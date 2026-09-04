@@ -1,0 +1,34 @@
+# DYX 3WD production install manifest.
+#
+# Lists what reaches a production rover. Anything absent here is development-only.
+#
+# ⛔ dyx3_rpp_legacy is DELIBERATELY ABSENT. It is the quarantined Python shadow
+#    oracle (architecture 7.5) and must never ship. CI job `legacy_quarantine`
+#    fails the build if it appears in this file.
+
+[ros2_packages]
+dyx3_interfaces
+dyx3_geometry
+dyx3_mission
+dyx3_rpp
+dyx3_motion_guard
+dyx3_px4_link
+dyx3_gnss_rtk
+dyx3_spray
+dyx3_recorder
+dyx3_system_gateway
+dyx3_bringup
+
+[services]
+dyx3-platform
+dyx3-ros
+dyx3-rtk
+dyx3-backend
+dyx3-recorder
+
+[filesystem]
+/opt/dyx3/{current,releases,bin}
+/etc/dyx3
+/var/lib/dyx3/{missions,runs,bags,reports,state}
+/var/log/dyx3
+/run/dyx3

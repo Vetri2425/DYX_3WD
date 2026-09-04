@@ -1,0 +1,178 @@
+name: CI
+
+# Mirrors the DYX_4WD CI contract: colcon build + test, clang-format, backend
+# checks, repo hygiene. Two jobs are 3WD-specific:
+#   - legacy_quarantine: dyx3_rpp_legacy is the ONE permitted Python package in
+#     the control graph (the shadow-run oracle). CI enforces that it stays
+#     quarantined and never reaches a production install.
+#   - path_engine tests run inside backend_checks, because the path engine is
+#     deliberately Python and lives in the backend, not in ros2_ws.
+# clang-tidy and interface-compatibility checks are not wired yet — no C++
+# sources and no frozen interfaces exist to check against.
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  ros2_build_test:
+    name: colcon build + test (ROS 2 Humble)
+    runs-on: ubuntu-24.04-arm
+    container:
+      image: ros:humble-ros-base
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: colcon build
+        shell: bash
+        run: |
+          source /opt/ros/humble/setup.bash
+          cd ros2_ws
+          colcon build --symlink-install
+
+      - name: colcon test
+        shell: bash
+        run: |
+          source /opt/ros/humble/setup.bash
+          cd ros2_ws
+          colcon test
+          colcon test-result --verbose
+
+  native_geometry_tests:
+    name: dyx3_geometry native tests (no ROS)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure + build + test without a ROS installation
+        run: |
+          set -euo pipefail
+          if [ ! -f ros2_ws/src/dyx3_geometry/CMakeLists.txt ]; then
+            echo "dyx3_geometry not present yet — skipping"; exit 0
+          fi
+          cmake -S ros2_ws/src/dyx3_geometry -B build/geom_native -DDYX3_NATIVE_TESTS=ON
+          cmake --build build/geom_native
+          ctest --test-dir build/geom_native --output-on-failure
+
+  clang_format:
+    name: clang-format check
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang-format
+        run: sudo apt-get update && sudo apt-get install -y clang-format
+
+      - name: clang-format --dry-run --Werror
+        run: |
+          find ros2_ws/src -type f \( -name '*.cpp' -o -name '*.hpp' -o -name '*.h' \) \
+            -print0 | xargs -0 -r clang-format --dry-run --Werror
+
+  backend_checks:
+    name: backend + path engine (ruff + pytest)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install backend + dev deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e "backend[dev]"
+
+      - name: ruff
+        run: ruff check backend/src backend/tests
+
+      - name: pytest
+        run: pytest backend/tests
+
+  legacy_quarantine:
+    name: dyx3_rpp_legacy quarantine
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enforce the one permitted Python control package
+        run: |
+          set -euo pipefail
+          fail=0
+
+          echo "Checking that dyx3_rpp_legacy is the ONLY ament_python package..."
+          while IFS= read -r pkg; do
+            if grep -q 'ament_python' "$pkg" 2>/dev/null; then
+              d=$(dirname "$pkg")
+              if [ "$(basename "$d")" != "dyx3_rpp_legacy" ]; then
+                echo "::error::$d is ament_python. Only dyx3_rpp_legacy may be Python."
+                fail=1
+              fi
+            fi
+          done < <(find ros2_ws/src -name package.xml)
+
+          echo "Checking dyx3_rpp_legacy is excluded from the production manifest..."
+          # Comments are stripped first: the manifest deliberately NAMES the package
+          # in a comment explaining why it is absent. Only a real entry is a failure.
+          if [ -f installer/manifests/production.manifest ]; then
+            if sed 's/#.*//' installer/manifests/production.manifest \
+               | grep -q '\bdyx3_rpp_legacy\b'; then
+              echo "::error::dyx3_rpp_legacy must never ship in a production install."
+              fail=1
+            fi
+          fi
+
+          echo "Checking no C++ package depends on the legacy oracle..."
+          if grep -rl 'dyx3_rpp_legacy' ros2_ws/src --include=package.xml \
+             | grep -v 'dyx3_rpp_legacy/package.xml' | grep . ; then
+            echo "::error::No package may depend on dyx3_rpp_legacy — it is a shadow oracle."
+            fail=1
+          fi
+
+          exit "$fail"
+
+  repo_hygiene:
+    name: repo hygiene
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reject backups, bags, ulogs, oversized files, build dirs, secrets
+        run: |
+          set -euo pipefail
+          fail=0
+
+          echo "Checking for backup-style files..."
+          if git ls-files | grep -E '(\.backup$|\.bak$|\.before_.*|_old\.|_v2\.)'; then
+            echo "::error::Backup-style files are not allowed. Git is the backup."
+            fail=1
+          fi
+
+          echo "Checking for tracked bag/ulog/database files..."
+          if git ls-files | grep -E '\.(db3|mcap|ulg)$'; then
+            echo "::error::Bag/ulog files must not be committed."
+            fail=1
+          fi
+
+          echo "Checking for tracked build/install/log directories..."
+          if git ls-files | grep -E '(^|/)(build|install|log)/'; then
+            echo "::error::Generated build/install/log directories must not be committed."
+            fail=1
+          fi
+
+          echo "Checking for secrets..."
+          if git ls-files | grep -E '(\.env$|ntrip.*\.(env|conf)$|.*\.token$|secrets/)'; then
+            echo "::error::Credentials must never be committed. This repository is public."
+            fail=1
+          fi
+
+          echo "Checking for files over 5MB..."
+          while IFS= read -r -d '' f; do
+            size=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f")
+            if [ "$size" -gt 5242880 ]; then
+              echo "::error::$f is over 5MB ($size bytes)."
+              fail=1
+            fi
+          done < <(git ls-files -z)
+
+          exit "$fail"

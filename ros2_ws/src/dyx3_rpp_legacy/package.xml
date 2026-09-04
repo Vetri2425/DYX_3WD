@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>dyx3_rpp_legacy</name>
+  <version>0.0.0</version>
+  <description>QUARANTINED. The PX4_DXP Python RPP controller carried in verbatim, with only its output stage rewired to publish MotionSetpoint. It is the shadow-run oracle the C++ port is validated against, and it delivers the precision win before the rewrite completes. Deleted at Gate 7 — its removal is a tracked deliverable, not a cleanup task.</description>
+  <maintainer email="vetri96anitha@gmail.com">Vetri</maintainer>
+  <license>Proprietary</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

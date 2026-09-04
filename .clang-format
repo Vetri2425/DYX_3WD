@@ -1,0 +1,10 @@
+# DYX 3WD clang-format baseline.
+# Google style with a wider column limit — controller math reads badly at 80.
+# Matches the DYX_4WD repo so a reader moving between the two vehicles sees
+# one style, not two.
+BasedOnStyle: Google
+ColumnLimit: 100
+IndentWidth: 2
+AccessModifierOffset: -2
+PointerAlignment: Left
+SortIncludes: true

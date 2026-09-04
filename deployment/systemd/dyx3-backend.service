@@ -1,0 +1,31 @@
+[Unit]
+Description=DYX 3WD — REST + Socket.IO + path engine
+After=dyx3-ros.service
+Wants=dyx3-ros.service
+
+[Service]
+Type=exec
+User=dyx3
+Group=dyx3
+ExecStart=/opt/dyx3/current/bin/dyx3-backend
+Restart=always
+RestartSec=5
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/dyx3 /var/log/dyx3 /run/dyx3
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+
+LimitNOFILE=65536
+
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=dyx3-backend
+
+[Install]
+WantedBy=multi-user.target

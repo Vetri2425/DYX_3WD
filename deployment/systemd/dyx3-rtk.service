@@ -1,0 +1,35 @@
+[Unit]
+Description=DYX 3WD — NTRIP client and RTCM correction delivery
+After=dyx3-platform.service
+Wants=dyx3-platform.service
+# Deliberately a SIBLING of the backend, never a child. In PX4_DXP the NTRIP
+# client was a child process of rover-server, so any server deploy silently
+# dropped the rover to FLOAT with no warning in the app. That defect does not
+# survive into this stack.
+
+[Service]
+Type=exec
+User=dyx3
+Group=dyx3
+ExecStart=/opt/dyx3/current/bin/dyx3-rtk
+Restart=always
+RestartSec=5
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/dyx3 /var/log/dyx3 /run/dyx3
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+
+LimitNOFILE=65536
+
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=dyx3-rtk
+
+[Install]
+WantedBy=multi-user.target

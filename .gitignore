@@ -1,0 +1,32 @@
+# Build artifacts
+build/
+install/
+log/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Runtime / field data — no bags, no logs, no runtime-generated mission files
+runs/
+bags/
+*.db3
+*.mcap
+*.ulg
+
+# Secrets / environment — NTRIP passwords, WiFi PSK, SIM/APN, machine tokens
+*.env
+secrets/
+*.token
+
+# Backup files — Git is the backup
+*.backup
+*.bak
+*.before_*
+
+# OS cruft
+.DS_Store

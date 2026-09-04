@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "dyx3-backend"
+version = "0.0.0"
+description = "DYX 3WD production backend: REST + Socket.IO, auth, mission, telemetry, RTK profiles, storage, and the CAD/CRS path engine. Never imports rclpy — reaches ROS only through dyx3_system_gateway."
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+authors = [{ name = "Vetri", email = "vetri96anitha@gmail.com" }]
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+]
+
+[project.optional-dependencies]
+# The path engine stays Python by decision (architecture 7.2): it runs once per
+# mission upload, never in the loop, and carries a bug history that a C++ rewrite
+# would re-open for latency nobody needs.
+path-engine = [
+    "ezdxf>=1.1",
+    "pyproj>=3.6",
+    "numpy>=1.24",
+    "shapely>=2.0",
+]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+    "httpx>=0.27",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dyx3_backend"]
+
+[tool.ruff]
+line-length = 100
