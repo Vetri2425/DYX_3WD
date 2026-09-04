@@ -27,11 +27,24 @@ Append a section per work session. Newest last.
 
 **Ran**
 - `python3 -c "yaml.safe_load(...)"` on `ci.yml` — parses, 6 jobs.
+- Quarantine + hygiene logic by hand before committing. **This caught a real bug in my own
+  CI**: `legacy_quarantine` grepped the production manifest for `dyx3_rpp_legacy` and matched
+  the comment that documents why it is excluded — a correct manifest would have failed the
+  build. Fixed by stripping comments (`sed 's/#.*//'`) before the grep.
+- `clang-format -i` across 120 stub sources after CI run 1 failed on formatting: Google style
+  collapses empty namespace bodies to `namespace X {}  // namespace X`.
+
+**CI status: GREEN, 6/6** — run `33915731980` on `2c7aedd`.
+- ✅ colcon build + test (all 12 packages, incl. rosidl and the ament_python package)
+- ✅ dyx3_geometry native tests (no ROS installation present)
+- ✅ clang-format · ✅ backend ruff+pytest · ✅ legacy_quarantine · ✅ repo hygiene
+
+Green CI proves the packages **configure and build**. It proves nothing about behaviour —
+there is none yet.
 
 **Not run**
-- `colcon build` — no ROS 2 on this Mac. CI on `ubuntu-24.04-arm` is authoritative.
-- `pytest backend/tests` — deps not installed locally.
-- **CI has never run on this repo.** Nothing here is verified green.
+- `colcon build` locally — no ROS 2 on this Mac.
+- Anything on hardware. **Nothing in this repo has run on a rover.**
 
 **DERIVED — NOT FROM V1 SPEC**
 - Package module file lists (e.g. `dyx3_rpp`'s ten modules) are read off the architecture's
@@ -51,3 +64,44 @@ Append a section per work session. Newest last.
   (rover differential won't turn in Mission Mode on v1.17) before designing the F4 gate.
 - Commit attribution: `CLAUDE.md` in the firmware repos says no Claude attribution; the current
   session config requires a `Co-Authored-By` trailer. Which wins?
+
+---
+
+## 2026-09-05 (later) — Claude — CI green, status captured
+
+**Changed**
+- `2c7aedd` — clang-format across 120 stub sources. CI now 6/6 green.
+- `CLAUDE.md` §3b — current status, decided-and-not-to-be-re-litigated list, known risks.
+- Firmware repo `CLAUDE.md` — current status, F1 order, upstream blockers.
+
+**Repositories now standing**
+
+| Repo | State |
+|---|---|
+| `Vetri2425/DYX_3WD` | public, `master`, CI 6/6 green |
+| `Vetri2425/PX4-Autopilot-3WD-Prod` | public, `dyx-3wd-production`, v1.17.0 pinned, build green |
+| `Way_to_Mark/PX4-Firmware/{3WD,4WD}/` | per-vehicle artifact archive |
+
+**Notable result:** the firmware artifact records `git_identity = f3de5d1` — our commit, not
+the base hash. The old fork's `cp`-overlay CI made every build record `54f0455f` regardless of
+content, which is why `ver_sw` could never identify a flash. Building from a real committed
+tree fixes it structurally.
+
+**DERIVED — NOT FROM V1 SPEC**
+- Nothing new this session beyond the Milestone 1 markers above.
+
+**Next agent should do first**
+1. **Stage 0.1** — quantify the arc-tracking payoff analytically from existing bags. Days of
+   desk work that either validates the programme or reshapes it. Cheapest possible test of the
+   central hypothesis; do it before building more.
+2. Milestone 2 — freeze `dyx3_interfaces`, starting with `MotionSetpoint`.
+3. F1.1 — RoboClaw drivetrain patches as semantic diffs against v1.16.2 ancestors.
+
+**Open questions for the human**
+- `F-tasks.md` Part E, questions 1–6. Most consequential: reproduce upstream #27497 before
+  designing the F4 gate, or design around it?
+- Pin `clang-format` in CI? It is unpinned in both this repo and DYX_4WD. Local 23.1.0 and
+  Ubuntu's apt version agree today; a runner image bump can fail the job on untouched code.
+- Commit attribution: both firmware repos' `CLAUDE.md` say no Claude attribution, but the
+  current session config requires a `Co-Authored-By` trailer. All commits this session carry
+  one. Which convention wins?

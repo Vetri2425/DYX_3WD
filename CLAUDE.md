@@ -53,6 +53,64 @@ human decision.
 
 ---
 
+## 3b. Current status — 2026-09-05
+
+**Milestone 1 complete. Skeleton only: no control logic, no firmware patches.**
+
+| | |
+|---|---|
+| This repo | `Vetri2425/DYX_3WD` — public, branch `master`, **CI green (6/6)** |
+| Firmware repo | `Vetri2425/PX4-Autopilot-3WD-Prod` — public, branch `dyx-3wd-production`, base PX4 **v1.17.0 == `d6f12ad1c4`**, first build green, pristine + CI only |
+| Artifact archive | `Way_to_Mark/PX4-Firmware/3WD/<short-sha>-<slug>/` |
+| Hardware | still CubeOrange+ / MAVROS in the field. **Nothing here has run on a rover.** |
+
+**Green CI proves:** all 12 packages configure and build (including `dyx3_interfaces`
+with rosidl and the lone `ament_python` package), `dyx3_geometry` builds and tests with
+no ROS installation, the quarantine and hygiene gates work.
+**Green CI does not prove:** any behaviour. There is none yet.
+
+### What exists
+
+- The V1 specification and `docs/Firmware/F-tasks.md`.
+- 12 package skeletons with module file stubs — **empty namespaces, no targets**.
+- Backend with a `/api/ping` endpoint and one test. Path engine directory is empty.
+- 5 systemd units, installer skeleton, production manifest. **All non-functional stubs.**
+
+### What is decided and must not be silently re-litigated
+
+- Base pin `v1.17.0`, identical to the 4WD repo. Any divergence between vehicles must be
+  our patches, never the base.
+- Firmware patches are **real commits**, never `cp`-overlays. The new build already proves
+  this works: the `.px4` records `git_identity = f3de5d1`, our commit — old fork builds all
+  recorded base hash `54f0455f` regardless of content, which is why `ver_sw` could never
+  identify a build.
+- Transport and command interface migrate **together**. DDS while still publishing an XY
+  velocity vector keeps the structural tracking floor and buys nothing.
+- Gates are **acceptance gates, not start gates**: build anything at any time; accept
+  nothing without its number.
+
+### Immediate next steps
+
+1. **Milestone 2** — freeze `dyx3_interfaces`, starting with `MotionSetpoint`.
+2. Classify all 174 parameters (120 RPP + 54 spray) as LIVE / IDLE_ONLY / RESTART.
+3. **F1.1** in `docs/Firmware/F-tasks.md` — RoboClaw drivetrain patches as semantic diffs
+   against their v1.16.2 ancestors.
+4. Stage 0.1 — quantify the arc-tracking payoff analytically from existing bags **before**
+   committing further. It is days of desk work that validates or reshapes the programme.
+
+### Known risks carried into this repo
+
+- **Upstream #27514** (`risk:safety-critical`): PX4 applies a stale setpoint for ~900 ms
+  after an external process dies — 31 cm at 0.35 m/s. Our fail-to-zero is not optional.
+- **Upstream #27497**: rover differential does not turn in Mission Mode on v1.17 stable.
+  Blocks the F4 gate as written.
+- **Upstream #27388**: `uxrce_dds_client` silently stops publishing; only an FC reboot
+  recovers it. Detect per-topic staleness, not just session liveness.
+- `clang-format` is **unpinned** in CI. Local 23.1.0 and Ubuntu's apt version agree today;
+  a runner image bump can fail the job on untouched code. Pin it before real C++ lands.
+
+---
+
 ## 4. Rules that apply to every agent
 
 **Never modify `docs/architecture/DYX_3WD_Production_Stack_Architecture_V1.md`** without an
