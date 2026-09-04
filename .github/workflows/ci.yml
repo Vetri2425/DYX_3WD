@@ -60,11 +60,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install clang-format
-        run: sudo apt-get update && sudo apt-get install -y clang-format
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # PINNED — do not replace with apt. Ubuntu's clang-format tracks the runner
+      # image and changes silently when GitHub bumps it, and Google style
+      # definitions shift between LLVM releases, so an unpinned checker fails
+      # untouched code. The PyPI wheel gives an exact version on every platform;
+      # developers can match it locally with the same pip install.
+      # Verified 2026-09-05: 20.1.8 and 23.1.0 both report 0 violations on this
+      # tree, so the pin is not masking a disagreement between versions.
+      - name: Install pinned clang-format
+        run: pip install clang-format==20.1.8
 
       - name: clang-format --dry-run --Werror
         run: |
+          clang-format --version
           find ros2_ws/src -type f \( -name '*.cpp' -o -name '*.hpp' -o -name '*.h' \) \
             -print0 | xargs -0 -r clang-format --dry-run --Werror
 

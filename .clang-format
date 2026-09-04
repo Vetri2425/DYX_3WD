@@ -2,6 +2,11 @@
 # Google style with a wider column limit — controller math reads badly at 80.
 # Matches the DYX_4WD repo so a reader moving between the two vehicles sees
 # one style, not two.
+#
+# PINNED TOOL VERSION: clang-format 20.1.8 (CI installs the PyPI wheel).
+# Match it locally:  pip install clang-format==20.1.8
+# Google style definitions shift between LLVM releases -- a different
+# local version can reformat code CI considers already clean.
 BasedOnStyle: Google
 ColumnLimit: 100
 IndentWidth: 2
