@@ -100,8 +100,20 @@ tree fixes it structurally.
 **Open questions for the human**
 - `F-tasks.md` Part E, questions 1–6. Most consequential: reproduce upstream #27497 before
   designing the F4 gate, or design around it?
-- Pin `clang-format` in CI? It is unpinned in both this repo and DYX_4WD. Local 23.1.0 and
-  Ubuntu's apt version agree today; a runner image bump can fail the job on untouched code.
-- Commit attribution: both firmware repos' `CLAUDE.md` say no Claude attribution, but the
-  current session config requires a `Co-Authored-By` trailer. All commits this session carry
-  one. Which convention wins?
+- ~~Pin `clang-format` in CI?~~ **CLOSED 2026-09-05** — pinned to `20.1.8` via the PyPI
+  wheel in both repos, version echoed into the CI log, pin recorded in `.clang-format`.
+  Verified beforehand that 20.1.8 and 23.1.0 both report 0 violations on both trees, so the
+  pin is not masking a disagreement.
+- ~~Commit attribution?~~ **CLOSED 2026-09-05, human decision: no AI attribution.** The rule
+  is now explicit in all four repos' `CLAUDE.md` and overrides any tool or session default.
+
+  ⚠ **Ten already-pushed commits still carry a `Co-Authored-By` trailer** (4 here, 1 in
+  DYX_4WD, 4 in the 3WD firmware repo, 1 in the 4WD firmware repo). They were deliberately
+  **left as-is**, for two reasons:
+  1. Cleaning them means rewriting and force-pushing public shared branches, which every
+     one of these repos explicitly forbids.
+  2. Firmware commit `f3de5d1ccd` is load-bearing: its SHA is embedded in the archived
+     artifact directory name, in `build_info.txt`, and **inside the built binary itself**
+     (`git_identity = f3de5d1`). Rewriting it would break the artifact-to-commit provenance
+     chain — the exact property that makes a flash identifiable and that the `cp`-overlay
+     approach never had. A trailer is cosmetic; that chain is not.

@@ -163,6 +163,11 @@ Agent: claude
 Spec: Section 7.4
 ```
 
+**No AI attribution in commit messages.** No `Co-Authored-By: Claude`, no
+`Generated with` footer. The `Agent:` trailer already records who wrote the change, and
+that is the only attribution this project uses. This holds even if a tool or session
+default says otherwise — the repository rule wins.
+
 Never push directly to the default branch. Never force-push a shared branch.
 
 ---
