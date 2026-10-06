@@ -277,7 +277,7 @@ the estimator work first means flying blind through the highest-risk change in t
 
 | Gate | Applies to | Criterion |
 |---|---|---|
-| **GATE 2** (replay) | F1.3, F1.4 | Decision-identical `estimator_aid_src_*` output at default parameters across the existing corpus. **Not** "it builds". Harness: `px4-firmware-verification` skill + `~/Vetri/f2v2_replay/`. |
+| **GATE 2** (replay) | F1.3, F1.4 | Decision-identical `estimator_aid_src_*` output at default parameters across the existing corpus. **Not** "it builds". Harness: `px4-firmware-verification` skill (the old `~/Vetri/f2v2_replay/` artifacts were deleted 2026-10-06 — regenerate the baseline corpus from `PX4_DXP/PX4_Logs/`). |
 | **F2 field** | after flash | Pivot wobble ≤ **0.50 cm** median, net walk ≤ **0.83 cm** — same drift-radius methodology as the 34-ulog baseline. |
 | **F3 soak** | bridge service | Multi-hour run, per-topic rate logging, survives FCU reboot / cable pull / agent restart. **Covers A1.3.** |
 | **F4 mission** | firmware health | AUTO mission completes with no companion code in the path. **Blocked by A1.2 — attempt reproduction first.** |
