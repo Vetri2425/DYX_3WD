@@ -279,7 +279,7 @@ memory of your reasoning.
 ## 12. Never
 
 - Modify the frozen V1 architecture document without a human decision
-- Touch `PX4_DXP/`, `Vetri/PX4-Autopilot/`, or any firmware tree from this repo
+- Touch `PX4_DXP/`, `Vetri/3WD_Proto/PX4-Autopilot/`, or any firmware tree from this repo
 - Add MAVROS to the control path
 - Put safety authority in the backend or the tablet
 - Ship `dyx3_rpp_legacy` to a production rover
