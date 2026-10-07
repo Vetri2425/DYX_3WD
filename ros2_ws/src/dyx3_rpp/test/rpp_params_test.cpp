@@ -1,11 +1,11 @@
+#include "dyx3_rpp/rpp_params.hpp"
+
 #include <gtest/gtest.h>
 
 #include <algorithm>
 #include <fstream>
 #include <map>
 #include <sstream>
-
-#include "dyx3_rpp/rpp_params.hpp"
 
 using namespace dyx3_rpp;
 
@@ -48,7 +48,9 @@ TEST(RppParams, TableMatchesTheRegistry) {
     const auto it = reg.find(d[i].name);
     ASSERT_NE(it, reg.end()) << d[i].name;
     const auto& r = it->second;
-    const char* cls = d[i].cls == ParamClass::Live ? "LIVE" : d[i].cls == ParamClass::IdleOnly ? "IDLE_ONLY" : "RESTART";
+    const char* cls = d[i].cls == ParamClass::Live       ? "LIVE"
+                      : d[i].cls == ParamClass::IdleOnly ? "IDLE_ONLY"
+                                                         : "RESTART";
     EXPECT_EQ(r.cls, cls) << d[i].name;
     if (d[i].kind == Kind::String) {
       EXPECT_EQ(r.dflt, std::string("\"") + d[i].sdflt + "\"") << d[i].name;
@@ -78,12 +80,12 @@ TEST(RppParams, ClassRulesAreEnforced) {
   SetContext idle;
   SetContext running;
   running.mission_running = true;
-  EXPECT_TRUE(p.set({"max_linear_vel", 0.4, ""}, running).ok);   // LIVE
+  EXPECT_TRUE(p.set({"max_linear_vel", 0.4, ""}, running).ok);  // LIVE
   EXPECT_DOUBLE_EQ(p.num(P::max_linear_vel), 0.4);
-  const auto r = p.set({"require_rtk_fix", 0.0, ""}, running);   // IDLE_ONLY while running
+  const auto r = p.set({"require_rtk_fix", 0.0, ""}, running);  // IDLE_ONLY while running
   EXPECT_FALSE(r.ok);
   EXPECT_NE(r.reason.find("IDLE_ONLY"), std::string::npos);
-  EXPECT_TRUE(p.flag(P::require_rtk_fix));                         // not applied, not deferred
+  EXPECT_TRUE(p.flag(P::require_rtk_fix));  // not applied, not deferred
   EXPECT_TRUE(p.set({"require_rtk_fix", 0.0, ""}, idle).ok);
   EXPECT_FALSE(p.flag(P::require_rtk_fix));
   const auto rs = p.set({"path_frame_id", 0.0, "other"}, idle);  // RESTART never at runtime
@@ -100,10 +102,10 @@ TEST(RppParams, StructuralValidation) {
   const double inf = HUGE_VAL;
   EXPECT_FALSE(p.set({"max_linear_vel", nan, ""}, c).ok);
   EXPECT_FALSE(p.set({"max_linear_vel", inf, ""}, c).ok);
-  EXPECT_FALSE(p.set({"max_linear_vel", 0.0, ""}, c).ok);      // divisor: > 0
-  EXPECT_FALSE(p.set({"min_linear_vel", -0.1, ""}, c).ok);     // negative
-  EXPECT_TRUE(p.set({"min_linear_vel", 0.0, ""}, c).ok);       // zero allowed where not a divisor
-  EXPECT_FALSE(p.set({"preview_curvature_n", 2.5, ""}, c).ok); // int
+  EXPECT_FALSE(p.set({"max_linear_vel", 0.0, ""}, c).ok);       // divisor: > 0
+  EXPECT_FALSE(p.set({"min_linear_vel", -0.1, ""}, c).ok);      // negative
+  EXPECT_TRUE(p.set({"min_linear_vel", 0.0, ""}, c).ok);        // zero allowed where not a divisor
+  EXPECT_FALSE(p.set({"preview_curvature_n", 2.5, ""}, c).ok);  // int
   EXPECT_FALSE(p.set({"preview_curvature_n", 0.0, ""}, c).ok);
   EXPECT_FALSE(p.set({"closed_loop_min_travel_frac", 1.5, ""}, c).ok);
   EXPECT_FALSE(p.set({"tracking_profile", 0.0, "bogus"}, c).ok);

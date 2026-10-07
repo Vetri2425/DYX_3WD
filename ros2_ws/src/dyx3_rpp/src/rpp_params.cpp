@@ -10,7 +10,8 @@ namespace {
 const Descriptor kTable[] = {
 #include "dyx3_rpp/rpp_param_table.inc"
 };
-static_assert(sizeof(kTable) / sizeof(kTable[0]) == kParamCount, "descriptor table and id enum disagree");
+static_assert(sizeof(kTable) / sizeof(kTable[0]) == kParamCount,
+              "descriptor table and id enum disagree");
 
 std::string fmt(const Descriptor& d, double n, const std::string& s) {
   if (d.kind == Kind::String) return s;
@@ -26,14 +27,17 @@ struct Relation {
   P hi;
   const char* why;
 };
-// DERIVED — NOT FROM V1 SPEC: structural orderings implied by how the prototype interpolates between
-// the pairs (min/max bounds, full/none gate ends, hysteresis enter/exit). Not tuning values.
+// DERIVED — NOT FROM V1 SPEC: structural orderings implied by how the prototype interpolates
+// between the pairs (min/max bounds, full/none gate ends, hysteresis enter/exit). Not tuning
+// values.
 const Relation kRelations[] = {
     {P::min_linear_vel, P::max_linear_vel, "min_linear_vel must not exceed max_linear_vel"},
-    {P::min_lookahead_dist, P::max_lookahead_dist, "min_lookahead_dist must not exceed max_lookahead_dist"},
+    {P::min_lookahead_dist, P::max_lookahead_dist,
+     "min_lookahead_dist must not exceed max_lookahead_dist"},
     {P::accel_gate_heading_full_deg, P::accel_gate_heading_none_deg,
      "accel_gate_heading_full_deg must not exceed accel_gate_heading_none_deg"},
-    {P::accel_gate_curv_full, P::accel_gate_curv_none, "accel_gate_curv_full must not exceed accel_gate_curv_none"},
+    {P::accel_gate_curv_full, P::accel_gate_curv_none,
+     "accel_gate_curv_full must not exceed accel_gate_curv_none"},
     {P::kappa_hard_exit, P::kappa_hard_enter, "kappa_hard_exit must not exceed kappa_hard_enter"},
 };
 

@@ -31,16 +31,16 @@ struct Descriptor {
   const char* name;
   Kind kind;
   ParamClass cls;
-  double dflt;          // numeric default (bool as 0/1)
-  const char* sdflt;    // string default
-  double lo;            // structural lower bound (inclusive)
-  double hi;            // structural upper bound (inclusive)
-  bool positive;        // value must be > 0 (a divisor or period)
-  bool nonempty;        // strings: must not be empty
+  double dflt;             // numeric default (bool as 0/1)
+  const char* sdflt;       // string default
+  double lo;               // structural lower bound (inclusive)
+  double hi;               // structural upper bound (inclusive)
+  bool positive;           // value must be > 0 (a divisor or period)
+  bool nonempty;           // strings: must not be empty
   const char* allowed[4];  // strings: closed set when allowed[0] != nullptr
 };
 
-const Descriptor* descriptors();  // kParamCount entries, index == static_cast<size_t>(P)
+const Descriptor* descriptors();          // kParamCount entries, index == static_cast<size_t>(P)
 int find_index(const std::string& name);  // -1 if unknown
 
 struct Change {
@@ -63,12 +63,12 @@ struct SetResult {
 
 struct Item {
   std::string name;
-  double num{0.0};       // bool as 0/1
-  std::string str;       // string parameters
+  double num{0.0};  // bool as 0/1
+  std::string str;  // string parameters
 };
 
 class ParamSet {
- public:
+public:
   ParamSet();  // prototype defaults
 
   // Hot-path accessors: array index, no allocation, no hashing.
@@ -90,7 +90,7 @@ class ParamSet {
 
   const std::vector<Change>& journal() const { return journal_; }
 
- private:
+private:
   SetResult relations_of(const std::array<double, kParamCount>& v) const;
   std::array<double, kParamCount> num_{};
   std::array<std::string, kParamCount> str_{};
