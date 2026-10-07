@@ -339,3 +339,87 @@ TEST(MotionOutput, SanitizeFailsToZero) {
 TEST(MotionOutput, HeadingIsWrapped) {
   EXPECT_NEAR(make_track_heading(0.3, 4.0).yaw_setpoint, 4.0 - 2.0 * M_PI, 1e-6);
 }
+
+// ---------------------------------------------------------------------------------------------------
+// diagnostics and the tick -> MotionSetpoint mapping
+#include "dyx3_rpp/diagnostics.hpp"
+#include "dyx3_rpp/rpp_command.hpp"
+
+TEST(LoopTimer, JitterIsActualMinusTargetAndAnOverrunIsAStall) {
+  LoopTimer t(20000.0);  // 50 Hz
+  t.note(1'000'000'000);
+  EXPECT_EQ(t.overruns(), 0U);
+  t.note(1'020'000'000);  // exactly on time
+  EXPECT_NEAR(t.jitter_us(), 0.0, 1e-6);
+  t.note(1'041'500'000);  // 1.5 ms late
+  EXPECT_NEAR(t.jitter_us(), 1500.0, 1e-6);
+  EXPECT_NEAR(t.max_abs_jitter_us(), 1500.0, 1e-6);
+  EXPECT_EQ(t.overruns(), 0U);
+  t.note(1'065'000'000);  // 23.5 ms: early-ish, still not an overrun (< 1.5 x)
+  EXPECT_EQ(t.overruns(), 0U);
+  t.note(1'125'000'000);  // 60 ms: a stall
+  EXPECT_EQ(t.overruns(), 1U);
+  EXPECT_NEAR(t.max_abs_jitter_us(), 40000.0, 1e-6);
+  t.note(1'144'000'000);  // 19 ms: early by 1 ms
+  EXPECT_NEAR(t.jitter_us(), -1000.0, 1e-6);
+  EXPECT_NEAR(t.max_abs_jitter_us(), 40000.0, 1e-6);  // the maximum is of |jitter|
+}
+
+TEST(RppCommand, EveryKindMapsToAContractConformingCommand) {
+  TickOutput o;
+  // STOP
+  EXPECT_EQ(command_from_tick(o, true, 0.45).mode, MotionMode::Stop);
+  // TRACK: segment -> heading; smooth -> rate
+  o.cmd = CmdKind::Track;
+  o.v_n = 0.3;
+  o.v_e = 0.0;
+  o.track_heading_ned = 0.1;
+  o.yaw_rate = 0.2;
+  MotionCommand c = command_from_tick(o, true, 0.45);
+  EXPECT_EQ(c.mode, MotionMode::TrackHeading);
+  EXPECT_FLOAT_EQ(c.speed_body_x, 0.3F);
+  EXPECT_FLOAT_EQ(c.yaw_setpoint, 0.1F);
+  EXPECT_TRUE(std::isnan(c.yaw_rate_setpoint));
+  c = command_from_tick(o, false, 0.45);
+  EXPECT_EQ(c.mode, MotionMode::TrackRate);
+  EXPECT_FLOAT_EQ(c.yaw_rate_setpoint, 0.2F);
+  EXPECT_TRUE(std::isnan(c.yaw_setpoint));
+  // zero speed keeps the frozen heading: no snap to North
+  o.v_n = 0.0;
+  o.track_heading_ned = 1.2;
+  c = command_from_tick(o, true, 0.45);
+  EXPECT_EQ(c.mode, MotionMode::TrackHeading);
+  EXPECT_FLOAT_EQ(c.yaw_setpoint, 1.2F);
+  // the rate is clamped
+  o.v_n = 0.3;
+  o.yaw_rate = 3.0;
+  EXPECT_FLOAT_EQ(command_from_tick(o, false, 0.45).yaw_rate_setpoint, 0.45F);
+  // BRAKE: signed along the nose, nose heading held (reverse is a negative speed, never a spot
+  // turn)
+  o.cmd = CmdKind::Brake;
+  o.brake_speed = -0.08;
+  o.yaw_ned = 2.0;
+  c = command_from_tick(o, true, 0.45);
+  EXPECT_EQ(c.mode, MotionMode::TrackHeading);
+  EXPECT_FLOAT_EQ(c.speed_body_x, -0.08F);
+  EXPECT_FLOAT_EQ(c.yaw_setpoint, 2.0F);
+  // PIVOT: speed 0, a finite clamped rate toward the exit heading
+  o.cmd = CmdKind::Pivot;
+  o.pivot_heading_err = -1.0;
+  c = command_from_tick(o, true, 0.45);
+  EXPECT_EQ(c.mode, MotionMode::Pivot);
+  EXPECT_EQ(c.speed_body_x, 0.0F);
+  EXPECT_FLOAT_EQ(c.yaw_rate_setpoint, -0.45F);
+  // CREEP: signed, no turn
+  o.cmd = CmdKind::Creep;
+  o.creep_speed = -0.03;
+  c = command_from_tick(o, true, 0.45);
+  EXPECT_EQ(c.mode, MotionMode::Creep);
+  EXPECT_FLOAT_EQ(c.speed_body_x, -0.03F);
+  EXPECT_FLOAT_EQ(c.yaw_rate_setpoint, 0.0F);
+  // a non-finite value anywhere fails to zero
+  o.cmd = CmdKind::Track;
+  o.v_n = std::nan("");
+  c = command_from_tick(o, true, 0.45);
+  EXPECT_EQ(c.mode, MotionMode::Stop);
+}

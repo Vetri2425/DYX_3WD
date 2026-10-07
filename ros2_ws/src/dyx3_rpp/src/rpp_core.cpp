@@ -56,6 +56,8 @@ const char* to_string(CmdKind k) {
       return "BRAKE";
     case CmdKind::Pivot:
       return "PIVOT";
+    case CmdKind::Creep:
+      return "CREEP";
   }
   return "?";
 }
@@ -736,7 +738,9 @@ bool RppCore::precise_stop_tick(double pos_n, double pos_e, double yaw_ned, doub
   const double v_e = speed_mag * dir_e;
   publish_velocity(v_n, v_e);
   publish_yaw_rate(0.0);
-  out_.cmd = CmdKind::Track;  // a creep / profile speed along the final leg, not an active brake
+  out_.cmd = CmdKind::Creep;  // a creep / profile speed along the final leg, not an active brake
+  out_.creep_speed =
+      std::copysign(std::hypot(v_n, v_e), v_n * std::cos(yaw_ned) + v_e * std::sin(yaw_ned));
   publish_debug(
       hold_row(cross, 0.0, dist_to_goal, std::hypot(v_n, v_e), dist_to_goal, age_ms, false));
   publish_segment_debug(SegState::CornerStop, std::max(0, static_cast<int>(run_->pts.size()) - 2),
@@ -761,6 +765,7 @@ const TickOutput& RppCore::tick(int64_t now_ns) {
   boundary_hold_.set_params(sp_);
   completion_hold_.set_params(sp_);
   control_loop_impl(now_ns);
+  out_.yaw_ned = pose_.yaw_ned;
   return out_;
 }
 
@@ -1051,6 +1056,7 @@ void RppCore::control_smooth(double pos_n, double pos_e, double yaw_ned, double 
     yaw_target_ned = last_yaw_cmd_;
   }
   last_yaw_cmd_ = yaw_target_ned;
+  out_.track_heading_ned = yaw_target_ned;
 
   publish_velocity(v_n, v_e);
   publish_yaw_rate(yaw_rate_body);
@@ -1299,6 +1305,7 @@ void RppCore::control_segment(double pos_n, double pos_e, double yaw_ned, double
     clamp_to_forward_cone(v_n, v_e, yaw_ned, speed);
     const double speed_mag = std::hypot(v_n, v_e);
     if (speed_mag > 0.01) last_yaw_cmd_ = std::atan2(v_e, v_n);
+    out_.track_heading_ned = last_yaw_cmd_;
 
     publish_velocity(v_n, v_e);
     publish_yaw_rate(yaw_rate_body);
@@ -1320,6 +1327,12 @@ void RppCore::control_segment(double pos_n, double pos_e, double yaw_ned, double
                           std::atan2(b.e - a.e, b.n - a.n), theta_e, yaw_rate_body);
     return;
   }
+}
+
+void RppCore::pause() {
+  last_speed_cmd_ = 0.0;
+  kappa_hard_latched_ = false;
+  reset_corner_pivot_state();
 }
 
 CoreState RppCore::snapshot() const {

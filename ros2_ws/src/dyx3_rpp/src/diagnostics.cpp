@@ -1,4 +1,2 @@
-// diagnostics — see docs/contracts/dyx3_rpp.md
+// diagnostics — header-only; this translation unit exists so the module has a home in the library.
 #include "dyx3_rpp/diagnostics.hpp"
-
-namespace dyx3_rpp {}  // namespace dyx3_rpp

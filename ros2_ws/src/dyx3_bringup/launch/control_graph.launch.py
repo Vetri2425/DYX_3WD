@@ -1,7 +1,6 @@
 """The production control graph (dyx3-ros.service).
 
-Runs: mission, motion_guard, px4_link, spray, system_gateway. NOT in this graph, on purpose:
-  * dyx3_rpp         : the controller node does not exist yet (docs/contracts/dyx3_rpp.md section 2); nothing here can drive.
+Runs: mission, motion_guard, px4_link, rpp, spray, system_gateway. NOT in this graph, on purpose:
   * dyx3_gnss_rtk    : its own service (dyx3-rtk), a sibling of the backend, never a child.
   * dyx3_recorder    : its own service (dyx3-recorder), keeps recording when anything else dies.
   * spray_watchdog   : its own service (dyx3-spray-watchdog), must survive this graph dying.
@@ -24,6 +23,7 @@ GRAPH = (
     ("dyx3_mission", "mission_node", "dyx3_mission", "mission"),
     ("dyx3_motion_guard", "motion_guard_node", "motion_guard", "motion_guard"),
     ("dyx3_px4_link", "px4_link_node", "px4_link", "px4"),
+    ("dyx3_rpp", "rpp_node", "rpp", "rpp"),
     ("dyx3_spray", "spray_node", "spray", "spray"),
     ("dyx3_system_gateway", "gateway_node", "system_gateway", "gateway"),
 )

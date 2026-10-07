@@ -13,6 +13,7 @@
   <exec_depend>dyx3_mission</exec_depend>
   <exec_depend>dyx3_motion_guard</exec_depend>
   <exec_depend>dyx3_px4_link</exec_depend>
+  <exec_depend>dyx3_rpp</exec_depend>
   <exec_depend>dyx3_spray</exec_depend>
   <exec_depend>dyx3_system_gateway</exec_depend>
 

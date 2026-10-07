@@ -82,6 +82,11 @@ public:
   SetResult set(const Item& item, const SetContext& ctx);
   SetResult set_many(const std::vector<Item>& items, const SetContext& ctx);
 
+  // Startup only: validates exactly like set_many (including the cross-parameter relations) but
+  // applies to every class, since a RESTART value is by definition set while the process starts.
+  // Atomic.
+  SetResult init_many(const std::vector<Item>& items);
+
   // Structural validation of a value against its descriptor (no class rule, no relations).
   static SetResult validate(const Descriptor& d, double num, const std::string& str);
 

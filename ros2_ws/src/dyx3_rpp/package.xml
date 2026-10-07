@@ -9,6 +9,9 @@
 
   <buildtool_depend>ament_cmake</buildtool_depend>
   <depend>dyx3_geometry</depend>
+  <depend>rclcpp</depend>
+  <depend>dyx3_interfaces</depend>
+  <depend>dyx3_mission</depend>
 
   <test_depend>ament_cmake_gtest</test_depend>
 

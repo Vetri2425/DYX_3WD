@@ -7,6 +7,9 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(ament_cmake REQUIRED)
 find_package(dyx3_geometry REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(dyx3_interfaces REQUIRED)
+find_package(dyx3_mission REQUIRED)
 
 # Pure C++ core: no ROS includes in any algorithm module (CLAUDE.md section 7).
 add_library(dyx3_rpp_core STATIC
@@ -17,6 +20,8 @@ add_library(dyx3_rpp_core STATIC
   src/terminal.cpp
   src/path_conditioner.cpp
   src/rpp_core.cpp
+  src/rpp_command.cpp
+  src/diagnostics.cpp
   src/motion_output.cpp)
 target_include_directories(dyx3_rpp_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -25,7 +30,17 @@ target_link_libraries(dyx3_rpp_core PUBLIC dyx3_geometry::dyx3_geometry)
 set_target_properties(dyx3_rpp_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_compile_options(dyx3_rpp_core PRIVATE -Wall -Wextra -Wpedantic -ffp-contract=off)
 
+# ROS wiring: the node and its executable. The algorithm library above has no ROS include.
+add_library(dyx3_rpp_node_lib STATIC src/rpp_node.cpp)
+target_link_libraries(dyx3_rpp_node_lib PUBLIC dyx3_rpp_core dyx3_mission::dyx3_mission_core)
+ament_target_dependencies(dyx3_rpp_node_lib PUBLIC rclcpp dyx3_interfaces)
+target_compile_options(dyx3_rpp_node_lib PRIVATE -Wall -Wextra -Wpedantic -ffp-contract=off)
+
+add_executable(rpp_node src/main.cpp)
+target_link_libraries(rpp_node dyx3_rpp_node_lib)
+
 install(DIRECTORY include/ DESTINATION include)
+install(TARGETS rpp_node DESTINATION lib/${PROJECT_NAME})
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
@@ -39,6 +54,10 @@ if(BUILD_TESTING)
   ament_add_gtest(orchestrator_equivalence_test test/orchestrator_equivalence_test.cpp)
   target_link_libraries(orchestrator_equivalence_test dyx3_rpp_core)
   target_compile_definitions(orchestrator_equivalence_test PRIVATE DYX3_FIXTURES="${FIXTURES}")
+  # Real-time DDS: seconds of wall time per case, above the 60 s ament default for the whole file.
+  ament_add_gtest(rpp_node_test test/rpp_node_test.cpp TIMEOUT 300)
+  target_link_libraries(rpp_node_test dyx3_rpp_node_lib)
+  ament_target_dependencies(rpp_node_test rclcpp dyx3_interfaces)
   ament_add_gtest(rpp_modules_test test/rpp_modules_test.cpp)
   target_link_libraries(rpp_modules_test dyx3_rpp_core)
   ament_add_gtest(rpp_params_test test/rpp_params_test.cpp)

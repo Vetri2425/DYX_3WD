@@ -505,3 +505,23 @@ criterion (the issue only says ~4 ms is expected vs ~40 ms right after boot = 1.
 ### P0 — Stage 0 tooling
 `tools/analysis/{timebase,arc_floor}.py`, synthetic-data tests only (see `docs/analysis/stage0.md`). 0.1 needs the (omega, heading error) series extracted from the real arc bags (LOCAL ACTION) and a human's lateral-geometry choice to turn a heading floor into centimetres;
 0.2 needs real bags and the rewiring of the prototype's own analysis tools (not in this repo); 0.3 is not code.
+
+### P5 (remainder) — the RPP orchestrator and node (`dyx3_rpp`, interfaces 0.8.0)
+Contracts: `docs/contracts/rpp_orchestrator.md`, `rpp_node.md`, `rpp_path_conditioner.md`, `topics.md` (new: every topic/service/QoS extracted from the code).
+**Path conditioner** (`condition_path`): the whole of `_path_cb`'s run building; 2 091 cases incl. 182 end-to-end calls of the carried `_path_cb`; five mutations caught.
+**Orchestrator** (`RppCore::tick`, pure C++, no allocation in `tick`): the gates in front of the controller, goal test, smooth + segment tracking, and the **whole stop/pivot flow through the explicit
+`stop_pivot_fsm`** (corner pivot, run-boundary hold, entry alignment, endpoint precise stop, completion hold) with ONE shared stop confirmation exactly as the prototype shares it. Only the point hold
+is not ported (the tick publishes zero and the node reports `STATE_ERROR`, `handoff = 1`). **Proof: tick by tick against the REAL carried node** (`tools/gate4/gen_orchestrator_vectors.py`, Humble container; injected clock,
+captured publishers, plain messages so float32 never rounds a double; a closed-loop kinematic rover model with pose/GPS/velocity blackouts, GPS float / poor / unknown accuracy, an EKF jump):
+**97 episodes, 13 166 ticks, 0 mismatches**, episodes run to DONE; ~45 mutations applied to the C++, survivors listed in the contract (inputs do not reach them).
+**Node** (`RppNode`): loads the artifact BY ID (the file the mission and spray load), conditions it, ticks only while the mission is RUNNING (STOP every tick otherwise; `STATE_LOADED` is the acknowledgement
+the mission waits for), maps the decision to `MotionSetpoint` (`rpp_command`), publishes `RppStatus` incl. loop jitter, all 119 parameters as ROS parameters with their class (refused, never deferred).
+11 in-process cases incl. **a whole mission driven to COMPLETE** by a stand-in vehicle (marks where the planner says, stops on the final point within 6 cm).
+**Interfaces 0.8.0**: `RppStatus.STATE_LOADED` + `tick_state`, `segment_state`, `spray_request`, `handoff`, `rtk_reason` (appended). `rpp_node` is now in the control graph (`dyx3_bringup`).
+DERIVED (all in the contracts): TRACK_HEADING for segment runs / TRACK_RATE for smooth runs; pivot rate `clamp(1.5 * err)`; `tick_hz` 50; `LoopTimer` overrun = period > 1.5 x target; the unported feature refuses to drive;
+`curvature_baseline_m` and `max_yaw_rate_body` must be > 0 (the prototype allowed 0 = off); `run_sequencer` / `spray_gate` stubs removed (their logic is inside `RppCore`).
+NOT run: anything on PX4 or a rover; loop timing / jitter; the firmware's reaction to the pivot and brake commands; the controller on recorded bag poses (the rover model is a stand-in).
+Open (human): RTK_FLOAT acceptance (the prototype hard-codes minimum fix 6; the guard's `rtk_min_fix_type` is 6 too: change both or neither); whether `spray_request` should veto the valve (it is a heading verdict on
+the CONDITIONED run, which fuses a short unpainted lead into the mark, so it can be true where the planner's flag is false); SCHED_FIFO priority / CPU affinity; the point hold / handshake / progress publication (port, drop,
+or move to the mission layer); survivors of the mutation check that need scenarios I could not construct (run-boundary turns 45-62 degrees, precise-stop reverse after an overshoot, a corner released straight into tracking).
+LOCAL ACTION: run the orchestrator test on real bag poses; `tools/gate4/gen_orchestrator_vectors.py --check` (Humble container); bench the pivot and brake commands (GATE 1).

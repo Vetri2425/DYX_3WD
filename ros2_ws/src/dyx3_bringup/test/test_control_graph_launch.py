@@ -9,9 +9,9 @@ SPEC.loader.exec_module(mod)
 
 def test_graph_membership_is_exactly_the_implemented_control_nodes():
     packages = [g[0] for g in mod.GRAPH]
-    assert packages == ["dyx3_mission", "dyx3_motion_guard", "dyx3_px4_link", "dyx3_spray", "dyx3_system_gateway"]
+    assert packages == ["dyx3_mission", "dyx3_motion_guard", "dyx3_px4_link", "dyx3_rpp", "dyx3_spray", "dyx3_system_gateway"]
     # siblings and quarantine never appear in the control graph
-    for forbidden in ("dyx3_gnss_rtk", "dyx3_recorder", "dyx3_rpp_legacy", "dyx3_rpp"):
+    for forbidden in ("dyx3_gnss_rtk", "dyx3_recorder", "dyx3_rpp_legacy"):
         assert forbidden not in packages
     # no executable named after the independent watchdog either: it is its own service
     assert all("watchdog" not in g[1] for g in mod.GRAPH)
@@ -20,8 +20,8 @@ def test_graph_membership_is_exactly_the_implemented_control_nodes():
 def test_parameter_files_are_applied_only_when_they_exist(tmp_path):
     (tmp_path / "px4.yaml").write_text("/**:\n  ros__parameters: {}\n")
     p = mod.plan(str(tmp_path))
-    assert [x["name"] for x in p] == ["dyx3_mission", "motion_guard", "px4_link", "spray", "system_gateway"]
-    assert [x["params_file"] is not None for x in p] == [False, False, True, False, False]
+    assert [x["name"] for x in p] == ["dyx3_mission", "motion_guard", "px4_link", "rpp", "spray", "system_gateway"]
+    assert [x["params_file"] is not None for x in p] == [False, False, True, False, False, False]
     assert all(x["params_file"] is None for x in mod.plan(str(tmp_path / "missing")))
 
 

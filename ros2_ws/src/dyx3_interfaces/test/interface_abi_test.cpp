@@ -225,6 +225,7 @@ TEST(StatusMessageAbi, ConstantsAndSafeDefaults) {
   EXPECT_EQ(Rpp::STATE_CREEPING, 4U);
   EXPECT_EQ(Rpp::STATE_COMPLETE, 5U);
   EXPECT_EQ(Rpp::STATE_ERROR, 6U);
+  EXPECT_EQ(Rpp::STATE_LOADED, 7U);
   const Rpp rpp{};
   ExpectZeroTime(rpp.stamp);
   EXPECT_EQ(rpp.state, Rpp::STATE_IDLE);
@@ -237,6 +238,11 @@ TEST(StatusMessageAbi, ConstantsAndSafeDefaults) {
   EXPECT_FLOAT_EQ(rpp.loop_jitter_us, 0.0F);
   EXPECT_FLOAT_EQ(rpp.loop_jitter_max_us, 0.0F);
   EXPECT_EQ(rpp.loop_overrun_count, 0U);
+  EXPECT_EQ(rpp.tick_state, 0);
+  EXPECT_EQ(rpp.segment_state, 0U);
+  EXPECT_FALSE(rpp.spray_request);  // the safe default: no request to open the valve
+  EXPECT_EQ(rpp.handoff, 0U);
+  EXPECT_EQ(rpp.rtk_reason, 0U);
 
   using Mission = dyx3_interfaces::msg::MissionState;
   EXPECT_EQ(Mission::STATE_IDLE, 0U);

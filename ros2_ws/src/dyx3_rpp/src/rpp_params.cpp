@@ -117,6 +117,44 @@ SetResult ParamSet::relations_of(const std::array<double, kParamCount>& v) const
 
 SetResult ParamSet::check_relations() const { return relations_of(num_); }
 
+SetResult ParamSet::init_many(const std::vector<Item>& items) {
+  SetResult fail;
+  auto tentative_n = num_;
+  auto tentative_s = str_;
+  std::vector<size_t> touched;
+  for (const auto& it : items) {
+    const int idx = find_index(it.name);
+    if (idx < 0) {
+      fail.reason = "unknown parameter " + it.name;
+      return fail;
+    }
+    const auto v = validate(kTable[idx], it.num, it.str);
+    if (!v.ok) return v;
+    tentative_n[static_cast<size_t>(idx)] = it.num;
+    tentative_s[static_cast<size_t>(idx)] = it.str;
+    touched.push_back(static_cast<size_t>(idx));
+  }
+  const auto rel = relations_of(tentative_n);
+  if (!rel.ok) return rel;
+  for (const size_t i : touched) {
+    const auto& d = kTable[i];
+    if (fmt(d, num_[i], str_[i]) == fmt(d, tentative_n[i], tentative_s[i]))
+      continue;  // the default: nothing to record
+    Change c;
+    c.seq = ++seq_;
+    c.name = d.name;
+    c.old_value = fmt(d, num_[i], str_[i]);
+    c.new_value = fmt(d, tentative_n[i], tentative_s[i]);
+    c.source = "startup";
+    journal_.push_back(std::move(c));
+  }
+  num_ = tentative_n;
+  str_ = tentative_s;
+  SetResult ok;
+  ok.ok = true;
+  return ok;
+}
+
 SetResult ParamSet::set(const Item& item, const SetContext& ctx) { return set_many({item}, ctx); }
 
 SetResult ParamSet::set_many(const std::vector<Item>& items, const SetContext& ctx) {

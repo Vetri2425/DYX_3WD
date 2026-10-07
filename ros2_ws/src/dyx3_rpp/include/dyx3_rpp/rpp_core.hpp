@@ -64,6 +64,7 @@ enum class CmdKind : uint8_t {
   Track,     // follow: the NED velocity vector (v_n, v_e) with the body yaw rate
   Brake,     // active body-axis brake: signed speed along the nose (brake_speed)
   Pivot,     // in-place turn toward the exit heading (pivot_heading_err, wrapped target - yaw)
+  Creep,     // endpoint precise stop: a small signed speed along the nose (creep_speed), no turn
 };
 const char* to_string(CmdKind k);
 
@@ -108,7 +109,11 @@ struct TickOutput {
   double brake_speed{0.0};  // CmdKind::Brake: signed speed along the nose (+ forward, - reverse)
   double pivot_heading_err{0.0};  // CmdKind::Pivot: wrapped (target heading - yaw), rad
   double pivot_speed_memory{
-      0.0};  // CmdKind::Pivot: the prototype's corner speed (the vector magnitude)
+      0.0};                 // CmdKind::Pivot: the prototype's corner speed (the vector magnitude)
+  double creep_speed{0.0};  // CmdKind::Creep: signed speed along the nose (- reverse)
+  double track_heading_ned{
+      0.0};             // CmdKind::Track: heading target (frozen below 1 cm/s: no North snap)
+  double yaw_ned{0.0};  // the heading this tick used (the nose, for a held-heading command)
   Handoff handoff{Handoff::None};
   RtkReason rtk_reason{RtkReason::Ok};
   bool velocity_published{
@@ -171,6 +176,14 @@ public:
   void mark_alignment_done() { run_align_pending_ = false; }
   // Test hook: a warm start (the commanded-speed memory of a rover that is already moving).
   void test_set_last_speed_cmd(double v) { last_speed_cmd_ = v; }
+
+  // Not running (paused, waiting): forget the motion memory exactly as a zero publish does, and
+  // restart the stop confirmation. The node calls this instead of ticking.
+  void pause();
+  bool path_done() const { return path_done_; }
+  bool profile_segment() const { return profile_segment_; }
+  size_t run_index() const { return run_idx_; }
+  bool loaded() const { return run_ != nullptr; }
 
   size_t run_count() const { return runs_.size(); }
   int ekf_reset_count() const { return ekf_reset_count_; }

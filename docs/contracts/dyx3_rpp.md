@@ -1,7 +1,7 @@
 # dyx3_rpp — package contract and build status
 
 **Status:** PARTIAL by design (2026-10-07, cloud session). Read with the per-module contracts
-`rpp_overview.md`, `rpp_orchestrator.md`, `rpp_guidance.md`, `rpp_speed_profile.md`, `rpp_stop_pivot_fsm.md`, `rpp_terminal.md`,
+`rpp_overview.md`, `rpp_orchestrator.md`, `rpp_node.md`, `rpp_guidance.md`, `rpp_speed_profile.md`, `rpp_stop_pivot_fsm.md`, `rpp_terminal.md`,
 `rpp_motion_output.md`, `rpp_path_conditioner.md`, `rpp_spray_gate.md`. **Spec:** V1 section 7.4.
 **Authority:** `dyx3_rpp` owns the path-following decision and produces exactly one `MotionSetpoint` stream.
 It never publishes a safety verdict; `dyx3_motion_guard` is the last authority before PX4.
@@ -17,6 +17,8 @@ It never publishes a safety verdict; `dyx3_motion_guard` is the last authority b
 | `terminal` | closed-run test, min travel, path progress, tail transit, remaining-along, effective goal tolerance, endpoint-capture recovery (wide miss refused) | equivalence vs the verbatim Python |
 | `path_conditioner` | `condition_path` = the whole run-building of `_path_cb`: split by flag, absorb short connectors, split at corners, merge collinear (profile-aware), classify, per-run segment simplification (angle + Douglas-Peucker + must-hit) or smooth (corner arcs + resample), closed-run test, sliver drop. Must-hit travels by 1 mm coordinate key. | 1 986+ cases incl. 182 end-to-end `_path_cb` calls vs the verbatim Python (`tools/gate4/gen_conditioner_vectors.py`); point selection, run structure, profile and flags match exactly, coordinates to 1e-9; five mutations caught (must-hit, DP threshold, dual-corner gate, arc skip rule, 5 cm sliver) |
 | `rpp_core` (orchestrator) | `RppCore::tick`: pose/RTK/jump gates, goal test, smooth and segment tracking, per-run reset, and the whole stop/pivot flow (corner pivot, run boundary, entry alignment, endpoint precise stop, completion hold) through `stop_pivot_fsm` with the prototype's shared stop confirmation — see `rpp_orchestrator.md`. Only the point hold is a handoff (publishes zero) | tick-by-tick against the REAL carried node (`tools/gate4/gen_orchestrator_vectors.py`): 97 episodes, 13 166 ticks, 0 mismatches; about 45 mutations checked, survivors listed |
+| `rpp_command` / `diagnostics` | tick -> `MotionCommand` (STOP / TRACK_HEADING / TRACK_RATE / BRAKE / PIVOT / CREEP) and the loop-jitter measurement | contract tests (`rpp_modules_test`) |
+| `rpp_node` | ROS wiring: artifact load by id, `MotionSetpoint` / `RppStatus`, parameter classes | `rpp_node_test` (11 in-process cases incl. a whole mission driven to COMPLETE) |
 | `motion_output` | **rewritten**, not ported: STOP / TRACK_HEADING / TRACK_RATE / PIVOT / CREEP builders, signed reverse with the nose held, fail-to-zero sanitiser | contract tests |
 
 Equivalence vectors (`test/fixtures/gate4_rpp_vectors.txt`, 3.9 MB) are produced by running the carried,
@@ -28,14 +30,15 @@ This is **module-level** proof on synthetic and archived-mission inputs; the fie
 
 ## 2. What is NOT built (do not read the package as a replacement for `dyx3_rpp_legacy` yet)
 
-* The **point hold** (`point_hold_enabled`): `RppCore` publishes zero and reports it (`rpp_orchestrator.md`).
-* `run_sequencer`, **`rpp_node`** (ROS wiring, artifact loading by id, `MotionSetpoint` selection from `TickOutput::cmd`, `RppStatus` with
-  loop-jitter measurement) and the **spray gate** interface to `dyx3_spray` (`_gate_spray` itself is in `RppCore`).
+* The **point hold** (`point_hold_enabled`): `RppCore` publishes zero and the node reports `STATE_ERROR` with `handoff = 1` (`rpp_orchestrator.md`).
 * Features not ported: point handshake, precise point stop, progress publication.
-* Nothing here has run on a rover, and the closed-loop rover model behind the proof is a stand-in: real-bag replay is a LOCAL ACTION.
+* The node (`rpp_node.md`) exists and is proven in-process against a kinematic stand-in vehicle; it has never run against PX4 or on a rover, and the closed-loop
+  model behind the controller proof is a stand-in too: real-bag replay is a LOCAL ACTION. Timing, jitter and the firmware's reaction to the pivot and brake
+  commands are not provable off-target.
+* `run_sequencer` and `spray_gate` are not separate modules: the run sequence (`_apply_run` / `_advance_run`) and the heading gates (`_gate_spray`) are inside `RppCore`,
+  where the shared state they need lives. The empty stubs were removed.
 
-Until the node exists the precision path on a rover is `dyx3_rpp_legacy` (quarantined, GATE 7 deletes it).
-`RppCore` is the thing the shadow-run oracle compares tick by tick.
+Until the shadow run (GATE 7) the precision path on a rover is `dyx3_rpp_legacy` (quarantined, GATE 7 deletes it). `RppCore` is the thing the shadow-run oracle compares tick by tick.
 
 ## 3. DERIVED — NOT FROM V1 SPEC
 

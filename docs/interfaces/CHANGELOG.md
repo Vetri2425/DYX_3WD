@@ -63,3 +63,10 @@
 - `Px4LinkStatus`: appended `timesync_valid`, `timesync_offset_us`, `timesync_round_trip_us` (the FCU timesync estimate, for the recorder's
   start/end log, `dyx3-health` and the gateway's telemetry). Appended fields — existing fields unchanged. Values only: no gate consumes them yet
   (no numeric convergence criterion exists; F-tasks A1.4).
+
+## 0.8.0 — 2026-10-07 (RPP node)
+
+- `RppStatus`: new `STATE_LOADED=7` (the verified path is loaded and RPP waits for the mission to run; this is the acknowledgement
+  `dyx3_mission` waits for) and appended `tick_state`, `segment_state` (the prototype's diagnostic codes), `spray_request` (the
+  heading-gated MARK request; the valve stays owned by `dyx3_spray`), `handoff` and `rtk_reason`. Appended fields and one new constant —
+  existing fields and constants unchanged; consumers of 0.7.0 are unaffected.
