@@ -336,3 +336,50 @@ dump step; the uncommitted EKF2 edits in the firmware working tree (other sessio
 **Next**
 - Claude should review the unpushed local Phase 1 commit. Do not start Phase 2 without human
   approval.
+
+---
+
+## 2026-10-07 — Claude (cloud, branch `claude/cloud-phases`) — P1.1, P11a, P12
+
+Cloud session, code only. Branch `claude/cloud-phases` (not master). **No attribution trailers** per CLAUDE.md §5.
+Running log; later phases append below. Toolchain used: `ros:humble-ros-base` from `public.ecr.aws` (Docker Hub rate-limited),
+`mavros_msgs`+`geographic_msgs` built from source for message definitions only, `px4_msgs` built **by the installer's own
+`build_px4_msgs`** from firmware `27a7ac9284` (4 min at `-j4` in the container; the code path is verified, the Jetson `-j1` timing is not).
+
+### P1.1 — Phase 1 review fixes (`dyx3_interfaces` 0.1.0 → 0.2.0)
+Done: `RtkStatus.fix_type` mirrors `SensorGps` (`FIX_3D` 2→3; added 2D/RTCM_CODE_DIFFERENTIAL/EXTRAPOLATED); `MotionSetpointStatus`
+reasons 9–12 (heading unhealthy, operator link lost, arming gate, estimator unhealthy); new `EstimatorHealth.msg`; `AbortMission` has a
+defined 0 and `REASON_`-named result; `ExecuteMission` documented as canonical (`StartMission` = admission wrapper, same `dyx3_mission`
+code path); parameter registry has a PROPOSED class + rationale for all 173 (77 LIVE / 88 IDLE_ONLY / 6 RESTART / 2 TBD).
+**Finding (needs human):** `/fmu/out/estimator_status` and `estimator_aid_src_*` are **not in `dds_topics.yaml` @27a7ac9284**; only
+`estimator_status_flags` is. So test ratios (yaw/pos/vel) are unavailable over DDS until a firmware change; `EstimatorHealth.test_ratios_valid`
+stays false and the guard must use the boolean flags (`reject_yaw`, `cs_gnss_yaw_fault`, `cs_inertial_dead_reckoning`, `reject_hor_pos/vel`).
+Ran: colcon build+test (8 interface tests pass). DERIVED: new reason numbers; EstimatorHealth field set.
+
+### P11a — minimal deployment slice
+`installer/` (install.sh, upgrade.sh, verify.sh, lib/*, pins/*, tests) + `deployment/scripts/start-platform.sh` + `dyx3-platform.service`.
+See `installer/README.md`. Ran: shellcheck clean; `installer/tests/run_tests.sh` 41/41 on a staged root with fake colcon/ss/ping (build refusal,
+atomic switch, auto-revert on failed health, config preservation, prune, unknown ref, supervisor restart/SIGTERM); the real `build_px4_msgs`
+end-to-end in the Humble container (found + fixed a real bug: the sparse firmware checkout was inside the colcon workspace).
+**NOT run**: anything on a Jetson — apt, ROS apt repo, pinned XRCE agent + mavlink-router builds, NetworkManager, systemd, real DDS.
+DERIVED: mavlink-router pin = tag `v4` (`42529d5`) — HANDOFF named no version; XRCE agent installs to `/usr/local` (as the proven bring-up); `dyx3-health` is
+minimal (platform only); FCU Ethernet profile has `FCU_KEEP_DHCP=1` for the bench; config templates are `.tmpl` because the hygiene gate forbids tracked `*.env`.
+
+### P12 — legacy port-in + contracts
+`dyx3_rpp_legacy`: `rpp_controller_node.py` + 5 helpers + `path_publisher_node.py` copied **byte-for-byte** from PX4_DXP `build/demo-ready` @ `fc6436b`
+(sha256-pinned, `test/VERBATIM.sha256`), 26 of the prototype's own tests carried verbatim. Only new code: `output_stage.py` (pure, decodes NED vector + yaw rate →
+`MotionSetpoint`, incl. reverse and pivot hysteresis), `legacy_node.py` (subclass overriding exactly `_publish_velocity/_publish_yaw_rate`),
+`input_shim.py` (VehicleState/RtkStatus → MAVROS-named topics). `docs/contracts/rpp_*.md` (8 docs).
+Ran: 29 package tests + prototype suite: **183 pass / 7 fail, identical in the untouched PX4_DXP checkout** (`rpp_legacy_evidence.md`).
+**Findings (need human):**
+1. **Default divergence** — `docs/tuning/default_divergence.md`: `build/demo-ready` (registry source) vs older `Upgrade_speed` retuned set (`min_lookahead 0.35`, `a_lat_max 0.3`, `mission_speed 0.35`…). Which seeds production?
+2. **Spot-turn thresholds conflict inside the prototype** (docstring 30°/5°, comment 10°/5°; as-flown FCU params 40°/2°). Used 40°/2° (DERIVED).
+3. **Pivot-rate law is unspecified** (old firmware owned it); legacy uses `1.5·err`, clamp 0.45 (DERIVED, GATE 1).
+4. `output_mode` default `heading` (field-proven information flow); `rate` is the precision mode — flip after GATE 1. The legacy yaw rate is already closed-loop (pure-pursuit κv / 1.5·θe).
+5. `/path` (nav_msgs/Path, z bitfield) and point-handshake topics have no adapter yet — needs Phase 3/4 path artifact.
+NOT run: the legacy node under rclpy with live topics; `input_shim`.
+
+### LOCAL ACTIONS NEEDED (Mac, bags at `~/Vetri/3WD_Proto/PX4_DXP/bags`, `PX4_Logs`)
+1. Legacy decode evidence: `python3 tools/extract_legacy_decode_fixture.py <bag_dir> -o ros2_ws/src/dyx3_rpp_legacy/test/fixtures/legacy_decode_<name>.json` for a square bag (e.g. `square_20260611_*`), an arc bag and an extension line bag; then `pytest ros2_ws/src/dyx3_rpp_legacy/test/test_fixture_decode.py` (currently SKIPPED, not passing).
+2. On the Jetson: `installer/install.sh --production` and `dyx3-upgrade <ref>`; confirm `-j1` px4_msgs build time/memory; `systemctl status dyx3-platform`; `dyx3-health --deep`.
+3. Re-run the carried prototype tests: `DYX3_RUN_DXP_TESTS=1 pytest ros2_ws/src/dyx3_rpp_legacy/test/dxp_verbatim` and decide what the 7 failures mean.
