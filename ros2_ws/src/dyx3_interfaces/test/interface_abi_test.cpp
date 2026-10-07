@@ -17,7 +17,12 @@
 #include "dyx3_interfaces/msg/rtcm_data.hpp"
 #include "dyx3_interfaces/msg/rtk_status.hpp"
 #include "dyx3_interfaces/msg/safety_gate_status.hpp"
+#include "dyx3_interfaces/msg/spray_actuator_ack.hpp"
+#include "dyx3_interfaces/msg/spray_actuator_command.hpp"
+#include "dyx3_interfaces/msg/spray_lease.hpp"
 #include "dyx3_interfaces/msg/spray_state.hpp"
+#include "dyx3_interfaces/msg/spray_status.hpp"
+#include "dyx3_interfaces/msg/spray_watchdog_status.hpp"
 #include "dyx3_interfaces/msg/ulog_chunk.hpp"
 #include "dyx3_interfaces/msg/vehicle_state.hpp"
 #include "dyx3_interfaces/srv/abort_mission.hpp"
@@ -26,6 +31,7 @@
 #include "dyx3_interfaces/srv/resume_mission.hpp"
 #include "dyx3_interfaces/srv/set_emergency_stop.hpp"
 #include "dyx3_interfaces/srv/set_offboard.hpp"
+#include "dyx3_interfaces/srv/set_spray_manual.hpp"
 #include "dyx3_interfaces/srv/skip_point.hpp"
 #include "dyx3_interfaces/srv/start_mission.hpp"
 
@@ -180,6 +186,23 @@ TEST(Px4LinkAbi, DefaultsAreUnhealthyAndConstantsAreFrozen) {
   EXPECT_EQ(n.frames_total, 0U);
   EXPECT_TRUE(n.last_error.empty());
   EXPECT_EQ(dyx3_interfaces::msg::NtripStatus::STATE_STREAMING, 2);
+  const dyx3_interfaces::msg::SprayActuatorCommand sc{};  // default = OFF from the controller
+  EXPECT_FALSE(sc.on);
+  EXPECT_EQ(sc.source, dyx3_interfaces::msg::SprayActuatorCommand::SOURCE_CONTROLLER);
+  const dyx3_interfaces::msg::SprayActuatorAck sa{};
+  EXPECT_FALSE(sa.success);
+  EXPECT_EQ(dyx3_interfaces::msg::SprayActuatorAck::RESULT_LINK_REFUSED, 255);
+  const dyx3_interfaces::msg::SprayLease sl{};  // default = no ON
+  EXPECT_FALSE(sl.allow_on);
+  const dyx3_interfaces::msg::SprayWatchdogStatus sw{};
+  EXPECT_FALSE(sw.off_authority_ready);
+  EXPECT_FALSE(sw.allow_on);
+  const dyx3_interfaces::msg::SprayStatus ss{};
+  EXPECT_FALSE(ss.spraying);
+  EXPECT_FALSE(ss.safety_ok);
+  EXPECT_EQ(ss.fsm_state, dyx3_interfaces::msg::SprayStatus::FSM_OFF_UNCONFIRMED);
+  EXPECT_FALSE(dyx3_interfaces::srv::SetSprayManual::Request{}.on);
+  EXPECT_FALSE(dyx3_interfaces::srv::SetSprayManual::Response{}.accepted);
   const dyx3_interfaces::msg::RtcmData r{};
   EXPECT_TRUE(r.data.empty());
   const dyx3_interfaces::msg::UlogChunk u{};

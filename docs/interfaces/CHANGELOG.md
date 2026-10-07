@@ -50,3 +50,10 @@
 - New `NtripStatus` (link state, correction age and rate, frame/byte/CRC counters, reconnects, FIX transitions) for
   the backend and the recorder. Default = no corrections.
 
+## 0.6.0 — 2026-10-07 (Phase 9 needs)
+
+- New `SprayActuatorCommand` / `SprayActuatorAck` (dyx3_spray and the spray watchdog ask `dyx3_px4_link`, the only
+  package that touches /fmu, to drive the valve via DO_SET_ACTUATOR / DO_SET_SERVO and report the FCU's ack),
+  `SprayLease` (typed replacement for the prototype's JSON lease), `SprayWatchdogStatus`, `SprayStatus` (rich status for the
+  recorder/backend), and the `SetSprayManual` service. No existing definition changed.
+

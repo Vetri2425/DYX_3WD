@@ -1,0 +1,10 @@
+# Bench / operator override: hold the valve ON for at most manual_override_timeout_s, or cancel. Subordinate to every
+# fail-safe (disarm, disabled, watchdog not ready). Owner: dyx3_spray. A backend request is only a request.
+bool on
+---
+bool accepted
+uint8 REASON_OK=0
+uint8 REASON_DISABLED=1
+uint8 REASON_DISARMED=2
+uint8 REASON_WATCHDOG_NOT_READY=3
+uint8 reason_code
