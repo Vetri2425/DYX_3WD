@@ -3,22 +3,28 @@
 #include "builtin_interfaces/msg/time.hpp"
 #include "dyx3_interfaces/action/execute_mission.hpp"
 #include "dyx3_interfaces/msg/emergency_stop_state.hpp"
+#include "dyx3_interfaces/msg/gnss_report.hpp"
 #include "dyx3_interfaces/msg/estimator_health.hpp"
 #include "dyx3_interfaces/msg/mission_state.hpp"
 #include "dyx3_interfaces/msg/motion_setpoint.hpp"
 #include "dyx3_interfaces/msg/motion_setpoint_status.hpp"
 #include "dyx3_interfaces/msg/operator_link_status.hpp"
 #include "dyx3_interfaces/msg/point_result.hpp"
+#include "dyx3_interfaces/msg/px4_link_status.hpp"
 #include "dyx3_interfaces/msg/recorder_status.hpp"
 #include "dyx3_interfaces/msg/rpp_status.hpp"
+#include "dyx3_interfaces/msg/rtcm_data.hpp"
 #include "dyx3_interfaces/msg/rtk_status.hpp"
 #include "dyx3_interfaces/msg/safety_gate_status.hpp"
 #include "dyx3_interfaces/msg/spray_state.hpp"
+#include "dyx3_interfaces/msg/ulog_chunk.hpp"
 #include "dyx3_interfaces/msg/vehicle_state.hpp"
 #include "dyx3_interfaces/srv/abort_mission.hpp"
+#include "dyx3_interfaces/srv/arm_disarm.hpp"
 #include "dyx3_interfaces/srv/pause_mission.hpp"
 #include "dyx3_interfaces/srv/resume_mission.hpp"
 #include "dyx3_interfaces/srv/set_emergency_stop.hpp"
+#include "dyx3_interfaces/srv/set_offboard.hpp"
 #include "dyx3_interfaces/srv/skip_point.hpp"
 #include "dyx3_interfaces/srv/start_mission.hpp"
 
@@ -139,6 +145,39 @@ TEST(SafetyMessagesAbi, DefaultsAreFailSafe) {
   EXPECT_FALSE(
       estop.asserted);  // absence of a fresh message is what consumers must treat as asserted
   EXPECT_TRUE(estop.source.empty());
+}
+
+TEST(Px4LinkAbi, DefaultsAreUnhealthyAndConstantsAreFrozen) {
+  using L = dyx3_interfaces::msg::Px4LinkStatus;
+  const L l{};
+  ExpectZeroTime(l.stamp);
+  EXPECT_FALSE(l.session_alive);
+  EXPECT_FALSE(l.handshake_ok);
+  EXPECT_FALSE(l.offboard_heartbeat_active);
+  EXPECT_FALSE(l.failing_to_zero);
+  EXPECT_EQ(l.fault, L::FAULT_NONE);
+  EXPECT_EQ(L::FAULT_NO_SESSION, 1U);
+  EXPECT_EQ(L::FAULT_HANDSHAKE_MISMATCH, 2U);
+  EXPECT_EQ(L::FAULT_TOPIC_STALE, 3U);
+  EXPECT_EQ(L::FAULT_COMMAND_STALE, 4U);
+  EXPECT_EQ(L::FAULT_LOOP_OVERRUN, 5U);
+  EXPECT_EQ(L::FAULT_HANDSHAKE_PENDING, 6U);
+  EXPECT_EQ(l.stale_topics_mask, 0U);
+  EXPECT_EQ(l.loop_overrun_count, 0U);
+  EXPECT_EQ(l.command_gap_events, 0U);
+  EXPECT_EQ(l.session_resets, 0U);
+
+  const dyx3_interfaces::msg::GnssReport g{};
+  EXPECT_FALSE(g.valid);
+  EXPECT_EQ(g.fix_type, 0U);
+  const dyx3_interfaces::msg::RtcmData r{};
+  EXPECT_TRUE(r.data.empty());
+  const dyx3_interfaces::msg::UlogChunk u{};
+  EXPECT_TRUE(u.data.empty());
+  EXPECT_FALSE(dyx3_interfaces::srv::ArmDisarm::Request{}.arm);  // default request is "disarm"
+  EXPECT_FALSE(dyx3_interfaces::srv::ArmDisarm::Response{}.accepted);
+  EXPECT_FALSE(dyx3_interfaces::srv::SetOffboard::Request{}.enable);
+  EXPECT_FALSE(dyx3_interfaces::srv::SetOffboard::Response{}.accepted);
 }
 
 TEST(StatusMessageAbi, ConstantsAndSafeDefaults) {

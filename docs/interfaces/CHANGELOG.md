@@ -33,3 +33,11 @@
 - New `SafetyGateStatus` (guard-owned aggregate of every gate except the mission gate; default
   `ok = false`), `OperatorLinkStatus` (gateway-owned tablet heartbeat state; default `alive = false`),
   `EmergencyStopState` (guard-owned latched E-stop; absence of a fresh message == asserted).
+
+## 0.4.0 — 2026-10-07 (Phase 7 needs)
+
+- New `Px4LinkStatus` (session / handshake / staleness / fail-to-zero evidence; default = unhealthy),
+  `GnssReport` (raw FCU GNSS pass-through; only px4_link may read /fmu), `RtcmData` (gnss_rtk →
+  px4_link RTCM chunks), `UlogChunk` (px4_link → recorder ULog chunks).
+- New services `ArmDisarm` and `SetOffboard` (owner dyx3_px4_link). Defaults are the safe request
+  (disarm / disable). No existing definition changed.

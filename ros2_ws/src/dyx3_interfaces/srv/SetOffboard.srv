@@ -1,0 +1,11 @@
+# Enable or disable the offboard heartbeat and request OFFBOARD navigation mode. Owner:
+# dyx3_px4_link. PX4 requires a stream of OffboardControlMode (>= 2 Hz) BEFORE it accepts OFFBOARD, so
+# enabling first starts the heartbeat (with explicit STOP setpoints) and only then sends the mode
+# command. Disabling stops the heartbeat; PX4 then leaves OFFBOARD through its own loss handling.
+bool enable
+---
+bool accepted
+uint8 REASON_OK=0
+uint8 REASON_LINK_UNHEALTHY=1
+uint8 REASON_NOT_ARMED_OR_REJECTED=2
+uint8 reason_code

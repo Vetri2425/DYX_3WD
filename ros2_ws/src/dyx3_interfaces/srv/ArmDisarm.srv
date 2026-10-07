@@ -1,0 +1,10 @@
+# Arm or disarm the FCU. Owner: dyx3_px4_link. Always allowed to DISARM; arming is refused unless the
+# link is healthy (session alive, handshake ok, topics fresh).
+bool arm
+---
+bool accepted
+uint8 REASON_OK=0
+uint8 REASON_LINK_UNHEALTHY=1
+uint8 REASON_REJECTED_BY_FCU=2
+uint8 REASON_TIMEOUT=3
+uint8 reason_code

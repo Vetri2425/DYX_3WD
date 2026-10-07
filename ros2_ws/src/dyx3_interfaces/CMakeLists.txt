@@ -21,12 +21,18 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/SafetyGateStatus.msg"
   "msg/OperatorLinkStatus.msg"
   "msg/EmergencyStopState.msg"
+  "msg/Px4LinkStatus.msg"
+  "msg/GnssReport.msg"
+  "msg/RtcmData.msg"
+  "msg/UlogChunk.msg"
   "srv/StartMission.srv"
   "srv/PauseMission.srv"
   "srv/ResumeMission.srv"
   "srv/AbortMission.srv"
   "srv/SkipPoint.srv"
   "srv/SetEmergencyStop.srv"
+  "srv/ArmDisarm.srv"
+  "srv/SetOffboard.srv"
   "action/ExecuteMission.action"
   DEPENDENCIES builtin_interfaces
 )
