@@ -111,7 +111,8 @@ class OutputStage:
     def step(self, v_n: float, v_e: float, yaw_rate_body: float, yaw_ned: float) -> Setpoint:
         """Decode one legacy tick.
 
-        v_n, v_e       NED velocity vector the prototype would have published (m/s)
+        v_n, v_e       NED velocity vector the prototype would have published (m/s). A vector
+                       pointing behind the nose decodes as reverse (negative speed_body_x).
         yaw_rate_body  prototype feed-forward yaw rate, NED/FRD clockwise-positive (rad/s)
         yaw_ned        current heading, NED, 0 = North, clockwise-positive (rad)
         """
@@ -128,7 +129,18 @@ class OutputStage:
             return _stop()
 
         bearing = math.atan2(v_e, v_n)  # NED: 0 = North, clockwise-positive
-        err = wrap_pi(bearing - yaw_ned)  # >0: target is clockwise of the nose
+        # Reverse detection, mirroring the old firmware (BUG-T3 notes in the prototype): a
+        # vector with a NEGATIVE forward component (|bearing - yaw| > 90 deg) means "drive
+        # backwards along it". The prototype emits such vectors on purpose: the corner/endpoint
+        # brake (_corner_brake_velocity: exactly +-body-axis) and the precise-stop reverse
+        # (precise_stop.servo_speed / feedforward_brake_speed with a negative residual).
+        # Under the explicit contract that is a SIGNED speed and the NOSE heading target is
+        # the opposite bearing (F1.7: "no bearing is inferred from a velocity vector").
+        err_fwd = wrap_pi(bearing - yaw_ned)
+        reverse = math.cos(err_fwd) < 0.0
+        heading_target = wrap_pi(bearing + math.pi) if reverse else bearing
+        sign = -1.0 if reverse else 1.0
+        err = wrap_pi(heading_target - yaw_ned)  # >0: nose target is clockwise of the nose
 
         if self._pivoting:
             if abs(err) < p.pivot_exit_rad:
@@ -142,5 +154,5 @@ class OutputStage:
 
         if p.mode == "rate":
             rate = max(-p.max_yaw_rate_radps, min(p.max_yaw_rate_radps, yaw_rate_body))
-            return Setpoint(MODE_TRACK_RATE, speed, NAN, rate, True)
-        return Setpoint(MODE_TRACK_HEADING, speed, wrap_pi(bearing), NAN, True)
+            return Setpoint(MODE_TRACK_RATE, sign * speed, NAN, rate, True)
+        return Setpoint(MODE_TRACK_HEADING, sign * speed, wrap_pi(heading_target), NAN, True)

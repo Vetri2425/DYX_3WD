@@ -72,11 +72,37 @@ def test_heading_mode_cardinal_directions():
     assert w.yaw_setpoint == pytest.approx(D(-90))
 
 
-def test_speed_is_vector_magnitude_and_never_negative():
-    for vn, ve in [(0.3, 0.4), (-0.1, 0.0), (0.0, -0.2)]:
-        sp = OutputStage().step(vn, ve, 0.0, math.atan2(ve, vn))
+def test_speed_magnitude_is_the_vector_norm():
+    for vn, ve in [(0.3, 0.4), (0.2, 0.0), (0.0, 0.2)]:
+        sp = OutputStage().step(vn, ve, 0.0, math.atan2(ve, vn))  # nose on the vector
         assert sp.speed_body_x == pytest.approx(math.hypot(vn, ve))
-        assert sp.speed_body_x >= 0.0  # the prototype never commands reverse
+
+
+def test_brake_vector_decodes_as_reverse_holding_heading():
+    # _corner_brake_velocity is exactly -+ along the nose. Moving forward at 0.1 m/s with the
+    # nose at 60 deg, the brake vector points at bearing 240 deg: a reverse command that must
+    # HOLD the nose heading, not spot-turn 180 deg (the prototype's BUG-T3 failure mode).
+    yaw = D(60)
+    b = yaw + math.pi
+    sp = OutputStage().step(0.08 * math.cos(b), 0.08 * math.sin(b), 0.0, yaw)
+    assert sp.mode == MODE_TRACK_HEADING
+    assert sp.speed_body_x == pytest.approx(-0.08)
+    assert sp.yaw_setpoint == pytest.approx(yaw)
+    check_contract(sp)
+
+
+def test_reverse_pivot_uses_the_nose_target_not_the_vector_bearing():
+    # Vector 170 deg behind a north-facing nose: reversing, nose target is -10 deg => small
+    # error, so TRACK_HEADING (reverse), not PIVOT.
+    b = D(170)
+    sp = OutputStage().step(0.1 * math.cos(b), 0.1 * math.sin(b), 0.0, 0.0)
+    assert sp.mode == MODE_TRACK_HEADING and sp.speed_body_x < 0.0
+    assert sp.yaw_setpoint == pytest.approx(D(170) - math.pi)
+
+
+def test_ninety_degrees_off_the_nose_is_a_forward_pivot_not_a_reverse():
+    sp = OutputStage().step(0.0, 0.1, 0.0, 0.0)  # bearing 90 deg, nose north
+    assert sp.mode == MODE_PIVOT and sp.yaw_rate_setpoint > 0.0
 
 
 def test_pivot_hysteresis_enter_40_exit_2():
