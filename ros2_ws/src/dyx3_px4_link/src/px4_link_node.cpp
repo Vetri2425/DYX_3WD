@@ -154,6 +154,10 @@ Px4LinkNode::Px4LinkNode(const rclcpp::NodeOptions& options, ClockFn clock, bool
         r.satellites_used = m->satellites_used;
         r.heading_rad = m->heading;
         r.heading_accuracy_rad = m->heading_accuracy;
+        r.latitude_deg = m->latitude_deg;
+        r.longitude_deg = m->longitude_deg;
+        r.altitude_msl_m = static_cast<float>(m->altitude_msl_m);
+        r.hdop = m->hdop;
         pub_gnss_->publish(r);
       });
   // Best effort: a lost response is simply re-requested; a reliable subscription would silently

@@ -23,6 +23,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/EmergencyStopState.msg"
   "msg/Px4LinkStatus.msg"
   "msg/GnssReport.msg"
+  "msg/NtripStatus.msg"
   "msg/RtcmData.msg"
   "msg/UlogChunk.msg"
   "srv/StartMission.srv"

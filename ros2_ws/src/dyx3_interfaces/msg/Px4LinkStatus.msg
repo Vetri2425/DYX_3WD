@@ -1,4 +1,4 @@
-# Health of the PX4 link, published by dyx3_px4_link (the only package that touches /fmu/**).
+# Health of the PX4 link, published by dyx3_px4_link (the only package that touches the /fmu namespace).
 # Fail-safe defaults: everything false / zero means "link not healthy".
 builtin_interfaces/Time stamp
 

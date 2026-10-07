@@ -8,6 +8,7 @@
 #include "dyx3_interfaces/msg/mission_state.hpp"
 #include "dyx3_interfaces/msg/motion_setpoint.hpp"
 #include "dyx3_interfaces/msg/motion_setpoint_status.hpp"
+#include "dyx3_interfaces/msg/ntrip_status.hpp"
 #include "dyx3_interfaces/msg/operator_link_status.hpp"
 #include "dyx3_interfaces/msg/point_result.hpp"
 #include "dyx3_interfaces/msg/px4_link_status.hpp"
@@ -170,6 +171,15 @@ TEST(Px4LinkAbi, DefaultsAreUnhealthyAndConstantsAreFrozen) {
   const dyx3_interfaces::msg::GnssReport g{};
   EXPECT_FALSE(g.valid);
   EXPECT_EQ(g.fix_type, 0U);
+  EXPECT_EQ(g.latitude_deg, 0.0);
+  EXPECT_EQ(g.hdop, 0.0F);
+  const dyx3_interfaces::msg::NtripStatus n{};  // fail-safe default: no corrections
+  EXPECT_FALSE(n.connected);
+  EXPECT_FALSE(n.streaming);
+  EXPECT_EQ(n.state, dyx3_interfaces::msg::NtripStatus::STATE_STARTING);
+  EXPECT_EQ(n.frames_total, 0U);
+  EXPECT_TRUE(n.last_error.empty());
+  EXPECT_EQ(dyx3_interfaces::msg::NtripStatus::STATE_STREAMING, 2);
   const dyx3_interfaces::msg::RtcmData r{};
   EXPECT_TRUE(r.data.empty());
   const dyx3_interfaces::msg::UlogChunk u{};

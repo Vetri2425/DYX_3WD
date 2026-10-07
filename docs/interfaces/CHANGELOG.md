@@ -41,3 +41,12 @@
   px4_link RTCM chunks), `UlogChunk` (px4_link → recorder ULog chunks).
 - New services `ArmDisarm` and `SetOffboard` (owner dyx3_px4_link). Defaults are the safe request
   (disarm / disable). No existing definition changed.
+
+## 0.5.0 — 2026-10-07 (Phase 8 needs)
+
+- `GnssReport`: appended `latitude_deg`, `longitude_deg`, `altitude_msl_m`, `hdop` (the NTRIP GGA back-feed needs a
+  rover position and the receiver's own satellite/HDOP figures instead of the prototype's placeholders).
+  Appended fields — existing fields unchanged; consumers of 0.4.0 are unaffected.
+- New `NtripStatus` (link state, correction age and rate, frame/byte/CRC counters, reconnects, FIX transitions) for
+  the backend and the recorder. Default = no corrections.
+
