@@ -1,0 +1,6 @@
+# mavlink-router — pinned. Service plane only (QGC forward). Idle while MAV_2_CONFIG=0.
+# DERIVED — NOT FROM V1 SPEC: tag v4 was chosen as the newest release tag; the HANDOFF
+# did not name a version. Re-verify on the Jetson and change this file (one place) if needed.
+MAVROUTER_REPO=https://github.com/mavlink-router/mavlink-router.git
+MAVROUTER_TAG=v4
+MAVROUTER_COMMIT=42529d55b665e0a9a29e424e186f514c56c2e5b5

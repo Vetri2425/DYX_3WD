@@ -141,6 +141,23 @@ jobs:
       - name: pytest
         run: pytest backend/tests
 
+  installer_checks:
+    name: installer (shellcheck + staged-root tests)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # Staged root, fake colcon/ss/ping: proves the release lifecycle logic (build refusal,
+      # atomic switch, automatic revert, config preservation, prune) and the platform
+      # supervisor. It does NOT prove apt/ROS/NetworkManager/systemd on the Jetson.
+      - name: shellcheck
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck -x installer/*.sh installer/lib/*.sh installer/tests/*.sh deployment/scripts/*.sh
+
+      - name: installer tests
+        run: bash installer/tests/run_tests.sh
+
   legacy_quarantine:
     name: dyx3_rpp_legacy quarantine
     runs-on: ubuntu-22.04

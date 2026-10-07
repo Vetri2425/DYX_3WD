@@ -1,15 +1,19 @@
 [Unit]
 Description=DYX 3WD — network, XRCE agent, MAVLink sidecar, devices, runtime dirs
-After=network-online.target
+After=network-online.target NetworkManager.service
 Wants=network-online.target
 
 [Service]
 Type=exec
+EnvironmentFile=-/etc/dyx3/platform.env
 User=dyx3
 Group=dyx3
 ExecStart=/opt/dyx3/current/bin/dyx3-platform
 Restart=always
 RestartSec=5
+# Stop the whole cgroup (agent + router) on stop/restart.
+KillMode=control-group
+TimeoutStopSec=10
 
 # Hardening
 NoNewPrivileges=yes

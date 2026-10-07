@@ -1,0 +1,5 @@
+# Micro XRCE-DDS Agent — pinned. Proven on the rover (2026-10-07: session to 10.41.10.2,
+# 68 /fmu topics). Tag v2.4.3 is a lightweight tag; the commit is what is verified.
+XRCE_REPO=https://github.com/eProsima/Micro-XRCE-DDS-Agent.git
+XRCE_TAG=v2.4.3
+XRCE_COMMIT=73622810d984349b80bbac0ef55fc0b694d62222

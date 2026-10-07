@@ -1,0 +1,4 @@
+# Installer libraries are sourced by several entry scripts, so variables look "unused" and
+# source targets are computed at run time.
+external-sources=true
+disable=SC1090,SC1091,SC2034,SC2015
