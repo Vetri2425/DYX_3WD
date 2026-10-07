@@ -462,3 +462,11 @@ Open (human): FCU / hardware valve fail-safe if `dyx3_px4_link` dies while the v
 2. Regenerate / verify the vectors (need the path engine and rclpy, Humble container, **Python 3.10** for GATE 3): `tools/gate4/gen_spray_vectors.py --check`, `gen_rpp_vectors.py --check`, `gen_ntrip_vectors.py --check`.
 3. Jetson: node tests are timing-sensitive; run `colcon test` on the target. `ros2 topic info -v /fmu/in/...` must show RELIABLE (px4_link). Confirm `mavlink-router` pin and `COM_OF_LOSS_T`.
 4. Update `Px4LinkStatus.handshake_ok` comment at the next interface bump (it says "permanent"; the latch clears on session reset).
+
+### OPEN ITEMS — NOT DECIDED (human, recorded 2026-10-07; do not resolve silently)
+1. **Valve close when the DDS path fails.** Every OFF path in this repo (controller, independent watchdog, px4_link refusal) rides the same DDS link, so if DDS or `dyx3_px4_link` dies while the valve is ON, nothing here can close it.
+   Human ideas, undecided: (a) use the currently unused secondary UART link to disarm the rover and close the valve; (b) a PX4 companion-loss failsafe parameter that disarms. Neither is verified:
+   check in the firmware source/bench which parameter applies, and that the valve output goes to its closed (disarmed) level on disarm. Not designed yet.
+2. **`projection_direction_gate_deg`** stays 0.0 (disabled). No decision.
+3. **Decision input for 2:** replay 5-10 real missions (bag-derived, with real MARK/TRANSIT boundaries; the Git corpus is almost all MARK) through the projection with the gate off and on, compare station continuity and valve edges, then decide.
+   A replay harness is to be added; the missions are a LOCAL ACTION.
