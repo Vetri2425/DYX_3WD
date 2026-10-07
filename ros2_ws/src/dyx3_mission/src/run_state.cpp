@@ -1,4 +1,2 @@
-// run_state — see docs/contracts/dyx3_mission.md
+// run_state — header-only data; this translation unit keeps the file layout of the spec 7.4 table.
 #include "dyx3_mission/run_state.hpp"
-
-namespace dyx3_mission {}  // namespace dyx3_mission

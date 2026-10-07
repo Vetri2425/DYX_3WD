@@ -1,0 +1,71 @@
+# Contract — `dyx3_mission`
+
+Spec §7.1/§7.4/§4.3.1; Phase plan P3. **Mission decides WHAT is executed; it never computes steering, never publishes `/fmu/**`,
+and never re-implements a safety gate.** Authored 2026-10-07 from the spec and the prototype's `mission_runner_node.py`/`mission_progress.py`
+semantics (not ported line by line; the prototype's mission-runner touched MAVROS, the server and control arbitration, all gone).
+
+## 1. Single owner of mission start
+`ExecuteMission.action` is canonical (goal = start, feedback = progress, cancel = abort); `StartMission.srv` is an admission-only wrapper. **Both call the
+same `MissionNode::begin_mission()`**; nothing else may start a mission. A second start while a mission is active is rejected (`REASON_BUSY`).
+
+## 2. States (frozen ABI values, `MissionState.msg`)
+`IDLE 0 · LOADING 1 · READY 2 · RUNNING 3 · PAUSED 4 · COMPLETED 5 · ABORTED 6 · ERROR 7`. Reasons: `NONE 0 · OPERATOR 1 · SAFETY 2 · RTK 3 · PATH_ERROR 4 · INTERNAL_ERROR 5`.
+
+| State | Meaning | Motion allowed? |
+|---|---|---|
+| IDLE | no mission | no |
+| LOADING | artifact being read + hash-verified | no |
+| READY | artifact verified and published (`MissionState.path_artifact_sha256`); waiting for `dyx3_rpp` to acknowledge it (`RppStatus.mission_id` == this mission) | no |
+| RUNNING | RPP acknowledged; **the only state in which the guard's mission gate opens** | yes |
+| PAUSED | stopped by operator or by an automatic safety pause; resumable by an explicit Resume only | no |
+| COMPLETED / ABORTED / ERROR | terminal; left only by a new accepted start | no |
+
+## 3. Transition table (normative — `mission_fsm.cpp` implements exactly this; `mission_fsm_test.cpp` enumerates every state×event)
+Events: `start(gate_ok)` · `artifact_loaded(valid)` · `rpp_ack` · `pause` · `resume(gate_ok)` · `abort(reason)` · `rpp_complete` · `rpp_error` ·
+`gate_lost(guard_reason)` · `estop` · `skip_point(has_active_point)`.
+
+| From ↓ / Event → | start | artifact_loaded | rpp_ack | pause | resume | abort | rpp_complete | rpp_error | gate_lost | estop |
+|---|---|---|---|---|---|---|---|---|---|---|
+| IDLE | →LOADING if gate_ok else **reject SAFETY_GATE** | ✗ | ✗ | reject NOT_RUNNING | reject NOT_PAUSED | reject NOT_ACTIVE | ✗ | ✗ | – | – |
+| LOADING | reject BUSY | →READY if valid, else →ERROR(PATH_ERROR) | ✗ | reject NOT_RUNNING | reject NOT_PAUSED | →ABORTED | ✗ | →ERROR(INTERNAL) | →ABORTED(SAFETY/RTK) | →ABORTED(SAFETY) |
+| READY | reject BUSY | ✗ | →RUNNING if gate ok else →ABORTED(SAFETY/RTK) | reject NOT_RUNNING | reject NOT_PAUSED | →ABORTED | ✗ | →ERROR(INTERNAL) | →ABORTED(SAFETY/RTK) | →ABORTED(SAFETY) |
+| RUNNING | reject BUSY | ✗ | – (ignored) | →PAUSED(OPERATOR) | reject NOT_PAUSED | →ABORTED | →COMPLETED | →ERROR(INTERNAL) | **→PAUSED(SAFETY/RTK)** | →ABORTED(SAFETY) |
+| PAUSED | reject BUSY | ✗ | – | reject NOT_RUNNING | →RUNNING if gate_ok else **reject SAFETY_GATE** | →ABORTED | – | →ERROR(INTERNAL) | – (stays) | →ABORTED(SAFETY) |
+| COMPLETED / ABORTED / ERROR | →LOADING if gate_ok (new mission id) else reject SAFETY_GATE | ✗ | ✗ | reject NOT_RUNNING | reject NOT_PAUSED | reject NOT_ACTIVE | ✗ | ✗ | – | – |
+
+`✗` = illegal in that state: the FSM refuses it, logs it, and does not change state (never silent). `–` = no effect. `skip_point` is accepted only in RUNNING/PAUSED with an
+active point (it records a `PointResult` SKIPPED; no state change), else `REASON_NO_ACTIVE_POINT` / `REASON_NOT_RUNNING`.
+
+**Never auto-resume.** A gate that recovers does not restart motion; a human issues Resume, which re-checks the gate.
+**DERIVED — NOT FROM V1 SPEC:** E-stop aborts (not pauses) so an interrupted mission cannot silently continue (the prototype's `emergency.py` is not ported — human question);
+auto-pause on gate loss; READY exists to require an RPP acknowledgement before any motion.
+
+## 4. Every transition is logged
+`Transition{seq, from, to, event, reason, detail, stamp_ns}`; the last 256 are retained, each goes to `/rosout`, and the full state is republished as `MissionState` on every
+transition and at 10 Hz (DERIVED rate). Illegal events are logged as refused transitions.
+
+## 5. Inputs
+`SafetyGateStatus` (guard-owned aggregate, 10 Hz; stale > 0.5 s or never seen ⇒ **not ok**), `RppStatus`, `VehicleState` (position for the point journal).
+Mission never reads RTK/estimator/E-stop directly — one owner per gate (the guard).
+
+## 6. Point journal
+Must-hit vertices (bit1 of the artifact flags) in path order; **point index = rank among must-hit vertices** (same as the prototype's `_musthit_rank_by_key`). A vertex is *captured* when the rover
+comes within `point_capture_radius_m` (default **0.10 m = prototype `point_hold_acceptance_m`**, DERIVED); the result is emitted when the rover leaves the radius or the path ends:
+`COMPLETED` with the **closest-approach distance** and NED position; a vertex bypassed because a later vertex was captured first is `FAILED`; operator skip is `SKIPPED`; unresolved at the end ⇒ `FAILED`.
+(Journal reports geometry; the *dwell/handshake* logic is RPP/spray's — `point_hold*` parameters are not mission parameters.)
+
+## 7. Path artifact
+C++ reader + SHA-256 (`path_artifact.cpp`, `sha256.cpp`); must refuse everything the Python `decode()` refuses (`docs/contracts/path_artifact.md`), and compute the same hash. A mismatch is
+`ERROR(PATH_ERROR)` and the start response is `REASON_INVALID_ARTIFACT`.
+
+## 8. Parameters (classes per spec §9)
+| name | default | class | source |
+|---|---|---|---|
+| `missions_dir` | `/var/lib/dyx3/missions` | RESTART | spec §12 filesystem |
+| `state_publish_hz` | 10 | IDLE_ONLY | DERIVED |
+| `gate_status_max_age_s` | 0.5 | IDLE_ONLY | prototype freshness convention (`pose_max_age_s`/`rtk_fix_timeout_s` 0.5) — DERIVED |
+| `point_capture_radius_m` | 0.10 | IDLE_ONLY | prototype `point_hold_acceptance_m` — DERIVED |
+| `rpp_ack_timeout_s` | 0 (disabled) | IDLE_ONLY | **no source** — human to set; disabled means READY can wait forever (rover not moving) |
+
+## 9. Open questions
+E-stop → ABORTED vs PAUSED; whether `rpp_ack_timeout_s` and an RPP-status staleness auto-pause are wanted (no numeric source); mission-id persistence across reboot (currently per-boot counter).

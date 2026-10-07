@@ -108,6 +108,7 @@ def test_store_is_content_addressed_atomic_and_idempotent(tmp_path):
     data = _enc()
     digest, path = pa.store(str(tmp_path), data)
     assert os.path.basename(path) == digest + ".dyx3path"
+    assert (os.stat(path).st_mode & 0o777) == 0o644
     assert pa.store(str(tmp_path), data) == (digest, path)
     assert sorted(os.listdir(tmp_path)) == [digest + ".dyx3path"]  # no temp files left
     assert pa.load(str(tmp_path), digest).sha256 == digest

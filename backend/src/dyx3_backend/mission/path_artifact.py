@@ -259,6 +259,7 @@ def store(directory: str, data: bytes) -> tuple[str, str]:
             fh.write(data)
             fh.flush()
             os.fsync(fh.fileno())
+        os.chmod(tmp, 0o644)  # mkstemp creates 0600; other services (mission, rpp) must read it
         os.replace(tmp, final)
     except BaseException:
         if os.path.exists(tmp):
