@@ -158,9 +158,16 @@ jobs:
       # Staged root, fake colcon/ss/ping: proves the release lifecycle logic (build refusal,
       # atomic switch, automatic revert, config preservation, prune) and the platform
       # supervisor. It does NOT prove apt/ROS/NetworkManager/systemd on the Jetson.
+      # PyPI wheel instead of apt: deterministic version and no dependence on the runner's apt mirror
+      # (an apt-get hung a run for 10 minutes on 2026-10-07).
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - name: shellcheck
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          pip install shellcheck-py==0.10.0.1
+          shellcheck --version
           shellcheck -x installer/*.sh installer/lib/*.sh installer/tests/*.sh deployment/scripts/*.sh
 
       - name: installer tests
