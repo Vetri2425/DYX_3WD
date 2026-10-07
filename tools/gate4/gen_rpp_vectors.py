@@ -27,8 +27,8 @@ REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
 sys.path.insert(0, os.path.join(REPO, "tools", "gate3"))
 sys.path.insert(0, os.path.join(REPO, "backend", "src"))
 
-import ancestors  # noqa: E402
-import gen_geometry_vectors as g3  # noqa: E402
+import ancestors
+import gen_geometry_vectors as g3
 
 OUT = os.path.join(REPO, "ros2_ws", "src", "dyx3_rpp", "test", "fixtures", "gate4_rpp_vectors.txt")
 SEED = 20261008

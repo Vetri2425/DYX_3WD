@@ -213,6 +213,9 @@ jobs:
       - name: pytest tools/tests
         run: pytest tools/tests
 
+      - name: RPP parameter table is generated from the registry
+        run: python3 tools/gen_rpp_params.py --check
+
   legacy_quarantine:
     name: dyx3_rpp_legacy quarantine
     runs-on: ubuntu-22.04
