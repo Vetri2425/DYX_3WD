@@ -1,0 +1,993 @@
+#include "dyx3_rpp/rpp_core.hpp"
+
+#include <algorithm>
+#include <cmath>
+
+#include "dyx3_geometry/angle_wrap.hpp"
+#include "dyx3_geometry/curvature.hpp"
+#include "dyx3_geometry/heading_delta.hpp"
+#include "dyx3_geometry/project_onto_segment.hpp"
+#include "dyx3_rpp/guidance.hpp"
+#include "dyx3_rpp/speed_profile.hpp"
+#include "dyx3_rpp/terminal.hpp"
+
+namespace dyx3_rpp {
+namespace {
+
+constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
+constexpr double kPi = M_PI;
+// _CORNER_MAX_BEARING_OFFSET_RAD = math.radians(75.0)
+constexpr double kMaxBearingOffsetRad = 75.0 * (M_PI / 180.0);
+
+double clampd(double v, double lo, double hi) { return std::max(lo, std::min(hi, v)); }
+double dist(double ax, double ay, double bx, double by) { return std::hypot(ax - bx, ay - by); }
+double ns_to_s(int64_t ns) { return static_cast<double>(ns) * 1e-9; }
+
+// Python float %: the result takes the sign of the divisor.
+double py_mod(double x, double y) {
+  double m = std::fmod(x, y);
+  if (m != 0.0) {
+    if ((y < 0.0) != (m < 0.0)) m += y;
+  } else {
+    m = std::copysign(0.0, y);
+  }
+  return m;
+}
+
+}  // namespace
+
+const char* to_string(Handoff h) {
+  switch (h) {
+    case Handoff::None:
+      return "NONE";
+    case Handoff::RunAlignment:
+      return "RUN_ALIGNMENT";
+    case Handoff::PointHold:
+      return "POINT_HOLD";
+    case Handoff::RunBoundaryHold:
+      return "RUN_BOUNDARY_HOLD";
+    case Handoff::CompletionHold:
+      return "COMPLETION_HOLD";
+    case Handoff::EndpointPreciseStop:
+      return "ENDPOINT_PRECISE_STOP";
+    case Handoff::CornerStopPivot:
+      return "CORNER_STOP_PIVOT";
+  }
+  return "?";
+}
+
+double yaw_ned_from_enu_quaternion(double w, double x, double y, double z) {
+  const double siny_cosp = 2.0 * (w * z + x * y);
+  const double cosy_cosp = 1.0 - 2.0 * (y * y + z * z);
+  const double yaw_enu = std::atan2(siny_cosp, cosy_cosp);
+  double yaw_ned = kPi / 2.0 - yaw_enu;
+  yaw_ned = py_mod(yaw_ned + kPi, 2.0 * kPi) - kPi;
+  return yaw_ned;
+}
+
+RppCore::RppCore(const ParamSet& params) : params_(params) {}
+
+// ------------------------------------------------------------------------------------------------
+// mission lifecycle
+// ------------------------------------------------------------------------------------------------
+void RppCore::install_mission(std::vector<ConditionedRun> runs) {
+  runs_ = std::move(runs);
+  run_tail_transit_.assign(runs_.size(), 0.0);
+  for (size_t i = 0; i < runs_.size(); ++i) {
+    std::vector<bool> fl(runs_[i].flags.begin(), runs_[i].flags.end());
+    run_tail_transit_[i] = measure_tail_transit_m(PathView(runs_[i].pts), fl);
+  }
+  last_speed_cmd_ = 0.0;
+  kappa_hard_latched_ = false;
+  stop_latched_ = false;
+  segment_endpoint_stop_active_ = false;
+  have_last_tick_ = false;
+  have_last_pos_ = false;
+  ekf_off_n_ = ekf_off_e_ = 0.0;
+  ekf_reset_count_ = 0;
+  run_ = nullptr;
+  if (runs_.empty()) return;
+  apply_run(0);
+}
+
+void RppCore::apply_run(int idx) {
+  const ConditionedRun* prev = idx > 0 ? &runs_[static_cast<size_t>(idx) - 1] : nullptr;
+  const ConditionedRun& run = runs_[static_cast<size_t>(idx)];
+  run_align_pending_ = false;
+  entry_spray_hold_ = true;
+  if (prev != nullptr && prev->pts.size() > 1 && run.pts.size() > 1) {
+    const Point p0 = prev->pts[prev->pts.size() - 2];
+    const Point p1 = prev->pts[prev->pts.size() - 1];
+    const double h0 = std::atan2(p1.e - p0.e, p1.n - p0.n);
+    const Point n0 = run.pts[0];
+    const Point n1 = run.pts[1];
+    const double h1 = std::atan2(n1.e - n0.e, n1.n - n0.n);
+    const double threshold = params_.num(P::segment_corner_threshold_deg) * (kPi / 180.0);
+    const double turn = std::fabs(dyx3_geometry::heading_delta(h0, h1));
+    if (turn >= threshold) run_align_pending_ = true;
+  } else if (idx == 0 && run.pts.size() > 1 &&
+             (params_.flag(P::entry_prealign_enabled) ||
+              (!run.flags.empty() && run.flags[0] != 0))) {
+    run_align_pending_ = true;
+  }
+  run_boundary_stop_pending_ = false;
+  run_idx_ = static_cast<size_t>(idx);
+  run_ = &run;
+  profile_segment_ = run.profile == Profile::Segment;
+  segment_idx_ = 0;
+  segment_state_ =
+      (profile_segment_ && run.pts.size() >= 2) ? SegState::TrackSegment : SegState::Inactive;
+  path_done_ = false;
+  completion_stop_pending_ = false;
+  segment_endpoint_stop_active_ = false;
+  path_travel_m_ = 0.0;
+  kappa_hard_latched_ = false;
+  run_tail_transit_m_ = run_tail_transit_[static_cast<size_t>(idx)];
+  hint_.seg = 0;
+  hint_.valid = run.closed;
+}
+
+bool RppCore::advance_run() {
+  if (run_idx_ + 1 >= runs_.size()) return false;
+  apply_run(static_cast<int>(run_idx_) + 1);
+  return true;
+}
+
+// ------------------------------------------------------------------------------------------------
+// inputs
+// ------------------------------------------------------------------------------------------------
+void RppCore::on_pose(const NedPose& pose, int64_t now_ns) {
+  if (have_pose_) {
+    const double gap_s = ns_to_s(now_ns - pose_recv_ns_);
+    if (gap_s > 0.0 && gap_s < 1.0) {
+      gaps_[gaps_head_] = gap_s;
+      gaps_head_ = (gaps_head_ + 1) % kPoseGaps;
+      if (gaps_count_ < kPoseGaps) ++gaps_count_;
+    }
+  }
+  pose_ = pose;
+  have_pose_ = true;
+  pose_recv_ns_ = now_ns;
+}
+
+void RppCore::on_velocity(double v_north, double v_east, double yaw_rate_ned, int64_t now_ns) {
+  vel_n_ = v_north;
+  vel_e_ = v_east;
+  yaw_rate_ned_ = yaw_rate_ned;
+  vel_.has = true;
+  vel_.ns = now_ns;
+}
+
+void RppCore::on_gps(int fix_type, double h_acc_m, int64_t now_ns) {
+  gps_fix_ = fix_type;
+  gps_.has = true;
+  gps_.ns = now_ns;
+  gps_h_acc_known_ = std::isfinite(h_acc_m);
+  gps_h_acc_ = gps_h_acc_known_ ? h_acc_m : 0.0;
+}
+
+bool RppCore::vel_is_fresh(int64_t now_ns) const {
+  if (!vel_.has) return false;
+  return ns_to_s(now_ns - vel_.ns) < 0.3;
+}
+
+double RppCore::measured_speed(int64_t now_ns) const {
+  if (!vel_.has) return 0.0;
+  const double age = ns_to_s(now_ns - vel_.ns);
+  if (age >= 0.5) return 0.0;
+  return std::hypot(vel_n_, vel_e_);
+}
+
+// evaluate_rtk_quality (min_fix_type = 6, as the prototype calls it) plus the recovery hold.
+bool RppCore::rtk_gate(int64_t now_ns, RtkReason* reason) {
+  *reason = RtkReason::Ok;
+  const double timeout_s = std::max(0.0, params_.num(P::rtk_fix_timeout_s));
+  auto fail = [&](RtkReason r) {
+    rtk_recover_since_.has = false;
+    *reason = r;
+    return false;
+  };
+  if (!gps_.has) return fail(RtkReason::Unavailable);
+  const double age_s = ns_to_s(now_ns - gps_.ns);
+  if (!std::isfinite(age_s)) return fail(RtkReason::Unavailable);
+  if (age_s < 0.0 || age_s > timeout_s) return fail(RtkReason::Stale);
+  if (gps_fix_ < 6) return fail(RtkReason::FixBelowMin);
+  if (gps_fix_ != 5 && gps_fix_ != 6) return fail(RtkReason::NotRoverFix);
+  bool have_acc = false;
+  double accuracy = 0.0;
+  if (gps_h_acc_known_ && std::isfinite(gps_h_acc_) && gps_h_acc_ >= 0.0) {
+    have_acc = true;
+    accuracy = gps_h_acc_;
+  }
+  if (!have_acc) {
+    if (params_.flag(P::rtk_require_accuracy)) return fail(RtkReason::AccuracyUnknown);
+  } else {
+    const double max_h = params_.num(P::rtk_max_hrms_m);
+    if (max_h > 0.0 && accuracy > max_h) return fail(RtkReason::AccuracyTooLarge);
+  }
+  const double hold_s = std::max(0.0, params_.num(P::rtk_recover_hold_s));
+  if (!rtk_recover_since_.has) {
+    rtk_recover_since_.has = true;
+    rtk_recover_since_.ns = now_ns;
+  }
+  double held_s = ns_to_s(now_ns - rtk_recover_since_.ns);
+  if (held_s < 0.0) {
+    rtk_recover_since_.ns = now_ns;
+    held_s = 0.0;
+  }
+  if (held_s < hold_s) {
+    *reason = RtkReason::Recovering;
+    return false;
+  }
+  return true;
+}
+
+// ------------------------------------------------------------------------------------------------
+// publishes (the LAST publish of a stream in a tick is what the tick reports)
+// ------------------------------------------------------------------------------------------------
+void RppCore::publish_velocity(double v_n, double v_e) {
+  out_.v_n = v_n;
+  out_.v_e = v_e;
+  out_.velocity_published = true;
+}
+
+void RppCore::publish_yaw_rate(double yr) { out_.yaw_rate = yr; }
+
+bool RppCore::gate_spray(bool spray_active, double heading_err) {
+  if (!spray_active) return false;
+  const double hd_deg = std::fabs(heading_err * (180.0 / kPi));
+  const double cut_deg = params_.num(P::spray_heading_cut_deg);
+  if (cut_deg > 0.0 && hd_deg >= cut_deg) return false;
+  if (entry_spray_hold_) {
+    const double entry_deg = params_.num(P::spray_entry_max_heading_deg);
+    const double release_travel = params_.num(P::spray_entry_release_travel_m);
+    if (entry_deg <= 0.0 || hd_deg <= entry_deg || path_travel_m_ >= release_travel) {
+      entry_spray_hold_ = false;
+    } else {
+      return false;
+    }
+  }
+  return true;
+}
+
+void RppCore::publish_debug(const DebugRow& row) {
+  out_.debug = row;
+  out_.debug.spray_active = gate_spray(row.spray_active, row.heading_err);
+  out_.state = static_cast<StateCode>(row.state);
+  out_.debug_valid = true;
+}
+
+void RppCore::publish_segment_debug(SegState s, int seg_idx, double dist_end, double dist_corner,
+                                    double corner_angle, double target_heading, double heading_err,
+                                    double yaw_rate_body) {
+  out_.segment_debug = {static_cast<int>(s), seg_idx,        dist_end,    dist_corner,
+                        corner_angle,        target_heading, heading_err, yaw_rate_body};
+  out_.segment_debug_valid = true;
+  ++out_.segment_debug_publishes;
+}
+
+void RppCore::publish_zero(StateCode state, double pose_age_ms, double dist_to_goal) {
+  publish_velocity(0.0, 0.0);
+  publish_yaw_rate(0.0);
+  if (state != StateCode::JumpSkip) {
+    last_speed_cmd_ = 0.0;
+    kappa_hard_latched_ = false;
+  }
+  DebugRow row;
+  row.speed = 0.0;
+  row.dist_goal = dist_to_goal;
+  row.pose_age_ms = pose_age_ms;
+  row.state = static_cast<int>(state);
+  row.yaw_rate = 0.0;
+  row.spray_active = false;
+  publish_debug(row);
+  if (profile_segment_) {
+    const PathView path = run_ ? PathView(run_->pts) : PathView();
+    const int n = static_cast<int>(path.n);
+    const int seg_idx = std::max(0, std::min(segment_idx_, std::max(0, n - 2)));
+    SegState dbg_state = segment_state_;
+    if (state == StateCode::Done) dbg_state = SegState::Done;
+    publish_segment_debug(dbg_state, seg_idx, kNaN, dist_to_goal,
+                          n >= 3 ? segment_angle_deg(path, seg_idx) : kNaN, kNaN, kNaN, 0.0);
+  }
+}
+
+// A stop/pivot machine this slice does not run: fail to zero and say which one.
+void RppCore::handoff(Handoff h) {
+  out_.handoff = h;
+  publish_velocity(0.0, 0.0);
+  publish_yaw_rate(0.0);
+  last_speed_cmd_ = 0.0;
+  DebugRow row;
+  row.speed = 0.0;
+  row.state = static_cast<int>(StateCode::Idle);
+  row.yaw_rate = 0.0;
+  publish_debug(row);
+}
+
+// ------------------------------------------------------------------------------------------------
+// small helpers carried from the prototype
+// ------------------------------------------------------------------------------------------------
+bool RppCore::segment_spray_active(int seg_idx) const {
+  if (run_ == nullptr || path_done_ || run_->pts.size() < 2) return false;
+  if (run_->flags.size() != run_->pts.size()) return false;
+  const int n = static_cast<int>(run_->pts.size());
+  const int seg = std::max(0, std::min(seg_idx, n - 2));
+  return run_->flags[static_cast<size_t>(seg)] != 0 &&
+         run_->flags[static_cast<size_t>(seg) + 1] != 0;
+}
+
+double RppCore::run_min_travel() const {
+  RunInfo info;
+  if (run_ != nullptr) {
+    info.valid = true;
+    info.length = run_->length;
+    info.closed = run_->closed;
+  }
+  return dyx3_rpp::run_min_travel(info, params_.num(P::min_goal_travel_m),
+                                  params_.num(P::closed_loop_min_travel_frac));
+}
+
+void RppCore::update_path_progress(int seg_idx, double t) {
+  if (run_ == nullptr) return;
+  path_travel_m_ =
+      std::max(path_travel_m_, path_progress_at(run_->cum_s, run_->pts.size(), seg_idx, t));
+}
+
+std::optional<double> RppCore::run_remaining_along() const {
+  RunInfo info;
+  if (run_ != nullptr) {
+    info.valid = true;
+    info.length = run_->length;
+    info.closed = run_->closed;
+  }
+  static const std::vector<double> kEmpty;
+  return dyx3_rpp::run_remaining_along(info, run_ ? run_->cum_s : kEmpty,
+                                       run_ ? run_->pts.size() : 0, path_travel_m_);
+}
+
+double RppCore::goal_tol_effective(double goal_tol) const {
+  return dyx3_rpp::goal_tol_effective(goal_tol, run_tail_transit_m_,
+                                      params_.num(P::transit_runout_goal_tolerance_m));
+}
+
+bool RppCore::endpoint_capture_recovered(double pos_n, double pos_e,
+                                         double /*dist_to_goal*/) const {
+  if (run_ == nullptr) return false;
+  CaptureParams cp;
+  cp.enabled = params_.flag(P::endpoint_capture_recover_enabled);
+  cp.goal_tol = params_.num(P::xy_goal_tolerance);
+  cp.tail_transit_m = run_tail_transit_m_;
+  cp.transit_runout_goal_tolerance_m = params_.num(P::transit_runout_goal_tolerance_m);
+  cp.past_m = params_.num(P::endpoint_capture_past_m);
+  cp.max_miss_m = params_.num(P::endpoint_capture_max_miss_m);
+  return dyx3_rpp::endpoint_capture_recovered(PathView(run_->pts), Point{pos_n, pos_e},
+                                              run_remaining_along(),
+                                              cp) == CaptureVerdict::Recovered;
+}
+
+// [STOP-LATCH] cmd in {0} U [min_actuatable, vmax] on the segment DRIVE command.
+double RppCore::stop_latch_filter(double speed, double stop_dist, int64_t now_ns) {
+  if (!params_.flag(P::stop_latch_enabled)) return speed;
+  const double th = params_.num(P::stop_latch_min_actuatable_m_s);
+  const double cap = params_.num(P::stop_latch_capture_dist_m);
+  const double rel = params_.num(P::stop_latch_release_dist_m);
+  if (stop_latched_) {
+    if (speed > 0.0 && stop_dist > rel) {
+      stop_latched_ = false;
+      return std::max(speed, th);
+    }
+    if (speed > 0.0 && stop_dist > cap && measured_speed(now_ns) < 0.02) return th;
+    return 0.0;
+  }
+  if (speed <= 0.0 || speed >= th) return speed;
+  if (stop_dist <= cap) {
+    stop_latched_ = true;
+    return 0.0;
+  }
+  return th;
+}
+
+void RppCore::clamp_to_forward_cone(double& v_n, double& v_e, double yaw_ned, double speed) const {
+  if (speed <= 1e-6) return;
+  const double mag = std::hypot(v_n, v_e);
+  if (mag <= 1e-9) return;
+  const double bearing = std::atan2(v_e, v_n);
+  const double heading_err = dyx3_geometry::angle_wrap(bearing - yaw_ned);
+  if (std::fabs(heading_err) <= kMaxBearingOffsetRad) return;
+  const double step = clampd(heading_err, -kMaxBearingOffsetRad, kMaxBearingOffsetRad);
+  const double cmd_bearing = yaw_ned + step;
+  v_n = speed * std::cos(cmd_bearing);
+  v_e = speed * std::sin(cmd_bearing);
+}
+
+// The final-run endpoint overlay is ON by default: it engages once the along-track residual is
+// inside the braking distance (or the rover is already past the end plane). Its stop/creep logic is
+// not ported: report the engagement.
+bool RppCore::precise_stop_engages(double pos_n, double pos_e, int64_t now_ns) const {
+  if (!params_.flag(P::segment_precise_endpoint_stop_enabled)) return false;
+  if (run_idx_ + 1 < runs_.size()) return false;
+  if (run_ == nullptr || run_->pts.size() < 2) return false;
+  const Point a = run_->pts[run_->pts.size() - 2];
+  const Point b = run_->pts[run_->pts.size() - 1];
+  double un = b.n - a.n, ue = b.e - a.e;
+  const double seg_len = std::hypot(un, ue);
+  if (seg_len < 1e-6) return false;
+  un /= seg_len;
+  ue /= seg_len;
+  const double dn = b.n - pos_n;
+  const double de = b.e - pos_e;
+  const double residual = dn * un + de * ue;
+  const double along_tol = params_.num(P::segment_endpoint_arrival_tolerance_m);
+  const double speed = measured_speed(now_ns);
+  const double decel = params_.num(P::segment_endpoint_precise_decel_m_s2);
+  // precise_stop.feedforward_trigger_distance(speed, decel, along_tol)
+  const double sp = std::max(0.0, speed);
+  const double floor_d = std::max(0.0, along_tol);
+  const double ff = decel <= 0.0 ? floor_d : std::max(floor_d, (sp * sp) / (2.0 * decel));
+  const double trigger = ff + params_.num(P::segment_endpoint_trigger_margin_m);
+  return segment_endpoint_stop_active_ || !(residual > trigger);
+}
+
+// ------------------------------------------------------------------------------------------------
+// tick
+// ------------------------------------------------------------------------------------------------
+const TickOutput& RppCore::tick(int64_t now_ns) {
+  out_ = TickOutput{};
+  if (!have_last_tick_) {
+    tick_dt_ = 1.0 / kControlHz;
+  } else {
+    tick_dt_ = std::max(0.0, std::min(0.1, ns_to_s(now_ns - last_tick_ns_)));
+  }
+  last_tick_ns_ = now_ns;
+  have_last_tick_ = true;
+  control_loop_impl(now_ns);
+  return out_;
+}
+
+void RppCore::control_loop_impl(int64_t now_ns) {
+  const double hw_max_v = params_.num(P::max_linear_vel);
+  const double mission_v = params_.num(P::mission_speed);
+  const double max_v = std::min(hw_max_v, mission_v);
+  const double max_age_s = params_.num(P::pose_max_age_s);
+  const bool req_rtk = params_.flag(P::require_rtk_fix);
+
+  double pose_gap_worst;
+  if (gaps_count_ > 0) {
+    double mx = gaps_[0];
+    for (size_t i = 1; i < gaps_count_; ++i) mx = std::max(mx, gaps_[i]);
+    pose_gap_worst = std::min(mx, 0.3);
+  } else {
+    pose_gap_worst = 1.0 / kControlHz;
+  }
+  const double v_meas = vel_is_fresh(now_ns) ? std::hypot(vel_n_, vel_e_) : 0.0;
+  const double jump_thr =
+      std::max(params_.num(P::ekf_jump_threshold_m),
+               std::max(max_v, v_meas) * std::max(pose_gap_worst, 1.0 / kControlHz) + 0.03);
+
+  if (!have_pose_) {
+    publish_zero(StateCode::Idle, kNaN);
+    return;
+  }
+
+  const bool use_extrap = params_.flag(P::use_imu_extrapolation);
+  const double extrap_horizon = params_.num(P::imu_max_extrap_age_s);
+  const double effective_max_age = max_age_s + (use_extrap ? extrap_horizon : 0.0);
+
+  const double pose_age_s = ns_to_s(now_ns - pose_recv_ns_);
+  if (pose_age_s > effective_max_age) {
+    publish_zero(StateCode::Stale, pose_age_s * 1000);
+    return;
+  }
+
+  double use_n = pose_.n, use_e = pose_.e;
+  if (use_extrap && vel_.has) {
+    const double vel_age_s = ns_to_s(now_ns - vel_.ns);
+    if (vel_age_s < extrap_horizon) {
+      const double dt = pose_age_s + std::max(0.0, params_.num(P::pose_latency_bias_s));
+      const double d_n = vel_n_ * dt;
+      const double d_e = vel_e_ * dt;
+      use_n = pose_.n + d_n;
+      use_e = pose_.e + d_e;
+    }
+  }
+
+  // ---- P0.3 RTK gate ----
+  bool rtk_ok;
+  RtkReason reason = RtkReason::Ok;
+  if (req_rtk) {
+    rtk_ok = rtk_gate(now_ns, &reason);
+  } else {
+    rtk_recover_since_.has = false;
+    rtk_ok = true;
+  }
+  out_.rtk_reason = reason;
+  if (!rtk_ok) {
+    publish_zero(StateCode::RtkWait, pose_age_s * 1000);
+    return;
+  }
+
+  if (run_ == nullptr || run_->pts.empty()) {
+    publish_zero(StateCode::Idle, pose_age_s * 1000);
+    return;
+  }
+  if (path_done_) {
+    publish_zero(StateCode::Done, pose_age_s * 1000);
+    return;
+  }
+
+  double pos_n = use_n;
+  double pos_e = use_e;
+  const double yaw_ned = pose_.yaw_ned;
+  const PathView path(run_->pts);
+
+  // ---- P0.2 / A3 EKF / position jump ----
+  const bool comp_enabled = params_.flag(P::ekf_reset_compensation);
+  const double max_absorb = params_.num(P::ekf_reset_max_absorb_m);
+  if (have_last_pos_) {
+    const double d_n = pos_n - last_pos_n_;
+    const double d_e = pos_e - last_pos_e_;
+    const double jump_m = std::hypot(d_n, d_e);
+    if (jump_m > jump_thr) {
+      if (comp_enabled && jump_m <= max_absorb) {
+        ekf_off_n_ = ekf_off_n_ + d_n;
+        ekf_off_e_ = ekf_off_e_ + d_e;
+        ++ekf_reset_count_;
+      } else {
+        last_pos_n_ = pos_n;
+        last_pos_e_ = pos_e;
+        have_last_pos_ = true;
+        hint_.seg = 0;
+        hint_.valid = false;
+        publish_zero(StateCode::JumpSkip, pose_age_s * 1000);
+        return;
+      }
+    }
+  }
+  last_pos_n_ = pos_n;
+  last_pos_e_ = pos_e;
+  have_last_pos_ = true;
+
+  pos_n -= ekf_off_n_;
+  pos_e -= ekf_off_e_;
+
+  // ---- run-transition alignment (the pivot itself is not ported) ----
+  if (run_align_pending_) {
+    if (path.n < 2) {
+      run_align_pending_ = false;
+    } else if (dist(path[0].n, path[0].e, path[1].n, path[1].e) < 1e-6) {
+      run_align_pending_ = false;
+    } else {
+      handoff(Handoff::RunAlignment);
+      return;
+    }
+  }
+
+  dyx3_geometry::PathProjection smooth_proj;
+  if (!profile_segment_) {
+    smooth_proj = dyx3_geometry::project_onto_path(Point{pos_n, pos_e}, path, hint_);
+    update_path_progress(smooth_proj.seg_idx, smooth_proj.t);
+  }
+
+  // ---- goal check ----
+  const double min_travel = run_min_travel();
+  const Point final_pt = path[path.n - 1];
+  const double dist_to_goal = dist(pos_n, pos_e, final_pt.n, final_pt.e);
+  if (params_.flag(P::point_hold_enabled)) {
+    handoff(Handoff::PointHold);
+    return;
+  }
+  if (run_boundary_stop_pending_) {
+    handoff(Handoff::RunBoundaryHold);
+    return;
+  }
+  if (completion_stop_pending_) {
+    handoff(Handoff::CompletionHold);
+    return;
+  }
+  if (profile_segment_ && run_idx_ + 1 >= runs_.size() && path_travel_m_ >= min_travel) {
+    if (precise_stop_engages(pos_n, pos_e, now_ns)) {
+      handoff(Handoff::EndpointPreciseStop);
+      return;
+    }
+  }
+  const double goal_tol = params_.num(P::xy_goal_tolerance);
+  if (path_travel_m_ >= min_travel && (dist_to_goal <= goal_tol_effective(goal_tol) ||
+                                       endpoint_capture_recovered(pos_n, pos_e, dist_to_goal))) {
+    handoff(run_idx_ + 1 < runs_.size() ? Handoff::RunBoundaryHold : Handoff::CompletionHold);
+    return;
+  }
+
+  if (profile_segment_) {
+    control_segment(pos_n, pos_e, yaw_ned, pose_age_s, dist_to_goal, now_ns);
+    return;
+  }
+  control_smooth(pos_n, pos_e, yaw_ned, pose_age_s, dist_to_goal, smooth_proj, now_ns);
+}
+
+// ------------------------------------------------------------------------------------------------
+// smooth profile (steps 1-8 of _control_loop_impl)
+// ------------------------------------------------------------------------------------------------
+void RppCore::control_smooth(double pos_n, double pos_e, double yaw_ned, double pose_age_s,
+                             double dist_to_goal, dyx3_geometry::PathProjection proj,
+                             int64_t /*now_ns*/) {
+  const PathView path(run_->pts);
+  const double max_v = std::min(params_.num(P::max_linear_vel), params_.num(P::mission_speed));
+  const double min_v = params_.num(P::min_linear_vel);
+  const double l_min = params_.num(P::min_lookahead_dist);
+  const double l_max = params_.num(P::max_lookahead_dist);
+  const double a_lat_max = params_.num(P::a_lat_max);
+  const double min_curv_v = params_.num(P::regulated_linear_scaling_min_speed);
+  const double approach_v = params_.num(P::min_approach_linear_velocity);
+  const double p4_floor = params_.num(P::p4_zero_vel_threshold);
+  const int n_preview = params_.integer(P::preview_curvature_n);
+  const double max_decel = params_.num(P::max_linear_decel);
+  const double approach_d =
+      approach_distance(params_.num(P::approach_velocity_scaling_dist), max_v, max_decel);
+
+  const int seg_idx = proj.seg_idx;
+  const Point foot = proj.foot;
+  const double signed_xtrack = proj.signed_cross;
+  const bool spray_active = segment_spray_active(seg_idx);
+
+  LookaheadParams lp{min_v,
+                     max_v,
+                     l_min,
+                     l_max,
+                     params_.num(P::lookahead_time),
+                     params_.num(P::xtrack_lookahead_gain)};
+  const LookaheadDistance ld = lookahead_distance(lp, last_speed_cmd_, signed_xtrack);
+  double l_d = ld.l_d;
+  const double l_d_raw = ld.raw;
+
+  const double kappa_path =
+      dyx3_geometry::curvature_at(path, seg_idx, params_.num(P::curvature_baseline_m));
+  l_d = apply_arc_cap(
+      l_d, kappa_path,
+      ArcCapParams{params_.num(P::smooth_max_arc_cut_m), params_.num(P::smooth_min_arc_ld_m),
+                   params_.num(P::smooth_curvature_ld_coeff)});
+
+  LookaheadPoint lh = smooth_lookahead_point(path, seg_idx, foot, l_d);
+  double dn = lh.p.n - pos_n;
+  double de = lh.p.e - pos_e;
+  Steering st = steering_geometry(dn, de, yaw_ned);
+  if (st.degenerate) {
+    lh = smooth_lookahead_point(path, seg_idx, foot, l_min);
+    dn = lh.p.n - pos_n;
+    de = lh.p.e - pos_e;
+    st = steering_geometry(dn, de, yaw_ned);
+    if (st.degenerate) {
+      publish_zero(StateCode::Idle, pose_age_s * 1000, dist_to_goal);
+      return;
+    }
+  }
+  const double kappa = st.kappa;
+  const double theta_e = st.theta_e;
+  const double l_actual = st.l_actual;
+
+  int n_eff = n_preview;
+  const double preview_dist_m = params_.num(P::preview_curvature_distance_m);
+  if (preview_dist_m > 0.0 && l_d > 1e-9)
+    n_eff = std::max(n_preview, static_cast<int>(std::ceil(preview_dist_m / l_d)));
+  const double kappa_speed =
+      n_eff > 1 ? dyx3_geometry::max_preview_curvature(path, seg_idx, foot, l_d, n_eff)
+                : std::fabs(kappa);
+
+  const LateralLimit lat = lateral_speed_limit(kappa_speed, a_lat_max, min_curv_v, max_v);
+  double speed = lat.speed;
+  const double v_lat_limit = lat.v_lat_limit;
+
+  StateCode state_code = StateCode::Tracking;
+  const ApproachResult ar = smooth_approach_scaling(
+      speed, run_->closed, run_->length, path_travel_m_, dist_to_goal, approach_d, approach_v);
+  speed = ar.speed;
+  if (ar.approach_active) state_code = StateCode::Approach;
+
+  const double speed_raw = speed;
+  const double speed_before_accel = speed_raw;
+  const double max_accel = params_.num(P::max_linear_accel);
+  const double kappa_now = std::max(std::fabs(kappa), std::fabs(kappa_speed));
+  const double accel_scale = alignment_accel_scale(
+      theta_e, kappa_now, params_.num(P::accel_gate_heading_full_deg),
+      params_.num(P::accel_gate_heading_none_deg), params_.num(P::accel_gate_curv_full),
+      params_.num(P::accel_gate_curv_none));
+  kappa_hard_latched_ =
+      update_kappa_hard_latch(kappa_hard_latched_, kappa_now, params_.num(P::kappa_hard_enter),
+                              params_.num(P::kappa_hard_exit));
+  const bool approach_active = state_code == StateCode::Approach;
+  const SlewResult sl = apply_smooth_speed_slew(
+      speed_raw, last_speed_cmd_, tick_dt_, kappa_hard_latched_,
+      params_.num(P::speed_cmd_decel_m_s2), max_accel, accel_scale, approach_active, p4_floor);
+  speed = sl.speed;
+  int speed_mode = sl.mode;
+
+  speed = apply_p4_floor(speed, speed_before_accel, last_speed_cmd_, p4_floor, &speed_mode);
+  last_speed_cmd_ = speed;
+
+  double yaw_rate_body;
+  if (params_.flag(P::use_feedforward_yaw_rate)) {
+    const double yaw_rate_ff = kappa * speed;
+    const double yaw_rate_fb = params_.num(P::yaw_rate_feedback_gain) * theta_e;
+    yaw_rate_body = yaw_rate_ff + yaw_rate_fb;
+    const double max_yr = params_.num(P::max_yaw_rate_body);
+    if (max_yr > 0.0) yaw_rate_body = clampd(yaw_rate_body, -max_yr, max_yr);
+  } else {
+    yaw_rate_body = 0.0;
+  }
+
+  const double unit_n = l_actual > 1e-9 ? dn / l_actual : 0.0;
+  const double unit_e = l_actual > 1e-9 ? de / l_actual : 0.0;
+  double v_n = speed * unit_n;
+  double v_e = speed * unit_e;
+
+  const double lat_gain = params_.num(P::smooth_lateral_gain);
+  if (lat_gain > 0.0 && speed > 1e-6) {
+    const double max_corr = params_.num(P::smooth_lateral_max_deg) * (kPi / 180.0);
+    const double delta = clampd(-lat_gain * signed_xtrack, -max_corr, max_corr);
+    const double bearing = std::atan2(v_e, v_n) + delta;
+    v_n = speed * std::cos(bearing);
+    v_e = speed * std::sin(bearing);
+  }
+
+  clamp_to_forward_cone(v_n, v_e, yaw_ned, speed);
+
+  const double speed_mag = std::hypot(v_n, v_e);
+  double yaw_target_ned;
+  if (speed_mag > 0.01) {
+    yaw_target_ned = std::atan2(v_e, v_n);
+  } else {
+    yaw_target_ned = last_yaw_cmd_;
+  }
+  last_yaw_cmd_ = yaw_target_ned;
+
+  publish_velocity(v_n, v_e);
+  publish_yaw_rate(yaw_rate_body);
+
+  DebugRow row;
+  row.cross_track = signed_xtrack;
+  row.heading_err = theta_e;
+  row.lookahead = l_actual;
+  row.speed = speed;
+  row.kappa = kappa;
+  row.dist_goal = dist_to_goal;
+  row.pose_age_ms = pose_age_s * 1000;
+  row.state = static_cast<int>(state_code);
+  row.l_d_raw = l_d_raw;
+  row.kappa_speed = kappa_speed;
+  row.yaw_rate = yaw_rate_body;
+  row.spray_active = spray_active;
+  row.speed_raw = speed_raw;
+  row.v_lat_limit = v_lat_limit;
+  row.accel_scale = accel_scale;
+  row.speed_mode = speed_mode;
+  publish_debug(row);
+
+  publish_segment_debug(SegState::TrackSegment, seg_idx, dist_to_goal, dist_to_goal, 0.0,
+                        yaw_target_ned, theta_e, yaw_rate_body);
+}
+
+// ------------------------------------------------------------------------------------------------
+// segment profile (_control_segment_profile; the corner stop/pivot and endpoint machines are handed
+// off)
+// ------------------------------------------------------------------------------------------------
+void RppCore::control_segment(double pos_n, double pos_e, double yaw_ned, double pose_age_s,
+                              double dist_to_goal, int64_t now_ns) {
+  const PathView path(run_->pts);
+  const int n_pts = static_cast<int>(path.n);
+
+  for (;;) {  // the prototype recurses after crossing a collinear vertex; same state, so a loop
+    if (n_pts < 2) {
+      if (advance_run()) {
+        out_.velocity_published = false;  // the prototype returns without publishing this tick
+        return;
+      }
+      segment_state_ = SegState::Done;
+      path_done_ = true;
+      publish_zero(StateCode::Done, pose_age_s * 1000.0, dist_to_goal);
+      publish_segment_debug(segment_state_, 0, kNaN, dist_to_goal, kNaN, kNaN, kNaN, 0.0);
+      return;
+    }
+
+    while (segment_idx_ < n_pts - 2) {
+      const Point a = path[static_cast<size_t>(segment_idx_)];
+      const Point b = path[static_cast<size_t>(segment_idx_) + 1];
+      if (dist(a.n, a.e, b.n, b.e) >= 1e-6) break;
+      ++segment_idx_;
+    }
+    segment_idx_ = std::max(0, std::min(segment_idx_, n_pts - 2));
+    const int seg_idx = segment_idx_;
+    const Point a = path[static_cast<size_t>(seg_idx)];
+    const Point b = path[static_cast<size_t>(seg_idx) + 1];
+    const double seg_len = dist(a.n, a.e, b.n, b.e);
+    if (seg_len < 1e-6) {
+      publish_zero(StateCode::Idle, pose_age_s * 1000.0, dist_to_goal);
+      return;
+    }
+
+    const bool final_segment = seg_idx >= n_pts - 2;
+    const auto sp = dyx3_geometry::project_onto_segment(Point{pos_n, pos_e}, path, seg_idx);
+    const double signed_xtrack = sp.signed_cross;
+    const double dist_to_end_along = sp.dist_to_end_along;
+    update_path_progress(seg_idx, sp.t);
+    const double dist_to_corner = dist(pos_n, pos_e, b.n, b.e);
+    const double corner_angle = segment_angle_deg(path, seg_idx);
+    const bool spray_active = segment_spray_active(seg_idx);
+
+    const double goal_tol = params_.num(P::xy_goal_tolerance);
+    const double goal_tol_eff = goal_tol_effective(goal_tol);
+    const double min_travel = run_min_travel();
+    if (final_segment && path_travel_m_ >= min_travel) {
+      if (precise_stop_engages(pos_n, pos_e, now_ns)) {
+        handoff(Handoff::EndpointPreciseStop);
+        return;
+      }
+    }
+    if (final_segment && path_travel_m_ >= min_travel &&
+        (dist_to_corner <= goal_tol_eff ||
+         endpoint_capture_recovered(pos_n, pos_e, dist_to_corner))) {
+      handoff(run_idx_ + 1 < runs_.size() ? Handoff::RunBoundaryHold : Handoff::CompletionHold);
+      return;
+    }
+
+    const double acceptance = params_.num(P::segment_corner_acceptance_radius);
+    const double yaw_gain = params_.num(P::segment_yaw_rate_gain);
+    const bool use_ff_yaw_rate = params_.flag(P::use_feedforward_yaw_rate);
+    const double max_yr = params_.num(P::max_yaw_rate_body);
+
+    if (!final_segment && dist_to_corner <= acceptance) {
+      const double path_corner_deg = std::fabs(segment_angle_deg(path, seg_idx));
+      const double threshold_deg = params_.num(P::segment_corner_threshold_deg);
+      if (path_corner_deg < threshold_deg) {
+        // Geometrically tangent junction: advance without stopping (momentum is kept).
+        const Point c = path[static_cast<size_t>(seg_idx) + 2];
+        const double leg_heading = std::atan2(c.e - b.e, c.n - b.n);
+        const double target_heading = pivot_intercept_heading(
+            Point{pos_n, pos_e}, b, c, leg_heading, params_.flag(P::pivot_to_intercept_enabled),
+            params_.num(P::pivot_intercept_dist_m));
+        const double heading_err = dyx3_geometry::angle_wrap(target_heading - yaw_ned);
+        ++segment_idx_;
+        segment_state_ = SegState::TrackSegment;
+        publish_segment_debug(segment_state_, segment_idx_, kNaN, dist_to_corner, corner_angle,
+                              target_heading, heading_err, 0.0);
+        continue;
+      }
+      handoff(Handoff::CornerStopPivot);
+      return;
+    }
+
+    const double max_v = std::min(params_.num(P::max_linear_vel), params_.num(P::mission_speed));
+    LookaheadParams lp{params_.num(P::min_linear_vel),     max_v,
+                       params_.num(P::min_lookahead_dist), params_.num(P::max_lookahead_dist),
+                       params_.num(P::lookahead_time),     params_.num(P::xtrack_lookahead_gain)};
+    const LookaheadDistance ld = lookahead_distance(lp, last_speed_cmd_, signed_xtrack);
+    const double l_d = ld.l_d;
+    const double l_d_raw = ld.raw;
+
+    Point lh = segment_lookahead_point(path, seg_idx, sp.foot, l_d,
+                                       params_.num(P::segment_lookahead_cross_collinear_deg),
+                                       params_.flag(P::segment_endpoint_lookahead_extend),
+                                       params_.flag(P::segment_corner_lookahead_extend));
+    double dn = lh.n - pos_n;
+    double de = lh.e - pos_e;
+    Steering st = steering_geometry(dn, de, yaw_ned);
+    if (st.degenerate) {
+      dn = b.n - pos_n;
+      de = b.e - pos_e;
+      st = steering_geometry(dn, de, yaw_ned);
+      if (st.degenerate) {
+        publish_zero(StateCode::Idle, pose_age_s * 1000.0, dist_to_goal);
+        return;
+      }
+    }
+    const double l_actual = st.l_actual;
+    const double theta_e = st.theta_e;
+    double speed = max_v;
+    const double slowdown = params_.num(P::segment_slowdown_dist);
+    const double min_corner_speed = params_.num(P::segment_min_corner_speed);
+    segment_state_ = SegState::TrackSegment;
+    const double corner_threshold_deg = params_.num(P::segment_corner_threshold_deg);
+    if (!final_segment && slowdown > 1e-6 && dist_to_corner < slowdown &&
+        std::isfinite(corner_angle) && std::fabs(corner_angle) >= corner_threshold_deg) {
+      const double scale = clampd(dist_to_corner / slowdown, 0.0, 1.0);
+      speed = std::max(min_corner_speed, max_v * scale);
+      segment_state_ = SegState::PreCornerSlowdown;
+    }
+
+    const double max_decel = params_.num(P::max_linear_decel);
+    const double approach_v = params_.num(P::segment_endpoint_approach_speed);
+    const double approach_d = std::max(params_.num(P::approach_velocity_scaling_dist),
+                                       (max_v * max_v) / (2.0 * max_decel) + 0.10);
+    double approach_ref = final_segment ? dist_to_corner : std::numeric_limits<double>::infinity();
+    if (params_.flag(P::endpoint_approach_run_remaining)) {
+      const std::optional<double> remaining_along = run_remaining_along();
+      if (remaining_along.has_value()) approach_ref = std::min(approach_ref, *remaining_along);
+    }
+    if (approach_ref < approach_d) {
+      const double scale = clampd(approach_ref / approach_d, 0.0, 1.0);
+      speed = std::min(speed, std::max(approach_v, max_v * scale));
+      const double runout_min = params_.num(P::transit_runout_min_speed_m_s);
+      if (runout_min > 0.0 && run_tail_transit_m_ > 0.0 && 0.0 < speed && speed < runout_min &&
+          dist_to_corner > goal_tol_eff) {
+        speed = runout_min;
+      }
+      segment_state_ = SegState::PreCornerSlowdown;
+    }
+
+    const double max_accel = params_.num(P::max_linear_accel);
+    const double speed_before_accel = speed;
+    if (max_accel > 0.0 && speed > last_speed_cmd_) {
+      const double accel_scale = alignment_accel_scale(
+          theta_e, 0.0, params_.num(P::accel_gate_heading_full_deg),
+          params_.num(P::accel_gate_heading_none_deg), params_.num(P::accel_gate_curv_full),
+          params_.num(P::accel_gate_curv_none));
+      speed = std::min(speed, last_speed_cmd_ + max_accel * accel_scale * tick_dt_);
+    }
+
+    const double p4_floor = params_.num(P::p4_zero_vel_threshold);
+    if (speed < p4_floor && speed_before_accel < p4_floor && last_speed_cmd_ > 0.0) speed = 0.0;
+    const double latch_ref = (final_segment || segment_state_ == SegState::PreCornerSlowdown)
+                                 ? dist_to_corner
+                                 : std::numeric_limits<double>::infinity();
+    speed = stop_latch_filter(speed, latch_ref, now_ns);
+    last_speed_cmd_ = speed;
+
+    double yaw_rate_body = use_ff_yaw_rate ? yaw_gain * theta_e : 0.0;
+    if (max_yr > 0.0) yaw_rate_body = clampd(yaw_rate_body, -max_yr, max_yr);
+
+    const double unit_n = dn / l_actual;
+    const double unit_e = de / l_actual;
+    double v_n = speed * unit_n;
+    double v_e = speed * unit_e;
+    clamp_to_forward_cone(v_n, v_e, yaw_ned, speed);
+    const double speed_mag = std::hypot(v_n, v_e);
+    if (speed_mag > 0.01) last_yaw_cmd_ = std::atan2(v_e, v_n);
+
+    publish_velocity(v_n, v_e);
+    publish_yaw_rate(yaw_rate_body);
+    DebugRow row;
+    row.cross_track = signed_xtrack;
+    row.heading_err = theta_e;
+    row.lookahead = l_actual;
+    row.speed = speed;
+    row.kappa = 0.0;
+    row.dist_goal = dist_to_goal;
+    row.pose_age_ms = pose_age_s * 1000.0;
+    row.state = static_cast<int>(StateCode::Tracking);
+    row.l_d_raw = l_d_raw;
+    row.kappa_speed = 0.0;
+    row.yaw_rate = yaw_rate_body;
+    row.spray_active = spray_active;
+    publish_debug(row);
+    publish_segment_debug(segment_state_, seg_idx, dist_to_end_along, dist_to_corner, corner_angle,
+                          std::atan2(b.e - a.e, b.n - a.n), theta_e, yaw_rate_body);
+    return;
+  }
+}
+
+CoreState RppCore::snapshot() const {
+  CoreState s{};
+  s.last_speed_cmd = last_speed_cmd_;
+  s.last_yaw_cmd = last_yaw_cmd_;
+  s.path_travel_m = path_travel_m_;
+  s.tick_dt = tick_dt_;
+  s.segment_idx = segment_idx_;
+  s.run_idx = static_cast<int>(run_idx_);
+  s.hint_seg = hint_.seg;
+  s.hint_valid = hint_.valid;
+  s.kappa_hard_latched = kappa_hard_latched_;
+  s.stop_latched = stop_latched_;
+  s.entry_spray_hold = entry_spray_hold_;
+  s.path_done = path_done_;
+  s.run_align_pending = run_align_pending_;
+  s.ekf_offset_n = ekf_off_n_;
+  s.ekf_offset_e = ekf_off_e_;
+  s.ekf_reset_count = ekf_reset_count_;
+  s.have_last_pos = have_last_pos_;
+  s.last_pos_n = last_pos_n_;
+  s.last_pos_e = last_pos_e_;
+  s.segment_state = static_cast<int>(segment_state_);
+  s.rtk_recovering = rtk_recover_since_.has;
+  return s;
+}
+
+}  // namespace dyx3_rpp

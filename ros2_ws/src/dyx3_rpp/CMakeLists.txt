@@ -16,6 +16,7 @@ add_library(dyx3_rpp_core STATIC
   src/stop_pivot_fsm.cpp
   src/terminal.cpp
   src/path_conditioner.cpp
+  src/rpp_core.cpp
   src/motion_output.cpp)
 target_include_directories(dyx3_rpp_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -35,6 +36,9 @@ if(BUILD_TESTING)
   ament_add_gtest(conditioner_equivalence_test test/conditioner_equivalence_test.cpp)
   target_link_libraries(conditioner_equivalence_test dyx3_rpp_core)
   target_compile_definitions(conditioner_equivalence_test PRIVATE DYX3_FIXTURES="${FIXTURES}")
+  ament_add_gtest(orchestrator_equivalence_test test/orchestrator_equivalence_test.cpp)
+  target_link_libraries(orchestrator_equivalence_test dyx3_rpp_core)
+  target_compile_definitions(orchestrator_equivalence_test PRIVATE DYX3_FIXTURES="${FIXTURES}")
   ament_add_gtest(rpp_modules_test test/rpp_modules_test.cpp)
   target_link_libraries(rpp_modules_test dyx3_rpp_core)
   ament_add_gtest(rpp_params_test test/rpp_params_test.cpp)
