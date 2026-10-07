@@ -79,10 +79,14 @@ build_px4_msgs() {
     printf '%s\n' "${FIRMWARE_SHA}" >"${root}/firmware.sha"
   fi
 
+  # The sparse firmware checkout contains its own package.xml files (px4_msgs_old,
+  # translation_node); keep it out of the build and drop it once copied.
+  run rm -rf "${fw}"
+
   # 3. build
   run bash -c "set +u; . '${ROS_SETUP}'; set -u; cd '${root}' && \
     MAKEFLAGS='-j${DYX3_BUILD_JOBS}' nice -n 10 colcon build \
-      --parallel-workers 1 --cmake-args -DCMAKE_BUILD_TYPE=Release" ||
+      --base-paths src --parallel-workers 1 --cmake-args -DCMAKE_BUILD_TYPE=Release" ||
     die "px4_msgs colcon build failed"
   run touch "${root}/.complete"
 }

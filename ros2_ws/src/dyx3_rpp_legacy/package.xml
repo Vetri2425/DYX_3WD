@@ -9,6 +9,16 @@
 
   <buildtool_depend>ament_python</buildtool_depend>
 
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <!-- message definitions only (GPSRAW); no MAVROS process is involved -->
+  <exec_depend>mavros_msgs</exec_depend>
+  <exec_depend>dyx3_interfaces</exec_depend>
+
+  <test_depend>python3-pytest</test_depend>
+
   <export>
     <build_type>ament_python</build_type>
   </export>

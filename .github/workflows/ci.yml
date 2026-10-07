@@ -63,6 +63,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Message definitions only (GPSRAW for the quarantined legacy RPP's input shim);
+      # no MAVROS process is installed or run.
+      - name: install mavros_msgs
+        shell: bash
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq ros-humble-mavros-msgs
+
       - name: colcon build
         shell: bash
         run: |
@@ -157,6 +165,19 @@ jobs:
 
       - name: installer tests
         run: bash installer/tests/run_tests.sh
+
+  tools_tests:
+    name: tools (rosbags extractors)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: pip install pytest numpy rosbags
+      - name: pytest tools/tests
+        run: pytest tools/tests
 
   legacy_quarantine:
     name: dyx3_rpp_legacy quarantine
