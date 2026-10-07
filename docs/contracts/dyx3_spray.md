@@ -1,0 +1,173 @@
+# dyx3_spray — contract
+
+**Status:** draft for review, written before the implementation (CLAUDE.md §6: actuator + boundary semantics).
+**Spec:** V1 §7.8, §3, Phase plan 9. **Evidence:** `PX4_DXP` `build/demo-ready` @ `fc6436b`:
+`spray_fsm.py`, `spray_safety_lease.py`, `spray_safety_watchdog_node.py`, `spray_flow_model.py`, `spray_controller_node.py`
+(2 792 lines), read-only. The painted line is the product: **where the valve opens is part of the accuracy spec.**
+
+## 1. What is ported and what is not
+
+| Ported (C++, equivalence-tested against the verbatim Python) | Not ported (listed so nobody assumes it) |
+|---|---|
+| `SpraySafetyStateMachine` (7 states, invariants 1 and 2, ack timeout, RECOVERY backoff) | **Dash mode** (`spray_modes.DashMeter`) and **point mode** (`PointMeter`) — the session-config schema that drives them |
+| safety lease validation + freshness monitor; the **independent watchdog** as its own executable | the `/spray/active` heartbeat net (B4) and the RPP-progress boundary source (G2): `dyx3_rpp`'s `spray_gate` and `RppStatus` boundaries do not exist yet |
+| speed-proportional flow modulator | the legacy `allow_legacy_spray_active_fallback` / `use_distance_aware_spray` switch (distance-aware is the only path) |
+| distance-aware continuous decision: path model, windowed projection **with the direction gate**, MARK-boundary lead, terminal shutoff, cross-track hysteresis | MAVROS (`command_service`): the valve is driven through `dyx3_px4_link` |
+| gate stack: armed / OFFBOARD, pose + velocity freshness, RTK gate with recovery hold, tracking-seen (B5), pivot (CORNER_ALIGN) gate, E-stop | |
+| manual override with a hard expiry; debounce; ON re-assertion | |
+
+45 of the 54 registry parameters are carried (`tools/gen_param_tables.py`); the 9 that belong to the unported features
+are excluded with a reason in the generator. Two carried parameters do nothing in the prototype either and are kept only for
+registry parity: `anticipatory_margin_m` (declared, never read) and `min_spray_speed_mps` (its gate was removed: spraying is a
+question of WHERE the nozzle is, slow means thin flow, never off).
+
+## 2. Authority and the three layers
+
+1. **Controller** (`spray_node`) decides *where* paint is wanted and drives the FSM. It never talks to the FCU.
+2. **`dyx3_px4_link`** is the only package touching `/fmu/**`. It turns `SprayActuatorCommand` into
+   `VEHICLE_CMD_DO_SET_ACTUATOR` (187; value in slot `actuator_set_index`, the other five NaN) or `DO_SET_SERVO` (183;
+   `pwm_us` clamped to 2200) and maps `/fmu/out/vehicle_command_ack` back into `SprayActuatorAck`. A command that cannot
+   be sent (handshake not proven, session dead, uninterpretable) is acked **false at once** (`result 255`), so a forced OFF
+   retries and an ON is never latched.
+3. **Independent watchdog** (`spray_watchdog`, its own process and unit): sends OFF whenever the lease is absent,
+   denied, malformed or stale, and publishes `SprayWatchdogStatus`. It must survive the controller dying. **Open hardware
+   question (human):** if `dyx3_px4_link` or the FCU path dies while the valve is ON, nothing in this repository can close
+   it; the FCU/hardware fail-safe (actuator timeout, relay default) must cover that and is firmware/hardware territory.
+
+## 3. The state machine (carried verbatim in behaviour)
+
+`OFF_UNCONFIRMED -> OFF_CONFIRMED -> ON_PENDING -> ON_CONFIRMED -> OFF_PENDING -> (RECOVERY | OFF_CONFIRMED | DISABLED)`.
+Invariant 1: `spraying` is true only in `ON_CONFIRMED` — there is no optimistic-ON window. Invariant 2: every command
+carries a monotonic `cmd_seq`; an ack applies only if its seq matches. ON is refused until a fresh OFF is confirmed
+(re-enable always passes through `OFF_UNCONFIRMED`). A safety loss forces OFF on the *edge* and then falls silent once OFF
+is confirmed (no 50 Hz flood while the rover sits disarmed). An ack that never arrives is treated as a failure after
+`ack_timeout_s` (1.0): a pending ON becomes a fresh OFF, a pending OFF enters RECOVERY with backoff
+`min(0.5 * 2^attempt, 5.0)`, reset by a safety-loss edge or `note_event_reset`.
+
+## 4. Lease and watchdog
+
+`SprayLease` (typed message; the prototype's JSON schema carried the same fields) is validated strictly: backend in
+{actuator, servo_pwm}; `actuator_set_index` 1..6; `off_value` finite and in [-1, 1]; `servo_instance` 1..16;
+`off_pwm_us` 0..2200. The controller publishes it every tick with
+`allow_on = desired && safety_ok && enabled && fsm.commanded` (ON_PENDING included so a watchdog OFF cannot race a freshly
+dispatched ON). An unknown backend never grants an ON lease. The watchdog's `off_reason(now)`:
+no lease -> "no controller lease"; invalidated -> its reason; age > `lease_timeout_s` (0.35) -> stale; `allow_on=false` ->
+"denies ON"; else ON is allowed. Receive-time freshness, never the sender's stamp. Watchdog OFF cadence: burst
+20 Hz for 1.5 s after the OFF CAUSE changes (no lease / invalidated / stale / denied / shutdown), then 2 Hz. **DERIVED — NOT FROM
+V1 SPEC:** the prototype compared the full reason text, and the stale text embeds the lease age, so while a lease stayed stale it
+re-armed the 20 Hz burst on every tick forever; keying on the cause removes that (tested); an OFF whose ack takes longer than 1.0 s is retried; startup is fail-closed
+before any lease; shutdown sends OFF.
+
+## 5. Distance-aware decision (continuous mode)
+
+Nozzle position = pose + body-frame offsets (forward, lateral right). The path model carries `cumulative_s` and MARK
+boundaries from the flag changes; **a path that ends on MARK gets a synthetic terminal MARK->TRANSIT boundary**. Lead:
+`on_lead = v * open_delay + on_margin`, `off_lead = max(0, v * close_delay - off_margin)`; the valve opens early before
+TRANSIT->MARK and closes early before MARK->TRANSIT. Terminal shutoff: forced OFF within `terminal_off_epsilon_m` of the final
+station at speed <= `terminal_off_speed_mps` (the OFF lead is ~1 mm at creep speed, so the geometric boundary is never
+crossed). Cross-track gate with hysteresis (trip at the wide level, clear at the tight one, and stay off at least
+`xtrack_gate_min_off_s`); it is **load-bearing** and must not be loosened.
+
+**Geometry source.** The path model is built from the content-addressed artifact named by `MissionState.path_artifact_sha256`,
+read with the same reader `dyx3_mission` uses (`dyx3_mission_core`, exported), so the spray flags and the geometry RPP drives
+come from one file. It is the planned polyline, **not** RPP's conditioned path (`path_conditioner` is not built yet): when it is,
+the boundary stations may need to be re-derived from the conditioned geometry (open question). An unknown or unreadable
+artifact means "path not loaded" and spray stays OFF.
+
+**Debounce latency (carried, part of the boundary budget).** `debounce_samples` (3) means the debounced desire follows the raw one
+only after 3 identical ticks, so every valve edge is delayed by up to 3 ticks: **2.1 cm at 0.35 m/s and 50 Hz**, on the CLOSE as
+well as the OPEN. The lead maths (section 5) does not compensate for it. Measured in `spray_core_test` (the close lands ~2 cm
+after the led boundary). Whether that is acceptable against the 1.4–2 cm accuracy budget is a human decision at GATE 5.
+
+## 6. KNOWN-OPEN DEFECT — projection continuity (spec 7.8)
+
+**Spray boundary gap — OPEN.** On a path that doubles back, the approach leg and the marked leg sit centimetres apart. The
+nearest-segment search cannot separate them by distance, so `projection.s` can teleport between the legs and jump over a MARK
+boundary: the valve then opens inside the mark. Prototype evidence (bags `stg_d8a4f2ad`, `stg_46ba8830`): the station jumped
+4.45 -> 5.05 in one step straddling the boundary at 4.770, the valve opened 29.7 cm inside the mark; 4 of 18 runs lost 23-40 cm
+with RTK fixed, safety_ok true and xtrack under 2.2 cm.
+
+State of the code carried here: a spatial window around the previous station (`projection_window_back_m` 0.5,
+`projection_window_fwd_m` 2.0, `projection_reacquire_dist_m` 1.0) **and a direction gate**
+(`projection_direction_gate_deg`) that rejects segments running against the vehicle heading. The window alone does not fix
+it (it is spatial); the direction gate is the only signal that separates coincident legs. **The gate's default is 0.0 = DISABLED**
+(the prototype's A/B default), so the defect is open by default. This repository does not change that value: it is spray-boundary
+semantics, hence a human decision with field evidence (CLAUDE.md §4).
+
+`test/spray_defect_test.cpp` reproduces it with the verbatim algorithm on a synthetic out-and-back path (legs 2 cm apart, 3 mm
+lateral noise): with the gate disabled the reported station teleports across the leg and the MARK flag flips at the wrong place
+(the test asserts the defect is present — it documents it); with the gate enabled the station is continuous. **This is a
+synthetic reproduction of the mechanism, not the field bags**; replaying `stg_d8a4f2ad` / `stg_46ba8830` is a LOCAL ACTION.
+Also open: nozzle offset 1.6-6.6 cm (`nozzle_*_offset_m` are 0.0 defaults).
+
+## 7. Gates (first failing wins; the reason string is published)
+
+disarmed; not OFFBOARD (`require_offboard`); path not loaded; pose stale (`pose_timeout_s`); velocity stale
+(`velocity_timeout_s`); RTK gate (below); awaiting tracking (B5: no `RppStatus` TRACKING since the path loaded, so a rover parked
+on a spray-flagged vertex 0 cannot open the valve); pivoting in place (`RppStatus.state == PIVOTING`, CORNER_ALIGN only — never
+CORNER_STOP, which still lays the last 2 cm of the leg; stale state fails open immediately). DERIVED additions: **E-stop asserted or
+its state missing/stale (> 0.5 s) -> OFF** (consumers treat absence as asserted; first in the order), and the watchdog heartbeat
+must be fresh and `off_authority_ready` (`spray_watchdog_required`). Also DERIVED: the vehicle state (armed / OFFBOARD / pose) is
+only trusted while fresh (`pose_timeout_s`), so manual ON cannot ride a dead state stream; the prototype read a latched `/state`.
+
+**Deliberate divergences from the prototype's gate evaluation (DERIVED, safer):**
+* The RTK gate (and its recovery timer) is evaluated EVERY tick. The prototype evaluated it only after the earlier gates passed,
+  so a fix drop that happened while e.g. the pose was stale never reset the recovery hold, and the gate reopened with no hold.
+* Tracking evidence is `RppStatus.state == TRACKING` only. The prototype's segment states 1 and 2 (TRACK_SEGMENT,
+  PRE_CORNER_SLOWDOWN) have no one-to-one mapping (our 2 is STOPPING, which is not tracking); fail closed: it can only delay the
+  first mark, never advance it. Pivot gate: PIVOTING only (CORNER_ALIGN); STOPPING (CORNER_STOP) never gates.
+
+RTK gate (carried from `rtk_quality.py`): only fix types 5 and 6 at or above `spray_min_fix_type`; unknown accuracy (0) fails
+closed when `spray_require_accuracy`; accuracy <= `spray_max_hrms_m`; sample age <= `gps_fix_timeout_s`; **asymmetric
+hysteresis**: a drop is instant, re-enable only after `gps_recover_hold_s` of continuous good fix.
+
+## 8. Interfaces
+
+| Direction | Name | Type |
+|---|---|---|
+| in | `/dyx3/vehicle_state` | VehicleState (pose NED, heading, velocity, arming/nav state) |
+| in | `/dyx3/rtk_status` | RtkStatus |
+| in | `/dyx3/rpp/status` | RppStatus (tracking / pivoting evidence) |
+| in | `/dyx3/mission/state` | MissionState (`path_artifact_sha256`: the flags come from the same artifact RPP loads) |
+| in | `/dyx3/emergency_stop_state` | EmergencyStopState |
+| in | `/dyx3/spray/watchdog_status` | SprayWatchdogStatus |
+| in | `/dyx3/spray/actuator_ack` | SprayActuatorAck |
+| service | `/dyx3/spray/set_manual` | SetSprayManual |
+| out | `/dyx3/spray/actuator_command` | SprayActuatorCommand |
+| out | `/dyx3/spray/lease` | SprayLease (reliable, depth 1) |
+| out | `/dyx3/spray/state`, `/dyx3/spray/status` | SprayState, SprayStatus |
+
+The watchdog subscribes `/dyx3/spray/lease` and `/dyx3/spray/actuator_ack` and publishes `/dyx3/spray/watchdog_status`
+and `/dyx3/spray/actuator_command` (source = watchdog).
+
+## 9. Parameters
+
+45 carried parameters (`docs/tuning/parameter_registry.md`, classes as proposed there; defaults verbatim from the prototype and
+**re-validated at GATE 5**). Two are `TBD — human` in the registry and are treated as follows until decided: `spray_enabled`
+default true, **IDLE_ONLY**. The actuator value range is validated structurally (`off_value`, `on_value` in [-1, 1]; `min_flow_value`
+within [off, on]); no tuning value is invented. Watchdog constants (`lease_timeout_s` 0.35, `off_retry_hz` 2, `off_burst_hz` 20,
+`off_burst_duration_s` 1.5, `command_ack_timeout_s` 1.0) are the prototype's, RESTART, in the watchdog's own parameters.
+
+## 9b. Node behaviour (not in the prototype's shape)
+
+Control tick 50 Hz (`tick_hz`, DERIVED = the prototype's 20 ms timer; node-level, RESTART). The lease is published every tick
+(reliable, depth 1; the watchdog's timeout is 0.35 s); `SprayStatus`/`SprayState` at 10 Hz and on every FSM or event change. An ON
+already commanded is re-asserted on the wire at `reassert_hz` with the same `cmd_seq` (a heartbeat: no FSM transition; a late
+duplicate ack is a no-op in the FSM). Events and safety-loss edges are handled at the next tick (<= 20 ms), not inside the
+subscription callbacks as the prototype did. The signal handler only raises a flag so the shutdown OFF can still be published while
+the DDS context is up (rclcpp's own handler would kill the context first); both executables then flush for a bounded time.
+Runtime parameter changes go through `ParamSet` (class rules, validation, journal); `use_sim_time` passes through; the two
+node-level parameters (`tick_hz`, `artifact_dir`) are RESTART.
+
+## 10. Acceptance
+
+Off-target (all run, see HANDOFF): `spray_equivalence_test` compares the FSM (17 001 scripted events), lease validation (600) and
+monitor (893), the flow modulator (1 831), `evaluate_rtk_quality` (2 500), the gate stack with the recovery hold (15 365 steps plus 400
+single evaluations, the controller's own methods run unbound) and the continuous decision (12 900 ticks over the archived and
+mixed-flag missions, synthetic out-and-backs, reverse/jumpy/noisy drives) against vectors from the VERBATIM prototype
+(`tools/gate4/gen_spray_vectors.py`, sources pinned in `tools/gate4/spray_dxp/VERBATIM.sha256`). Every decision is exact; derived
+distances agree to 1e-12 relative because CPython's `math.hypot` is not libm's. Mutation-checked (gate threshold, terminal epsilon,
+recovery hold, projection tie-break, slew law, cross-track clear level: each is caught). `spray_defect_test` reproduces the open
+defect. `spray_node_test` runs the controller and the independent watchdog against a fake FCU link. The vector generator needs the
+path engine and rclpy (Humble container), so CI does not regenerate it: **LOCAL ACTION** to re-run `gen_spray_vectors.py --check`.
+**Not provable off-target:** valve timing (`solenoid_*_delay_s`), nozzle offset, paint quality, the real FCU ack path.
