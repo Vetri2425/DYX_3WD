@@ -1,0 +1,255 @@
+#include <gtest/gtest.h>
+#include <unistd.h>
+
+#include <chrono>
+#include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+#include <thread>
+
+#include "dyx3_recorder/bag_writer.hpp"
+#include "dyx3_recorder/param_snapshot.hpp"
+#include "dyx3_recorder/run_lifecycle.hpp"
+#include "dyx3_recorder/run_manifest.hpp"
+#include "dyx3_recorder/ulog_capture.hpp"
+
+using namespace dyx3_recorder;
+namespace fs = std::filesystem;
+
+namespace {
+struct TmpDir {
+  std::string path;
+  TmpDir() {
+    path = (fs::temp_directory_path() / ("dyx3_rec_" + std::to_string(getpid()) + "_" +
+                                         std::to_string(reinterpret_cast<uintptr_t>(this))))
+               .string();
+    fs::create_directories(path);
+  }
+  ~TmpDir() {
+    std::error_code ec;
+    fs::remove_all(path, ec);
+  }
+};
+std::string slurp(const std::string& p) {
+  std::ifstream f(p, std::ios::binary);
+  std::ostringstream o;
+  o << f.rdbuf();
+  return o.str();
+}
+}  // namespace
+
+TEST(Json, EscapingAndNonFiniteAndDeterminism) {
+  EXPECT_EQ(json_escape("a\"b\\c\n\t\x01"), "a\\\"b\\\\c\\n\\t\\u0001");
+  JsonObject o;
+  o.str("k", "v").num("x", NAN).num("y", 0.1).integer("n", -3).boolean("b", true).str_list(
+      "l", {"a", "b\"c"});
+  const std::string a = o.dump();
+  EXPECT_NE(a.find("\"x\": null"), std::string::npos);
+  EXPECT_NE(a.find("\"y\": 0.10000000000000001"), std::string::npos);  // %.17g: round-trips exactly
+  EXPECT_NE(a.find("\"l\": [\"a\", \"b\\\"c\"]"), std::string::npos);
+  EXPECT_EQ(a, o.dump());
+  EXPECT_EQ(JsonObject().dump(), "{}");
+}
+
+TEST(RunNaming, UtcStampMissionIdAndCollisionSuffix) {
+  const time_t t = 1788617730;  // 2026-09-05 14:15:30 UTC
+  EXPECT_EQ(iso_utc(t), "2026-09-05T14:15:30Z");
+  EXPECT_EQ(run_dir_name(t, 42, 0), "2026-09-05_141530_mission_0042");
+  EXPECT_EQ(run_dir_name(t, 42, 3), "2026-09-05_141530_mission_0042_run3");
+  TmpDir d;
+  const std::string n = run_dir_name(t, 42, 0);
+  EXPECT_EQ(unique_run_path(d.path, n), d.path + "/" + n);
+  fs::create_directories(d.path + "/" + n);
+  EXPECT_EQ(unique_run_path(d.path, n), d.path + "/" + n + "_2");
+  fs::create_directories(d.path + "/" + n + "_2");
+  EXPECT_EQ(unique_run_path(d.path, n), d.path + "/" + n + "_3");
+}
+
+TEST(Manifest, ContainsEveryProvenanceField) {
+  RunInfo r;
+  r.run_id = "r1";
+  r.mission_id = 42;
+  r.run_index = 1;
+  r.path_artifact_sha256 = std::string(64, 'a');
+  r.start_utc = "2026-09-05T14:15:30Z";
+  r.vehicle_id = "3wd-01";
+  r.operator_name = "op \"x\"";
+  r.hostname = "jetson";
+  const std::string m = manifest_json(r);
+  for (const char* k : {"run_id", "mission_id", "run_index", "path_artifact_sha256", "start_utc",
+                        "vehicle_id", "operator", "hostname"}) {
+    EXPECT_NE(m.find(std::string("\"") + k + "\""), std::string::npos) << k;
+  }
+  EXPECT_NE(m.find("op \\\"x\\\""), std::string::npos);
+  RunSummary s;
+  s.notes = {"a", "b"};
+  s.provenance_complete = false;
+  const std::string sj = summary_json(s);
+  EXPECT_NE(sj.find("\"provenance_complete\": false"), std::string::npos);
+  EXPECT_NE(sj.find("\"notes\": [\"a\", \"b\"]"), std::string::npos);
+}
+
+TEST(ConfigSnapshot, SecretsNeverReachTheRunDirectory) {
+  for (const char* n :
+       {"ntrip.env", "platform.env", "ntrip_profile.json", "api_token", "wifi_psk.conf", "my.key",
+        "cert.pem", "PASSWORD.txt", "secrets.yaml", "x.token"}) {
+    EXPECT_TRUE(is_secret_name(n)) << n;
+  }
+  for (const char* n : {"rpp.yaml", "spray.yaml", "guard.json", "limits.txt"})
+    EXPECT_FALSE(is_secret_name(n)) << n;
+  TmpDir src, dst;
+  fs::create_directories(src.path + "/rpp");
+  fs::create_directories(src.path + "/secrets");
+  std::ofstream(src.path + "/rpp/params.yaml") << "a: 1\n";
+  std::ofstream(src.path + "/spray.yaml") << "b: 2\n";
+  std::ofstream(src.path + "/ntrip.env") << "PASSWORD=hunter2\n";
+  std::ofstream(src.path + "/rpp/my.key") << "KEY\n";
+  std::ofstream(src.path + "/secrets/x.yaml") << "c: 3\n";
+  const CopyResult r = copy_config_tree(src.path, dst.path + "/snap");
+  EXPECT_TRUE(r.ok);
+  EXPECT_EQ(r.copied, 2U);
+  EXPECT_GE(r.excluded, 3U);
+  EXPECT_TRUE(fs::exists(dst.path + "/snap/rpp/params.yaml"));
+  EXPECT_TRUE(fs::exists(dst.path + "/snap/spray.yaml"));
+  EXPECT_FALSE(fs::exists(dst.path + "/snap/ntrip.env"));
+  EXPECT_FALSE(fs::exists(dst.path + "/snap/rpp/my.key"));
+  EXPECT_FALSE(fs::exists(dst.path + "/snap/secrets"));
+  for (const auto& e : fs::recursive_directory_iterator(dst.path)) {
+    if (e.is_regular_file()) EXPECT_EQ(slurp(e.path().string()).find("hunter2"), std::string::npos);
+  }
+  EXPECT_FALSE(copy_config_tree(src.path + "/nope", dst.path + "/x").ok);
+}
+
+TEST(AtomicWrite, ReplacesWholeFileOrNothing) {
+  TmpDir d;
+  EXPECT_TRUE(write_file_atomic(d.path + "/f.json", "one"));
+  EXPECT_TRUE(write_file_atomic(d.path + "/f.json", "two"));
+  EXPECT_EQ(slurp(d.path + "/f.json"), "two");
+  EXPECT_FALSE(fs::exists(d.path + "/f.json.tmp"));
+  EXPECT_FALSE(write_file_atomic(d.path + "/missing/f.json", "x"));
+}
+
+TEST(ParamSnapshot, SortedByteIdenticalAndUnreachableIsExplicit) {
+  std::vector<NodeParams> a{
+      {"spray", true, {{"spray", "b", "double", "2"}, {"spray", "a", "bool", "true"}}},
+      {"guard", false, {}}};
+  std::vector<NodeParams> b{a[1], {"spray", true, {a[0].params[1], a[0].params[0]}}};
+  const std::string j1 = params_ros_snapshot_json("t", a);
+  EXPECT_EQ(j1, params_ros_snapshot_json("t", b));
+  EXPECT_LT(j1.find("guard"), j1.find("spray"));
+  EXPECT_LT(j1.find("\"a\""), j1.find("\"b\""));
+  EXPECT_NE(j1.find("\"reachable\": false"), std::string::npos);
+  const std::string file = params_ros_file_json(j1, "");
+  EXPECT_NE(file.find("\"end\": null"), std::string::npos);
+  EXPECT_NE(unavailable_json("fcu", "why").find("\"status\": \"unavailable\""), std::string::npos);
+}
+
+TEST(UlogCapture, ReassemblesInOrderAndRecordsGapsDuplicatesAndWrap) {
+  TmpDir d;
+  UlogCapture u;
+  ASSERT_TRUE(u.open(d.path + "/s.ulg"));
+  const uint8_t a[3] = {1, 2, 3}, b[2] = {4, 5}, c[1] = {6}, e[2] = {7, 8};
+  EXPECT_TRUE(u.on_chunk(65534, 0, a, 3));
+  EXPECT_TRUE(u.on_chunk(65535, 0, b, 2));
+  EXPECT_FALSE(u.on_chunk(65535, 0, b, 2));  // duplicate
+  EXPECT_TRUE(u.on_chunk(0, 0, c, 1));       // wrap, no gap
+  EXPECT_TRUE(u.gaps().empty());
+  EXPECT_TRUE(u.on_chunk(3, 7, e, 2));  // 1 and 2 missing
+  ASSERT_EQ(u.gaps().size(), 1U);
+  EXPECT_EQ(u.gaps()[0].expected_seq, 1);
+  EXPECT_EQ(u.gaps()[0].got_seq, 3);
+  EXPECT_EQ(u.gaps()[0].missing_chunks, 2U);
+  EXPECT_EQ(u.gaps()[0].file_offset, 6U);
+  EXPECT_EQ(u.gaps()[0].resync_offset, 7);
+  EXPECT_FALSE(u.on_chunk(2, 0, c, 1));  // late chunk from before the gap: out of order, dropped
+  EXPECT_EQ(u.duplicates(), 1U);
+  EXPECT_EQ(u.out_of_order(), 1U);
+  EXPECT_EQ(u.bytes(), 8U);
+  u.close();
+  EXPECT_EQ(slurp(d.path + "/s.ulg"), std::string("\x01\x02\x03\x04\x05\x06\x07\x08", 8));
+  EXPECT_NE(u.gaps_json().find("\"missing_chunks\": 2"), std::string::npos);
+}
+
+TEST(UlogCapture, ClosedCaptureWritesNothing) {
+  UlogCapture u;
+  const uint8_t a[1] = {1};
+  EXPECT_FALSE(u.on_chunk(0, 0, a, 1));
+  EXPECT_FALSE(u.open("/nonexistent_dir_dyx3/x.ulg"));
+}
+
+TEST(Lifecycle, StartsOnRunningStopsOnTerminalAndSplitsRuns) {
+  RunLifecycle l;
+  EXPECT_FALSE(l.on_mission(kMissionReady, 1, 0).start);
+  auto a = l.on_mission(kMissionRunning, 1, 0);
+  EXPECT_TRUE(a.start);
+  EXPECT_FALSE(a.stop);
+  EXPECT_TRUE(l.recording());
+  for (uint8_t s : {kMissionPaused, kMissionRunning, kMissionReady, kMissionLoading}) {
+    a = l.on_mission(s, 1, 0);
+    EXPECT_FALSE(a.start || a.stop) << int(s);
+  }
+  a = l.on_mission(kMissionRunning, 2, 0);  // a different mission while recording
+  EXPECT_TRUE(a.stop && a.start);
+  EXPECT_EQ(a.final_state, "SUPERSEDED");
+  a = l.on_mission(kMissionRunning, 2, 1);  // next run of the same mission
+  EXPECT_TRUE(a.stop && a.start);
+  a = l.on_mission(kMissionAborted, 2, 1);
+  EXPECT_TRUE(a.stop);
+  EXPECT_FALSE(a.start);
+  EXPECT_EQ(a.final_state, "ABORTED");
+  EXPECT_FALSE(l.recording());
+  EXPECT_FALSE(l.on_mission(kMissionCompleted, 2, 1).stop);  // nothing open: nothing to stop
+  l.on_mission(kMissionRunning, 3, 0);
+  EXPECT_EQ(l.on_mission(kMissionError, 3, 0).final_state, "ERROR");
+  l.on_mission(kMissionRunning, 4, 0);
+  EXPECT_EQ(l.on_mission(kMissionIdle, 0, 0).final_state, "IDLE");
+}
+
+// ---- bag supervision against a fake child
+// -------------------------------------------------------------------------
+TEST(BagWriter, ExecFailureIsReported) {
+  BagWriter w;
+  EXPECT_FALSE(w.start({"/nonexistent/ros2", "bag"}, "/tmp/x"));
+  EXPECT_FALSE(w.running());
+}
+
+TEST(BagWriter, GrowsAndStopsOnSigint) {
+  TmpDir d;
+  BagWriter w;
+  ASSERT_TRUE(w.start({"/bin/sh", "-c",
+                       "trap 'exit 0' INT; mkdir -p \"$0\"; while :; do echo xxxxxxxxxx >> "
+                       "\"$0/data\"; sleep 0.05; done",
+                       d.path + "/bag"},
+                      d.path + "/bag"));
+  std::this_thread::sleep_for(std::chrono::milliseconds(400));
+  EXPECT_TRUE(w.running());
+  const uint64_t b1 = w.bytes();
+  EXPECT_GT(b1, 0U);
+  EXPECT_EQ(w.stop(3.0, 1.0), 0);  // exited on SIGINT, no escalation
+  EXPECT_FALSE(w.running());
+  EXPECT_EQ(w.last_exit_code(), 0);
+}
+
+TEST(BagWriter, EscalatesAgainstAChildThatIgnoresSigint) {
+  BagWriter w;
+  ASSERT_TRUE(w.start({"/bin/sh", "-c", "trap '' INT; while :; do sleep 0.05; done"}, "/tmp"));
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  EXPECT_EQ(w.stop(0.3, 1.0), 1);  // SIGTERM kills it
+  EXPECT_FALSE(w.running());
+  BagWriter x;
+  ASSERT_TRUE(x.start({"/bin/sh", "-c", "trap '' INT TERM; while :; do sleep 0.05; done"}, "/tmp"));
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  EXPECT_EQ(x.stop(0.2, 0.2), 2);  // needs SIGKILL
+  EXPECT_FALSE(x.running());
+}
+
+TEST(BagWriter, ChildDeathIsDetected) {
+  BagWriter w;
+  ASSERT_TRUE(w.start({"/bin/sh", "-c", "sleep 0.1; exit 3"}, "/tmp"));
+  for (int i = 0; i < 100 && w.running(); ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  EXPECT_FALSE(w.running());
+  EXPECT_EQ(w.last_exit_code(), 3);
+  EXPECT_TRUE(w.exited_abnormally());
+}
