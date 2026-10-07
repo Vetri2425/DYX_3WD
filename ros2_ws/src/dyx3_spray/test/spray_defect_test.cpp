@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "dyx3_spray/boundary_projection.hpp"
+#include "dyx3_spray/replay.hpp"
 
 using namespace dyx3_spray;
 
@@ -170,4 +171,48 @@ TEST(SprayDefect, GateEnabledTheReturnLegIsMarkedOnceAndTheValveOpensEarlyByTheL
   // The MARK boundary is at s = 5 + 0.02 + 0.5. ON leads it by v*open_delay + margin = 0.083.
   const double boundary = kLeg + kGap + (kLeg - kMarkFrom);
   EXPECT_NEAR(first_on_s, boundary - (0.35 * 0.18 + 0.02), 0.01);
+}
+
+// ---------------------------------------------------------------------------------------------------
+// The replay tool's core (spray_projection_replay): the same mechanism, measured over a whole drive
+// ALONG the path.
+TEST(SprayReplay, ADoublingBackPathIsExposedWithTheGateOffAndCleanWithItOn) {
+  const PathModel m = out_and_back();
+  ReplayConfig off;  // gate 0 = the shipped default
+  const ReplayStats a = replay_drive_along(m, off);
+  EXPECT_GT(a.samples, 1000U);
+  EXPECT_GE(a.teleports, 1U) << "the station must teleport between the legs";
+  EXPECT_GT(a.max_jump_m, 0.5);
+  EXPECT_GT(a.wrong_flag_samples, 0U);
+  EXPECT_EQ(a.wrong_flag_samples, a.spurious_mark_samples + a.missed_mark_samples);
+  for (const double deg : {30.0, 60.0, 90.0}) {
+    ReplayConfig on;
+    on.gate_deg = deg;
+    const ReplayStats b = replay_drive_along(m, on);
+    EXPECT_EQ(b.teleports, 0U) << deg;
+    EXPECT_EQ(b.wrong_flag_samples, 0U) << deg;
+    EXPECT_LT(b.max_jump_m, 0.05) << deg;
+    EXPECT_NEAR(b.final_s_error_m, 0.0, 0.05) << deg;
+  }
+}
+
+TEST(SprayReplay, AStraightMissionIsNeverExposed) {
+  std::vector<double> n, e;
+  std::vector<bool> f;
+  for (int i = 0; i <= 10; ++i) {
+    n.push_back(i * 1.0);
+    e.push_back(0.0);
+    f.push_back(i >= 2 && i <= 7);
+  }
+  PathModel m;
+  ASSERT_TRUE(build_path_model(n, e, f, &m));
+  for (const double deg : {0.0, 60.0}) {
+    ReplayConfig c;
+    c.gate_deg = deg;
+    const ReplayStats s = replay_drive_along(m, c);
+    EXPECT_EQ(s.teleports, 0U) << deg;
+    EXPECT_EQ(s.wrong_flag_samples, 0U) << deg;
+    EXPECT_EQ(s.boundaries, 2U);
+    EXPECT_NEAR(s.path_length_m, 10.0, 1e-9);
+  }
 }

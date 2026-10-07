@@ -468,7 +468,7 @@ Open (human): FCU / hardware valve fail-safe if `dyx3_px4_link` dies while the v
    Human ideas, undecided: (a) use the currently unused secondary UART link to disarm the rover and close the valve; (b) a PX4 companion-loss failsafe parameter that disarms. Neither is verified:
    check in the firmware source/bench which parameter applies, and that the valve output goes to its closed (disarmed) level on disarm. Not designed yet.
 2. **`projection_direction_gate_deg`** stays 0.0 (disabled). No decision.
-3. **Decision input for 2:** replay 5-10 real missions (bag-derived, with real MARK/TRANSIT boundaries; the Git corpus is almost all MARK) through the projection with the gate off and on, compare station continuity and valve edges, then decide.
+3. **Decision input for 2 (tool built, missions still a LOCAL ACTION):** `spray_projection_replay --gates 0,45,60,90 <artifacts>` now exists (see the spray contract section 6; first table on the 4 archived missions: gate off leaves ~1.0 m of hole on one pitch and 1.3 m of spurious paint on the other, 45/60 degrees remove almost all of it, 90 is worse). Original wording: replay 5-10 real missions (bag-derived, with real MARK/TRANSIT boundaries; the Git corpus is almost all MARK) through the projection with the gate off and on, compare station continuity and valve edges, then decide.
    A replay harness is to be added; the missions are a LOCAL ACTION.
 
 ### P10 — `dyx3_recorder`, `dyx3_system_gateway`

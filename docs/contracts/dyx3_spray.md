@@ -100,6 +100,26 @@ lateral noise): with the gate disabled the reported station teleports across the
 synthetic reproduction of the mechanism, not the field bags**; replaying `stg_d8a4f2ad` / `stg_46ba8830` is a LOCAL ACTION.
 Also open: nozzle offset 1.6-6.6 cm (`nozzle_*_offset_m` are 0.0 defaults).
 
+**Replay over mission geometry (decision input; `spray_projection_replay`).** The executable drives a synthetic rover ALONG the planned path of any
+artifact (1 cm right of the line, 3 mm wobble, 7 mm steps, the shipped window) through the projection, gate off and on, and counts station teleports
+(> 0.25 m in one sample) and samples whose projected MARK/TRANSIT flag disagrees with the plan (outside a 5 cm band around each boundary):
+
+    spray_projection_replay --gates 0,45,60,90 <artifact.dyx3path | directory>...
+
+Run on the four archived missions in Git (2026-10-07; planned geometry, **not** recorded traces; two of them are huge synthetic pitches, and the corpus is
+almost all MARK, so it is a weak sample for the hard cases):
+
+| mission | gate 0 (shipped) | gate 45 / 60 | gate 90 |
+|---|---|---|---|
+| `mission_straight_5m`, `square_2x2` | clean (the square: 1 teleport at the closed-loop seam, flag right) | clean | clean |
+| `soccer_field_penalty_area` (457 m) | 1 teleport, **143 samples (~1.0 m) with a hole in the line** | 0 wrong flags (the seam teleport remains) | 0 wrong |
+| `soccer_pitch_fifa_edited` (1207 m) | 9 teleports, **419 wrong samples: 184 spurious MARK (~1.3 m of paint where none is planned), 235 holes** | 4 teleports, 9 wrong samples | 9 teleports, 98 wrong |
+
+Reading (not a decision): the gate removes almost all of the exposure on the two missions that double back; 45 and 60 degrees behave the same, 90 is visibly worse
+(too loose to separate legs that run at right angles); a small residual remains at 45-60 on the pitch, and the closed-loop seam (end point = start point) teleports
+whatever the gate. The decision and the angle stay with a human, on 5 to 10 missions from the field plus the bag traces. **LOCAL ACTION:** export the artifacts of
+the field missions from the backend (`/var/lib/dyx3/missions/*.dyx3path`) and run the command above.
+
 ## 7. Gates (first failing wins; the reason string is published)
 
 disarmed; not OFFBOARD (`require_offboard`); path not loaded; pose stale (`pose_timeout_s`); velocity stale

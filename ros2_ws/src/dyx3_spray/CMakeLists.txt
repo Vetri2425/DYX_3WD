@@ -19,6 +19,7 @@ add_library(dyx3_spray_core STATIC
   src/safety_lease.cpp
   src/spray_gates.cpp
   src/spray_controller.cpp
+  src/replay.cpp
   src/watchdog_core.cpp)
 target_include_directories(dyx3_spray_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -37,8 +38,12 @@ target_link_libraries(spray_node dyx3_spray_node_lib)
 add_executable(spray_watchdog src/watchdog_main.cpp)
 target_link_libraries(spray_watchdog dyx3_spray_node_lib)
 
+# The decision input for projection_direction_gate_deg: the projection over the planned geometry of mission artifacts.
+add_executable(spray_projection_replay src/replay_main.cpp)
+target_link_libraries(spray_projection_replay dyx3_spray_core dyx3_mission::dyx3_mission_core)
+
 install(DIRECTORY include/ DESTINATION include)
-install(TARGETS spray_node spray_watchdog DESTINATION lib/${PROJECT_NAME})
+install(TARGETS spray_node spray_watchdog spray_projection_replay DESTINATION lib/${PROJECT_NAME})
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
