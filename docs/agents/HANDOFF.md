@@ -166,6 +166,16 @@ on hardware — no flash, no bench, no DDS agent, no RTK.
 3. Field: RTK over DDS (`gps status` + FIX transition), ULog stream completeness, DDS agent
    restart (C5).
 
+**Still open for fine tracking** (`PX4_DXP/docs/FIRMWARE_PENDING_PATCHES.md`, each confirmed
+present in v1.17 source): A1 RoboClaw serial never resyncs after a stray byte (no `tcflush`);
+A2 encoder reads every mixer cycle; **A9 `fuseBodyFrameVelocity()` refreshes the global
+velocity-fusion timers — while WENC fuses, GNSS loss is masked and the GSF yaw rescue cannot
+fire; fix before enabling WENC**; A6 zero-side-slip constraint stays on during pivots; GPS-driver
+submodule C2 (NMEA restart cycle), C3 (config spam), F7 (variance-as-σ). C1/C4/F5 are resolved
+by dropping the always-landed land-detector patch (verify F5 in the first bench log).
+Parameter-only (bench): `EKF2_GPS_P_NOISE` 0.015, `EKF2_GPS_V_NOISE` 0.05, `RO_YAW_RATE_TH` 0.5
+after F1.4B, re-measured `EKF2_IMU_POS_*` / GNSS antenna positions, `GPS_YAW_OFFSET`.
+
 **Open questions for the human**
 - `COM_OF_LOSS_T` and `COM_OBL_RC_ACT` values (left OPEN in the contract).
 - Spray valve output on the 6X (deferred; parameter only).
