@@ -181,3 +181,25 @@ after F1.4B, re-measured `EKF2_IMU_POS_*` / GNSS antenna positions, `GPS_YAW_OFF
 - Spray valve output on the 6X (deferred; parameter only).
 - The WENC +2.3 cm GNSS-position innovation seen in replay on both v1.16.2 and v1.17: calibrate
   `EKF2_WENC_RAD` on the new vehicle before enabling WENC.
+
+### 2026-10-07 (later) — Claude — GNSS ownership rule, heading-recovery investigation, fine-tracking batch
+
+**Human decisions:** PX4 must not auto-configure the GNSS receiver (contract
+`docs/contracts/GNSS_receiver_configuration.md`; current firmware still violates it via
+`request_unicore_messages()`). A9 held: neutral in replay but its mechanism was never observed,
+and `_time_last_hor_vel_fuse` also drives dead-reckoning classification — prove on the bench first.
+
+**Firmware since the F1 handoff:** A1 RoboClaw RX resync `420768d812`, A2 speed-only encoder reads
+(`wheel_angle` = NaN) `4eb9465e3c` — both CI green, archived; `4eb9465e3c` is the current flash
+candidate. A9 patch preserved (worktree + `PX4-Firmware/3WD/_held_patches/`).
+
+**Heading-recovery investigation (replay, +90°/+20° GNSS-heading fault, WENC off):** not a defect
+introduced by any of our patches — identical in field-flown v1.16.2, stock v1.17 and current.
+EKF2 resets only on a *continuous* ~8 s rejection run. If the fault is mostly rejected (log_311) the
+EKF resets cleanly and recovers 10.8 s after the fault ends; if it is mostly accepted (log_285,
+creeping rover) post-fault rejections are intermittent, the reset never fires, and heading stays
+tens of degrees wrong for ~190 s with no flag. Mitigation belongs in the companion
+(`dyx3_motion_guard`): monitor `reject_yaw` and GNSS-yaw innovation/test ratio, pause on unhealthy.
+Firmware option for later (design decision): reset on rejection *ratio*. Add a heading-disturbance
+field test (e.g. shade one antenna) with recovery time logged. Correction: an earlier report of
+"stuck ≥ 30 s on both logs" was a measurement error (window maximum included pre-reset time).

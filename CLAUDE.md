@@ -265,6 +265,12 @@ architecture document — do not invent IP addresses.
 Firmware lives in `Vetri2425/PX4-Autopilot-3WD-Prod` (base v1.17.0 == `d6f12ad1c4`). Never edit
 firmware from this repository. Never `cp`-overlay firmware files — patches are real commits.
 
+⛔ **PX4 must not auto-configure the GNSS receiver** (hard requirement, 2026-10-07). The UM982's
+production configuration lives in its own persistent memory; PX4 only consumes data and injects
+RTCM. No fix — reconnect, timeout, heading loss — may make PX4 (re)configure the receiver.
+Current v1.17 firmware still violates this (`request_unicore_messages()`); see
+`docs/contracts/GNSS_receiver_configuration.md`.
+
 ---
 
 ## 11. Handoff
