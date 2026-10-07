@@ -411,3 +411,54 @@ CI now builds `px4_msgs` from the pinned firmware (cached) before `colcon build`
 DERIVED: all `stale_*_s` limits and `command_max_age_s` 0.2 (from prototype `input_max_age_s`) — re-validate at GATE 4; "STOP with heartbeat kept" reading of the F1.7 obligation;
 `LOGGING_START param1=0` (firmware logger source not in the sparse checkout).
 NOT run: any DDS to a real FCU, real timesync, jitter, the kill-process stop distance (A1.1 / F5).
+
+### P6 — `dyx3_motion_guard` (SAFETY-CRITICAL)
+Contract first (`docs/contracts/dyx3_motion_guard.md`). Pure core: `motion_types`, `limits`, `estop_gate`, `rtk_gate`, `mission_gate`, `fail_to_zero`,
+`freshness_watchdog`; fixed-rate (50 Hz) node that always publishes (a valid command or the canonical STOP) so the loss of RPP is itself reported.
+Ordered 12-row decision table; every row has a test, plus a randomised property test: **no non-STOP command ever leaves the guard while any gate fails**.
+24 core + 8 node tests (fault injection, private DDS domain, injected clock).
+DERIVED: limits are PROTOTYPE defaults (forward 1.0, yaw 0.45, accel 0.20, decel 0.50) — re-validate GATE 4; **reverse limit 0 (no source)**; jerk / yaw-accel limits
+off (no source); `command_max_age_s` 0.2; `session_accept_count` 3; E-stop boots CLEAR (physical E-stop is hardware); parameters are read once at start (the LIVE
+class is the target, the runtime-change callback is NOT built).
+Open (human): E-stop abort vs pause; reverse limit; ratio limits need `estimator_status` on DDS (firmware `dds_topics` change).
+
+### P5 — `dyx3_rpp` (PARTIAL — modules, not the controller)
+Built: `rpp_params` (119 parameters generated from the registry, class enforcement, journal), `guidance`, `speed_profile`, `stop_pivot_fsm` (explicit `CornerFsm`,
+`StopConfirm`, `PivotWatchdog`, `StopHold`; times in int64 ns), `terminal`, `motion_output`. `gate4_equivalence_test` compares ~24k values bit-exactly with the
+verbatim Python (`tools/gate4/gen_rpp_vectors.py`); a 1 % error in the slew law is caught.
+**NOT built (listed in `docs/contracts/dyx3_rpp.md`): orchestrator tick, path conditioner, `rpp_node`, run sequencer, `spray_gate`, `RppStatus` jitter, point-hold /
+handshake / precise-stop features.** Nothing drives a rover yet. DERIVED: `kPivotRateGain` 1.5 (the old firmware owned the pivot-rate law).
+
+### P8 — `dyx3_gnss_rtk`
+Contract first. `rtcm_parser` (CRC-24Q, resync one byte after the preamble, buffer cap), `rtcm_transport` (MAVLink `GPS_RTCM_DATA` flag layout, <=300 B chunks),
+`correction_health`, `gga_provider`, `ntrip_client` (pure protocol + threaded poll() socket client), `rtk_node`. Nothing here configures the UM982; no serial access.
+**Credentials come from the environment only** (`DYX3_NTRIP_*`, `EnvironmentFile`), never argv / logs / Git.
+Proof: 22 RTCM tests, loopback fake caster (8), node tests (6), `ntrip_equivalence_test` vs the prototype (300 streams, 400 CRC, 600 GGA; the fixture records the source sha256).
+DERIVED: `correction_fresh_s` 10 (the prototype's stream-liveness bound), `gnss_report_max_age_s` 1.0, `rate_window_s` 10, `max_buffer_bytes` 8192.
+Interfaces 0.5.0: `GnssReport` gained lat/lon/alt/hdop; new `NtripStatus`. NOT run: a real caster, the LTE link, the GPS driver's reassembly, an RTK FIX transition.
+
+### P9 — `dyx3_spray` (actuator + boundary semantics) — interfaces 0.6.0
+Contract first: `docs/contracts/dyx3_spray.md`. Three authority layers: controller (`spray_node`, decides WHERE), `dyx3_px4_link` (the only package touching `/fmu`;
+DO_SET_ACTUATOR 187 / DO_SET_SERVO 183, immediate `result 255` ack when the link is not proven), and the **independent watchdog** (`spray_watchdog`, its own executable;
+OFF on absent / denied / malformed / stale lease; startup fail-closed; proves it can close the valve before the controller may open it).
+Pure cores: `spray_fsm` (7 states, `spraying` only in ON_CONFIRMED, acks matched by `cmd_seq`), `safety_lease`, `flow_model`, `boundary_projection` (windowed projection
+with the direction gate, MARK lead, terminal shutoff, cross-track hysteresis), `spray_gates`, `spray_controller`, `watchdog_core`.
+Proof: `spray_equivalence_test` — 17 001 FSM events, 600 lease + 893 monitor, 1 831 flow, 2 500 RTK-quality, 15 365 gate steps, **12 900 decisions** vs vectors from the
+VERBATIM prototype (`tools/gate4/gen_spray_vectors.py`, sources pinned in `tools/gate4/spray_dxp/VERBATIM.sha256`); decisions exact, derived distances to 1e-12 (CPython
+`hypot` != libm); six mutations each caught. 24 core + 8 gate + 4 defect + 11 node tests (fake FCU link, controller death closed by the watchdog, link refusal never latches ON,
+E-stop, manual override, runtime parameter classes). `spray_params`: 45 of 54 registry rows (the 9 excluded rows belong to unported features, with reasons in the generator).
+**KNOWN-OPEN DEFECT (spec 7.8) — NOT FIXED.** `projection_direction_gate_deg` default stays **0.0 = disabled** (a spray-boundary decision for a human with field evidence).
+`test/spray_defect_test.cpp` reproduces the mechanism on a synthetic out-and-back (the gate-off case ASSERTS the teleport; the gate-on case is continuous). Synthetic, not the bags.
+NOT ported (listed in the contract): dash and point modes, the `/spray/active` heartbeat, RPP-progress boundary source, legacy fallback, MAVROS service path.
+DERIVED (all in the contract): E-stop first in the gate order and consumed fail-closed; vehicle state trusted only while fresh; RTK gate evaluated every tick (the prototype only when earlier
+gates passed, which let a fix drop skip the recovery hold); tracking evidence = `RppStatus.TRACKING` only; watchdog burst keyed on the OFF cause (the prototype re-armed the 20 Hz burst every
+tick while stale); node tick 50 Hz; path geometry = the planned artifact polyline, **not** RPP's conditioned path (open: re-derive boundaries when `path_conditioner` exists).
+Observed, carried, in the boundary budget: **debounce (3 ticks) delays every valve edge ~2.1 cm at 0.35 m/s** and the lead maths does not compensate.
+NOT run: valve timing (`solenoid_*_delay_s`), nozzle offset (1.6-6.6 cm, defaults 0.0), the real FCU ack path, paint quality, DDS timing.
+Open (human): FCU / hardware valve fail-safe if `dyx3_px4_link` dies while the valve is ON (nothing in this repo can close it); default of `projection_direction_gate_deg`; debounce vs lead.
+
+### LOCAL ACTIONS NEEDED (P6-P9)
+1. Bags: replay `stg_d8a4f2ad` / `stg_46ba8830` through `spray_defect_test`'s drive model (the real defect); GATE 3/4 bag replay for geometry and RPP modules.
+2. Regenerate / verify the vectors (need the path engine and rclpy, Humble container, **Python 3.10** for GATE 3): `tools/gate4/gen_spray_vectors.py --check`, `gen_rpp_vectors.py --check`, `gen_ntrip_vectors.py --check`.
+3. Jetson: node tests are timing-sensitive; run `colcon test` on the target. `ros2 topic info -v /fmu/in/...` must show RELIABLE (px4_link). Confirm `mavlink-router` pin and `COM_OF_LOSS_T`.
+4. Update `Px4LinkStatus.handshake_ok` comment at the next interface bump (it says "permanent"; the latch clears on session reset).
