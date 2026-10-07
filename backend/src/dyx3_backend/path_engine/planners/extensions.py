@@ -1,0 +1,658 @@
+"""Drive extension logic for marking paths.
+
+For every extendable MARK geometry, the rover drives extra distance before and
+after the real CAD marking geometry.  Spray is ON only on the original CAD
+geometry; the PRE/AFT extensions are TRANSIT (spray OFF).
+
+Extension direction priority (evaluated in order):
+  1. ``metadata["start_tangent"]`` / ``metadata["end_tangent"]`` — exact analytic
+     tangent vectors injected by ``dxf_parser`` for ARC and CIRCLE entities.
+  2. ``_is_line_like_segment()`` — line-like metadata or ``LINE_``,
+     ``LWPOLYLINE_``, ``POLYLINE_`` source prefixes: infer direction from
+     first/last adjacent densified points.
+  3. No match → return unchanged copy (unknown geometry, no metadata).
+
+Tangent formula (Stage 7A audit, verified against ``arc_waypoints()``):
+  DXF angle θ (0°=East, CCW positive), in (north, east) tuple convention:
+    CCW tangent at θ = (cos θ, -sin θ)
+    CW  tangent at θ = (-cos θ,  sin θ)
+
+ARC/CIRCLE extension is only active when ``metadata["start_tangent"]`` and
+``metadata["end_tangent"]`` are present.  A raw ``ARC_...`` or ``CIRCLE_...``
+PathSegment created without going through ``dxf_parser`` will have no metadata
+and will be returned unchanged (safe fallback).
+
+Metadata survival chain:
+  dxf_parser.entities_to_segments()
+    → densify_segment()           [straight_line.py — copies metadata]
+    → optimize_segment_order()    [segment_order.py — swaps/negates on reversal]
+    → split_mark_segment_with_extensions()   [this module — copies metadata]
+    → apply_spray_latency_compensation()     [spray.py — copies metadata]
+"""
+
+from __future__ import annotations
+
+import logging
+import math
+
+from ..core import (
+    CURVED_GEOMETRY_TYPES,
+    LINE_LIKE_GEOMETRY_TYPES,
+    DXFEntity,
+    PathSegment,
+    SegmentType,
+    dxf_arc_tangent,
+)
+
+log = logging.getLogger("path_engine.extensions")
+
+
+# ---------------------------------------------------------------------------
+# Low-level geometry helpers
+# ---------------------------------------------------------------------------
+
+def _distance(a: tuple[float, float], b: tuple[float, float]) -> float:
+    """Euclidean distance between two (north, east) points."""
+    return math.hypot(b[0] - a[0], b[1] - a[1])
+
+
+def _ray_first_hit(
+    origin: tuple[float, float],
+    direction: tuple[float, float],
+    max_dist: float,
+    obstacles: list[list[tuple[float, float]]],
+    ignore_near_origin_m: float = 0.03,
+) -> float | None:
+    """Distance along `direction` to the first obstacle, or None if the ray is clear.
+
+    `obstacles` are polylines of MARK geometry. An extension that reaches one of them
+    would be driven straight over a line the rover paints, so the caller shortens (or
+    drops) the extension to stop short of the hit.
+
+    Hits within `ignore_near_origin_m` are ignored. Two reasons, both real:
+
+      * The extension springs FROM a mark endpoint, so it touches its own geometry at
+        t=0 by construction.
+      * Where two entities genuinely TOUCH in the drawing — a line ending on a circle,
+        say — the run-out nicks the circle's chord polyline a few mm from the junction.
+        Curves are discretised to a 5 mm chord error, so even a true tangential
+        departure registers a crossing at millimetre scale. The rover has to drive over
+        that junction to paint both entities anyway; it is not a defect.
+
+    3 cm comfortably absorbs both, and is far below the scale of a real obstruction
+    (star_3x3m's run-outs crossed the square's edges 7 cm out, and are caught).
+    """
+    ox, oy = origin
+    dx, dy = direction
+    best: float | None = None
+
+    for poly in obstacles:
+        for i in range(len(poly) - 1):
+            ax, ay = poly[i]
+            bx, by = poly[i + 1]
+            ex, ey = bx - ax, by - ay
+            denom = dx * ey - dy * ex
+            if abs(denom) < 1e-12:
+                continue  # parallel to this edge
+            # origin + t*dir  ==  a + u*e
+            t = ((ax - ox) * ey - (ay - oy) * ex) / denom
+            u = ((ax - ox) * dy - (ay - oy) * dx) / denom
+            if u < -1e-9 or u > 1 + 1e-9:
+                continue  # crossing point lies off the obstacle edge
+            if t <= ignore_near_origin_m or t > max_dist:
+                continue
+            if best is None or t < best:
+                best = t
+    return best
+
+
+def _clamp_extension(
+    requested_m: float,
+    line_length_m: float,
+    origin: tuple[float, float],
+    direction: tuple[float, float],
+    obstacles: list[list[tuple[float, float]]],
+    max_line_fraction: float,
+    min_line_length_m: float,
+    obstacle_clearance_m: float,
+    min_useful_m: float,
+) -> float:
+    """Resolve how far a run-up/run-out may actually reach.
+
+    Two independent limits, both of which produced real defects in the 14-shape sweep
+    (docs/upgrade_path/03_EXTENSION_GEOMETRY_DEFECTS.md):
+
+    E2 — PROPORTION. `requested_m` is absolute, so a short line gets the same run-up as
+      a long one. star_3x3m's 10 cm crosshair lines were each given 97 cm of extension —
+      7.4x the line they serve; the rover drove nearly a metre to paint a hand's width.
+      Cap the extension at a fraction of the line, and refuse to extend a line that is
+      too short to benefit at all.
+
+    E1 — COLLISION. An extension continues its own line's direction past the endpoint
+      and is laid down wherever that lands, with no view of the rest of the drawing. On
+      star_3x3m the star's tips touch the enclosing square, so six run-ups/run-outs were
+      driven straight across lines the rover paints. Ray-cast and stop short.
+
+    Returns the permitted length in metres — 0.0 means "emit no extension".
+    """
+    if requested_m <= 0.0:
+        return 0.0
+
+    if line_length_m < min_line_length_m:
+        return 0.0  # too short to benefit from a run-up at all
+
+    allowed = min(requested_m, max_line_fraction * line_length_m)
+
+    hit = _ray_first_hit(origin, direction, allowed, obstacles)
+    if hit is not None:
+        allowed = min(allowed, max(0.0, hit - obstacle_clearance_m))
+
+    return allowed if allowed >= min_useful_m else 0.0
+
+
+# Closed-run detection — thresholds match the RPP `_is_closed_run` guard
+# (commit 5677d48) so planner and controller agree on what a closed loop is.
+_CLOSED_RUN_GAP_TOL_M = 0.15   # endpoints within this distance ⇒ coincident
+_CLOSED_RUN_MIN_LEN_M = 1.0    # ignore tiny loops (degenerate stubs)
+
+
+def _path_length(points: list[tuple[float, float]]) -> float:
+    """Total polyline arc length in metres."""
+    return sum(_distance(points[i - 1], points[i]) for i in range(1, len(points)))
+
+
+def _is_closed_run(points: list[tuple[float, float]]) -> bool:
+    """True when *points* form a closed loop (square / triangle / closed
+    polyline): first and last points coincide within tolerance and the loop is
+    long enough to be a real shape rather than a degenerate stub.
+
+    A closed loop has no free end to run off, so a linear PRE/AFT extension
+    would stub into or across the shape — extensions are suppressed for these.
+    """
+    if len(points) < 4:
+        return False
+    if _distance(points[0], points[-1]) > _CLOSED_RUN_GAP_TOL_M:
+        return False
+    return _path_length(points) >= _CLOSED_RUN_MIN_LEN_M
+
+
+def _unit_vector(
+    a: tuple[float, float],
+    b: tuple[float, float],
+) -> tuple[float, float] | None:
+    """Unit vector from *a* towards *b*.
+
+    Returns None when the two points are coincident (distance < 1e-9 m).
+    """
+    dx = b[0] - a[0]
+    dy = b[1] - a[1]
+    length = math.hypot(dx, dy)
+    if length < 1e-9:
+        return None
+    return (dx / length, dy / length)
+
+
+def _offset_point(
+    p: tuple[float, float],
+    direction: tuple[float, float],
+    distance: float,
+) -> tuple[float, float]:
+    """Offset point *p* by *distance* metres along *direction* (unit vector).
+
+    Use a negative *distance* to step backwards (opposite to *direction*).
+    """
+    return (p[0] + direction[0] * distance, p[1] + direction[1] * distance)
+
+
+def _copy_segment(segment: PathSegment) -> PathSegment:
+    """Return a shallow-copy of *segment* with all six fields preserved.
+
+    Using a helper keeps every guard return site consistent so that adding
+    a new field to PathSegment only requires updating this one function.
+    """
+    return PathSegment(
+        segment_type=segment.segment_type,
+        points=list(segment.points),
+        speed=segment.speed,
+        segment_id=segment.segment_id,
+        source_entity=segment.source_entity,
+        metadata=dict(segment.metadata),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Geometry classification
+# ---------------------------------------------------------------------------
+
+_LINE_LIKE_PREFIXES = ("LINE_", "LWPOLYLINE_", "POLYLINE_")
+
+
+def _is_line_like_source(source_entity: str) -> bool:
+    """Return True when a source_entity label names line-like geometry."""
+    src = (source_entity or "").upper()
+    if src.startswith(_LINE_LIKE_PREFIXES):
+        return True
+
+    if not src.startswith("GROUP:"):
+        return False
+
+    # Grouped labels are synthetic. Current grouping writes
+    # ``group:<first_source>+<extra_count>``; older/audit examples may carry
+    # ``group:LINE_A+LINE_B``. Accept only when every explicit geometry token is
+    # line-like. Numeric count suffixes are bookkeeping, not geometry tokens.
+    body = src.split(":", 1)[1]
+    geometry_tokens = [
+        token for token in body.split("+")
+        if token and not token.isdigit()
+    ]
+    return bool(geometry_tokens) and all(
+        token.startswith(_LINE_LIKE_PREFIXES) for token in geometry_tokens
+    )
+
+
+def _is_line_like_segment(segment: PathSegment) -> bool:
+    """Return True for geometry profiles whose direction can be inferred from
+    adjacent densified points (LINE / LWPOLYLINE / POLYLINE / LINE_CHAIN).
+
+    Classification is by geometry metadata, not by entity label: every primitive
+    is tagged ``geometry_type`` by ``dxf_parser`` and every composite by
+    ``shape_grouping``.  Curved geometry (ARC / CIRCLE / SPLINE / ELLIPSE /
+    bulge polyline) is excluded here — it uses analytic tangent metadata handled
+    before this classifier.  The source_entity string is consulted only as a
+    legacy fallback for segments built without geometry metadata.
+    """
+    meta = segment.metadata or {}
+
+    # Primary signal: explicit geometry metadata (the production path).
+    if meta.get("line_like") is True:
+        return True
+
+    geom = str(meta.get("geometry_type", "")).upper()
+    if geom in CURVED_GEOMETRY_TYPES:
+        # Hard exclude: a curve never qualifies as line-like, even if some
+        # stray label looks line-like. This is what keeps the smooth/segment
+        # profile split intact.
+        return False
+    if geom in LINE_LIKE_GEOMETRY_TYPES:
+        return True
+
+    # Composite lacking an explicit line_like flag: line-like iff every merged
+    # source is line-like.
+    grouped_from = meta.get("grouped_from")
+    if isinstance(grouped_from, (list, tuple)):
+        sources = [str(src) for src in grouped_from if src]
+        if sources and all(_is_line_like_source(src) for src in sources):
+            return True
+
+    # Legacy fallback: segments constructed without geometry_type metadata
+    # (hand-built PathSegments, older callers). Dead once every producer tags
+    # geometry, but keeps untagged inputs working.
+    return _is_line_like_source(segment.source_entity)
+
+
+def _normalise(v: tuple[float, float]) -> tuple[float, float] | None:
+    """Normalise vector *v* to a unit vector.  Returns None if near-zero."""
+    length = math.hypot(v[0], v[1])
+    if length < 1e-9:
+        return None
+    return (v[0] / length, v[1] / length)
+
+
+def entity_extension_directions(
+    entity: DXFEntity,
+    points: list[tuple[float, float]],
+) -> tuple[tuple[float, float], tuple[float, float]] | None:
+    """Start/end unit tangents for PRE/AFT extensions of one DXF entity.
+
+    Entity-level mirror of split_mark_segment_with_extensions() direction
+    priority, used by the server's extension *preview* so that preview and
+    planned geometry come from the same formulas:
+
+      - ARC / CIRCLE: analytic tangents (dxf_arc_tangent — same source as
+        the dxf_parser segment metadata).
+      - LINE / LWPOLYLINE / SPLINE / ELLIPSE: finite differences from the
+        densified *points*, matching the planner's line-like inference and
+        the spline/ellipse finite-difference metadata.
+      - POINT / unknown / degenerate geometry: None (the planner adds no
+        extension for these either).
+
+    Returns (start_dir, end_dir) unit vectors in (north, east), or None when
+    no extension direction can be derived.
+    """
+    etype = entity.entity_type
+    if etype == "ARC":
+        geom = entity.geometry
+        return (
+            dxf_arc_tangent(geom.get("start_angle", 0.0)),
+            dxf_arc_tangent(geom.get("end_angle", 360.0)),
+        )
+    if etype == "CIRCLE":
+        # densify_circle starts at 0° (East point) and travels CCW; a full
+        # circle ends where it started.
+        return (dxf_arc_tangent(0.0), dxf_arc_tangent(0.0))
+    if etype in ("LINE", "LWPOLYLINE", "POLYLINE", "SPLINE", "ELLIPSE"):
+        if len(points) < 2:
+            return None
+        start_dir = _unit_vector(points[0], points[1])
+        end_dir = _unit_vector(points[-2], points[-1])
+        if start_dir is None or end_dir is None:
+            return None
+        return (start_dir, end_dir)
+    return None
+
+
+def offset_point(
+    p: tuple[float, float],
+    direction: tuple[float, float],
+    distance: float,
+) -> tuple[float, float]:
+    """Public alias of _offset_point for preview/extension consumers."""
+    return _offset_point(p, direction, distance)
+
+
+# Corner angle (degrees) above which a vertex splits a line chain into separate
+# edges. 30° clears densification noise on straight sides while catching every
+# real polygon corner (square/rect = 90°, hexagon vertex turn = 60°).
+_EDGE_SPLIT_CORNER_DEG = 30.0
+
+
+def decompose_line_chain_to_edges(
+    segment: PathSegment,
+    corner_threshold_deg: float = _EDGE_SPLIT_CORNER_DEG,
+) -> list[PathSegment]:
+    """Split a line-like MARK segment into its straight edges at corner vertices.
+
+    Per-line extension mode treats each CAD line as an independent PRE/MARK/AFT
+    pass. A grouped shape (square / rectangle / polygon perimeter) arrives here as
+    ONE composite MARK run; this splits it back into the individual edges so each
+    edge can get its own run-up/run-out — including the sides of a *closed* square,
+    which the connectivity policy would otherwise leave un-extended.
+
+    Curved geometry (ARC / CIRCLE) and non-line / too-short segments are returned
+    unchanged (single-element list) so their analytic-tangent extension still
+    applies. Each emitted edge copies the parent metadata (so it stays classified
+    line-like) plus ``edge_index`` / ``edge_parent`` for traceability.
+    """
+    if segment.segment_type != SegmentType.MARK:
+        return [segment]
+    pts = segment.points
+    if len(pts) < 3:
+        return [segment]
+    if not _is_line_like_segment(segment):
+        # Arc / circle / unknown — keep whole; tangent extensions handle these.
+        return [segment]
+
+    thr = math.radians(corner_threshold_deg)
+    splits = [0]
+    for i in range(1, len(pts) - 1):
+        d0 = _unit_vector(pts[i - 1], pts[i])
+        d1 = _unit_vector(pts[i], pts[i + 1])
+        if d0 is None or d1 is None:
+            continue
+        dot = max(-1.0, min(1.0, d0[0] * d1[0] + d0[1] * d1[1]))
+        if math.acos(dot) >= thr:
+            splits.append(i)
+    splits.append(len(pts) - 1)
+
+    if len(splits) <= 2:
+        return [segment]  # no interior corner → a single straight edge already
+
+    # Parent provenance indexes the parent's full point list. Each edge is a
+    # slice pts[a:b+1]; remap the source-vertex / control indices into the
+    # edge's own index space so must-hit survives the split. Without this the
+    # edge inherits the parent's indices verbatim and points them at the wrong
+    # (or out-of-range) samples — the same stale-index class as _merge_chain.
+    parent_vidx = segment.metadata.get("vertex_indices")
+    parent_ctrl = segment.metadata.get("control_indices")
+
+    edges: list[PathSegment] = []
+    for k, (a, b) in enumerate(zip(splits[:-1], splits[1:])):
+        if b <= a:
+            continue
+        edge_pts = list(pts[a:b + 1])
+        if len(edge_pts) < 2:
+            continue
+        meta = dict(segment.metadata)
+        meta["edge_index"] = k
+        meta["edge_parent"] = segment.source_entity
+        # The two split points a and b are corner vertices by construction; keep
+        # them plus any interior source vertex that fell inside this edge.
+        if parent_vidx is not None:
+            meta["vertex_indices"] = sorted(
+                {0, b - a} | {v - a for v in parent_vidx if a <= v <= b}
+            )
+        else:
+            # No parent provenance → over-preserve (engine convention: unknown
+            # means all points are source geometry, never droppable fill).
+            meta["vertex_indices"] = list(range(len(edge_pts)))
+        if parent_ctrl is not None:
+            meta["control_indices"] = sorted(
+                {c - a for c in parent_ctrl if a <= c <= b}
+            )
+        edges.append(PathSegment(
+            segment_type=SegmentType.MARK,
+            points=edge_pts,
+            speed=segment.speed,
+            segment_id=segment.segment_id,
+            source_entity=f"{segment.source_entity}:edge{k}",
+            metadata=meta,
+        ))
+    return edges or [segment]
+
+
+# ---------------------------------------------------------------------------
+# Main public function
+# ---------------------------------------------------------------------------
+
+def split_mark_segment_with_extensions(
+    segment: PathSegment,
+    pre_extension_m: float,
+    aft_extension_m: float,
+    transit_speed: float,
+    suppress_closed_loops: bool = True,
+    obstacles: list[list[tuple[float, float]]] | None = None,
+    max_line_fraction: float = 0.5,
+    min_line_length_m: float = 0.30,
+    obstacle_clearance_m: float = 0.10,
+    min_useful_extension_m: float = 0.10,
+) -> list[PathSegment]:
+    """Expand one MARK segment into [PRE-TRANSIT, MARK, AFT-TRANSIT].
+
+    Extension direction is determined by the following priority:
+
+    1. **Metadata tangents** (ARC / CIRCLE from dxf_parser):
+       ``metadata["start_tangent"]`` and ``metadata["end_tangent"]`` are used
+       as-is (normalised defensively).  These survive densification, optimizer
+       reversal (with negation/swap), and spray compensation.
+
+    2. **Line-like source_entity** (LINE / LWPOLYLINE / POLYLINE):
+       Direction inferred from ``points[0]→points[1]`` (start) and
+       ``points[-2]→points[-1]`` (end) of the densified point array.
+
+    3. **No match** → return a copy of the original segment unchanged.
+
+    Guards (returns single-element copy list):
+      - segment is not MARK
+      - segment has fewer than 2 points
+      - no metadata tangents AND not line-like
+      - line-like segment is a closed loop (square / triangle / closed
+        polyline) — a linear run-up/run-out would stub into the shape
+      - direction vectors are degenerate (coincident points or zero-length)
+
+    Original ``segment.points`` is **never mutated**.
+    The returned MARK element contains ``dict(segment.metadata)`` — a copy.
+
+    PRE/AFT TRANSIT segments carry:
+      ``metadata["extension_role"]``        : "pre" | "aft"
+      ``metadata["parent_source_entity"]``  : source_entity of original MARK
+
+    Args:
+        segment:          Source PathSegment (expected MARK).
+        pre_extension_m:  Metres before start — a CEILING, not a guarantee (see below).
+        aft_extension_m:  Metres after end    — likewise.
+        transit_speed:    Speed (m/s) for PRE and AFT TRANSIT segments.
+        suppress_closed_loops: See the closed-run guard below.
+        obstacles:        Every OTHER MARK polyline in the plan. An extension that would
+                          cross one is shortened to stop `obstacle_clearance_m` short of
+                          it (E1) — otherwise the run-up is driven straight over a line
+                          the rover paints.
+        max_line_fraction: Cap the extension at this fraction of the line it serves (E2).
+                          An absolute extension is nonsense on a short line: a 10 cm mark
+                          was being given 97 cm of run-up + run-out.
+        min_line_length_m: Lines shorter than this get no extension at all.
+        obstacle_clearance_m: Stop this far short of an obstructing mark.
+        min_useful_extension_m: A surviving extension shorter than this is dropped rather
+                          than emitted as a useless stub.
+
+    Returns:
+        List of 1, 2, or 3 PathSegments:
+          [PRE-TRANSIT?] + [MARK] + [AFT-TRANSIT?]
+
+    PRE/AFT carry ``metadata["extension_clamped"]`` = True when the requested length was
+    reduced, so the caller can report it.
+    """
+    # Guard 1: only MARK segments are extended
+    if segment.segment_type != SegmentType.MARK:
+        return [_copy_segment(segment)]
+
+    # Guard 2: need at least 2 points to define a direction
+    if len(segment.points) < 2:
+        return [_copy_segment(segment)]
+
+    start = segment.points[0]
+    end   = segment.points[-1]
+    meta  = segment.metadata
+
+    # ── Direction priority ──────────────────────────────────────────────────
+
+    has_tangent_meta = (
+        "start_tangent" in meta and "end_tangent" in meta
+    )
+
+    if has_tangent_meta:
+        # Priority 1: analytic tangent from metadata (ARC / CIRCLE)
+        start_dir = _normalise(meta["start_tangent"])
+        end_dir   = _normalise(meta["end_tangent"])
+        if start_dir is None or end_dir is None:
+            return [_copy_segment(segment)]
+
+    elif _is_line_like_segment(segment):
+        # Closed loop (square / triangle / closed polyline): endpoints coincide,
+        # so there is no free end to run off. A linear PRE/AFT would stub into or
+        # across the shape — suppress extensions and mark the run unchanged. The
+        # closed-loop completion guard in RPP already drives the rover through the
+        # start point at speed, so no separate run-up is needed. Curves keep their
+        # analytic-tangent extensions (handled in the branch above).
+        #
+        # per-line mode (suppress_closed_loops=False) opts out of this guard: the
+        # caller has already decomposed the chain into individual open edges via
+        # decompose_line_chain_to_edges(), so each edge is genuinely open and must
+        # get its own run-up/run-out even though the parent shape was closed.
+        if suppress_closed_loops and _is_closed_run(segment.points):
+            log.debug(
+                "Path extensions suppressed for closed run %s (id=%s): "
+                "endpoints coincide — no linear run-up/run-out added.",
+                segment.source_entity, segment.segment_id,
+            )
+            return [_copy_segment(segment)]
+
+        # Priority 2: infer from adjacent densified points (LINE / LWPOLYLINE)
+        start_dir = _unit_vector(segment.points[0], segment.points[1])
+        end_dir   = _unit_vector(segment.points[-2], segment.points[-1])
+        if start_dir is None or end_dir is None:
+            return [_copy_segment(segment)]
+
+    else:
+        # Priority 3: unknown geometry, no metadata → skip, return copy.
+        # EX1 fix: warn instead of silently skipping, so the operator knows
+        # this MARK segment will get no PRE/AFT run-up even though
+        # enable_path_extensions is on.
+        log.warning(
+            "Path extension skipped for MARK segment %s (id=%s): no tangent "
+            "metadata and geometry is not line-like — no PRE/AFT run-up "
+            "will be added.",
+            segment.source_entity, segment.segment_id,
+        )
+        return [_copy_segment(segment)]
+
+    # ── Resolve how far each end may ACTUALLY reach ─────────────────────────
+    # The requested lengths are only a ceiling: they are cut down by the line's own
+    # length (E2) and by any marked geometry in the way (E1). See _clamp_extension.
+    obs = obstacles or []
+    line_len = _path_length(segment.points)
+
+    pre_len = _clamp_extension(
+        pre_extension_m, line_len,
+        origin=start,
+        direction=(-start_dir[0], -start_dir[1]),   # PRE runs BACKWARDS from the start
+        obstacles=obs,
+        max_line_fraction=max_line_fraction,
+        min_line_length_m=min_line_length_m,
+        obstacle_clearance_m=obstacle_clearance_m,
+        min_useful_m=min_useful_extension_m,
+    )
+    aft_len = _clamp_extension(
+        aft_extension_m, line_len,
+        origin=end,
+        direction=end_dir,
+        obstacles=obs,
+        max_line_fraction=max_line_fraction,
+        min_line_length_m=min_line_length_m,
+        obstacle_clearance_m=obstacle_clearance_m,
+        min_useful_m=min_useful_extension_m,
+    )
+
+    if pre_extension_m > 0 and pre_len < pre_extension_m - 1e-9:
+        log.info("extension clamped: %s PRE %.3f m -> %.3f m (line %.3f m)",
+                 segment.source_entity, pre_extension_m, pre_len, line_len)
+    if aft_extension_m > 0 and aft_len < aft_extension_m - 1e-9:
+        log.info("extension clamped: %s AFT %.3f m -> %.3f m (line %.3f m)",
+                 segment.source_entity, aft_extension_m, aft_len, line_len)
+
+    # ── Build result list ───────────────────────────────────────────────────
+
+    result: list[PathSegment] = []
+
+    # PRE extension: step backwards from start along start_dir
+    if pre_len > 0:
+        pre_start = _offset_point(start, start_dir, -pre_len)
+        result.append(PathSegment(
+            segment_type=SegmentType.TRANSIT,
+            points=[pre_start, start],
+            speed=transit_speed,
+            segment_id=segment.segment_id,
+            source_entity=f"{segment.source_entity}:pre",
+            metadata={
+                "extension_role": "pre",
+                "parent_source_entity": segment.source_entity,
+                "extension_clamped": pre_len < pre_extension_m - 1e-9,
+            },
+        ))
+
+    # Original MARK segment — copy, never mutate; preserve metadata
+    result.append(PathSegment(
+        segment_type=SegmentType.MARK,
+        points=list(segment.points),
+        speed=segment.speed,
+        segment_id=segment.segment_id,
+        source_entity=segment.source_entity,
+        metadata=dict(meta),
+    ))
+
+    # AFT extension: step forward from end along end_dir
+    if aft_len > 0:
+        aft_end = _offset_point(end, end_dir, aft_len)
+        result.append(PathSegment(
+            segment_type=SegmentType.TRANSIT,
+            points=[end, aft_end],
+            speed=transit_speed,
+            segment_id=segment.segment_id,
+            source_entity=f"{segment.source_entity}:aft",
+            metadata={
+                "extension_role": "aft",
+                "parent_source_entity": segment.source_entity,
+                "extension_clamped": aft_len < aft_extension_m - 1e-9,
+            },
+        ))
+
+    return result
