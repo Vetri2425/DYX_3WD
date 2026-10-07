@@ -470,3 +470,38 @@ Open (human): FCU / hardware valve fail-safe if `dyx3_px4_link` dies while the v
 2. **`projection_direction_gate_deg`** stays 0.0 (disabled). No decision.
 3. **Decision input for 2:** replay 5-10 real missions (bag-derived, with real MARK/TRANSIT boundaries; the Git corpus is almost all MARK) through the projection with the gate off and on, compare station continuity and valve edges, then decide.
    A replay harness is to be added; the missions are a LOCAL ACTION.
+
+### P10 — `dyx3_recorder`, `dyx3_system_gateway`
+**Recorder** (`docs/contracts/dyx3_recorder.md`): a run directory opens on `MissionState` RUNNING and closes on a terminal state: `manifest.json`, `versions.json` (copy of `/etc/dyx3/versions.json`),
+`params_ros.json` (start+end), `params_fcu.json`, `config_snapshot/` (secrets excluded by name), supervised `ros2 bag record` child (SIGINT -> SIGTERM -> SIGKILL), ULog reassembled from `/dyx3/ulog_chunk`
+with a gap list, `summary.json` with `provenance_complete`. It never gates a mission. 13 core + 7 node tests (fake bag child, injected clock).
+**NOT proven:** `ros2 bag record` itself (rosbag2 is not installed in CI), disk-full, real ULog bytes. **`params_fcu.json` is always "unavailable"**: no FCU parameter read path exists in this stack (OPEN, human).
+DERIVED/OPEN: the recorded topic list (raw `/fmu/out/**` and `/dyx3/rtcm` excluded), `min_free_bytes` 0 = no check, `bag_stall_s` off (no source for either), one run per (mission_id, run_index).
+**Gateway** (`docs/contracts/dyx3_system_gateway.md`): strict JSON parser, NDJSON over a Unix socket (`/run/dyx3/gateway.sock`, 0660), command validator (syntax only, no policy), nine service forwards with the downstream verdict
+returned verbatim, E-stop processed before everything else in a batch and never reported accepted when undelivered (`service_unavailable` / `timeout`), per-source aged telemetry snapshot, and the **operator-link heartbeat** (R13).
+10 core + 7 node tests over a real socket. A Python client (the backend's) was also run against the real C++ node (`tools/gateway_smoke.py`).
+DERIVED/OPEN: **`operator_link_timeout_s` 2.0 (no source; at 0.35 m/s = 70 cm)**, `telemetry_hz` 5, `max_clients` 4, `service_timeout_s` 2.0.
+
+### P2 — backend
+`docs/contracts/backend.md`. FastAPI + python-socketio, never imports rclpy. Hashed bearer tokens with viewer/operator roles, fail closed (**auth model DERIVED/OPEN**); an asyncio gateway client that never queues a command
+for later and reports `delivered` true/false/unknown; upload -> the carried path engine -> content-addressed `DYX3PATH 1` artifact (size/extension/engine-error handling, the client filename is never a path); runs view; the tablet-heartbeat
+relay (`heartbeat_relay_s` 0.5, `tablet_heartbeat_timeout_s` 1.5: DERIVED/OPEN; worst-case tablet-drop-to-guard delay = 1.5 + 2.0 s); Socket.IO hub (anyone may assert E-stop, only an operator clears). 40 new tests, 536 pass.
+**Not built (OPEN):** NTRIP profile management (the credentials file is `root:dyx3 0640`; how the backend changes it is undecided), settings/storage beyond missions and runs, report generation, retention.
+**Not ported, questions for the human:** the prototype's arbiter, joystick/manual-drive gateway and emergency-stop plumbing. Manual driving is a motion source and needs its own contract; none exists.
+`cors_allowed_origins=[]` (same origin) until the tablet app's origin is decided. NOT run: uvicorn under systemd, the real tablet.
+
+### P11 (remainder) — deployment
+Launchers for ros / rtk / recorder / backend; **`dyx3-spray-watchdog.service` as its own unit** (not tied to dyx3-ros); `dyx3_bringup/control_graph.launch.py` (mission, guard, px4_link, spray, gateway; any node exit shuts the graph down so systemd
+restarts it: DERIVED); `deployment/scripts/dyx3-env.sh` refuses to start without `ROS_DOMAIN_ID` (no number in the spec: set it in `/etc/dyx3/ros.env`) or the px4_msgs overlay of the pinned firmware; `dyx3-rollback` (verifies the target first, restores on
+an unhealthy result, twice = undo), `dyx3-version` (the firmware identity printed is the PIN; the running FCU's is "unavailable"), `/etc/dyx3/versions.json` for the recorder, backend venv built with the release (failure = warning), health extras.
+Installer tests 69/69 on a staged root. **`[enabled_services]` is still `dyx3-platform` only on purpose**: nothing but platform has ever run on a rover, and an enabled service that fails health makes `dyx3-upgrade` revert.
+OPEN: per-node RT priority/affinity (the unit applies FIFO 80 / CPU 4 to the whole tree), DDS scoping (loopback-only is stricter than the eth0 whitelist and survives an unplugged FCU cable), the backend port 8000 (DERIVED).
+NOT run: anything on a Jetson (systemd, apt, pip, NetworkManager, real DDS).
+
+### Timesync (interfaces 0.7.0)
+`Px4LinkStatus.timesync_{valid,offset_us,round_trip_us}`; the recorder logs them at run start and end (a sample older than 1 s is recorded as not valid). **The mission precondition F-tasks A1.4 asks for is NOT built**: no source gives a numeric convergence
+criterion (the issue only says ~4 ms is expected vs ~40 ms right after boot = 1.4 cm). OPEN (human): the criterion and who gates on it.
+
+### P0 — Stage 0 tooling
+`tools/analysis/{timebase,arc_floor}.py`, synthetic-data tests only (see `docs/analysis/stage0.md`). 0.1 needs the (omega, heading error) series extracted from the real arc bags (LOCAL ACTION) and a human's lateral-geometry choice to turn a heading floor into centimetres;
+0.2 needs real bags and the rewiring of the prototype's own analysis tools (not in this repo); 0.3 is not code.
