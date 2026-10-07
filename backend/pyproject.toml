@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "dyx3-backend"
-version = "0.0.0"
+version = "0.1.0"
 description = "DYX 3WD production backend: REST + Socket.IO, auth, mission, telemetry, RTK profiles, storage, and the CAD/CRS path engine. Never imports rclpy — reaches ROS only through dyx3_system_gateway."
 requires-python = ">=3.10"
 license = { text = "Proprietary" }
@@ -12,6 +12,8 @@ authors = [{ name = "Vetri", email = "vetri96anitha@gmail.com" }]
 dependencies = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
+    "python-socketio>=5.10",
+    "python-multipart>=0.0.9",
 ]
 
 [project.optional-dependencies]
