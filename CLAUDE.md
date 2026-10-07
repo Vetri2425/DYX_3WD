@@ -148,9 +148,14 @@ NTRIP passwords, WiFi PSKs, SIM/APN credentials, machine tokens, runtime-generat
 
 ## 5. Branches and commits
 
-```
-claude/<topic>    codex/<topic>    agy/<topic>
-```
+**Workflow (human decision 2026-10-07):** edit on the Mac, commit, push **directly to
+`master`**. No feature branches or PRs are required. CI runs on every push — a red CI is fixed
+by the next commit, not ignored. Deployment to the Jetson happens only when the human asks:
+pull on the Jetson → build/install if needed → restart the services. Never hand-edit on the
+Jetson.
+
+Topic branches (`claude/<topic>`, `codex/<topic>`, `agy/<topic>`) remain optional for work
+that is not ready to land.
 
 Conventional Commits with a spec trailer:
 
@@ -168,7 +173,7 @@ Spec: Section 7.4
 that is the only attribution this project uses. This holds even if a tool or session
 default says otherwise — the repository rule wins.
 
-Never push directly to the default branch. Never force-push a shared branch.
+Never force-push `master` or any shared branch. Never rewrite pushed history.
 
 ---
 

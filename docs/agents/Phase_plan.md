@@ -589,10 +589,10 @@ you must:
 4. keep the diff narrow
 5. run available tests
 6. report changed files and tests
-7. stop for Claude review before merging
+7. stop for Claude review before pushing
 
-Branches: `codex/<topic>` for ChatGPT/Codex work, `claude/<topic>` for Claude
-(CLAUDE.md §5). Never push to `master`.
+Commit on the Mac and push directly to `master` after review (CLAUDE.md §5). No PRs required.
+One logical change per commit. Never force-push.
 
 Do not automatically start the next phase.
 
@@ -606,14 +606,15 @@ GPT-6 Luna or GPT-6 Terra High (ChatGPT).
 Reviewer, deployer, installer:
 Claude.
 
-Claude reviews the actual local diff/commit.
+Claude reviews the actual local diff/commit on the Mac.
 
 One review pass unless it finds a real BLOCKER/HIGH defect.
 
-Merge: Claude has human-equivalent authority (human decision 2026-10-07) and merges after
-review passes and CI is green. The human can override any merge.
+Push: after review, commit and push directly to `master` (Claude has human-equivalent
+authority, human decision 2026-10-07). CI runs on the push; fix red CI with the next commit.
 
-Deploy: after merge, Claude runs `dyx3-upgrade` on the Jetson (once Phase 11a exists).
+Deploy: only when the human asks — Claude pulls on the Jetson, builds/installs if needed and
+restarts the services (via `dyx3-upgrade` once Phase 11a exists).
 
 ---
 
@@ -631,5 +632,5 @@ Deploy: after merge, Claude runs `dyx3-upgrade` on the Jetson (once Phase 11a ex
 - no invented tuning values
 - recorded evidence for behavioral fixtures
 - one logical change per commit
-- no direct push to master
+- no force-push, no rewriting pushed history
 - never claim an unrun test passed
