@@ -117,3 +117,67 @@ tree fixes it structurally.
      (`git_identity = f3de5d1`). Rewriting it would break the artifact-to-commit provenance
      chain — the exact property that makes a flash identifiable and that the `cp`-overlay
      approach never had. A trailer is cosmetic; that chain is not.
+
+## 2026-10-07 — Claude — Track F1 firmware rebase complete (code), GATE 2 passed
+
+**Branch:** `claude/f17-b2-decisions` (this repo, docs only). Firmware commits are in
+`Vetri2425/PX4-Autopilot-3WD-Prod` on `dyx-3wd-production`, each pushed alone, CI green,
+artifact archived in `3WD_PROD/PX4-Firmware/3WD/<sha>-<slug>/`.
+
+| Roadmap item | Firmware commit | Gate evidence |
+|---|---|---|
+| CI target → `px4_fmu-v6x_rover` | `1416913c85` | CI |
+| F1.1 RoboClaw QPPS / raw UART / select / 255 / deadbands | `14e3fb88b2` | CI |
+| F1.2 logger (`wheel_encoders`, all multi-EKF aid-source instances) | `385034b7ef`, `809b3561c0` | CI |
+| F1.3 WENC fusion + lever arm (`fuseBodyFrameVelocity` extracted from EV) | `b5189bd734` | GATE 2: neutrality (state bit-identical) + compatibility vs v1.16.2 (pivot wobble 1.86 vs 1.96 cm; lever-arm failure reproduced on both) |
+| F1.4A RoboClaw encoder timestamp before UART | `07bcfdc601` | CI (replay cannot exercise timing) |
+| F1.4B `EKF2_GPS_YAW_N/_G` | `1cc5c364b8` | GATE 2: reproduces 08-05 failure (16.8/24.4 % vs recorded 17.5/24.3 %), floor fixes it, 0 reverse actions |
+| F1.5 RTCM over DDS (`/fmu/in/gps_inject_data`, PublicationMulti) | `07741c2f26` | CI + generator check |
+| C5 DDS reconnect after agent restart (upstream #26848 backport) | `1bc34ef933` | CI |
+| F1.8/C3 ULog streaming over DDS | `9f07777a32` | CI + generator check |
+| F1.7 explicit-setpoint gate in `DifferentialOffboardMode` | `b19901b004` | CI (see contract) |
+
+**Findings that correct earlier docs**
+- F-tasks C1 is already satisfied on v6x: `rover.px4board` is a variant of `default.px4board`,
+  which has `CONFIG_MODULES_UXRCE_DDS_CLIENT=y`; Ethernet/netman fallback IP is 10.41.10.2.
+- A1.2 / #27497 is not a firmware bug (reporter: a motor not flagged Reverse).
+- #27860 (C5 original concern) is serial-baud specific; startup retry (#23723) is in v1.17.0.
+  The real gap was reconnect after agent restart (#26848), now backported.
+- C6 is not needed under path A: OFFBOARD already has `COM_OF_LOSS_T` freshness; the remaining
+  hole (live heartbeat, stale setpoints) is a companion obligation.
+
+**What I ran / could not run:** CI builds of every commit (pinned container); local SITL
+replay builds and 900+ replays for GATE 2 (verification only, never archived). Not run: anything
+on hardware — no flash, no bench, no DDS agent, no RTK.
+
+**DERIVED — NOT FROM V1 SPEC**
+- GATE 2 needed a v1.16.2→v1.17 `SensorGps` ULog converter (2 additive fields, byte-level,
+  round-trip-verified) — without it v1.17 replay silently drops all GNSS.
+- Replay of these logs is not native EKF2 replay (`SDLOG_PROFILE=1`, no `ekf2_timestamps`) and
+  is run-to-run nondeterministic on every binary, including pre-F1.3; it is ~3× pessimistic on
+  absolute pivot wobble vs the recorded field estimate. Relative comparisons only.
+
+**Half-finished / next**
+1. Bench (spec F2/F4 + GATE 1): set `RBCLW_QPPS_MAX`, `RO_MAX_THR_SPEED`; motor/encoder signs;
+   128/128 zero; dual-antenna heading vs physical heading; keep `EKF2_WENC_CTRL=0` until
+   `EKF2_IMU_POS_*` is re-measured on the 6X mount.
+2. GATE 1: STOP / TRACK_HEADING / TRACK_RATE / PIVOT / CREEP / reverse + companion kill →
+   closes B2 rows 15/16 (`docs/contracts/F1.7_B2_firmware_decisions.md`).
+3. Field: RTK over DDS (`gps status` + FIX transition), ULog stream completeness, DDS agent
+   restart (C5).
+
+**Still open for fine tracking** (`PX4_DXP/docs/FIRMWARE_PENDING_PATCHES.md`, each confirmed
+present in v1.17 source): A1 RoboClaw serial never resyncs after a stray byte (no `tcflush`);
+A2 encoder reads every mixer cycle; **A9 `fuseBodyFrameVelocity()` refreshes the global
+velocity-fusion timers — while WENC fuses, GNSS loss is masked and the GSF yaw rescue cannot
+fire; fix before enabling WENC**; A6 zero-side-slip constraint stays on during pivots; GPS-driver
+submodule C2 (NMEA restart cycle), C3 (config spam), F7 (variance-as-σ). C1/C4/F5 are resolved
+by dropping the always-landed land-detector patch (verify F5 in the first bench log).
+Parameter-only (bench): `EKF2_GPS_P_NOISE` 0.015, `EKF2_GPS_V_NOISE` 0.05, `RO_YAW_RATE_TH` 0.5
+after F1.4B, re-measured `EKF2_IMU_POS_*` / GNSS antenna positions, `GPS_YAW_OFFSET`.
+
+**Open questions for the human**
+- `COM_OF_LOSS_T` and `COM_OBL_RC_ACT` values (left OPEN in the contract).
+- Spray valve output on the 6X (deferred; parameter only).
+- The WENC +2.3 cm GNSS-position innovation seen in replay on both v1.16.2 and v1.17: calibrate
+  `EKF2_WENC_RAD` on the new vehicle before enabling WENC.
