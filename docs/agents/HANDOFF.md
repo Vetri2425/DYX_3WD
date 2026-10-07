@@ -80,7 +80,7 @@ there is none yet.
 |---|---|
 | `Vetri2425/DYX_3WD` | public, `master`, CI 6/6 green |
 | `Vetri2425/PX4-Autopilot-3WD-Prod` | public, `dyx-3wd-production`, v1.17.0 pinned, build green |
-| `Way_to_Mark/PX4-Firmware/{3WD,4WD}/` | per-vehicle artifact archive |
+| `3WD_PROD/PX4-Firmware/3WD/` (4WD: `Way_to_Mark/PX4-Firmware/4WD/`) | per-vehicle artifact archive |
 
 **Notable result:** the firmware artifact records `git_identity = f3de5d1` — our commit, not
 the base hash. The old fork's `cp`-overlay CI made every build record `54f0455f` regardless of

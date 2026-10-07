@@ -61,7 +61,7 @@ human decision.
 |---|---|
 | This repo | `Vetri2425/DYX_3WD` — public, branch `master`, **CI green (6/6)** |
 | Firmware repo | `Vetri2425/PX4-Autopilot-3WD-Prod` — public, branch `dyx-3wd-production`, base PX4 **v1.17.0 == `d6f12ad1c4`**, first build green, pristine + CI only |
-| Artifact archive | `Way_to_Mark/PX4-Firmware/3WD/<short-sha>-<slug>/` |
+| Artifact archive | `3WD_PROD/PX4-Firmware/3WD/<short-sha>-<slug>/` |
 | Hardware | still CubeOrange+ / MAVROS in the field. **Nothing here has run on a rover.** |
 
 **Green CI proves:** all 12 packages configure and build (including `dyx3_interfaces`
