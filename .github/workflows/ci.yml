@@ -71,10 +71,36 @@ jobs:
           apt-get update -qq
           apt-get install -y -qq ros-humble-mavros-msgs
 
+      # px4_msgs generated from the PINNED FIRMWARE's msg/ + srv/ (never stock): dyx3_px4_link needs
+      # it, and the install is the same function the installer uses on the rover. Cached by pin.
+      - name: px4_msgs cache
+        id: px4cache
+        uses: actions/cache@v4
+        with:
+          path: /opt/dyx3/px4_msgs
+          key: px4_msgs-${{ runner.arch }}-${{ hashFiles('installer/pins/firmware.pin', 'installer/lib/ros_install.sh') }}
+
+      - name: build px4_msgs from the pinned firmware
+        if: steps.px4cache.outputs.cache-hit != 'true'
+        shell: bash
+        env:
+          DYX3_ALLOW_ANY_OS: "1"
+          DYX3_BUILD_JOBS: "4"
+        run: |
+          set -euo pipefail
+          apt-get update -qq
+          apt-get install -y -qq git
+          source installer/lib/common.sh
+          source installer/lib/os_check.sh
+          source installer/lib/dependencies.sh
+          source installer/lib/ros_install.sh
+          build_px4_msgs
+
       - name: colcon build
         shell: bash
         run: |
           source /opt/ros/humble/setup.bash
+          source "$(ls -d /opt/dyx3/px4_msgs/*/install | head -1)/setup.bash"
           cd ros2_ws
           colcon build --symlink-install
 
@@ -82,6 +108,7 @@ jobs:
         shell: bash
         run: |
           source /opt/ros/humble/setup.bash
+          source "$(ls -d /opt/dyx3/px4_msgs/*/install | head -1)/setup.bash"
           cd ros2_ws
           colcon test
           colcon test-result --verbose

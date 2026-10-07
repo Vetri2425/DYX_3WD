@@ -383,3 +383,31 @@ NOT run: the legacy node under rclpy with live topics; `input_shim`.
 1. Legacy decode evidence: `python3 tools/extract_legacy_decode_fixture.py <bag_dir> -o ros2_ws/src/dyx3_rpp_legacy/test/fixtures/legacy_decode_<name>.json` for a square bag (e.g. `square_20260611_*`), an arc bag and an extension line bag; then `pytest ros2_ws/src/dyx3_rpp_legacy/test/test_fixture_decode.py` (currently SKIPPED, not passing).
 2. On the Jetson: `installer/install.sh --production` and `dyx3-upgrade <ref>`; confirm `-j1` px4_msgs build time/memory; `systemctl status dyx3-platform`; `dyx3-health --deep`.
 3. Re-run the carried prototype tests: `DYX3_RUN_DXP_TESTS=1 pytest ros2_ws/src/dyx3_rpp_legacy/test/dxp_verbatim` and decide what the 7 failures mean.
+
+
+### P4 — path engine carried, `DYX3PATH 1` artifact, `dyx3_geometry`
+Path engine copied into `backend/src/dyx3_backend/path_engine/` (only the import prefix changed; `ORIGIN.sha256` + provenance test). 466 of its 509 tests
+pass; 43 (old `PathManager`) skip with a reason. Artifact (`docs/contracts/path_artifact.md`): ASCII, LF, id = sha256 of the bytes, strict decoder, atomic store.
+`dyx3_geometry`: 13 no-ROS functions; `test/gate3_equivalence_test.cpp` compares 119 147 values against the verbatim PX4_DXP ancestors (max 1.1e-13 / 2 ULP),
+unit tests 855 checks clean under ASan/UBSan. **GATE 3 is demonstrated on the Git corpus only — NOT closed:** the bag-derived poses and field missions are a LOCAL ACTION
+(`tools/extract_geometry_bag_fixture.py`, then `geometry_bag_replay_test`, currently exit 77 = SKIPPED). Fixture must be generated under **Python 3.10** (3.12 `sum()` is compensated).
+
+### P3 — `dyx3_mission`
+Contract first (`docs/contracts/dyx3_mission.md`): 8 states, transition table, never auto-resume, E-stop aborts, READY waits for the RPP ack.
+Pure-C++ FSM, SHA-256, artifact reader, point journal; thin node (action + 5 services). 5 ctest targets pass in the Humble container.
+DERIVED: `rpp_ack_timeout_s` default 0 (disabled) and RPP-staleness have no numeric source. **Open (human):** E-stop *aborts* vs *pauses*.
+
+### P7 — `dyx3_px4_link` (`dyx3_interfaces` 0.4.0)
+Contract first: `docs/contracts/dyx3_px4_link.md`. Pure core (no ROS, no px4_msgs): `message_hash`, `rover_setpoint_writer` (mapper + `CommandGate`), `dds_session`
+(per-topic staleness, #27388), `msg_version_handshake`, `offboard_heartbeat`, `vehicle_state_assembler`; one node that touches `/fmu/**`.
+Facts found in the **firmware source** that change the design (not in the spec):
+1. The handshake request must carry the **base** topic name (`/fmu/out/vehicle_status`, no `_v1`): the firmware matches the uORB name (`uxrce_dds_client.cpp:448-455`).
+2. The firmware converts timestamps in both directions inside its serialisers: the link stamps with the **Jetson system clock** and never applies `estimated_offset`.
+3. `/fmu/in` publishers are **reliable** (the XRCE agent's reader; a best-effort writer would not match) — unverifiable off-target, check with `ros2 topic info -v` at GATE 1.
+Proof: the C++ hash equals the firmware's own Python `get_message_hash` (run unmodified behind a parsing shim, `tools/px4_msg_hash/`) for **all 235 messages** of the pinned set.
+Fault-injection tests with a fake FCU: no setpoints before handshake, mismatch is loud and refuses everything, session loss re-arms the handshake, one silent topic
+forces STOP while the session stays up, guard silence -> explicit zero with the heartbeat kept, sequence reset, RTCM/ULog paths.
+CI now builds `px4_msgs` from the pinned firmware (cached) before `colcon build`.
+DERIVED: all `stale_*_s` limits and `command_max_age_s` 0.2 (from prototype `input_max_age_s`) — re-validate at GATE 4; "STOP with heartbeat kept" reading of the F1.7 obligation;
+`LOGGING_START param1=0` (firmware logger source not in the sparse checkout).
+NOT run: any DDS to a real FCU, real timesync, jitter, the kill-process stop distance (A1.1 / F5).
