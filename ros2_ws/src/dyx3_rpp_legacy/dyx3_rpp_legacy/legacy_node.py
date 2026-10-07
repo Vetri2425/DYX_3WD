@@ -40,19 +40,21 @@ class LegacyRppNode(_dxp.RPPControllerNode):
         # New parameters (they do not collide with any of the 119 inherited names).
         self.declare_parameter("output_topic", DEFAULT_OUTPUT_TOPIC)
         self.declare_parameter("output_mode", "heading")  # 'heading' | 'rate'
-        self.declare_parameter("output_pivot_enter_deg", 30.0)
-        self.declare_parameter("output_pivot_exit_deg", 5.0)
+        self.declare_parameter("output_pivot_enter_deg", 40.0)
+        self.declare_parameter("output_pivot_exit_deg", 2.0)
         self.declare_parameter("output_pivot_rate_gain", 1.5)
         self.declare_parameter("output_stop_speed_mps", 0.01)
 
         mode = str(self.get_parameter("output_mode").value)
-        if mode == "rate" and float(self.get_parameter("yaw_rate_feedback_gain").value) <= 0.0:
-            # TRACK_RATE with no heading feedback is open-loop in heading: refuse it.
-            self.get_logger().error(
-                "output_mode='rate' needs yaw_rate_feedback_gain > 0 (otherwise heading is "
-                "open-loop). Falling back to 'heading'."
-            )
+        if mode not in ("heading", "rate"):
+            self.get_logger().error(f"output_mode={mode!r} invalid; using 'heading'")
             mode = "heading"
+        # NOTE on 'rate': the prototype's yaw_rate_body is NOT open-loop. Smooth profile:
+        # omega = kappa*v with kappa = 2*y_body/L^2 (pure-pursuit curvature, a function of the
+        # current pose); segment profile: omega = segment_yaw_rate_gain*theta_e. Both are
+        # closed on the pose already, so TRACK_RATE is meaningful with
+        # yaw_rate_feedback_gain = 0. 'heading' is the default only because it reproduces the
+        # information flow that was field-proven; flip to 'rate' after GATE 1 on the bench.
         self._stage = OutputStage(
             OutputPolicy(
                 stop_speed_mps=float(self.get_parameter("output_stop_speed_mps").value),

@@ -44,22 +44,31 @@ class OutputPolicy:
 
     stop_speed_mps      0.01   prototype: PX4 P4 patch / firmware ZERO_VEL_THRESHOLD "|v| < 1 cm/s"
                                (rpp_controller_node.py module docstring; test_corner_pivot.py).
-    pivot_enter_deg     30.0   prototype docstring: "RD_TRANS_DRV_TRN (~30 deg)" — the old firmware's
-                               drive->turn spot-turn threshold. DERIVED: reused as the PIVOT entry.
-    pivot_exit_deg      5.0    prototype docstring: "RD_TRANS_TRN_DRV (~5 deg)". DERIVED: PIVOT exit.
+    pivot_enter_deg     40.0   FCU parameter RD_TRANS_DRV_TRN = 0.70 rad (40 deg) AS FLOWN: PX4_DXP
+                               params/31_07_2026_6_08pm.params and PX4_DXP CLAUDE.md. The old firmware
+                               spot-turned (zero forward throttle) above this heading error.
+                               DERIVED: reused as the PIVOT entry. NOTE the prototype source is
+                               self-inconsistent: its module docstring says ~30 deg and an inline
+                               comment says 10 deg; the as-flown parameter file is the evidence used.
+    pivot_exit_deg      2.0    FCU parameter RD_TRANS_TRN_DRV = 0.0349 rad (2 deg) as flown (same
+                               sources); also equals the prototype's segment_heading_tolerance_deg.
+                               DERIVED: PIVOT exit.
     pivot_rate_gain     1.5    RO_YAW_P = 1.5 (V1 spec 3.1 / PX4_DXP CLAUDE.md). DERIVED: reused as
                                the pivot yaw-rate P gain, so the pivot approximates the pure-P
                                yaw loop the prototype ran under.
     max_yaw_rate_radps  0.45   prototype parameter ``max_yaw_rate_body`` default (demo-ready).
     mode                'heading' | 'rate'. 'heading' reproduces the prototype information flow
-                               (a bearing, derived from the vector). 'rate' forwards the legacy
-                               feed-forward yaw rate (TRACK_RATE) — only meaningful when
-                               ``yaw_rate_feedback_gain`` > 0, else heading is open-loop.
+                               (a bearing derived from the vector; PX4 then runs a pure-P yaw loop,
+                               err ~ omega/RO_YAW_P: the structural tracking floor). 'rate' forwards
+                               the prototype's yaw rate (TRACK_RATE), which is ALREADY closed on the
+                               pose: pure-pursuit kappa*v on smooth runs, segment_yaw_rate_gain*theta_e
+                               on segment runs. This is the mode that removes the floor (spec 3.1);
+                               it is unvalidated until GATE 1.
     """
 
     stop_speed_mps: float = 0.01
-    pivot_enter_rad: float = math.radians(30.0)
-    pivot_exit_rad: float = math.radians(5.0)
+    pivot_enter_rad: float = math.radians(40.0)
+    pivot_exit_rad: float = math.radians(2.0)
     pivot_rate_gain: float = 1.5
     max_yaw_rate_radps: float = 0.45
     mode: str = "heading"

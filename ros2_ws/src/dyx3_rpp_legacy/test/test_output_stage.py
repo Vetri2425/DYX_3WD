@@ -79,7 +79,7 @@ def test_speed_is_vector_magnitude_and_never_negative():
         assert sp.speed_body_x >= 0.0  # the prototype never commands reverse
 
 
-def test_pivot_hysteresis_enter_30_exit_5():
+def test_pivot_hysteresis_enter_40_exit_2():
     st = OutputStage()
     yaw = 0.0
 
@@ -87,12 +87,12 @@ def test_pivot_hysteresis_enter_30_exit_5():
         b = D(err_deg)
         return 0.1 * math.cos(b), 0.1 * math.sin(b)  # bearing err_deg from a north-facing nose
 
-    assert st.step(*vec(29.0), 0.0, yaw).mode == MODE_TRACK_HEADING  # below enter
-    assert st.step(*vec(31.0), 0.0, yaw).mode == MODE_PIVOT  # enter
+    assert st.step(*vec(39.0), 0.0, yaw).mode == MODE_TRACK_HEADING  # below enter
+    assert st.step(*vec(41.0), 0.0, yaw).mode == MODE_PIVOT  # enter
     assert st.step(*vec(20.0), 0.0, yaw).mode == MODE_PIVOT  # latched
-    assert st.step(*vec(6.0), 0.0, yaw).mode == MODE_PIVOT  # still latched above exit
-    assert st.step(*vec(4.0), 0.0, yaw).mode == MODE_TRACK_HEADING  # exit
-    assert st.step(*vec(20.0), 0.0, yaw).mode == MODE_TRACK_HEADING  # does not re-enter below 30
+    assert st.step(*vec(3.0), 0.0, yaw).mode == MODE_PIVOT  # still latched above exit
+    assert st.step(*vec(1.5), 0.0, yaw).mode == MODE_TRACK_HEADING  # exit
+    assert st.step(*vec(20.0), 0.0, yaw).mode == MODE_TRACK_HEADING  # does not re-enter below 40
 
 
 @pytest.mark.parametrize("err_deg,sign", [(60.0, +1), (-60.0, -1)])
