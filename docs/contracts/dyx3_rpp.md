@@ -10,7 +10,7 @@ It never publishes a safety verdict; `dyx3_motion_guard` is the last authority b
 
 | Module | Content | Proof |
 |---|---|---|
-| `rpp_params` | all 119 parameters: descriptor table + index enum **generated** from `docs/tuning/parameter_registry.md` (`tools/gen_rpp_params.py --check`), structural validation, LIVE / IDLE_ONLY / RESTART enforcement, atomic batches, change journal | 6 unit tests incl. registry-vs-table comparison |
+| `rpp_params` | all 119 parameters: descriptor table + index enum **generated** from `docs/tuning/parameter_registry.md` (`tools/gen_param_tables.py --check`), structural validation, LIVE / IDLE_ONLY / RESTART enforcement, atomic batches, change journal | 6 unit tests incl. registry-vs-table comparison |
 | `guidance` | lookahead distance and low-pass, smooth arc-cut cap, smooth and segment lookahead point (collinear walk, path-end extension, corner extension), steering geometry, pivot intercept | equivalence vs the verbatim Python (`gate4`) |
 | `speed_profile` | alignment accel scale, hard-kappa latch, smooth slew, derived approach distance, lateral-acceleration law, closed/open approach scaling, P4 floor | equivalence vs the verbatim Python (statics) + definitional tests (inline smooth blocks, which the prototype does not expose as functions) |
 | `stop_pivot_fsm` | **explicit** state machine: `StopConfirm` (I3), brake (I1), `PivotWatchdog`, `CornerFsm` (TRACKING -> BRAKE -> PIVOT -> RELEASE_SETTLE -> ADVANCE, collinear shortcut, carried stop), `StopHold` (completion hold D3); every transition logged with a reason | stop confirmation (10 093 steps) and pivot watchdog (2 405 steps) replayed against the verbatim Python; FSM walk tests |
