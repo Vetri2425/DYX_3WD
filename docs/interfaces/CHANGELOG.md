@@ -25,3 +25,11 @@
 - Documented ownership: `ExecuteMission` is the canonical mission-execution
   interface; `StartMission` is an admission-only wrapper over the same
   `dyx3_mission` code path. No wire change.
+
+## 0.3.0 — 2026-10-07 (Phase 3/6 needs)
+
+- `MissionState`: appended `string path_artifact_sha256` (content hash of the loaded artifact;
+  dyx3_rpp loads the same file by this id). Appended field — existing fields unchanged.
+- New `SafetyGateStatus` (guard-owned aggregate of every gate except the mission gate; default
+  `ok = false`), `OperatorLinkStatus` (gateway-owned tablet heartbeat state; default `alive = false`),
+  `EmergencyStopState` (guard-owned latched E-stop; absence of a fresh message == asserted).

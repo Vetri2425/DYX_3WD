@@ -23,3 +23,8 @@ uint8 REASON_RTK=3
 uint8 REASON_PATH_ERROR=4
 uint8 REASON_INTERNAL_ERROR=5
 uint8 reason_code
+
+# Content hash of the loaded path artifact (docs/contracts/path_artifact.md): lowercase hex
+# sha256, empty when no mission is loaded. dyx3_rpp loads the SAME file by this id, so mission
+# and RPP can never disagree about which path is being driven.
+string path_artifact_sha256

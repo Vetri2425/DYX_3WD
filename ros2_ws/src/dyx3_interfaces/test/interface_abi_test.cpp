@@ -2,14 +2,17 @@
 
 #include "builtin_interfaces/msg/time.hpp"
 #include "dyx3_interfaces/action/execute_mission.hpp"
+#include "dyx3_interfaces/msg/emergency_stop_state.hpp"
 #include "dyx3_interfaces/msg/estimator_health.hpp"
 #include "dyx3_interfaces/msg/mission_state.hpp"
 #include "dyx3_interfaces/msg/motion_setpoint.hpp"
 #include "dyx3_interfaces/msg/motion_setpoint_status.hpp"
+#include "dyx3_interfaces/msg/operator_link_status.hpp"
 #include "dyx3_interfaces/msg/point_result.hpp"
 #include "dyx3_interfaces/msg/recorder_status.hpp"
 #include "dyx3_interfaces/msg/rpp_status.hpp"
 #include "dyx3_interfaces/msg/rtk_status.hpp"
+#include "dyx3_interfaces/msg/safety_gate_status.hpp"
 #include "dyx3_interfaces/msg/spray_state.hpp"
 #include "dyx3_interfaces/msg/vehicle_state.hpp"
 #include "dyx3_interfaces/srv/abort_mission.hpp"
@@ -120,6 +123,24 @@ TEST(EstimatorHealthAbi, DefaultIsUnhealthyByConstruction) {
   EXPECT_FLOAT_EQ(h.velocity_test_ratio, 0.0F);
 }
 
+TEST(SafetyMessagesAbi, DefaultsAreFailSafe) {
+  const dyx3_interfaces::msg::SafetyGateStatus gate{};
+  ExpectZeroTime(gate.stamp);
+  EXPECT_FALSE(gate.ok);  // no data == not safe
+  EXPECT_EQ(gate.reason_code, 0U);
+
+  const dyx3_interfaces::msg::OperatorLinkStatus link{};
+  ExpectZeroTime(link.stamp);
+  EXPECT_FALSE(link.alive);
+  EXPECT_FLOAT_EQ(link.age_s, 0.0F);
+
+  const dyx3_interfaces::msg::EmergencyStopState estop{};
+  ExpectZeroTime(estop.stamp);
+  EXPECT_FALSE(
+      estop.asserted);  // absence of a fresh message is what consumers must treat as asserted
+  EXPECT_TRUE(estop.source.empty());
+}
+
 TEST(StatusMessageAbi, ConstantsAndSafeDefaults) {
   using Rpp = dyx3_interfaces::msg::RppStatus;
   EXPECT_EQ(Rpp::STATE_IDLE, 0U);
@@ -164,6 +185,7 @@ TEST(StatusMessageAbi, ConstantsAndSafeDefaults) {
   EXPECT_EQ(mission.run_index, 0U);
   EXPECT_EQ(mission.point_index, 0U);
   EXPECT_EQ(mission.reason_code, Mission::REASON_NONE);
+  EXPECT_TRUE(mission.path_artifact_sha256.empty());
 
   using Point = dyx3_interfaces::msg::PointResult;
   EXPECT_EQ(Point::RESULT_NONE, 0U);
