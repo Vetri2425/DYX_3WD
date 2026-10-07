@@ -1,0 +1,68 @@
+# dyx3_system_gateway — contract
+
+**Status:** draft for review, written before the implementation. **Spec:** V1 §7.10, §4.3.1 (operator-link loss), R13. **Authority:** none over motion or safety.
+It is the **single ROS <-> backend boundary**: the backend (Python, no `rclpy`) talks to it over a Unix domain socket; it turns validated requests into ROS service calls and
+publishes a canonical telemetry snapshot. A backend or tablet E-stop is a **request** to `dyx3_motion_guard`; the gateway never stops anything itself. The one thing it owns
+is the **operator-link heartbeat** (§4.3.1): it publishes `OperatorLinkStatus`, and `dyx3_motion_guard` stops on `alive == false`.
+
+## 1. Transport
+
+* `SOCK_STREAM` Unix socket (`socket_path`, default `/run/dyx3/gateway.sock`, mode 0660, group `dyx3`); a stale socket file is replaced at start. At most `max_clients` (4, DERIVED) connections.
+* **Newline-delimited JSON, UTF-8**, one object per line, every message carries `"v":1`. A line longer than 64 KiB, invalid JSON, a wrong `v`, duplicate keys or trailing garbage
+  is answered `{"ok":false,"code":"bad_message"}` (the connection stays open unless the line overflows, which closes it). A client whose outbound buffer exceeds 1 MiB is dropped (slow consumer).
+* The gateway never trusts the client: every field is validated (section 3) before anything reaches ROS.
+
+### Client -> gateway
+`{"v":1,"id":<int>,"cmd":"<name>","args":{...}}`  — `id` is echoed in the reply (client-chosen, not interpreted).
+
+### Gateway -> client
+* reply: `{"v":1,"id":<id>,"ok":<bool>,"code":"<snake_case>","reason":"<text>","data":{...}}`
+* telemetry push: `{"v":1,"type":"telemetry","snapshot":{...}}` at `telemetry_hz` (5, DERIVED) to every client.
+
+## 2. Commands
+
+| `cmd` | `args` | ROS target | Notes |
+|---|---|---|---|
+| `heartbeat` | `{}` | (internal) | the tablet heartbeat relayed by the backend; see section 4 |
+| `get_snapshot` | `{}` | (internal) | reply `data` = the telemetry snapshot |
+| `start_mission` | `{"path_artifact_sha256": "<64 lowercase hex>"}` | `StartMission` | |
+| `abort_mission` | `{"reason": "operator"\|"safety"\|"unspecified"}` | `AbortMission` | |
+| `pause_mission` / `resume_mission` / `skip_point` | `{}` | `PauseMission` / `ResumeMission` / `SkipPoint` | |
+| `estop` | `{"asserted": bool, "source": "tablet"\|"backend"\|"ble"\|"physical"}` | `SetEmergencyStop` (motion_guard) | **never queued behind other commands, never rate limited** |
+| `arm` | `{"arm": bool}` | `ArmDisarm` (px4_link) | |
+| `offboard` | `{"enable": bool}` | `SetOffboard` (px4_link) | |
+| `spray_manual` | `{"on": bool}` | `SetSprayManual` (spray) | |
+
+Unknown `cmd`, unknown `args` keys, missing or wrongly typed fields -> `invalid_command`. The gateway adds **no** policy of its own (no "arm only if ..."): the safety/mission authorities
+downstream decide and their `accepted` / `reason_code` are returned verbatim in `data` (`{"accepted":..,"reason_code":..}` plus service-specific fields). If the target service is not
+available the reply is `service_unavailable` at once; if it does not answer within `service_timeout_s` (2.0, DERIVED) the reply is `timeout` — **an E-stop request that could not be delivered is reported as failed, never as accepted.**
+
+## 3. Telemetry snapshot
+
+One JSON object, assembled from the latest message of each source with its receive age. `null` = never received. Every source carries `age_s` (gateway steady clock) and `fresh`
+(age <= `snapshot_fresh_s`, default 1.0, DERIVED); a consumer must treat a stale or missing source as unknown, never as the last value. Sources: `vehicle_state`, `estimator_health`,
+`rtk_status`, `gnss_report`, `ntrip_status`, `px4_link`, `safety_gate`, `emergency_stop`, `motion_guard`, `rpp`, `mission`, `last_point_result`, `spray`, `recorder`, plus `gateway`
+(`operator_alive`, `clients`, `schema`). Field subsets are chosen for the tablet; the recorder, not the gateway, is the evidence path.
+
+## 4. Operator link (R13)
+
+`OperatorLinkStatus` is published at 10 Hz regardless of connected clients. `alive == true` iff **a client is connected AND a valid `heartbeat` command arrived within `operator_link_timeout_s`**.
+Never heard, no client, or timeout -> `alive == false`, `age_s` = time since the last heartbeat (0 when never). A dead backend therefore also reads as a dead operator link (fail-safe).
+The backend must send `heartbeat` only while the *tablet* is heartbeating to it, so a tablet WiFi dropout propagates through.
+**`operator_link_timeout_s` default 2.0 is DERIVED — NOT FROM V1 SPEC** (§4.3.1 says "design explicitly in Stage E", no number exists). **OPEN (human):** the value; too short stops the rover on WiFi
+jitter, too long drives on after a dropout (at 0.35 m/s, 2 s = 70 cm). Boot behaviour: `alive == false` until the first heartbeat, so the guard blocks motion until a tablet is present.
+
+## 5. Parameters (RESTART)
+
+`socket_path`, `max_clients` 4, `telemetry_hz` 5, `operator_link_timeout_s` 2.0, `service_timeout_s` 2.0, `snapshot_fresh_s` 1.0, `operator_link_hz` 10. Invalid values stop the node at start.
+
+## 6. Not in this package
+
+Authentication/authorisation of the tablet (backend), the REST/Socket.IO surface (backend), joystick/manual drive (**not ported, see backend questions**), BLE. The socket's file mode/group is the only
+local access control; the backend is the policy owner for who may send what.
+
+## 7. Acceptance
+
+Off-target: JSON parser (strict, duplicate keys, depth, escapes), command validation table, snapshot ageing, operator-link timing, the socket server (framing, oversized line, slow consumer, max clients,
+stale socket), and a node test with fake services (reply routing, timeout, service_unavailable, estop never reported accepted when undelivered, heartbeat -> `OperatorLinkStatus`).
+**Not provable off-target:** socket permissions under systemd, the real tablet path, latency.
