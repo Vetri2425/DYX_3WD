@@ -70,3 +70,8 @@
   `dyx3_mission` waits for) and appended `tick_state`, `segment_state` (the prototype's diagnostic codes), `spray_request` (the
   heading-gated MARK request; the valve stays owned by `dyx3_spray`), `handoff` and `rtk_reason`. Appended fields and one new constant —
   existing fields and constants unchanged; consumers of 0.7.0 are unaffected.
+
+## 0.8.1 — 2026-10-07 (comment only)
+
+- `Px4LinkStatus.handshake_ok`: the comment said a mismatch is "permanent for the process lifetime"; the implementation re-runs the handshake when the
+  session resets. Comment corrected; no field or constant changed.

@@ -5,8 +5,9 @@ builtin_interfaces/Time stamp
 # True while /fmu/out/timesync_status is fresh: the uXRCE-DDS session to the FCU is alive.
 bool session_alive
 # True once EVERY used topic's message hash reported by the firmware equals the hash computed from
-# the installed px4_msgs definitions (architecture 4.6). False until proven. A mismatch is permanent
-# for the process lifetime: fix px4_msgs, restart.
+# the installed px4_msgs definitions (architecture 4.6). False until proven. A mismatch does not clear
+# by itself: the handshake is re-run when the uXRCE-DDS session resets (an FCU reboot), and a hash that
+# still differs stays false. Fix px4_msgs and restart; never accept a mismatch.
 bool handshake_ok
 # True while the offboard heartbeat (OffboardControlMode) is being published.
 bool offboard_heartbeat_active
