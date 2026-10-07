@@ -20,6 +20,10 @@ constexpr uint8_t kArmed = 2;                // ARMING_STATE_ARMED
 constexpr uint32_t kCmdDoSetMode = 176;      // VEHICLE_CMD_DO_SET_MODE
 constexpr uint32_t kCmdArmDisarm = 400;      // VEHICLE_CMD_COMPONENT_ARM_DISARM
 constexpr uint32_t kCmdLoggingStart = 2510;  // VEHICLE_CMD_LOGGING_START
+constexpr uint32_t kCmdDoSetServo = 183;     // VEHICLE_CMD_DO_SET_SERVO
+constexpr uint32_t kCmdDoSetActuator = 187;  // VEHICLE_CMD_DO_SET_ACTUATOR
+constexpr size_t kMaxSprayPending = 16;
+constexpr double kSprayPendingMaxAgeS = 5.0;
 
 struct UsedTopic {
   const char* request_name;  // BASE topic name: the firmware matches the uORB name, no _vN suffix
@@ -41,6 +45,7 @@ const UsedTopic kUsedTopics[] = {
     {"/fmu/out/estimator_status_flags", "EstimatorStatusFlags"},
     {"/fmu/out/vehicle_gps_position", "SensorGps"},
     {"/fmu/out/ulog_stream", "UlogStream"},
+    {"/fmu/out/vehicle_command_ack", "VehicleCommandAck"},
 };
 
 double steady_now_s() {
@@ -190,6 +195,10 @@ Px4LinkNode::Px4LinkNode(const rclcpp::NodeOptions& options, ClockFn clock, bool
         pub_chunk_->publish(c);
       });
 
+  sub_cmd_ack_ = create_subscription<px4_msgs::msg::VehicleCommandAck>(
+      "/fmu/out/vehicle_command_ack", sensor,
+      [this](px4_msgs::msg::VehicleCommandAck::ConstSharedPtr m) { on_vehicle_command_ack(*m); });
+
   // --- repo interfaces
   pub_state_ = create_publisher<dyx3_interfaces::msg::VehicleState>("/dyx3/vehicle_state",
                                                                     rclcpp::QoS(1).reliable());
@@ -231,6 +240,14 @@ Px4LinkNode::Px4LinkNode(const rclcpp::NodeOptions& options, ClockFn clock, bool
         g.flags = m->flags;
         std::copy(m->data.begin(), m->data.end(), g.data.begin());
         pub_gps_inject_->publish(g);
+      });
+
+  pub_spray_ack_ = create_publisher<dyx3_interfaces::msg::SprayActuatorAck>(
+      "/dyx3/spray/actuator_ack", rclcpp::QoS(16).reliable());
+  sub_spray_ = create_subscription<dyx3_interfaces::msg::SprayActuatorCommand>(
+      "/dyx3/spray/actuator_command", rclcpp::QoS(16).reliable(),
+      [this](dyx3_interfaces::msg::SprayActuatorCommand::ConstSharedPtr m) {
+        on_spray_command(*m);
       });
 
   srv_arm_ = create_service<ArmSrv>(
@@ -420,6 +437,77 @@ void Px4LinkNode::publish_vehicle_command(uint32_t command, float p1, float p2, 
   pub_cmd_->publish(c);
 }
 
+void Px4LinkNode::on_spray_command(const dyx3_interfaces::msg::SprayActuatorCommand& m) {
+  using Cmd = dyx3_interfaces::msg::SprayActuatorCommand;
+  dyx3_interfaces::msg::SprayActuatorAck refuse;
+  refuse.stamp = ros_now();
+  refuse.seq = m.seq;
+  refuse.source = m.source;
+  refuse.success = false;
+  refuse.result = dyx3_interfaces::msg::SprayActuatorAck::RESULT_LINK_REFUSED;
+  // The VehicleCommand format must be proven identical on both sides and the session alive:
+  // otherwise refuse AT ONCE so the sender's FSM takes its failure path (a forced OFF retries, an
+  // ON is never latched) instead of waiting for a timeout.
+  if (handshake_->state() != HandshakeState::Ok || !last_rep_.session_alive) {
+    pub_spray_ack_->publish(refuse);
+    return;
+  }
+  px4_msgs::msg::VehicleCommand c;
+  c.timestamp = stamp_us();
+  c.target_system = 1;
+  c.target_component = 1;
+  c.source_system = 1;
+  c.source_component = 1;
+  c.from_external = true;
+  uint32_t command;
+  if (m.backend == Cmd::BACKEND_SERVO_PWM) {
+    const uint16_t pwm = std::min<uint16_t>(m.pwm_us, 2200);  // _SERVO_PWM_MAX_US of the prototype
+    command = kCmdDoSetServo;
+    c.command = command;
+    c.param1 = static_cast<float>(m.servo_instance);
+    c.param2 = static_cast<float>(pwm);
+    c.param3 = c.param4 = 0.0F;
+    c.param5 = c.param6 = 0.0;
+    c.param7 = 0.0F;
+  } else if (m.backend == Cmd::BACKEND_ACTUATOR && m.actuator_set_index >= 1 &&
+             m.actuator_set_index <= 6 && std::isfinite(m.value)) {
+    command = kCmdDoSetActuator;
+    c.command = command;
+    float p[6] = {kNaN, kNaN, kNaN, kNaN, kNaN, kNaN};
+    p[m.actuator_set_index - 1] = m.value;
+    c.param1 = p[0];
+    c.param2 = p[1];
+    c.param3 = p[2];
+    c.param4 = p[3];
+    c.param5 = static_cast<double>(p[4]);
+    c.param6 = static_cast<double>(p[5]);
+    c.param7 = 0.0F;
+  } else {
+    pub_spray_ack_->publish(refuse);  // an uninterpretable request is never sent
+    return;
+  }
+  pub_cmd_->publish(c);
+  spray_pending_.push_back({command, m.seq, m.source, clock_()});
+  while (spray_pending_.size() > kMaxSprayPending) spray_pending_.pop_front();
+}
+
+void Px4LinkNode::on_vehicle_command_ack(const px4_msgs::msg::VehicleCommandAck& a) {
+  if (a.result == px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_IN_PROGRESS)
+    return;  // wait for the final result
+  for (auto it = spray_pending_.begin(); it != spray_pending_.end(); ++it) {
+    if (it->command != a.command) continue;
+    dyx3_interfaces::msg::SprayActuatorAck out;
+    out.stamp = ros_now();
+    out.seq = it->seq;
+    out.source = it->source;
+    out.success = a.result == px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_ACCEPTED;
+    out.result = a.result;
+    spray_pending_.erase(it);
+    pub_spray_ack_->publish(out);
+    return;  // FIFO: the oldest pending command with this id
+  }
+}
+
 void Px4LinkNode::start_ulog_if_due(double /*now_s*/, bool link_ok) {
   if (!p_.ulog_streaming_enabled || !link_ok) return;
   if (ulog_started_ && last_ulog_gen_ == handshake_->generation()) return;
@@ -436,6 +524,8 @@ void Px4LinkNode::step(double now_s) {
   if (last_step_s_ >= 0.0 && now_s - last_step_s_ > 1.5 * period) ++overruns_;
   last_step_s_ = now_s;
 
+  while (!spray_pending_.empty() && now_s - spray_pending_.front().sent_s > kSprayPendingMaxAgeS)
+    spray_pending_.pop_front();
   last_rep_ = mon_->evaluate(now_s);
   if (mon_->consume_reset()) {
     handshake_->rearm();  // possibly a different firmware on the other side

@@ -13,6 +13,8 @@
 #include "dyx3_interfaces/msg/motion_setpoint.hpp"
 #include "dyx3_interfaces/msg/px4_link_status.hpp"
 #include "dyx3_interfaces/msg/rtcm_data.hpp"
+#include "dyx3_interfaces/msg/spray_actuator_ack.hpp"
+#include "dyx3_interfaces/msg/spray_actuator_command.hpp"
 #include "dyx3_interfaces/msg/ulog_chunk.hpp"
 #include "dyx3_interfaces/msg/vehicle_state.hpp"
 #include "dyx3_interfaces/srv/arm_disarm.hpp"
@@ -37,6 +39,7 @@
 #include "px4_msgs/msg/ulog_stream_ack.hpp"
 #include "px4_msgs/msg/vehicle_attitude.hpp"
 #include "px4_msgs/msg/vehicle_command.hpp"
+#include "px4_msgs/msg/vehicle_command_ack.hpp"
 #include "px4_msgs/msg/vehicle_local_position.hpp"
 #include "px4_msgs/msg/vehicle_status.hpp"
 #include "rclcpp/rclcpp.hpp"
@@ -94,6 +97,8 @@ private:
   void publish_state_and_health(double now_s);
   void service_pending(double now_s, bool link_healthy, const OffboardStep& ofb);
   void start_ulog_if_due(double now_s, bool link_ok);
+  void on_spray_command(const dyx3_interfaces::msg::SprayActuatorCommand& m);
+  void on_vehicle_command_ack(const px4_msgs::msg::VehicleCommandAck& a);
 
   ClockFn clock_;
   LinkParams p_;
@@ -126,6 +131,13 @@ private:
   bool ulog_started_{false};
   uint64_t last_ulog_gen_{~0ULL};
   std::deque<Pending> pending_;
+  struct SprayPending {
+    uint32_t command;  // MAVLink command id the ack will name
+    uint32_t seq;
+    uint8_t source;
+    double sent_s;
+  };
+  std::deque<SprayPending> spray_pending_;
 
   // /fmu publishers
   rclcpp::Publisher<px4_msgs::msg::OffboardControlMode>::SharedPtr pub_ocm_;
@@ -146,6 +158,7 @@ private:
   rclcpp::Subscription<px4_msgs::msg::SensorGps>::SharedPtr sub_gps_;
   rclcpp::Subscription<px4_msgs::msg::MessageFormatResponse>::SharedPtr sub_fmt_resp_;
   rclcpp::Subscription<px4_msgs::msg::UlogStream>::SharedPtr sub_ulog_;
+  rclcpp::Subscription<px4_msgs::msg::VehicleCommandAck>::SharedPtr sub_cmd_ack_;
   // repo interfaces
   rclcpp::Publisher<dyx3_interfaces::msg::VehicleState>::SharedPtr pub_state_;
   rclcpp::Publisher<dyx3_interfaces::msg::EstimatorHealth>::SharedPtr pub_health_;
@@ -154,6 +167,8 @@ private:
   rclcpp::Publisher<dyx3_interfaces::msg::UlogChunk>::SharedPtr pub_chunk_;
   rclcpp::Subscription<dyx3_interfaces::msg::MotionSetpoint>::SharedPtr sub_cmd_;
   rclcpp::Subscription<dyx3_interfaces::msg::RtcmData>::SharedPtr sub_rtcm_;
+  rclcpp::Subscription<dyx3_interfaces::msg::SprayActuatorCommand>::SharedPtr sub_spray_;
+  rclcpp::Publisher<dyx3_interfaces::msg::SprayActuatorAck>::SharedPtr pub_spray_ack_;
   rclcpp::Service<ArmSrv>::SharedPtr srv_arm_;
   rclcpp::Service<OffSrv>::SharedPtr srv_off_;
 };

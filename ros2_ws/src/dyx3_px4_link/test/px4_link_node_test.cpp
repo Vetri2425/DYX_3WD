@@ -43,7 +43,8 @@ const std::map<std::string, std::string> kTopicType = {
     {"/fmu/out/vehicle_attitude", "VehicleAttitude"},
     {"/fmu/out/estimator_status_flags", "EstimatorStatusFlags"},
     {"/fmu/out/vehicle_gps_position", "SensorGps"},
-    {"/fmu/out/ulog_stream", "UlogStream"}};
+    {"/fmu/out/ulog_stream", "UlogStream"},
+    {"/fmu/out/vehicle_command_ack", "VehicleCommandAck"}};
 
 void init_ctx(const std::shared_ptr<rclcpp::Context>& ctx) {
   rclcpp::InitOptions io;
@@ -67,6 +68,9 @@ struct Rig {
   rclcpp::Publisher<px4_msgs::msg::SensorGps>::SharedPtr p_gps;
   rclcpp::Publisher<px4_msgs::msg::MessageFormatResponse>::SharedPtr p_resp;
   rclcpp::Publisher<px4_msgs::msg::UlogStream>::SharedPtr p_ulog;
+  rclcpp::Publisher<px4_msgs::msg::VehicleCommandAck>::SharedPtr p_ack;
+  rclcpp::Publisher<dyx3_interfaces::msg::SprayActuatorCommand>::SharedPtr p_spray;
+  std::vector<dyx3_interfaces::msg::SprayActuatorAck> spray_acks;
   rclcpp::Publisher<dyx3_interfaces::msg::MotionSetpoint>::SharedPtr p_cmd;
   rclcpp::Publisher<dyx3_interfaces::msg::RtcmData>::SharedPtr p_rtcm;
   // recorded /fmu/in
@@ -127,6 +131,15 @@ struct Rig {
         "/fmu/out/message_format_response", rclcpp::QoS(10).best_effort());
     p_ulog = fcu->create_publisher<px4_msgs::msg::UlogStream>("/fmu/out/ulog_stream",
                                                               rclcpp::QoS(16).reliable());
+    p_ack = fcu->create_publisher<px4_msgs::msg::VehicleCommandAck>("/fmu/out/vehicle_command_ack",
+                                                                    sensor);
+    p_spray = fcu->create_publisher<dyx3_interfaces::msg::SprayActuatorCommand>(
+        "/dyx3/spray/actuator_command", rclcpp::QoS(16).reliable());
+    keep.push_back(fcu->create_subscription<dyx3_interfaces::msg::SprayActuatorAck>(
+        "/dyx3/spray/actuator_ack", rclcpp::QoS(16).reliable(),
+        [this](dyx3_interfaces::msg::SprayActuatorAck::ConstSharedPtr m) {
+          spray_acks.push_back(*m);
+        }));
     p_cmd = fcu->create_publisher<dyx3_interfaces::msg::MotionSetpoint>(
         "/dyx3/motion_guard/command", rclcpp::QoS(1).reliable());
     p_rtcm = fcu->create_publisher<dyx3_interfaces::msg::RtcmData>("/dyx3/rtcm",
@@ -586,6 +599,99 @@ TEST(Px4LinkNode, RtcmForwardedOnlyWhenLinkHealthyAndNeverTruncated) {
   r.p_rtcm->publish(d);
   r.pump(100);
   EXPECT_EQ(r.inject.size(), 1U);  // oversize rejected, not truncated
+}
+
+TEST(Px4LinkNode, SprayActuatorCommandsBecomeVehicleCommandsAndFcuAcksAreMapped) {
+  Rig r;
+  r.bring_up();
+  r.run(0.2);
+  r.clear();
+  dyx3_interfaces::msg::SprayActuatorCommand m;
+  m.seq = 41;
+  m.source = dyx3_interfaces::msg::SprayActuatorCommand::SOURCE_CONTROLLER;
+  m.backend = dyx3_interfaces::msg::SprayActuatorCommand::BACKEND_ACTUATOR;
+  m.on = true;
+  m.actuator_set_index = 2;
+  m.value = 0.7F;
+  r.p_spray->publish(m);
+  r.pump(150);
+  int n187 = 0;
+  for (const auto& c : r.cmds) {
+    if (c.command != 187) continue;
+    ++n187;
+    EXPECT_TRUE(std::isnan(c.param1));  // only the chosen slot carries a value
+    EXPECT_FLOAT_EQ(c.param2, 0.7F);
+    EXPECT_TRUE(std::isnan(c.param3));
+    EXPECT_TRUE(std::isnan(c.param4));
+  }
+  EXPECT_EQ(n187, 1);
+  EXPECT_TRUE(r.spray_acks.empty());  // no ack until the FCU answers
+  px4_msgs::msg::VehicleCommandAck a;
+  a.command = 187;
+  a.result = px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_IN_PROGRESS;
+  r.p_ack->publish(a);
+  r.pump(100);
+  EXPECT_TRUE(r.spray_acks.empty());  // in progress is not a result
+  a.result = px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_ACCEPTED;
+  r.p_ack->publish(a);
+  r.pump(150);
+  ASSERT_EQ(r.spray_acks.size(), 1U);
+  EXPECT_EQ(r.spray_acks[0].seq, 41U);
+  EXPECT_TRUE(r.spray_acks[0].success);
+  // servo backend and a rejected result
+  m.seq = 42;
+  m.backend = dyx3_interfaces::msg::SprayActuatorCommand::BACKEND_SERVO_PWM;
+  m.servo_instance = 3;
+  m.pwm_us = 60000;  // out of range: clamped to 2200
+  r.p_spray->publish(m);
+  r.pump(150);
+  bool saw_servo = false;
+  for (const auto& c : r.cmds) {
+    if (c.command == 183) {
+      saw_servo = true;
+      EXPECT_FLOAT_EQ(c.param1, 3.0F);
+      EXPECT_FLOAT_EQ(c.param2, 2200.0F);
+    }
+  }
+  EXPECT_TRUE(saw_servo);
+  a.command = 183;
+  a.result = px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_DENIED;
+  r.p_ack->publish(a);
+  r.pump(150);
+  ASSERT_EQ(r.spray_acks.size(), 2U);
+  EXPECT_EQ(r.spray_acks[1].seq, 42U);
+  EXPECT_FALSE(r.spray_acks[1].success);
+}
+
+TEST(Px4LinkNode, SprayCommandIsRefusedAtOnceWhenTheLinkIsNotProven) {
+  Rig r;
+  r.fcu_answers_handshake = false;
+  r.run(0.3);
+  dyx3_interfaces::msg::SprayActuatorCommand m;
+  m.seq = 7;
+  m.source = dyx3_interfaces::msg::SprayActuatorCommand::SOURCE_WATCHDOG;
+  m.on = false;
+  m.actuator_set_index = 1;
+  m.value = -1.0F;
+  r.p_spray->publish(m);
+  r.pump(200);
+  ASSERT_EQ(r.spray_acks.size(), 1U);
+  EXPECT_FALSE(r.spray_acks[0].success);
+  EXPECT_EQ(r.spray_acks[0].result, dyx3_interfaces::msg::SprayActuatorAck::RESULT_LINK_REFUSED);
+  EXPECT_EQ(r.spray_acks[0].source, dyx3_interfaces::msg::SprayActuatorCommand::SOURCE_WATCHDOG);
+  for (const auto& c : r.cmds) EXPECT_NE(c.command, 187U);  // nothing was sent to the FCU
+  // an uninterpretable request is never sent either
+  r.fcu_answers_handshake = true;
+  r.bring_up();
+  r.run(0.2);
+  r.clear();
+  r.spray_acks.clear();
+  m.actuator_set_index = 9;  // out of range
+  r.p_spray->publish(m);
+  r.pump(200);
+  ASSERT_EQ(r.spray_acks.size(), 1U);
+  EXPECT_FALSE(r.spray_acks[0].success);
+  for (const auto& c : r.cmds) EXPECT_NE(c.command, 187U);
 }
 
 TEST(Px4LinkNode, EstimatorHealthDefaultsUnhealthyUntilFlagsArrive) {
