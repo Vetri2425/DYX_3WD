@@ -15,6 +15,7 @@ It never publishes a safety verdict; `dyx3_motion_guard` is the last authority b
 | `speed_profile` | alignment accel scale, hard-kappa latch, smooth slew, derived approach distance, lateral-acceleration law, closed/open approach scaling, P4 floor | equivalence vs the verbatim Python (statics) + definitional tests (inline smooth blocks, which the prototype does not expose as functions) |
 | `stop_pivot_fsm` | **explicit** state machine: `StopConfirm` (I3), brake (I1), `PivotWatchdog`, `CornerFsm` (TRACKING -> BRAKE -> PIVOT -> RELEASE_SETTLE -> ADVANCE, collinear shortcut, carried stop), `StopHold` (completion hold D3); every transition logged with a reason | stop confirmation (10 093 steps) and pivot watchdog (2 405 steps) replayed against the verbatim Python; FSM walk tests |
 | `terminal` | closed-run test, min travel, path progress, tail transit, remaining-along, effective goal tolerance, endpoint-capture recovery (wide miss refused) | equivalence vs the verbatim Python |
+| `path_conditioner` | `condition_path` = the whole run-building of `_path_cb`: split by flag, absorb short connectors, split at corners, merge collinear (profile-aware), classify, per-run segment simplification (angle + Douglas-Peucker + must-hit) or smooth (corner arcs + resample), closed-run test, sliver drop. Must-hit travels by 1 mm coordinate key. | 1 986+ cases incl. 182 end-to-end `_path_cb` calls vs the verbatim Python (`tools/gate4/gen_conditioner_vectors.py`); point selection, run structure, profile and flags match exactly, coordinates to 1e-9; five mutations caught (must-hit, DP threshold, dual-corner gate, arc skip rule, 5 cm sliver) |
 | `motion_output` | **rewritten**, not ported: STOP / TRACK_HEADING / TRACK_RATE / PIVOT / CREEP builders, signed reverse with the nose held, fail-to-zero sanitiser | contract tests |
 
 Equivalence vectors (`test/fixtures/gate4_rpp_vectors.txt`, 3.9 MB) are produced by running the carried,
@@ -28,9 +29,6 @@ This is **module-level** proof on synthetic and archived-mission inputs; the fie
 
 * **Orchestrator** (`RppCore::tick`): the 50 Hz control loop (`_control_loop_impl`, `_control_segment_profile`),
   its ordering (pose/RTK/jump gates, goal test, holds), per-run reset (`_apply_run`), `run_sequencer`.
-* **Path conditioner**: `_simplify_path_for_profile`, `_split_runs_by_flag`, `_merge_collinear_runs`,
-  `_absorb_short_connectors`, `_split_run_at_corners`, `_resample_path`, `_smooth_corners` (the geometry
-  library has resample and curvature; the conditioner itself is not ported).
 * **`rpp_node`** (ROS wiring, artifact loading by id, `RppStatus` with loop-jitter measurement) and the
   **spray gate** interface to `dyx3_spray`.
 * Features not ported: point hold, point handshake, precise point stop, endpoint precise-stop tick, entry
