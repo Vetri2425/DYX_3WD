@@ -34,6 +34,10 @@ target_link_libraries(mission_node dyx3_mission_node_lib)
 
 install(DIRECTORY include/ DESTINATION include)
 install(TARGETS mission_node DESTINATION lib/${PROJECT_NAME})
+# The artifact reader is exported so dyx3_spray reads the SAME content-addressed file the mission loads (one reader).
+install(TARGETS dyx3_mission_core EXPORT export_dyx3_mission_core
+  ARCHIVE DESTINATION lib LIBRARY DESTINATION lib RUNTIME DESTINATION bin INCLUDES DESTINATION include)
+ament_export_targets(export_dyx3_mission_core HAS_LIBRARY_TARGET)
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)

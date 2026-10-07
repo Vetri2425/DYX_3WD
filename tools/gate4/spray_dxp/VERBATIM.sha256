@@ -1,0 +1,9 @@
+# sha256  file. Source: Vetri2425/PX4_DXP branch build/demo-ready @ fc6436b72107f7a6a027e790019f8c70fd46ea30 (src/<file>.py, byte-for-byte).
+# EVIDENCE ONLY: loaded by tools/gate4/gen_spray_vectors.py to produce C++ test vectors. Never imported by a ROS package. Edit NOTHING here.
+2122c8162f894b0b513778c20f5bd35d9d1e833c8a987a55084e4ee59491e9a7  spray_controller_node.py
+0e4352fb684cc880028ca326d5617577037aeb8ceb00f98242890ce1bbeff177  spray_flow_model.py
+a0c5c640c86b135f3ce06812c7ed4d4c949db58ea7594019420569d87f9057e0  spray_fsm.py
+d2fe63274273ba4a2f5a6ab437f678e5d7ddc63ec5f06306a7292033899f5291  spray_modes.py
+7b72d34dcc7199beadc7122c34476296910243324fab14362aa280a41e355231  spray_safety_lease.py
+cc97a3fae330ea66bd391799a3ee86b9e89367ca51cdf2ce421873df6e4a553a  spray_session_config.py
+a07b54aa4b56f8116fb1181fa3205400d7ad7ff0273e61246e12983154120266  spray_status.py

@@ -2,12 +2,15 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>dyx3_spray</name>
-  <version>0.0.0</version>
-  <description>Marking actuator with geometric boundary semantics. FSM, safety lease, flow model, session config. The independent safety watchdog is a SEPARATE process.</description>
+  <version>0.1.0</version>
+  <description>Marking actuator with geometric boundary semantics. FSM, safety lease, flow model, boundary projection, gate stack. The independent safety watchdog is a SEPARATE process.</description>
   <maintainer email="vetri96anitha@gmail.com">Vetri</maintainer>
   <license>Proprietary</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>rclcpp</depend>
+  <depend>dyx3_interfaces</depend>
+  <depend>dyx3_mission</depend>
 
   <test_depend>ament_cmake_gtest</test_depend>
 
