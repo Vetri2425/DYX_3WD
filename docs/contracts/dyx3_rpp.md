@@ -16,7 +16,7 @@ It never publishes a safety verdict; `dyx3_motion_guard` is the last authority b
 | `stop_pivot_fsm` | **explicit** state machine: `StopConfirm` (I3), brake (I1), `PivotWatchdog`, `CornerFsm` (TRACKING -> BRAKE -> PIVOT -> RELEASE_SETTLE -> ADVANCE, collinear shortcut, carried stop), `StopHold` (completion hold D3); every transition logged with a reason | stop confirmation (10 093 steps) and pivot watchdog (2 405 steps) replayed against the verbatim Python; FSM walk tests |
 | `terminal` | closed-run test, min travel, path progress, tail transit, remaining-along, effective goal tolerance, endpoint-capture recovery (wide miss refused) | equivalence vs the verbatim Python |
 | `path_conditioner` | `condition_path` = the whole run-building of `_path_cb`: split by flag, absorb short connectors, split at corners, merge collinear (profile-aware), classify, per-run segment simplification (angle + Douglas-Peucker + must-hit) or smooth (corner arcs + resample), closed-run test, sliver drop. Must-hit travels by 1 mm coordinate key. | 1 986+ cases incl. 182 end-to-end `_path_cb` calls vs the verbatim Python (`tools/gate4/gen_conditioner_vectors.py`); point selection, run structure, profile and flags match exactly, coordinates to 1e-9; five mutations caught (must-hit, DP threshold, dual-corner gate, arc skip rule, 5 cm sliver) |
-| `rpp_core` (orchestrator, first slice) | `RppCore::tick`: pose/RTK/jump gates, goal test, smooth and segment tracking, per-run reset; the stop/pivot machines are handed off (publish zero, report which) — see `rpp_orchestrator.md` | tick-by-tick against the REAL carried node (`tools/gate4/gen_orchestrator_vectors.py`): 81 episodes, 8 338 ticks, 0 mismatches; about 30 mutations checked, survivors listed |
+| `rpp_core` (orchestrator) | `RppCore::tick`: pose/RTK/jump gates, goal test, smooth and segment tracking, per-run reset, and the whole stop/pivot flow (corner pivot, run boundary, entry alignment, endpoint precise stop, completion hold) through `stop_pivot_fsm` with the prototype's shared stop confirmation — see `rpp_orchestrator.md`. Only the point hold is a handoff (publishes zero) | tick-by-tick against the REAL carried node (`tools/gate4/gen_orchestrator_vectors.py`): 97 episodes, 13 166 ticks, 0 mismatches; about 45 mutations checked, survivors listed |
 | `motion_output` | **rewritten**, not ported: STOP / TRACK_HEADING / TRACK_RATE / PIVOT / CREEP builders, signed reverse with the nose held, fail-to-zero sanitiser | contract tests |
 
 Equivalence vectors (`test/fixtures/gate4_rpp_vectors.txt`, 3.9 MB) are produced by running the carried,
@@ -28,15 +28,14 @@ This is **module-level** proof on synthetic and archived-mission inputs; the fie
 
 ## 2. What is NOT built (do not read the package as a replacement for `dyx3_rpp_legacy` yet)
 
-* **The stop/pivot half of the orchestrator**: run-boundary hold, completion hold, endpoint precise stop, corner stop-and-pivot, run
-  entry alignment, point hold. `RppCore` reaches each of them, publishes zero and reports which one (`rpp_orchestrator.md`); the explicit
-  `stop_pivot_fsm` is the replacement to wire in. A C++ run therefore stops at the first corner, the first run boundary and the end.
-* `run_sequencer`, **`rpp_node`** (ROS wiring, artifact loading by id, `RppStatus` with loop-jitter measurement) and the **spray gate**
-  interface to `dyx3_spray` (`_gate_spray` itself is in `RppCore`).
+* The **point hold** (`point_hold_enabled`): `RppCore` publishes zero and reports it (`rpp_orchestrator.md`).
+* `run_sequencer`, **`rpp_node`** (ROS wiring, artifact loading by id, `MotionSetpoint` selection from `TickOutput::cmd`, `RppStatus` with
+  loop-jitter measurement) and the **spray gate** interface to `dyx3_spray` (`_gate_spray` itself is in `RppCore`).
 * Features not ported: point handshake, precise point stop, progress publication.
+* Nothing here has run on a rover, and the closed-loop rover model behind the proof is a stand-in: real-bag replay is a LOCAL ACTION.
 
-Until the orchestrator is complete the precision path on a rover is `dyx3_rpp_legacy` (quarantined, GATE 7 deletes it).
-The C++ modules above are the building blocks the shadow-run oracle will validate tick by tick.
+Until the node exists the precision path on a rover is `dyx3_rpp_legacy` (quarantined, GATE 7 deletes it).
+`RppCore` is the thing the shadow-run oracle compares tick by tick.
 
 ## 3. DERIVED — NOT FROM V1 SPEC
 

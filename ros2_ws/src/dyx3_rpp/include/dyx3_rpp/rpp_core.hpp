@@ -4,13 +4,14 @@
 // the verbatim Python (test/orchestrator_equivalence_test.cpp,
 // tools/gate4/gen_orchestrator_vectors.py).
 //
-// SCOPE OF THIS SLICE (see the contract, section 2): everything that decides a velocity while the
-// rover TRACKS a run, plus the gates in front of it (pose staleness and extrapolation, RTK gate
-// with recovery hold, EKF jump guard with reset compensation, goal test) and the state each tick
-// leaves behind. The stop/pivot machines (run-boundary hold, completion hold, endpoint precise
-// stop, corner stop-and-pivot, run entry alignment, point hold) are NOT ported here: the tick that
-// would enter one publishes ZERO and reports which machine it was (TickOutput::handoff). Fail to
-// zero, never to a guess.
+// SCOPE: the gates in front of the controller (pose staleness and extrapolation, RTK gate with
+// recovery hold, EKF jump guard with reset compensation), projection, the goal test, the smooth and
+// segment tracking laws, the corner stop-and-pivot, the run-boundary hold, the run-entry alignment
+// pivot, the endpoint precise stop and the completion hold (the explicit machines of
+// stop_pivot_fsm, sharing ONE stop confirmation as the prototype does), and the state each tick
+// leaves behind. NOT ported: the point hold (any value of point_hold_enabled), the point handshake,
+// progress publication. A tick that would enter the point hold publishes ZERO and says so
+// (TickOutput::handoff). Fail to zero, never to a guess.
 #pragma once
 
 #include <array>
@@ -23,6 +24,7 @@
 #include "dyx3_geometry/project_onto_path.hpp"
 #include "dyx3_rpp/path_conditioner.hpp"
 #include "dyx3_rpp/rpp_params.hpp"
+#include "dyx3_rpp/stop_pivot_fsm.hpp"
 
 namespace dyx3_rpp {
 
@@ -47,17 +49,23 @@ enum class SegState : int {
   CornerStop = 5
 };
 
-// The stop/pivot machines this slice does not run. None means the tick was fully handled here.
+// A feature this orchestrator does not run. None means the tick was fully handled here.
 enum class Handoff : uint8_t {
   None = 0,
-  RunAlignment,         // _run_alignment_hold: a pivot toward the run's first leg is pending
-  PointHold,            // point_hold_enabled (default OFF in the prototype)
-  RunBoundaryHold,      // _run_boundary_stop_pending / reaching the end of a non-final run
-  CompletionHold,       // _completion_stop_pending / reaching the end of the final run
-  EndpointPreciseStop,  // _segment_endpoint_precise_stop_tick engaged
-  CornerStopPivot,      // a hard corner inside the acceptance radius
+  PointHold,  // point_hold_enabled (default OFF in the prototype)
 };
 const char* to_string(Handoff h);
+
+// What the tick asks the vehicle to do, in the controller's own vocabulary (the legacy velocity
+// vector below is the prototype's encoding of the same decision; the node maps this to
+// MotionSetpoint modes).
+enum class CmdKind : uint8_t {
+  Stop = 0,  // zero speed, zero rate
+  Track,     // follow: the NED velocity vector (v_n, v_e) with the body yaw rate
+  Brake,     // active body-axis brake: signed speed along the nose (brake_speed)
+  Pivot,     // in-place turn toward the exit heading (pivot_heading_err, wrapped target - yaw)
+};
+const char* to_string(CmdKind k);
 
 // Why the RTK gate refused (the prototype returned a free-text reason).
 enum class RtkReason : uint8_t {
@@ -96,6 +104,11 @@ struct TickOutput {
   // tick).
   double v_n{0}, v_e{0}, yaw_rate{0};
   StateCode state{StateCode::Idle};
+  CmdKind cmd{CmdKind::Stop};
+  double brake_speed{0.0};  // CmdKind::Brake: signed speed along the nose (+ forward, - reverse)
+  double pivot_heading_err{0.0};  // CmdKind::Pivot: wrapped (target heading - yaw), rad
+  double pivot_speed_memory{
+      0.0};  // CmdKind::Pivot: the prototype's corner speed (the vector magnitude)
   Handoff handoff{Handoff::None};
   RtkReason rtk_reason{RtkReason::Ok};
   bool velocity_published{
@@ -126,6 +139,9 @@ struct CoreState {
   double last_pos_n, last_pos_e;
   int segment_state;
   bool rtk_recovering;
+  bool run_boundary_stop_pending, completion_stop_pending, endpoint_stop_active,
+      corner_stop_complete;
+  double run_align_turn_rad;
 };
 
 class RppCore {
@@ -167,11 +183,25 @@ private:
 
   // ---- front end ----
   bool vel_is_fresh(int64_t now_ns) const;
-  bool precise_stop_engages(double pos_n, double pos_e, int64_t now_ns) const;
   double measured_speed(int64_t now_ns) const;
   bool rtk_gate(int64_t now_ns, RtkReason* reason);
-  void apply_run(int idx);
-  bool advance_run();
+  void apply_run(int idx, bool pre_stopped = false);
+  bool advance_run(bool pre_stopped = false);
+  StopTelemetry telemetry(int64_t now_ns, double yaw_ned) const;
+  StopPivotParams stop_params() const;
+  void reset_corner_pivot_state() { corner_fsm_.reset(); }
+  double debug_xtrack(double pos_n, double pos_e) const;
+  double next_run_turn() const;
+  bool next_run_requires_alignment() const;
+  void publish_brake(double yaw_ned, const StopTelemetry& tel, double* speed_out);
+  bool run_alignment_hold(double pos_n, double pos_e, double yaw_ned, double pose_age_s,
+                          int64_t now_ns);
+  void hold_before_run_advance(double pos_n, double pos_e, double yaw_ned, double pose_age_s,
+                               double dist_to_goal, int64_t now_ns);
+  void hold_at_completion(double pos_n, double pos_e, double yaw_ned, double pose_age_s,
+                          double dist_to_goal, int64_t now_ns);
+  bool precise_stop_tick(double pos_n, double pos_e, double yaw_ned, double pose_age_s,
+                         double dist_to_goal, int64_t now_ns);
 
   // ---- publishes ----
   void publish_velocity(double v_n, double v_e);
@@ -203,6 +233,14 @@ private:
   const ParamSet& params_;
   TickOutput out_;
 
+  // the stop machines: ONE stop confirmation shared by the corner flow and every hold (as in the
+  // prototype)
+  StopPivotParams sp_;  // refreshed from the ParamSet at the top of every tick
+  StopConfirm stop_confirm_;
+  CornerFsm corner_fsm_;
+  StopHold boundary_hold_;
+  StopHold completion_hold_;
+
   // mission
   std::vector<ConditionedRun> runs_;
   std::vector<double> run_tail_transit_;
@@ -214,6 +252,9 @@ private:
   bool run_boundary_stop_pending_{false};
   bool completion_stop_pending_{false};
   bool segment_endpoint_stop_active_{false};
+  bool endpoint_stop_started_{false};
+  int64_t endpoint_stop_start_ns_{0};
+  double run_align_turn_rad_{0.0};
   int segment_idx_{0};
   SegState segment_state_{SegState::Inactive};
   bool stop_latched_{false};

@@ -49,7 +49,9 @@ import ancestors  # noqa: E402
 import gen_conditioner_vectors as gc  # noqa: E402
 import gen_geometry_vectors as g3  # noqa: E402
 
-OUT = os.path.join(REPO, "ros2_ws", "src", "dyx3_rpp", "test", "fixtures", "gate4_orchestrator_vectors.txt")
+OUT_DIR = os.path.join(REPO, "ros2_ws", "src", "dyx3_rpp", "test", "fixtures")
+OUT_FMT = os.path.join(OUT_DIR, "gate4_orchestrator_vectors_{}.txt")
+PART_BYTES = 3_500_000  # each file stays well under the 5 MB hygiene limit
 SEED = 20261011
 PI = math.pi
 r = gc.r
@@ -147,20 +149,11 @@ def build_node(cls):
 
 
 def wrap_handoffs(node):
-    """Record entries into the stop/pivot machines the C++ slice does not port. The carried code still runs."""
+    """Record entries into the one feature the C++ orchestrator does not run (the point hold). The carried code still runs."""
 
     def record(name):
         if not node._ho_suppress:
             node._ho.append(name)
-
-    orig_align = node._run_alignment_hold
-
-    def align(pos_n, pos_e, yaw, age):
-        if node._run_align_pending and len(node._path) >= 2:
-            a, b = node._path[0].pose.position, node._path[1].pose.position
-            if math.hypot(a.x - b.x, a.y - b.y) >= 1e-6:
-                record("RUN_ALIGNMENT")
-        return orig_align(pos_n, pos_e, yaw, age)
 
     orig_pt = node._point_hold_tick
 
@@ -169,46 +162,7 @@ def wrap_handoffs(node):
             record("POINT_HOLD")
         return orig_pt(*a)
 
-    orig_hb = node._hold_before_run_advance
-
-    def hold_before(*a):
-        record("RUN_BOUNDARY_HOLD")
-        return orig_hb(*a)
-
-    orig_hc = node._hold_at_completion
-
-    def hold_comp(*a):
-        record("COMPLETION_HOLD")
-        return orig_hc(*a)
-
-    orig_ps = node._segment_endpoint_precise_stop_tick
-
-    def precise(*a):
-        node._ho_suppress = True
-        try:
-            res = orig_ps(*a)
-        finally:
-            node._ho_suppress = False
-        if res:
-            record("ENDPOINT_PRECISE_STOP")
-        return res
-
-    node._run_alignment_hold = align
     node._point_hold_tick = point
-    node._hold_before_run_advance = hold_before
-    node._hold_at_completion = hold_comp
-    node._segment_endpoint_precise_stop_tick = precise
-    for nm in ("_corner_stop_satisfied", "_corner_brake_velocity", "_corner_pivot_velocity"):
-        orig = getattr(node, nm)
-
-        def mk(o):
-            def f(*a, **k):
-                record("CORNER_STOP_PIVOT")
-                return o(*a, **k)
-
-            return f
-
-        setattr(node, nm, mk(orig))
 
 
 # ---------------------------------------------------------------------------------------------- rover model
@@ -218,16 +172,18 @@ class Rover:
         self.cmd_vn = self.cmd_ve = 0.0
 
     def advance(self, dt):
-        # first-order speed, bearing-following turn: a crude stand-in for the firmware loop, enough to close the loop
+        # A crude stand-in for the firmware loop. Along the nose: drive. 10-97 deg off the nose: spot-turn (no travel).
+        # Behind the nose (a reverse brake command): decelerate without turning, as the firmware's reverse detection does.
         s = math.hypot(self.cmd_vn, self.cmd_ve)
+        target = 0.0
+        self.w = 0.0
         if s >= 0.01:
             bearing = math.atan2(self.cmd_ve, self.cmd_vn)
             err = wrap(bearing - self.yaw)
-            self.w = max(-0.8, min(0.8, 3.0 * err))
-            target = s * max(0.0, math.cos(err)) if abs(err) < 1.2 else 0.0
-        else:
-            self.w = 0.0
-            target = 0.0
+            if abs(err) <= 1.7:
+                self.w = max(-0.8, min(0.8, 3.0 * err))
+                if abs(err) < 0.17:
+                    target = s * math.cos(err)
         self.yaw = wrap(self.yaw + self.w * dt)
         self.v += (target - self.v) * (1.0 - math.exp(-dt / 0.12))
         self.n += self.v * math.cos(self.yaw) * dt
@@ -258,7 +214,10 @@ def state_line(node):
                                               node._path_done, node._run_align_pending))
             + " " + " ".join(f13(x) for x in [node._ekf_reset_offset[0], node._ekf_reset_offset[1]]) + " " + str(node._ekf_reset_count)
             + " " + str(int(lp is not None)) + " " + " ".join(f13(x) for x in [lp[0] if lp else 0.0, lp[1] if lp else 0.0])
-            + " " + str(int(node._segment_state.value)) + " " + str(int(node._rtk_recover_since is not None)))
+            + " " + str(int(node._segment_state.value)) + " " + str(int(node._rtk_recover_since is not None))
+            + " " + " ".join(str(int(x)) for x in (node._run_boundary_stop_pending, node._completion_stop_pending,
+                                                    node._segment_endpoint_stop_active, node._corner_stop_complete))
+            + " " + f13(node._run_align_turn_rad))
 
 
 def coerce(defaults, name, value):
@@ -344,6 +303,7 @@ def run_episode(cls, defaults, name, pts, flags, must, params, rng, *, period_ns
     last_ns = t_ns
     fault = faults or {}
     stuck = 0
+    done_ticks = 0
 
     def in_window(key, t):
         w = fault.get(key)
@@ -433,7 +393,8 @@ def run_episode(cls, defaults, name, pts, flags, must, params, rng, *, period_ns
                     k = cap / math.hypot(vn, ve)
                     rov.cmd_vn, rov.cmd_ve = vn * k, ve * k
             stuck = stuck + 1 if (vp and vn == 0.0 and ve == 0.0 and not fault) else 0
-            if ho != "NONE" or node._path_done or stuck > 60:
+            done_ticks = done_ticks + 1 if node._path_done else 0
+            if ho != "NONE" or done_ticks > 5 or stuck > 150:
                 break
     L.append("END")
     node.destroy_node()
@@ -521,16 +482,27 @@ def build():
 
     # ---- segment profile
     L4 = line_pts(4.0, 0.5)
+    BENDS = [(0, 0), (2, 0), (4, 0.6), (6, 0.6), (8, 1.4), (10, 1.4)]
+    RO = [(0, 0), (0.6, 0), (1.6, 0), (1.8, 0)]  # a segment run walks its vertices in order: start at the beginning
+    SQ = [(0, 0), (2.5, 0), (2.5, 2.5), (0, 2.5), (0, 0)]
     add("seg_line", L4, params={**SEGMENT, "mission_speed": 0.35}, period_ns=P50, max_ticks=90, start_offset=0.015)
-    add("seg_line_tail", L4, params={**SEGMENT, "mission_speed": 0.35}, period_ns=P50, max_ticks=150, start_frac=0.6, start_speed=0.3,
+    add("seg_line_tail", L4, params={**SEGMENT, "mission_speed": 0.35}, period_ns=P50, max_ticks=190, start_frac=0.6, start_speed=0.3,
         start_offset=0.01)
     add("seg_line_fast", line_pts(5.0, 1.0), params={**SEGMENT, "mission_speed": 0.7}, period_ns=P20, max_ticks=150, start_yaw_err=0.03)
-    add("seg_line_fast_tail", line_pts(5.0, 1.0), params={**SEGMENT, "mission_speed": 0.7}, period_ns=P20, max_ticks=220,
+    add("seg_line_fast_tail", line_pts(5.0, 1.0), params={**SEGMENT, "mission_speed": 0.7}, period_ns=P20, max_ticks=330,
         start_frac=0.8, start_speed=0.6, start_yaw_err=0.02)
-    add("seg_slight_bends", [(0, 0), (2, 0), (4, 0.6), (6, 0.6), (8, 1.4), (10, 1.4)], params={**SEGMENT, "mission_speed": 0.5},
-        period_ns=P50, max_ticks=150, start_frac=0.15, start_speed=0.4)
-    add("seg_square", [(0, 0), (2.5, 0), (2.5, 2.5), (0, 2.5), (0, 0)], params={**SEGMENT, "mission_speed": 0.45}, period_ns=P50,
-        max_ticks=110, start_frac=0.2, start_speed=0.4)
+    add("seg_slight_bends", BENDS, params={**SEGMENT, "mission_speed": 0.5}, period_ns=P50, max_ticks=150, start_frac=0.15,
+        start_speed=0.4)
+    add("seg_square_corner", SQ, params={**SEGMENT, "mission_speed": 0.45}, period_ns=P50, max_ticks=230, start_frac=0.15,
+        start_speed=0.4)
+    add("seg_square_full", [(0, 0), (1.6, 0), (1.6, 1.6), (0, 1.6), (0, 0)], params={**SEGMENT, "mission_speed": 0.5}, period_ns=P50,
+        max_ticks=520)
+    add("seg_square_params", SQ, params={**SEGMENT, "mission_speed": 0.4, "segment_stop_dwell_s": 0.0, "segment_align_settle_s": 0.0,
+                                         "segment_heading_tolerance_deg": 4.0, "segment_pivot_release_max_deg": 6.0,
+                                         "pivot_to_intercept_enabled": False}, period_ns=P50, max_ticks=190, start_frac=0.2,
+        start_speed=0.4)
+    add("seg_square_nohold_vel", SQ, params={**SEGMENT, "mission_speed": 0.45}, period_ns=P50, max_ticks=330, start_frac=0.2,
+        start_speed=0.4, faults={"vel_blackout": (2.0, 9.0)})
     add("seg_marks", [(0, 0), (1, 0), (2, 0), (3, 0), (4, 0), (5, 0)], flags=[False, True, True, True, False, False],
         params={**SEGMENT, "mission_speed": 0.45, "spray_entry_max_heading_deg": 3.0, "spray_entry_release_travel_m": 0.5},
         period_ns=P50, max_ticks=120, start_yaw_err=0.03)
@@ -540,24 +512,62 @@ def build():
     add("seg_two_runs", [(0, 0), (2, 0), (4, 0), (4, 2), (4, 4)], flags=[False, True, True, False, False],
         params={**SEGMENT, "mission_speed": 0.5}, period_ns=P50, max_ticks=90)
     add("seg_two_runs_tail", [(0, 0), (2, 0), (4, 0), (4, 2), (4, 4)], flags=[False, True, True, False, False],
-        params={**SEGMENT, "mission_speed": 0.5}, period_ns=P50, max_ticks=140, start_frac=0.6, start_speed=0.4)
+        params={**SEGMENT, "mission_speed": 0.5}, period_ns=P50, max_ticks=330, start_frac=0.6, start_speed=0.4)
     add("seg_single_point_first", line_pts(3.0, 0.5), params={**SEGMENT, "mission_speed": 0.45}, period_ns=P50, max_ticks=90,
         prepend_single_point_run=True)
     add("seg_latch_tail", line_pts(3.0, 0.5), params={**SEGMENT, "mission_speed": 0.35, "stop_latch_enabled": True,
-                                                       "segment_precise_endpoint_stop_enabled": False}, period_ns=P50, max_ticks=170,
+                                                       "segment_precise_endpoint_stop_enabled": False}, period_ns=P50, max_ticks=190,
         start_frac=0.6, start_speed=0.3)
     add("seg_no_runrem_tail", line_pts(4.0, 0.5), params={**SEGMENT, "mission_speed": 0.5, "endpoint_approach_run_remaining": False,
-                                                           "segment_precise_endpoint_stop_enabled": False}, period_ns=P50, max_ticks=170,
+                                                           "segment_precise_endpoint_stop_enabled": False}, period_ns=P50, max_ticks=190,
         start_frac=0.7, start_speed=0.4)
-    RO = [(0, 0), (0.6, 0), (1.6, 0), (1.8, 0)]  # a segment run walks its vertices in order: start at the beginning
     add("seg_runout", RO, flags=[False, True, True, False],
-        params={**SEGMENT, "mission_speed": 0.45, "segment_precise_endpoint_stop_enabled": False}, period_ns=P50, max_ticks=140)
+        params={**SEGMENT, "mission_speed": 0.45, "segment_precise_endpoint_stop_enabled": False}, period_ns=P50, max_ticks=190)
     add("seg_runout_precise", RO, flags=[False, True, True, False], params={**SEGMENT, "mission_speed": 0.45}, period_ns=P50,
-        max_ticks=140)
-    add("seg_align_pending", line_pts(3.0, 0.5), flags=[True] * 7, params={**SEGMENT}, period_ns=P20, max_ticks=60, align_done=False,
-        start_yaw_err=0.6)
+        max_ticks=190)
+    add("seg_precise_params", line_pts(3.0, 1.0), params={**SEGMENT, "mission_speed": 0.45, "segment_endpoint_arrival_tolerance_m": 0.005,
+                                                           "segment_endpoint_cross_tolerance_m": 0.004,
+                                                           "segment_endpoint_precise_max_s": 2.0}, period_ns=P50, max_ticks=260,
+        start_frac=0.6, start_speed=0.4, start_offset=0.03)
+    add("seg_precise_offline", line_pts(3.0, 1.0), params={**SEGMENT, "mission_speed": 0.4, "segment_endpoint_cross_tolerance_m": 0.005,
+                                                            "segment_endpoint_max_correction_m": 0.05}, period_ns=P50, max_ticks=230,
+        start_frac=0.6, start_speed=0.3, start_offset=0.12)
+    add("seg_runout_min_speed", [(0, 0), (0.6, 0), (1.6, 0), (1.9, 0)], flags=[False, True, True, False],
+        params={**SEGMENT, "mission_speed": 0.45, "segment_precise_endpoint_stop_enabled": False, "transit_runout_min_speed_m_s": 0.12,
+                "transit_runout_goal_tolerance_m": 0.1, "segment_endpoint_approach_speed": 0.05}, period_ns=P50, max_ticks=190)
+    add("seg_latch_corner", [(0, 0), (2, 0), (2, 2), (0, 2)], params={**SEGMENT, "mission_speed": 0.35, "stop_latch_enabled": True,
+                                                                         "segment_min_corner_speed": 0.05, "segment_slowdown_dist": 0.8},
+        period_ns=P50, max_ticks=140, start_frac=0.2, start_speed=0.3)
+    # the entry pivot (a run that starts on a MARK, or after a hard boundary) is part of the mission now
+    add("seg_boundary_55deg", [(0, 0), (2, 0), (3.15, 1.64), (3.15, 3.6)], flags=[True, True, False, False],
+        params={**SEGMENT, "mission_speed": 0.45}, period_ns=P50, max_ticks=330, start_frac=0.2, start_speed=0.4)
+    add("seg_overshoot", line_pts(3.0, 1.0), params={**SEGMENT, "mission_speed": 0.9, "segment_endpoint_precise_max_s": 3.0,
+                                                      "max_linear_decel": 0.3}, period_ns=P50, max_ticks=260, start_frac=0.955,
+        start_speed=0.9)
+    add("seg_square_loose", SQ, params={**SEGMENT, "mission_speed": 0.4, "segment_stop_dwell_s": 0.0, "segment_align_settle_s": 0.0,
+                                        "segment_align_speed_threshold": 0.3, "segment_stop_yaw_rate_threshold": 1.0,
+                                        "segment_stop_speed_threshold": 0.3}, period_ns=P50, max_ticks=190, start_frac=0.2,
+        start_speed=0.4)
+    add("seg_square_slowpivot", SQ, params={**SEGMENT, "mission_speed": 0.4, "segment_min_corner_speed": 0.03,
+                                            "segment_heading_tolerance_deg": 5.0, "segment_pivot_release_max_deg": 3.0,
+                                            "segment_timeout_heading_tolerance_deg": 6.0, "segment_turn_timeout_s": 1.0,
+                                            "segment_pivot_timeout_max_s": 2.0}, period_ns=P50, max_ticks=230, start_frac=0.2,
+        start_speed=0.4)
+    add("align_big", line_pts(3.0, 0.5), flags=[True] * 7, params={**SEGMENT, "mission_speed": 0.4}, period_ns=P50, max_ticks=200,
+        align_done=False, start_yaw_err=0.9)
+    add("align_slow_corner_speed", line_pts(3.0, 0.5), flags=[True] * 7,
+        params={**SEGMENT, "mission_speed": 0.4, "segment_min_corner_speed": 0.03}, period_ns=P50, max_ticks=120, align_done=False,
+        start_yaw_err=0.7)
+    add("align_small", line_pts(3.0, 0.5), flags=[True] * 7, params={**SEGMENT, "mission_speed": 0.4}, period_ns=P50, max_ticks=110,
+        align_done=False, start_yaw_err=0.02)
+    add("align_stale_vel", line_pts(3.0, 0.5), flags=[True] * 7, params={**SEGMENT, "mission_speed": 0.4}, period_ns=P50, max_ticks=260,
+        align_done=False, start_yaw_err=0.4, faults={"vel_blackout": (0.0, 20.0)})
+    add("align_smooth", line_pts(3.0), flags=[True] * 61, params={**SMOOTH, "mission_speed": 0.4}, period_ns=P50, max_ticks=150,
+        align_done=False, start_yaw_err=-0.5)
+    add("align_prealign_param", line_pts(3.0, 0.5), params={**SEGMENT, "mission_speed": 0.4, "entry_prealign_enabled": True},
+        period_ns=P50, max_ticks=130, align_done=False, start_yaw_err=-0.3)
     add("auto_mixed", gc.densify([(0, 0), (3, 0), (3, 2)], 0.1), params={"tracking_profile": "auto", "mission_speed": 0.5},
-        period_ns=P50, max_ticks=170, start_frac=0.4, start_speed=0.4)
+        period_ns=P50, max_ticks=330, start_frac=0.4, start_speed=0.4)
     # ---- gates and faults (short paths: the fault window is the point; they start moving)
     base = {**SMOOTH, "mission_speed": 0.45}
     F = dict(period_ns=P50, max_ticks=110, start_speed=0.4, start_frac=0.1)
@@ -670,16 +680,24 @@ def build():
         add(f"rand{i}", shape, flags=flags, must=must, params=params, period_ns=rng.choice([20_000_000, 50_000_000, 50_000_000]), start_frac=rng.choice([0.0, 0.0, 0.3]), start_speed=0.3,
             max_ticks=100, faults=faults, start_offset=rng.uniform(-0.02, 0.02), start_yaw_err=rng.uniform(-0.03, 0.03))
 
-    total = 0
+    parts, cur, cur_bytes, total = [], [], 0, 0
     for name, pts, flags, must, params, kw in eps:
         ep = run_episode(cls, defaults, name, pts, flags, must, params, rng, **kw)
         if ep is None:
             print(f"skip {name}: no runs", file=sys.stderr)
             continue
-        L.extend(ep)
+        size = sum(len(x) + 1 for x in ep)
+        if cur and cur_bytes + size > PART_BYTES:
+            parts.append(cur)
+            cur, cur_bytes = [], 0
+        cur.extend(ep)
+        cur_bytes += size
         total += sum(1 for x in ep if x.startswith("EXP"))
-    L.insert(2, f"# {total} ticks")
-    return "\n".join(L) + "\n"
+    parts.append(cur)
+    out = []
+    for i, part in enumerate(parts):
+        out.append("\n".join(L[:3] + [f"# part {i + 1} of {len(parts)}; {total} ticks in all"] + part) + "\n")
+    return out
 
 
 if __name__ == "__main__":
@@ -687,13 +705,20 @@ if __name__ == "__main__":
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--only", default=None, help="debug: write to /tmp/orch_dbg.txt")
     a = ap.parse_args()
-    text = build()
+    texts = build()
+    paths = [OUT_FMT.format(i + 1) for i in range(len(texts))]
     if a.check:
-        if not os.path.exists(OUT) or open(OUT).read() != text:
-            sys.exit("gate4_orchestrator_vectors.txt is stale")
+        stale = [p for p, t in zip(paths, texts) if not os.path.exists(p) or open(p).read() != t]
+        extra = [f for f in os.listdir(OUT_DIR) if f.startswith("gate4_orchestrator_vectors_") and os.path.join(OUT_DIR, f) not in paths]
+        if stale or extra:
+            sys.exit(f"orchestrator vectors are stale: {stale + extra}")
         print("ok")
     else:
-        os.makedirs(os.path.dirname(OUT), exist_ok=True)
-        with open(OUT, "w") as f:
-            f.write(text)
-        print(f"wrote {OUT}: {text.count(chr(10))} lines, {len(text) / 1e6:.2f} MB")
+        os.makedirs(OUT_DIR, exist_ok=True)
+        for f in os.listdir(OUT_DIR):
+            if f.startswith("gate4_orchestrator_vectors"):
+                os.remove(os.path.join(OUT_DIR, f))
+        for p, t in zip(paths, texts):
+            with open(p, "w") as f:
+                f.write(t)
+            print(f"wrote {p}: {t.count(chr(10))} lines, {len(t) / 1e6:.2f} MB")

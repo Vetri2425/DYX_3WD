@@ -1,6 +1,6 @@
 # dyx3_rpp orchestrator (`RppCore`) — contract
 
-**Status:** FIRST SLICE, 2026-10-07 (cloud session). **Spec:** V1 section 7.4. Read with `rpp_overview.md` (the tick
+**Status:** orchestrator complete except the point hold, 2026-10-07 (cloud session). **Spec:** V1 section 7.4. Read with `rpp_overview.md` (the tick
 order in the prototype) and the per-module contracts. Source: `include/dyx3_rpp/rpp_core.hpp`, `src/rpp_core.cpp`.
 
 `RppCore::tick()` is the 50 Hz control decision: gates in front of the controller, projection, the goal test, the
@@ -8,35 +8,33 @@ smooth-profile speed/steering law and the segment-profile tracking law, and the 
 (no ROS, no allocation in `tick()`), reads parameters from `ParamSet` each tick (a LIVE change takes effect on the next tick),
 and takes the clock as an argument (`int64` ns, so replay and tests are exact).
 
-## 1. What this slice is, and is not
+## 1. What is ported, what is not
 
 **Ported and proven tick by tick** against the verbatim prototype: `_control_loop` (measured `dt`, clamp 0.1 s),
-`_control_loop_impl` up to and including the goal test, the whole smooth-profile tracking (steps 1 to 8), the segment-profile
-tracking while a run is followed (lookahead, corner slowdown, run-end approach, accel ramp, P4 floor, stop latch, forward-cone
-clamp), `_run_alignment_hold` / `_point_hold_tick` / `_segment_endpoint_precise_stop_tick` *entry conditions*, the tangent
-corner advance (below the corner threshold), single-point runs, `_apply_run` / `_install_mission` state reset, the RTK gate
-with recovery hold, pose staleness with the extrapolation horizon, velocity-based pose extrapolation with the latency bias,
-the EKF jump guard with reset compensation, the spray heading gates (`_gate_spray`), `_publish_zero` semantics and the
-`/rpp/debug` and `/rpp/segment_debug` rows.
+`_control_loop_impl` end to end, the whole smooth-profile tracking (steps 1 to 8), the segment-profile tracking (lookahead,
+corner slowdown, run-end approach, accel ramp, P4 floor, stop latch, forward-cone clamp), and **all of the stop/pivot machinery**,
+run through the explicit `stop_pivot_fsm` classes: the hard-corner stop-and-pivot with its release gates and watchdog, the
+tangent-corner advance, the run-boundary hold (and the carried stop into the next run's entry pivot), the run-entry alignment
+pivot, the endpoint precise stop (default ON in the prototype), the completion hold and `DONE`; also single-point runs,
+`_apply_run` / `_install_mission` state reset, the RTK gate with recovery hold, pose staleness with the extrapolation horizon,
+velocity-based pose extrapolation with the latency bias, the EKF jump guard with reset compensation, the spray heading gates
+(`_gate_spray`), `_publish_zero` semantics, and the `/rpp/debug` and `/rpp/segment_debug` rows.
 
-**Not ported — handed off, fail to zero.** When the carried code would enter one of the stop/pivot machines below, the C++
-publishes **zero** (`v = 0`, `yaw_rate = 0`, state IDLE, commanded-speed memory cleared) and reports which machine in
-`TickOutput::handoff`. It never guesses a stop. These are exactly the pieces `stop_pivot_fsm` (explicit state machine, proven
-against the prototype's primitives) is meant to run; wiring it in is the next slice:
+**One stop confirmation, shared.** The prototype keeps a single stop-confirmation state (`_corner_stop_entered` /
+`_corner_stop_settle_since`) used by the corner flow, the run-boundary hold, the completion hold and the endpoint precise stop;
+a precise stop that ends in the completion hold reuses the dwell it has already served. The C++ keeps that behaviour on purpose:
+one `StopConfirm` owned by `RppCore`, referenced by `CornerFsm` and both `StopHold`s, reset exactly where the prototype calls
+`_reset_corner_pivot_state()`. Two independent confirmations would add a second dwell at every completion.
 
-| `Handoff` | The prototype enters | Condition mirrored here |
-|---|---|---|
-| `RunAlignment` | `_run_alignment_hold` pivot before a run | a pending alignment on a non-degenerate first leg |
-| `PointHold` | `_point_hold_tick` | `point_hold_enabled` (any value of the feature is unported) |
-| `RunBoundaryHold` | `_hold_before_run_advance` | end of a non-final run, or the latch |
-| `CompletionHold` | `_hold_at_completion` | end of the final run, or the latch |
-| `EndpointPreciseStop` | `_segment_endpoint_precise_stop_tick` engaged | final run, travel >= min, residual inside braking distance (default ON in the prototype) |
-| `CornerStopPivot` | the hard-corner stop-and-pivot inside `_control_segment_profile` | not final segment, inside `segment_corner_acceptance_radius`, corner >= `segment_corner_threshold_deg` |
+**Not ported — the one remaining handoff.** `point_hold_enabled` (the per-point dwell overlay, default OFF in the prototype):
+a tick with it enabled publishes **zero** (`v = 0`, `yaw_rate = 0`, commanded-speed memory cleared) and reports
+`Handoff::PointHold`. Not ported at all: the point handshake (`/point/done`, `/point/advance`), precise point stop, progress
+publication, `RppStatus` and the node. This slice produces the decision; it is not yet a running controller.
 
-Also not ported: progress publication (`progress_publish_enabled`), the point handshake (`/point/done`, `/point/advance`),
-precise point stop, entry pre-align pivot itself, `RppStatus` and the node. **Until the handoffs are replaced, a C++ run stops at
-the first corner, the first run boundary and the end of the mission: this slice is not drivable on its own.** The precision
-path on a rover remains `dyx3_rpp_legacy`.
+**Two command encodings.** The prototype speaks a NED velocity vector; the firmware-aware pivot and brake are vectors too. `TickOutput`
+carries that vector (`v_n`, `v_e`, `yaw_rate`) so the tick can be compared exactly, and also the decision in the controller's own
+terms (`cmd`: STOP / TRACK / BRAKE / PIVOT, `brake_speed` signed along the nose, `pivot_heading_err`) which is what the node maps to
+`MotionSetpoint` modes. The two are derived from the same code path in the same tick.
 
 ## 2. Tick order (as implemented; prototype line references in `rpp_overview.md`)
 
@@ -51,24 +49,31 @@ path on a rover remains `dyx3_rpp_legacy`.
 6. Jump guard: jump `> max(ekf_jump_threshold_m, max(max_v, v_measured) * max(worst recent pose gap, 1/50) + 0.03)`. With
    `ekf_reset_compensation` and jump `<= ekf_reset_max_absorb_m` the jump is absorbed into the tracking offset; otherwise JUMP_SKIP zero
    and the projection hint is invalidated. JUMP_SKIP does not clear the commanded-speed memory.
-7. Pending run alignment, point hold, run-boundary latch, completion latch, endpoint precise stop, goal test: hand off (section 1).
+7. Pending run alignment (pivot toward the first leg; releases into tracking in the same tick), then, in order: point hold
+   (handoff), the run-boundary latch, the completion latch, the endpoint precise stop (segment profile, final run), the goal test
+   (end of a non-final run: boundary hold; end of the final run: completion hold).
 8. Smooth: projection with the windowed hint, lookahead distance / arc cap / point, steering, preview curvature, lateral
    acceleration law, approach scaling, hard-kappa latch and slew, P4 floor, feed-forward yaw rate, lateral correction, forward cone.
-   Segment: segment skipping, projection onto the segment, tangent corner advance, lookahead, corner slowdown, run-end approach
-   (along-run remaining distance), accel ramp, P4 floor, stop latch, forward cone.
+   Segment: segment skipping, projection onto the segment, the hard corner within `segment_corner_acceptance_radius` (the
+   `CornerFsm`: BRAKE, PIVOT, RELEASE_SETTLE, ADVANCE; a tangent junction advances at once and keeps its momentum), lookahead, corner
+   slowdown, run-end approach (along-run remaining distance), accel ramp, P4 floor, stop latch, forward cone.
 
 ## 3. DERIVED — NOT FROM V1 SPEC
 
-* A handed-off tick publishes zero and **clears** `last_speed_cmd`. The prototype would have run the machine. This is the fail-to-zero
-  choice for an unported path, not a port.
-* `PointHold` hands off whenever `point_hold_enabled` is set, even on ticks where the prototype's overlay would not have acted:
-  refusing to drive with an unported feature enabled is safer than driving without it.
+* A handed-off tick (point hold only) publishes zero and **clears** `last_speed_cmd`. The prototype would have run the overlay. This is the
+  fail-to-zero choice for an unported feature, not a port. `PointHold` hands off whenever `point_hold_enabled` is set, even on ticks where
+  the prototype's overlay would not have acted: refusing to drive with an unported feature enabled is safer than driving without it.
 * The C++ parameter table is stricter than the prototype where the prototype used `0` as "off": `curvature_baseline_m` and
-  `max_yaw_rate_body` must be `> 0` here (the prototype allowed `0`). Nothing in the evidence uses `0`.
+  `max_yaw_rate_body` must be `> 0` here. Nothing in the evidence uses `0`.
 * Test hooks `mark_alignment_done()` and `test_set_last_speed_cmd()` exist only for the equivalence harness (a rover that is already
   moving; a run whose entry pivot is not under test). Production code must not call them.
 * The RTK gate's minimum fix type is the prototype's hard-coded 6. `dyx3_motion_guard` has `rtk_min_fix_type` (default 6): the two
   agree today. **Open (human):** whether RTK_FLOAT should ever be accepted for marking; do not change one without the other.
+* `StopPivotParams::corner_speed` is carried for the FSM's own output but the core derives the pivot speed itself
+  (`max(0.05, segment_min_corner_speed)`), as the prototype does; changing the FSM field alone changes nothing.
+* The pivot and brake still go out as the prototype's velocity vectors (small vector at the exit heading, clamped 75 degrees off the nose;
+  body-axis brake). The `MotionSetpoint` rewrite (explicit `MODE_PIVOT`, signed brake) is `motion_output`'s and is selected from `cmd`;
+  whether the pivot rate law is acceptable on the new firmware is GATE 1 (`rpp_motion_output.md` section 4).
 
 ## 4. Proof and its limits
 
@@ -78,29 +83,41 @@ would otherwise round the controller's doubles). A closed-loop kinematic rover m
 poses, velocities and GPS with noise, blackouts (pose / GPS / velocity), GPS float / poor accuracy / unknown accuracy, and an EKF jump.
 All inputs and outputs are recorded; the C++ replays the **same inputs** and compares every tick: the velocity vector, yaw rate, the
 16 debug values, the segment-debug row and its publish count, the handoff, and (the first 40 ticks of every episode, then every
-fifth) 21 state fields.
+fifth) 26 state fields. Episodes run to `DONE` (or the tick budget).
 
-`test/fixtures/gate4_orchestrator_vectors.txt`, 4.5 MB: **81 episodes, 8 338 ticks, 0 mismatches**; states reached: STALE, IDLE,
-TRACKING, APPROACH, RTK_WAIT, JUMP_SKIP (DONE is not: nothing reaches `path_done` before a handoff); handoffs reached: all six
-(`RunAlignment` x1, `CornerStopPivot` x2, `EndpointPreciseStop` x4, `RunBoundaryHold` x2, `CompletionHold` x11).
+`test/fixtures/gate4_orchestrator_vectors_{1,2}.txt` (two files, 3.5 MB and 3.3 MB; the repository limit is 5 MB per file):
+**97 episodes, 13 166 ticks, 0 mismatches**. States reached: STALE, IDLE, TRACKING, APPROACH, DONE, RTK_WAIT, JUMP_SKIP; segment states:
+TRACK, PRE_CORNER, CORNER_ALIGN, DONE, CORNER_STOP; commands STOP / TRACK / BRAKE / PIVOT (about 740 brake and 830 pivot ticks).
+Episodes include a full square (four hard corners), entry alignments (large, small, stale velocity, smooth profile, the
+`entry_prealign_enabled` pivot), two runs with a hard boundary, the endpoint precise stop with several parameter sets, and the
+completion hold.
 
-Mutation check (each applied to `rpp_core.cpp`, rebuilt, test must fail; not committed): caught — speed memory, jump absorb,
-jump threshold velocity term, recovery hold, spray entry hold, stop-latch capture, along-run remaining approach, forward-cone angle,
-curvature used for the accel gate, latency bias, extrapolation horizon, velocity-age horizon, pose-gap window, hint invalidation on
-JUMP_SKIP, JUMP_SKIP memory exemption, GPS staleness bound, lateral-correction sign, preview-curvature lookahead and count,
-approach distance, corner slowdown distance, accel gate, yaw-command freeze, hard-kappa latch input, run-out minimum speed. **Survived
-(inputs do not reach them):** the 0.3 s velocity-freshness constant (only the jump threshold uses it); the `l_min` retry when the
-lookahead lands on the rover (unreachable by a rover that moves along its path); the `min_travel` gate for travel in
-[0.5, 1) x min (needs a path that returns to its own start); the stop-latch reference during a corner slowdown (the corner pivot
-takes over before the latch distance). They are listed, not claimed.
+Mutation check (each applied to `rpp_core.cpp`, rebuilt, test must fail; not committed): about 45 mutations, **caught** — speed memory,
+jump absorb, jump threshold velocity term, recovery hold, spray entry hold, stop-latch capture, along-run remaining approach,
+forward-cone angle, curvature used for the accel gate, latency bias, extrapolation horizon, velocity-age horizon, pose-gap window,
+hint invalidation on JUMP_SKIP, JUMP_SKIP memory exemption, GPS staleness bound, lateral-correction sign, preview-curvature lookahead
+and count, approach distance, corner slowdown distance, accel gate, yaw-command freeze, hard-kappa latch input, run-out minimum speed,
+the carried stop into the entry pivot, the entry pivot's watchdog angle, the shared stop dwell at completion, the precise-stop trigger
+margin, creep rule, profile distance, the brake sign, the pivot release cap, the pivot speed floor at an entry pivot.
+**Survived (the inputs do not reach them):**
+* the 0.3 s velocity-freshness constant (only the jump threshold uses it);
+* the `l_min` retry when the lookahead lands on the rover (unreachable by a rover that moves along its path);
+* the `min_travel` gate for travel in [0.5, 1) x min (needs a path that returns to its own start);
+* the stop-latch reference during a corner slowdown (the corner pivot takes over before the latch distance);
+* the run-boundary alignment threshold for turns between 45 and about 62 degrees (the conditioner merges those runs in every episode tried);
+* the direction of the precise-stop correction when the rover has overshot the end (the model never overshoots far enough);
+* zeroing the speed memory on a settled corner advance (no episode releases a pivot straight into tracking);
+* `StopPivotParams::corner_speed` (a dead field, see section 3).
+They are listed, not claimed. Two attempts were made at each of the first two scenario fixes before leaving them open.
 
-**Not proven here:** the rover model is a crude stand-in, not recorded motion — the same test on real bag poses is a LOCAL ACTION
-(needs the bags); loop timing and jitter; DDS; anything the handoffs stand for. libm differences: expected values are stored with 13
-digits and compared at 1e-9 relative.
+**Not proven here:** the rover model is a crude stand-in, not recorded motion; the same test on real bag poses is a LOCAL ACTION (needs
+the bags). Loop timing and jitter; DDS; the firmware's reaction to the pivot vector and the brake vector. libm differences: expected
+values are stored with 13 digits and compared at 1e-9 relative. A mission that starts in the middle of a multi-vertex segment run (the
+episodes that start part-way along a run) is not a case the prototype supports either: the segment index only advances at a vertex.
 
 ## 5. Open questions for the human
 
 * RTK_FLOAT acceptance (above).
-* Whether the stop/pivot machines should keep the prototype's behaviour bit for bit (shadow-run oracle) or take the explicit FSM's
-  cleaner semantics where the two differ (`rpp_stop_pivot_fsm.md` lists them).
+* The explicit FSM reproduced the prototype's behaviour on every tick of the fixture; where the contract proposed cleaner semantics
+  (`rpp_stop_pivot_fsm.md`) they were NOT adopted, because the equivalence is the Gate 7 oracle. Decide before changing any.
 * `progress_publish_enabled` / point handshake: port, drop, or move to the mission layer.

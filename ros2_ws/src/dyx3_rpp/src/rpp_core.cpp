@@ -40,18 +40,22 @@ const char* to_string(Handoff h) {
   switch (h) {
     case Handoff::None:
       return "NONE";
-    case Handoff::RunAlignment:
-      return "RUN_ALIGNMENT";
     case Handoff::PointHold:
       return "POINT_HOLD";
-    case Handoff::RunBoundaryHold:
-      return "RUN_BOUNDARY_HOLD";
-    case Handoff::CompletionHold:
-      return "COMPLETION_HOLD";
-    case Handoff::EndpointPreciseStop:
-      return "ENDPOINT_PRECISE_STOP";
-    case Handoff::CornerStopPivot:
-      return "CORNER_STOP_PIVOT";
+  }
+  return "?";
+}
+
+const char* to_string(CmdKind k) {
+  switch (k) {
+    case CmdKind::Stop:
+      return "STOP";
+    case CmdKind::Track:
+      return "TRACK";
+    case CmdKind::Brake:
+      return "BRAKE";
+    case CmdKind::Pivot:
+      return "PIVOT";
   }
   return "?";
 }
@@ -65,7 +69,11 @@ double yaw_ned_from_enu_quaternion(double w, double x, double y, double z) {
   return yaw_ned;
 }
 
-RppCore::RppCore(const ParamSet& params) : params_(params) {}
+RppCore::RppCore(const ParamSet& params)
+    : params_(params),
+      corner_fsm_(StopPivotParams{}, &stop_confirm_),
+      boundary_hold_(StopPivotParams{}, &stop_confirm_),
+      completion_hold_(StopPivotParams{}, &stop_confirm_) {}
 
 // ------------------------------------------------------------------------------------------------
 // mission lifecycle
@@ -90,10 +98,11 @@ void RppCore::install_mission(std::vector<ConditionedRun> runs) {
   apply_run(0);
 }
 
-void RppCore::apply_run(int idx) {
+void RppCore::apply_run(int idx, bool pre_stopped) {
   const ConditionedRun* prev = idx > 0 ? &runs_[static_cast<size_t>(idx) - 1] : nullptr;
   const ConditionedRun& run = runs_[static_cast<size_t>(idx)];
   run_align_pending_ = false;
+  run_align_turn_rad_ = 0.0;
   entry_spray_hold_ = true;
   if (prev != nullptr && prev->pts.size() > 1 && run.pts.size() > 1) {
     const Point p0 = prev->pts[prev->pts.size() - 2];
@@ -104,12 +113,20 @@ void RppCore::apply_run(int idx) {
     const double h1 = std::atan2(n1.e - n0.e, n1.n - n0.n);
     const double threshold = params_.num(P::segment_corner_threshold_deg) * (kPi / 180.0);
     const double turn = std::fabs(dyx3_geometry::heading_delta(h0, h1));
-    if (turn >= threshold) run_align_pending_ = true;
+    if (turn >= threshold) {
+      run_align_pending_ = true;
+      run_align_turn_rad_ = turn;  // angle-aware pivot budget
+    }
   } else if (idx == 0 && run.pts.size() > 1 &&
              (params_.flag(P::entry_prealign_enabled) ||
               (!run.flags.empty() && run.flags[0] != 0))) {
     run_align_pending_ = true;
+    run_align_turn_rad_ = kPi;  // worst case: the entry pose is unknown here
   }
+  reset_corner_pivot_state();
+  // A hard run boundary is stopped before the advance: carry that stop so the entry pivot starts
+  // directly.
+  if (pre_stopped && run_align_pending_) corner_fsm_.carry_stop_complete();
   run_boundary_stop_pending_ = false;
   run_idx_ = static_cast<size_t>(idx);
   run_ = &run;
@@ -127,9 +144,9 @@ void RppCore::apply_run(int idx) {
   hint_.valid = run.closed;
 }
 
-bool RppCore::advance_run() {
+bool RppCore::advance_run(bool pre_stopped) {
   if (run_idx_ + 1 >= runs_.size()) return false;
-  apply_run(static_cast<int>(run_idx_) + 1);
+  apply_run(static_cast<int>(run_idx_) + 1, pre_stopped);
   return true;
 }
 
@@ -229,6 +246,7 @@ void RppCore::publish_velocity(double v_n, double v_e) {
   out_.v_n = v_n;
   out_.v_e = v_e;
   out_.velocity_published = true;
+  out_.cmd = CmdKind::Track;
 }
 
 void RppCore::publish_yaw_rate(double yr) { out_.yaw_rate = yr; }
@@ -269,6 +287,7 @@ void RppCore::publish_segment_debug(SegState s, int seg_idx, double dist_end, do
 void RppCore::publish_zero(StateCode state, double pose_age_ms, double dist_to_goal) {
   publish_velocity(0.0, 0.0);
   publish_yaw_rate(0.0);
+  out_.cmd = CmdKind::Stop;
   if (state != StateCode::JumpSkip) {
     last_speed_cmd_ = 0.0;
     kappa_hard_latched_ = false;
@@ -297,6 +316,7 @@ void RppCore::handoff(Handoff h) {
   out_.handoff = h;
   publish_velocity(0.0, 0.0);
   publish_yaw_rate(0.0);
+  out_.cmd = CmdKind::Stop;
   last_speed_cmd_ = 0.0;
   DebugRow row;
   row.speed = 0.0;
@@ -401,10 +421,222 @@ void RppCore::clamp_to_forward_cone(double& v_n, double& v_e, double yaw_ned, do
   v_e = speed * std::sin(cmd_bearing);
 }
 
-// The final-run endpoint overlay is ON by default: it engages once the along-track residual is
-// inside the braking distance (or the rover is already past the end plane). Its stop/creep logic is
-// not ported: report the engagement.
-bool RppCore::precise_stop_engages(double pos_n, double pos_e, int64_t now_ns) const {
+// ------------------------------------------------------------------------------------------------
+// the stop machines
+// ------------------------------------------------------------------------------------------------
+StopPivotParams RppCore::stop_params() const {
+  StopPivotParams p;
+  p.stop_speed_threshold = params_.num(P::segment_stop_speed_threshold);
+  p.stop_yaw_rate_threshold = params_.num(P::segment_stop_yaw_rate_threshold);
+  p.stop_dwell_s = params_.num(P::segment_stop_dwell_s);
+  p.brake_velocity_cap = params_.num(P::segment_brake_velocity_cap_m_s);
+  p.align_speed_threshold = params_.num(P::segment_align_speed_threshold);
+  p.align_settle_s = params_.num(P::segment_align_settle_s);
+  p.heading_tolerance_rad = params_.num(P::segment_heading_tolerance_deg) * (kPi / 180.0);
+  p.timeout_heading_tol_rad = params_.num(P::segment_timeout_heading_tolerance_deg) * (kPi / 180.0);
+  p.release_max_rad = params_.num(P::segment_pivot_release_max_deg) * (kPi / 180.0);
+  p.spinup_margin_s = params_.num(P::segment_pivot_spinup_margin_s);
+  p.nominal_pivot_rate = params_.num(P::segment_nominal_pivot_rate_rad_s);
+  p.turn_timeout_s = params_.num(P::segment_turn_timeout_s);
+  p.pivot_timeout_max_s = params_.num(P::segment_pivot_timeout_max_s);
+  p.corner_threshold_deg = params_.num(P::segment_corner_threshold_deg);
+  p.corner_speed = std::max(0.05, params_.num(P::segment_min_corner_speed));
+  p.stale_vel_hold_s = 2.0;  // _CORNER_STOP_MAX_HOLD_S: a constant in the prototype
+  return p;
+}
+
+StopTelemetry RppCore::telemetry(int64_t now_ns, double yaw_ned) const {
+  StopTelemetry t;
+  t.vel_fresh = vel_is_fresh(now_ns);
+  t.speed = std::hypot(vel_n_, vel_e_);
+  t.v_forward = vel_n_ * std::cos(yaw_ned) + vel_e_ * std::sin(yaw_ned);
+  t.yaw_rate = yaw_rate_ned_;
+  return t;
+}
+
+// D7: the real signed cross-track for the debug emits inside holds (debug only, never feeds
+// control).
+double RppCore::debug_xtrack(double pos_n, double pos_e) const {
+  if (run_ == nullptr || run_->pts.size() < 2) return 0.0;
+  return dyx3_geometry::project_onto_segment(Point{pos_n, pos_e}, PathView(run_->pts), segment_idx_)
+      .signed_cross;
+}
+
+double RppCore::next_run_turn() const {
+  if (run_idx_ + 1 >= runs_.size()) return 0.0;
+  const auto& cur = runs_[run_idx_].pts;
+  const auto& nxt = runs_[run_idx_ + 1].pts;
+  if (cur.size() < 2 || nxt.size() < 2) return 0.0;
+  const Point a0 = cur[cur.size() - 2], a1 = cur[cur.size() - 1];
+  const Point b0 = nxt[0], b1 = nxt[1];
+  const double h0 = std::atan2(a1.e - a0.e, a1.n - a0.n);
+  const double h1 = std::atan2(b1.e - b0.e, b1.n - b0.n);
+  return std::fabs(dyx3_geometry::angle_wrap(h1 - h0));
+}
+
+bool RppCore::next_run_requires_alignment() const {
+  return next_run_turn() >= params_.num(P::segment_corner_threshold_deg) * (kPi / 180.0);
+}
+
+// Active body-axis brake (invariant I1): exactly forward or reverse along the nose.
+void RppCore::publish_brake(double yaw_ned, const StopTelemetry& tel, double* speed_out) {
+  const double b = brake_speed(tel, sp_);
+  const double bn = b * std::cos(yaw_ned);
+  const double be = b * std::sin(yaw_ned);
+  publish_velocity(bn, be);
+  publish_yaw_rate(0.0);
+  out_.cmd = CmdKind::Brake;
+  out_.brake_speed = b;
+  *speed_out = std::hypot(bn, be);
+}
+
+namespace {
+DebugRow hold_row(double cross_track, double heading_err, double lookahead, double speed,
+                  double dist_goal, double pose_age_ms, bool spray) {
+  DebugRow row;
+  row.cross_track = cross_track;
+  row.heading_err = heading_err;
+  row.lookahead = lookahead;
+  row.speed = speed;
+  row.kappa = 0.0;
+  row.dist_goal = dist_goal;
+  row.pose_age_ms = pose_age_ms;
+  row.state = static_cast<int>(StateCode::Tracking);
+  row.kappa_speed = 0.0;
+  row.yaw_rate = 0.0;
+  row.spray_active = spray;
+  return row;
+}
+}  // namespace
+
+// _run_alignment_hold: pivot in place toward the new run's first leg. True while stopping, pivoting
+// or settling; false once aligned (or not applicable) so the tick continues with normal tracking.
+bool RppCore::run_alignment_hold(double pos_n, double pos_e, double yaw_ned, double pose_age_s,
+                                 int64_t now_ns) {
+  if (!run_align_pending_) return false;
+  const PathView path(run_->pts);
+  if (path.n < 2) {
+    run_align_pending_ = false;
+    return false;
+  }
+  const Point a = path[0], b = path[1];
+  if (dist(a.n, a.e, b.n, b.e) < 1e-6) {
+    run_align_pending_ = false;
+    return false;
+  }
+  const double leg_heading = std::atan2(b.e - a.e, b.n - a.n);
+  const double target_heading = pivot_intercept_heading(Point{pos_n, pos_e}, a, b, leg_heading,
+                                                        params_.flag(P::pivot_to_intercept_enabled),
+                                                        params_.num(P::pivot_intercept_dist_m));
+  const double heading_err = dyx3_geometry::angle_wrap(target_heading - yaw_ned);
+  const StopTelemetry tel = telemetry(now_ns, yaw_ned);
+  CornerInput in;
+  in.now_ns = now_ns;
+  in.heading_err_rad = heading_err;
+  in.corner_deg =
+      std::numeric_limits<double>::infinity();  // an entry pivot never takes the tangent shortcut
+  in.tel = tel;
+  in.turn_angle_rad = run_align_turn_rad_;
+  const CornerOutput co = corner_fsm_.step(in);
+  if (co.action == CornerAction::Advance) {  // settled
+    run_align_pending_ = false;
+    last_speed_cmd_ = 0.0;
+    return false;
+  }
+  const Point fin = path[path.n - 1];
+  const double dist_to_goal = dist(pos_n, pos_e, fin.n, fin.e);
+  const double xt = debug_xtrack(pos_n, pos_e);
+  const double age_ms = pose_age_s * 1000.0;
+  double hv = 0.0;
+  if (co.action == CornerAction::SettleBrake || co.action == CornerAction::Brake) {
+    last_speed_cmd_ = 0.0;
+    publish_brake(yaw_ned, tel, &hv);
+    DebugRow row = hold_row(xt, heading_err, kNaN, hv, dist_to_goal, age_ms, false);
+    publish_debug(row);
+    publish_segment_debug(
+        co.action == CornerAction::Brake ? SegState::CornerStop : SegState::CornerAlign, 0, kNaN,
+        kNaN, kNaN, target_heading, heading_err, 0.0);
+    return true;
+  }
+  // Pivot: the prototype commands a small vector at the exit heading, kept inside the forward cone.
+  const double corner_speed = std::max(0.05, params_.num(P::segment_min_corner_speed));
+  const double step = clampd(heading_err, -kMaxBearingOffsetRad, kMaxBearingOffsetRad);
+  const double cmd_bearing = yaw_ned + step;
+  last_speed_cmd_ = corner_speed;
+  publish_velocity(corner_speed * std::cos(cmd_bearing), corner_speed * std::sin(cmd_bearing));
+  publish_yaw_rate(0.0);
+  out_.cmd = CmdKind::Pivot;
+  out_.pivot_heading_err = heading_err;
+  out_.pivot_speed_memory = corner_speed;
+  publish_debug(hold_row(xt, heading_err, kNaN, corner_speed, dist_to_goal, age_ms, false));
+  publish_segment_debug(SegState::CornerAlign, 0, kNaN, kNaN, kNaN, target_heading, heading_err,
+                        0.0);
+  return true;
+}
+
+// _hold_before_run_advance: physically stop at a hard run boundary, then advance exactly once.
+void RppCore::hold_before_run_advance(double pos_n, double pos_e, double yaw_ned, double pose_age_s,
+                                      double dist_to_goal, int64_t now_ns) {
+  if (run_idx_ + 1 >= runs_.size()) return;
+  if (!next_run_requires_alignment()) {
+    advance_run();  // a collinear transition: no stop, nothing published this tick
+    return;
+  }
+  if (!run_boundary_stop_pending_) {
+    reset_corner_pivot_state();
+    run_boundary_stop_pending_ = true;
+  }
+  const auto& nxt = runs_[run_idx_ + 1].pts;
+  const Point n0 = nxt[0], n1 = nxt[1];
+  const double target_heading = std::atan2(n1.e - n0.e, n1.n - n0.n);
+  const double heading_err = dyx3_geometry::angle_wrap(target_heading - yaw_ned);
+  const StopTelemetry tel = telemetry(now_ns, yaw_ned);
+  const HoldOutput h = boundary_hold_.step(now_ns, tel);
+  if (h.stopped) {
+    run_boundary_stop_pending_ = false;
+    advance_run(true);
+    return;
+  }
+  segment_state_ = SegState::CornerStop;
+  last_speed_cmd_ = 0.0;
+  double hv = 0.0;
+  publish_brake(yaw_ned, tel, &hv);
+  publish_debug(hold_row(debug_xtrack(pos_n, pos_e), heading_err, dist_to_goal, hv, dist_to_goal,
+                         pose_age_s * 1000.0, false));
+  publish_segment_debug(SegState::CornerStop, std::max(0, static_cast<int>(run_->pts.size()) - 2),
+                        0.0, dist_to_goal, next_run_turn() * (180.0 / kPi), target_heading,
+                        heading_err, 0.0);
+}
+
+// _hold_at_completion (D3): brake to a confirmed physical stop at the final waypoint, then DONE.
+void RppCore::hold_at_completion(double pos_n, double pos_e, double yaw_ned, double pose_age_s,
+                                 double dist_to_goal, int64_t now_ns) {
+  if (!completion_stop_pending_) {
+    reset_corner_pivot_state();
+    completion_stop_pending_ = true;
+  }
+  const StopTelemetry tel = telemetry(now_ns, yaw_ned);
+  const HoldOutput h = completion_hold_.step(now_ns, tel);
+  if (h.stopped) {
+    path_done_ = true;
+    segment_state_ = SegState::Done;
+    publish_zero(StateCode::Done, pose_age_s * 1000.0, dist_to_goal);
+    return;
+  }
+  segment_state_ = SegState::CornerStop;
+  last_speed_cmd_ = 0.0;
+  double hv = 0.0;
+  publish_brake(yaw_ned, tel, &hv);
+  publish_debug(hold_row(debug_xtrack(pos_n, pos_e), 0.0, dist_to_goal, hv, dist_to_goal,
+                         pose_age_s * 1000.0, false));
+  publish_segment_debug(SegState::CornerStop, std::max(0, static_cast<int>(run_->pts.size()) - 2),
+                        0.0, dist_to_goal, kNaN, kNaN, kNaN, 0.0);
+}
+
+// _segment_endpoint_precise_stop_tick: final-run endpoint overlay (ON by default in the prototype).
+// True when this tick published a stop/correction command.
+bool RppCore::precise_stop_tick(double pos_n, double pos_e, double yaw_ned, double pose_age_s,
+                                double dist_to_goal, int64_t now_ns) {
   if (!params_.flag(P::segment_precise_endpoint_stop_enabled)) return false;
   if (run_idx_ + 1 < runs_.size()) return false;
   if (run_ == nullptr || run_->pts.size() < 2) return false;
@@ -415,18 +647,101 @@ bool RppCore::precise_stop_engages(double pos_n, double pos_e, int64_t now_ns) c
   if (seg_len < 1e-6) return false;
   un /= seg_len;
   ue /= seg_len;
+
+  // residual: + endpoint ahead on the final segment, - overshot
   const double dn = b.n - pos_n;
   const double de = b.e - pos_e;
   const double residual = dn * un + de * ue;
+  const double cross = (pos_n - b.n) * ue - (pos_e - b.e) * un;
+  const double radial = std::hypot(dn, de);
+
   const double along_tol = params_.num(P::segment_endpoint_arrival_tolerance_m);
+  const double cross_tol = params_.num(P::segment_endpoint_cross_tolerance_m);
+  const double correction_limit = params_.num(P::segment_endpoint_max_correction_m);
   const double speed = measured_speed(now_ns);
   const double decel = params_.num(P::segment_endpoint_precise_decel_m_s2);
   // precise_stop.feedforward_trigger_distance(speed, decel, along_tol)
-  const double sp = std::max(0.0, speed);
+  const double sp0 = std::max(0.0, speed);
   const double floor_d = std::max(0.0, along_tol);
-  const double ff = decel <= 0.0 ? floor_d : std::max(floor_d, (sp * sp) / (2.0 * decel));
+  const double ff = decel <= 0.0 ? floor_d : std::max(floor_d, (sp0 * sp0) / (2.0 * decel));
   const double trigger = ff + params_.num(P::segment_endpoint_trigger_margin_m);
-  return segment_endpoint_stop_active_ || !(residual > trigger);
+
+  // A negative residual is already past the end plane, so it must engage.
+  if (!segment_endpoint_stop_active_ && residual > trigger) return false;
+  if (!segment_endpoint_stop_active_) {
+    reset_corner_pivot_state();
+    segment_endpoint_stop_active_ = true;
+    endpoint_stop_started_ = true;
+    endpoint_stop_start_ns_ = now_ns;
+  }
+
+  const StopTelemetry tel = telemetry(now_ns, yaw_ned);
+  const bool stopped = stop_confirm_.satisfied(now_ns, tel, sp_);
+  auto finish = [&]() {
+    segment_endpoint_stop_active_ = false;
+    endpoint_stop_started_ = false;
+    completion_stop_pending_ = true;
+    hold_at_completion(pos_n, pos_e, yaw_ned, pose_age_s, dist_to_goal, now_ns);
+  };
+  if (std::fabs(residual) <= along_tol && std::fabs(cross) <= cross_tol && stopped) {
+    finish();
+    return true;
+  }
+  const double max_s = params_.num(P::segment_endpoint_precise_max_s);
+  if (max_s > 0.0 && endpoint_stop_started_ &&
+      static_cast<double>(now_ns - endpoint_stop_start_ns_) * 1e-9 >= max_s && stopped) {
+    finish();  // timeout: accept the best position, only once stopped
+    return true;
+  }
+
+  segment_state_ = SegState::CornerStop;
+  last_speed_cmd_ = 0.0;
+  const double age_ms = pose_age_s * 1000.0;
+
+  if (radial > correction_limit && std::fabs(cross) > cross_tol) {
+    // lateral miss outside the correction envelope: brake, no aggressive diagonal chase
+    double hv = 0.0;
+    publish_brake(yaw_ned, tel, &hv);
+    publish_debug(hold_row(cross, 0.0, dist_to_goal, hv, dist_to_goal, age_ms, false));
+    return true;
+  }
+
+  const bool needs_lateral_correction = std::fabs(cross) > cross_tol && radial <= correction_limit;
+  const double profile_dist = needs_lateral_correction ? radial : std::fabs(residual);
+  const double creep = params_.num(P::segment_endpoint_creep_speed);
+  double speed_mag;
+  if (stopped && radial > std::max(along_tol, cross_tol)) {
+    speed_mag = creep;
+  } else {
+    const double cap = std::max(speed, creep);
+    // precise_stop.feedforward_brake_speed(max(0, profile_dist), decel, cap)
+    const double rem = std::max(0.0, profile_dist);
+    const double capc = std::max(0.0, cap);
+    speed_mag = (rem <= 0.0 || decel <= 0.0) ? 0.0 : std::min(std::sqrt(2.0 * decel * rem), capc);
+  }
+  double dir_n, dir_e;
+  if (radial < 1e-6 || radial > std::max(correction_limit, std::max(along_tol, cross_tol))) {
+    const double sign = residual >= 0.0 ? 1.0 : -1.0;
+    dir_n = sign * un;
+    dir_e = sign * ue;
+  } else if (needs_lateral_correction) {
+    dir_n = dn / radial;
+    dir_e = de / radial;
+  } else {
+    const double sign = residual >= 0.0 ? 1.0 : -1.0;
+    dir_n = sign * un;
+    dir_e = sign * ue;
+  }
+  const double v_n = speed_mag * dir_n;
+  const double v_e = speed_mag * dir_e;
+  publish_velocity(v_n, v_e);
+  publish_yaw_rate(0.0);
+  out_.cmd = CmdKind::Track;  // a creep / profile speed along the final leg, not an active brake
+  publish_debug(
+      hold_row(cross, 0.0, dist_to_goal, std::hypot(v_n, v_e), dist_to_goal, age_ms, false));
+  publish_segment_debug(SegState::CornerStop, std::max(0, static_cast<int>(run_->pts.size()) - 2),
+                        std::max(0.0, residual), dist_to_goal, kNaN, kNaN, kNaN, 0.0);
+  return true;
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -441,6 +756,10 @@ const TickOutput& RppCore::tick(int64_t now_ns) {
   }
   last_tick_ns_ = now_ns;
   have_last_tick_ = true;
+  sp_ = stop_params();
+  corner_fsm_.set_params(sp_);
+  boundary_hold_.set_params(sp_);
+  completion_hold_.set_params(sp_);
   control_loop_impl(now_ns);
   return out_;
 }
@@ -551,17 +870,8 @@ void RppCore::control_loop_impl(int64_t now_ns) {
   pos_n -= ekf_off_n_;
   pos_e -= ekf_off_e_;
 
-  // ---- run-transition alignment (the pivot itself is not ported) ----
-  if (run_align_pending_) {
-    if (path.n < 2) {
-      run_align_pending_ = false;
-    } else if (dist(path[0].n, path[0].e, path[1].n, path[1].e) < 1e-6) {
-      run_align_pending_ = false;
-    } else {
-      handoff(Handoff::RunAlignment);
-      return;
-    }
-  }
+  // ---- run-transition alignment: pivot toward the new run's first leg before tracking it ----
+  if (run_alignment_hold(pos_n, pos_e, yaw_ned, pose_age_s, now_ns)) return;
 
   dyx3_geometry::PathProjection smooth_proj;
   if (!profile_segment_) {
@@ -578,23 +888,25 @@ void RppCore::control_loop_impl(int64_t now_ns) {
     return;
   }
   if (run_boundary_stop_pending_) {
-    handoff(Handoff::RunBoundaryHold);
+    hold_before_run_advance(pos_n, pos_e, yaw_ned, pose_age_s, dist_to_goal, now_ns);
     return;
   }
+  // D3: once the final-waypoint stop is latched, hold it BEFORE the goal test.
   if (completion_stop_pending_) {
-    handoff(Handoff::CompletionHold);
+    hold_at_completion(pos_n, pos_e, yaw_ned, pose_age_s, dist_to_goal, now_ns);
     return;
   }
   if (profile_segment_ && run_idx_ + 1 >= runs_.size() && path_travel_m_ >= min_travel) {
-    if (precise_stop_engages(pos_n, pos_e, now_ns)) {
-      handoff(Handoff::EndpointPreciseStop);
-      return;
-    }
+    if (precise_stop_tick(pos_n, pos_e, yaw_ned, pose_age_s, dist_to_goal, now_ns)) return;
   }
   const double goal_tol = params_.num(P::xy_goal_tolerance);
   if (path_travel_m_ >= min_travel && (dist_to_goal <= goal_tol_effective(goal_tol) ||
                                        endpoint_capture_recovered(pos_n, pos_e, dist_to_goal))) {
-    handoff(run_idx_ + 1 < runs_.size() ? Handoff::RunBoundaryHold : Handoff::CompletionHold);
+    if (run_idx_ + 1 < runs_.size()) {
+      hold_before_run_advance(pos_n, pos_e, yaw_ned, pose_age_s, dist_to_goal, now_ns);
+    } else {
+      hold_at_completion(pos_n, pos_e, yaw_ned, pose_age_s, dist_to_goal, now_ns);
+    }
     return;
   }
 
@@ -817,15 +1129,18 @@ void RppCore::control_segment(double pos_n, double pos_e, double yaw_ned, double
     const double goal_tol_eff = goal_tol_effective(goal_tol);
     const double min_travel = run_min_travel();
     if (final_segment && path_travel_m_ >= min_travel) {
-      if (precise_stop_engages(pos_n, pos_e, now_ns)) {
-        handoff(Handoff::EndpointPreciseStop);
-        return;
-      }
+      if (precise_stop_tick(pos_n, pos_e, yaw_ned, pose_age_s, dist_to_corner, now_ns)) return;
     }
     if (final_segment && path_travel_m_ >= min_travel &&
         (dist_to_corner <= goal_tol_eff ||
          endpoint_capture_recovered(pos_n, pos_e, dist_to_corner))) {
-      handoff(run_idx_ + 1 < runs_.size() ? Handoff::RunBoundaryHold : Handoff::CompletionHold);
+      // stop before switching across a real heading change; the final run goes through the single
+      // completion handler
+      if (run_idx_ + 1 < runs_.size()) {
+        hold_before_run_advance(pos_n, pos_e, yaw_ned, pose_age_s, dist_to_corner, now_ns);
+      } else {
+        hold_at_completion(pos_n, pos_e, yaw_ned, pose_age_s, dist_to_corner, now_ns);
+      }
       return;
     }
 
@@ -836,22 +1151,65 @@ void RppCore::control_segment(double pos_n, double pos_e, double yaw_ned, double
 
     if (!final_segment && dist_to_corner <= acceptance) {
       const double path_corner_deg = std::fabs(segment_angle_deg(path, seg_idx));
-      const double threshold_deg = params_.num(P::segment_corner_threshold_deg);
-      if (path_corner_deg < threshold_deg) {
-        // Geometrically tangent junction: advance without stopping (momentum is kept).
-        const Point c = path[static_cast<size_t>(seg_idx) + 2];
-        const double leg_heading = std::atan2(c.e - b.e, c.n - b.n);
-        const double target_heading = pivot_intercept_heading(
-            Point{pos_n, pos_e}, b, c, leg_heading, params_.flag(P::pivot_to_intercept_enabled),
-            params_.num(P::pivot_intercept_dist_m));
-        const double heading_err = dyx3_geometry::angle_wrap(target_heading - yaw_ned);
+      const Point c = path[static_cast<size_t>(seg_idx) + 2];
+      const double leg_heading = std::atan2(c.e - b.e, c.n - b.n);
+      const double target_heading = pivot_intercept_heading(
+          Point{pos_n, pos_e}, b, c, leg_heading, params_.flag(P::pivot_to_intercept_enabled),
+          params_.num(P::pivot_intercept_dist_m));
+      const double heading_err = dyx3_geometry::angle_wrap(target_heading - yaw_ned);
+      const StopTelemetry tel = telemetry(now_ns, yaw_ned);
+      CornerInput in;
+      in.now_ns = now_ns;
+      in.heading_err_rad = heading_err;
+      in.corner_deg = path_corner_deg;
+      in.tel = tel;
+      const CornerOutput co = corner_fsm_.step(in);
+      const double age_ms = pose_age_s * 1000.0;
+      if (co.action == CornerAction::Advance) {
+        // tangent junctions keep momentum; a settled hard corner starts the next leg from rest
         ++segment_idx_;
         segment_state_ = SegState::TrackSegment;
+        if (co.zero_speed_memory) last_speed_cmd_ = 0.0;
         publish_segment_debug(segment_state_, segment_idx_, kNaN, dist_to_corner, corner_angle,
                               target_heading, heading_err, 0.0);
         continue;
       }
-      handoff(Handoff::CornerStopPivot);
+      if (co.action == CornerAction::SettleBrake) {
+        last_speed_cmd_ = 0.0;
+        double hv = 0.0;
+        publish_brake(yaw_ned, tel, &hv);
+        publish_debug(hold_row(signed_xtrack, heading_err, dist_to_corner, hv, dist_to_goal, age_ms,
+                               spray_active));
+        publish_segment_debug(SegState::CornerAlign, seg_idx, dist_to_end_along, dist_to_corner,
+                              corner_angle, target_heading, heading_err, 0.0);
+        return;
+      }
+      if (co.action == CornerAction::Brake) {
+        segment_state_ = SegState::CornerStop;
+        last_speed_cmd_ = 0.0;
+        double hv = 0.0;
+        publish_brake(yaw_ned, tel, &hv);
+        publish_debug(hold_row(signed_xtrack, heading_err, dist_to_corner, hv, dist_to_goal, age_ms,
+                               spray_active));
+        publish_segment_debug(segment_state_, seg_idx, dist_to_end_along, dist_to_corner,
+                              corner_angle, target_heading, heading_err, 0.0);
+        return;
+      }
+      // Pivot: a small vector at the exit heading, kept inside the forward cone
+      segment_state_ = SegState::CornerAlign;
+      const double corner_speed = std::max(0.05, params_.num(P::segment_min_corner_speed));
+      const double step = clampd(heading_err, -kMaxBearingOffsetRad, kMaxBearingOffsetRad);
+      const double cmd_bearing = yaw_ned + step;
+      last_speed_cmd_ = corner_speed;
+      publish_velocity(corner_speed * std::cos(cmd_bearing), corner_speed * std::sin(cmd_bearing));
+      publish_yaw_rate(0.0);
+      out_.cmd = CmdKind::Pivot;
+      out_.pivot_heading_err = heading_err;
+      out_.pivot_speed_memory = corner_speed;
+      publish_debug(hold_row(signed_xtrack, heading_err, dist_to_corner, corner_speed, dist_to_goal,
+                             age_ms, spray_active));
+      publish_segment_debug(segment_state_, seg_idx, dist_to_end_along, dist_to_corner,
+                            corner_angle, target_heading, heading_err, 0.0);
       return;
     }
 
@@ -987,6 +1345,11 @@ CoreState RppCore::snapshot() const {
   s.last_pos_e = last_pos_e_;
   s.segment_state = static_cast<int>(segment_state_);
   s.rtk_recovering = rtk_recover_since_.has;
+  s.run_boundary_stop_pending = run_boundary_stop_pending_;
+  s.completion_stop_pending = completion_stop_pending_;
+  s.endpoint_stop_active = segment_endpoint_stop_active_;
+  s.corner_stop_complete = corner_fsm_.stop_complete();
+  s.run_align_turn_rad = run_align_turn_rad_;
   return s;
 }
 

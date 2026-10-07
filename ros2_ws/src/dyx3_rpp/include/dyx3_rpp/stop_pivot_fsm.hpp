@@ -15,6 +15,7 @@
 #pragma once
 
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -131,13 +132,22 @@ struct CornerInput {
   double heading_err_rad;  // wrapped (target - yaw)
   double corner_deg;       // |path corner| in degrees
   StopTelemetry tel;
+  // Pivot watchdog angle when it is known in radians (a run-entry alignment carries its own); NaN
+  // derives it from corner_deg, exactly as the prototype's corner block does.
+  double turn_angle_rad{std::numeric_limits<double>::quiet_NaN()};
 };
 
 // The hard-corner flow at a segment vertex (the corner block of the segment profile):
 // TRACKING -> BRAKE -> PIVOT -> RELEASE_SETTLE -> ADVANCE, with the collinear shortcut.
 class CornerFsm {
 public:
-  explicit CornerFsm(const StopPivotParams& p) : p_(p) {}
+  // `shared_stop`: the prototype keeps ONE stop confirmation for the corner flow, the run-boundary
+  // hold, the completion hold and the endpoint precise stop (a hold that ends in the completion
+  // hold reuses the dwell the precise stop already served). Pass the shared object to keep that.
+  explicit CornerFsm(const StopPivotParams& p, StopConfirm* shared_stop = nullptr)
+      : p_(p), stop_(shared_stop != nullptr ? shared_stop : &own_stop_) {}
+  CornerFsm(const CornerFsm&) = delete;
+  CornerFsm& operator=(const CornerFsm&) = delete;
   void set_params(const StopPivotParams& p) { p_ = p; }
   CornerOutput step(const CornerInput& in);
   void reset();                                          // after an advance or a new run
@@ -149,7 +159,8 @@ public:
 private:
   void go(FsmState to, const char* reason, int64_t now_ns);
   StopPivotParams p_;
-  StopConfirm stop_;
+  StopConfirm own_stop_;
+  StopConfirm* stop_;
   PivotWatchdog pivot_;
   bool stop_complete_{false};
   bool settle_active_{false};
@@ -171,18 +182,22 @@ struct HoldOutput {
 
 class StopHold {
 public:
-  explicit StopHold(const StopPivotParams& p) : p_(p) {}
+  explicit StopHold(const StopPivotParams& p, StopConfirm* shared_stop = nullptr)
+      : p_(p), stop_(shared_stop != nullptr ? shared_stop : &own_stop_) {}
+  StopHold(const StopHold&) = delete;
+  StopHold& operator=(const StopHold&) = delete;
   void set_params(const StopPivotParams& p) { p_ = p; }
   HoldOutput step(int64_t now_ns, const StopTelemetry& tel);
   bool latched() const { return latched_; }
   void reset() {
     latched_ = false;
-    stop_.reset();
+    stop_->reset();
   }
 
 private:
   StopPivotParams p_;
-  StopConfirm stop_;
+  StopConfirm own_stop_;
+  StopConfirm* stop_;
   bool latched_{false};
 };
 

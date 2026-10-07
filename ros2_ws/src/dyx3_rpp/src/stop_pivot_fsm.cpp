@@ -94,7 +94,7 @@ void CornerFsm::go(FsmState to, const char* reason, int64_t now_ns) {
 }
 
 void CornerFsm::reset() {
-  stop_.reset();
+  stop_->reset();
   pivot_.reset();
   stop_complete_ = false;
   settle_active_ = false;
@@ -115,7 +115,8 @@ CornerOutput CornerFsm::step(const CornerInput& in) {
     return out;
   }
 
-  const double angle_rad = in.corner_deg * (M_PI / 180.0);
+  const double angle_rad =
+      std::isfinite(in.turn_angle_rad) ? in.turn_angle_rad : in.corner_deg * (M_PI / 180.0);
   const bool timed_out = stop_complete_ && pivot_.timed_out(in.now_ns, angle_rad, p_);
   out.pivot_timed_out = timed_out;
 
@@ -162,7 +163,7 @@ CornerOutput CornerFsm::step(const CornerInput& in) {
   }
 
   if (!stop_complete_) {
-    if (!stop_.satisfied(in.now_ns, in.tel, p_)) {
+    if (!stop_->satisfied(in.now_ns, in.tel, p_)) {
       go(FsmState::Brake, "stop not confirmed", in.now_ns);
       out.action = CornerAction::Brake;
       out.state = state_;
@@ -185,7 +186,7 @@ CornerOutput CornerFsm::step(const CornerInput& in) {
 HoldOutput StopHold::step(int64_t now_ns, const StopTelemetry& tel) {
   HoldOutput out;
   latched_ = true;
-  if (stop_.satisfied(now_ns, tel, p_)) {
+  if (stop_->satisfied(now_ns, tel, p_)) {
     out.phase = HoldPhase::Stopped;
     out.stopped = true;
     return out;

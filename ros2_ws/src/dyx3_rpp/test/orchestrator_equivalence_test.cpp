@@ -39,6 +39,8 @@ struct Stats {
   int scenarios{0}, ticks{0}, compared{0}, handoffs{0}, failures{0};
   std::map<std::string, int> handoff_names;
   std::map<int, int> states;
+  std::map<std::string, int> cmds;
+  std::map<int, int> seg_states;
   int shown{0};
 };
 
@@ -71,12 +73,22 @@ struct Stats {
 }  // namespace
 
 TEST(OrchestratorEquivalence, TickByTickAgainstTheCarriedNode) {
-  std::ifstream f(std::string(DYX3_FIXTURES) + "/gate4_orchestrator_vectors.txt");
-  ASSERT_TRUE(f.good()) << "fixture missing";
+  // The fixture is split into parts (each well under the repository's 5 MB file limit).
   std::vector<std::string> lines;
-  for (std::string l; std::getline(f, l);) lines.push_back(l);
+  int parts = 0;
+  for (int part = 1;; ++part) {
+    std::ifstream f(std::string(DYX3_FIXTURES) + "/gate4_orchestrator_vectors_" +
+                    std::to_string(part) + ".txt");
+    if (!f.good()) break;
+    ++parts;
+    std::string l;
+    std::getline(f, l);
+    ASSERT_EQ(l, "GATE4ORCH 1") << "part " << part;
+    while (std::getline(f, l)) lines.push_back(l);
+  }
+  ASSERT_GE(parts, 1) << "fixture missing";
   ASSERT_GT(lines.size(), 1000u);
-  ASSERT_EQ(lines[0], "GATE4ORCH 1");
+  lines.insert(lines.begin(), "GATE4ORCH 1");
 
   Stats st;
   size_t i = 1;
@@ -206,6 +218,7 @@ TEST(OrchestratorEquivalence, TickByTickAgainstTheCarriedNode) {
             CHECK_NEAR(st, "dbg.accel_scale", d[14], g.accel_scale);
             CHECK_NEAR(st, "dbg.speed_mode", d[15], g.speed_mode);
             ++st.states[g.state];
+            ++st.cmds[to_string(o.cmd)];
           }
           CHECK_EQ(st, "segment_debug_valid", seg_valid, o.segment_debug_valid);
           CHECK_EQ(st, "segment_debug_publishes", seg_n,
@@ -222,6 +235,7 @@ TEST(OrchestratorEquivalence, TickByTickAgainstTheCarriedNode) {
             CHECK_NEAR(st, "seg.yaw_rate", sg[7], g.yaw_rate_body);
           }
           ++st.compared;
+          if (seg_valid) ++st.seg_states[o.segment_debug.state];
           // optional state snapshot
           if (i < lines.size() && lines[i].rfind("ST ", 0) == 0) {
             auto s = split(lines[i++]);
@@ -267,12 +281,16 @@ TEST(OrchestratorEquivalence, TickByTickAgainstTheCarriedNode) {
       st.scenarios, st.ticks, st.compared, st.handoffs, st.failures);
   for (auto& kv : st.handoff_names) std::printf("  handoff %s x%d\n", kv.first.c_str(), kv.second);
   for (auto& kv : st.states) std::printf("  state %d x%d\n", kv.first, kv.second);
+  for (auto& kv : st.cmds) std::printf("  cmd %s x%d\n", kv.first.c_str(), kv.second);
+  for (auto& kv : st.seg_states) std::printf("  segment state %d x%d\n", kv.first, kv.second);
   EXPECT_EQ(st.failures, 0);
   EXPECT_GE(st.scenarios, 50);
-  EXPECT_GE(st.compared, 6500);
+  EXPECT_GE(st.compared, 9000);
   // the gates and every tracked state must actually have been exercised
-  for (int s : {-1, 0, 1, 2, 4, 5}) EXPECT_GT(st.states[s], 0) << "state " << s << " never reached";
-  for (const char* n : {"COMPLETION_HOLD", "RUN_BOUNDARY_HOLD", "ENDPOINT_PRECISE_STOP",
-                        "CORNER_STOP_PIVOT", "RUN_ALIGNMENT"})
-    EXPECT_GT(st.handoff_names[n], 0) << n << " never reached";
+  for (int s : {-1, 0, 1, 2, 3, 4, 5})
+    EXPECT_GT(st.states[s], 0) << "state " << s << " never reached";
+  for (int s : {1, 2, 3, 4, 5})
+    EXPECT_GT(st.seg_states[s], 0) << "segment state " << s << " never reached";
+  for (const char* n : {"BRAKE", "PIVOT", "TRACK", "STOP"})
+    EXPECT_GT(st.cmds[n], 0) << n << " never commanded";
 }
