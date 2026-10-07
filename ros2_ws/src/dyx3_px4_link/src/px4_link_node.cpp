@@ -529,6 +529,10 @@ void Px4LinkNode::publish_state_and_health(double now_s) {
     const auto o = assemble(lp_, att_, st_, f);
     dyx3_interfaces::msg::VehicleState s;
     s.stamp = ros_now();
+    // PX4 timestamps already arrive in the system-clock domain (contract section 7): no offset to
+    // apply.
+    s.px4_sample_stamp.sec = static_cast<int32_t>(o.px4_sample_us / 1000000ULL);
+    s.px4_sample_stamp.nanosec = static_cast<uint32_t>((o.px4_sample_us % 1000000ULL) * 1000ULL);
     s.position_valid = o.position_valid;
     s.velocity_valid = o.velocity_valid;
     s.attitude_valid = o.attitude_valid;
