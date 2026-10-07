@@ -161,6 +161,7 @@ F
   touch "${pm}/install/setup.bash" "${pm}/.complete"
   echo abc123def456 >"${pm}/px4_msgs.sha256"
   # Never really build px4_msgs in tests.
+  # shellcheck disable=SC2317  # invoked indirectly by upgrade_to
   build_px4_msgs() { :; }
 
   (upgrade_to "${A}") >"${T}/up_a" 2>&1
