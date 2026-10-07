@@ -2,6 +2,7 @@
 
 #include "builtin_interfaces/msg/time.hpp"
 #include "dyx3_interfaces/action/execute_mission.hpp"
+#include "dyx3_interfaces/msg/estimator_health.hpp"
 #include "dyx3_interfaces/msg/mission_state.hpp"
 #include "dyx3_interfaces/msg/motion_setpoint.hpp"
 #include "dyx3_interfaces/msg/motion_setpoint_status.hpp"
@@ -54,6 +55,10 @@ TEST(MotionSetpointStatusAbi, ConstantsAndSafeDefault) {
   EXPECT_EQ(Msg::REASON_RTK_GATE, 6U);
   EXPECT_EQ(Msg::REASON_LIMIT_CLAMPED, 7U);
   EXPECT_EQ(Msg::REASON_PX4_LINK_UNHEALTHY, 8U);
+  EXPECT_EQ(Msg::REASON_HEADING_UNHEALTHY, 9U);
+  EXPECT_EQ(Msg::REASON_OPERATOR_LINK_LOST, 10U);
+  EXPECT_EQ(Msg::REASON_ARMING_GATE, 11U);
+  EXPECT_EQ(Msg::REASON_ESTIMATOR_UNHEALTHY, 12U);
   const Msg message{};
   ExpectZeroTime(message.stamp);
   EXPECT_EQ(message.input_seq, 0U);
@@ -94,6 +99,25 @@ TEST(VehicleStateAbi, SafeDefault) {
   EXPECT_EQ(message.nav_state, 0U);
   EXPECT_FALSE(message.failsafe);
   EXPECT_FALSE(message.preflight_checks_pass);
+}
+
+TEST(EstimatorHealthAbi, DefaultIsUnhealthyByConstruction) {
+  const dyx3_interfaces::msg::EstimatorHealth h{};
+  ExpectZeroTime(h.stamp);
+  ExpectZeroTime(h.px4_sample_stamp);
+  // flags_valid=false means "no data": the guard must treat it as unhealthy.
+  EXPECT_FALSE(h.flags_valid);
+  EXPECT_FALSE(h.test_ratios_valid);
+  EXPECT_FALSE(h.gnss_yaw_fusion_intended);
+  EXPECT_FALSE(h.gnss_yaw_fault);
+  EXPECT_FALSE(h.reject_yaw);
+  EXPECT_FALSE(h.reject_hor_pos);
+  EXPECT_FALSE(h.reject_hor_vel);
+  EXPECT_FALSE(h.inertial_dead_reckoning);
+  EXPECT_EQ(h.innovation_fault_status_changes, 0U);
+  EXPECT_FLOAT_EQ(h.yaw_test_ratio, 0.0F);
+  EXPECT_FLOAT_EQ(h.position_test_ratio, 0.0F);
+  EXPECT_FLOAT_EQ(h.velocity_test_ratio, 0.0F);
 }
 
 TEST(StatusMessageAbi, ConstantsAndSafeDefaults) {
@@ -160,7 +184,10 @@ TEST(HealthMessageAbi, ConstantsAndSafeDefaults) {
   using Rtk = dyx3_interfaces::msg::RtkStatus;
   EXPECT_EQ(Rtk::FIX_UNKNOWN, 0U);
   EXPECT_EQ(Rtk::FIX_NONE, 1U);
-  EXPECT_EQ(Rtk::FIX_3D, 2U);
+  EXPECT_EQ(Rtk::FIX_2D, 2U);
+  EXPECT_EQ(Rtk::FIX_3D, 3U);
+  EXPECT_EQ(Rtk::FIX_RTCM_CODE_DIFFERENTIAL, 4U);
+  EXPECT_EQ(Rtk::FIX_EXTRAPOLATED, 8U);
   EXPECT_EQ(Rtk::FIX_RTK_FLOAT, 5U);
   EXPECT_EQ(Rtk::FIX_RTK_FIXED, 6U);
   const Rtk rtk{};
@@ -219,13 +246,14 @@ TEST(ServiceAndActionAbi, ConstantsAndSafeDefaults) {
   EXPECT_FALSE(Resume::Response{}.accepted);
   EXPECT_EQ(Resume::Response{}.reason_code, 0U);
   using Abort = dyx3_interfaces::srv::AbortMission;
+  EXPECT_EQ(Abort::Request::REASON_UNSPECIFIED, 0U);
   EXPECT_EQ(Abort::Request::REASON_OPERATOR, 1U);
   EXPECT_EQ(Abort::Request::REASON_SAFETY, 2U);
-  EXPECT_EQ(Abort::Response::RESULT_OK, 0U);
-  EXPECT_EQ(Abort::Response::RESULT_NOT_ACTIVE, 1U);
-  EXPECT_EQ(Abort::Request{}.reason_code, 0U);
+  EXPECT_EQ(Abort::Response::REASON_OK, 0U);
+  EXPECT_EQ(Abort::Response::REASON_NOT_ACTIVE, 1U);
+  EXPECT_EQ(Abort::Request{}.reason_code, Abort::Request::REASON_UNSPECIFIED);
   EXPECT_FALSE(Abort::Response{}.accepted);
-  EXPECT_EQ(Abort::Response{}.result_code, 0U);
+  EXPECT_EQ(Abort::Response{}.reason_code, 0U);
   using Skip = dyx3_interfaces::srv::SkipPoint;
   EXPECT_EQ(Skip::Response::REASON_OK, 0U);
   EXPECT_EQ(Skip::Response::REASON_NO_ACTIVE_POINT, 1U);

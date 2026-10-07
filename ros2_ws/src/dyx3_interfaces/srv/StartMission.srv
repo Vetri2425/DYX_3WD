@@ -1,3 +1,11 @@
+# Start a mission. CANONICAL OWNER: dyx3_mission.
+#
+# ExecuteMission.action is the canonical mission-execution interface (goal =
+# start, feedback = progress, result = outcome, cancel = abort). This service is
+# a thin admission-only convenience over the SAME dyx3_mission entry point: it
+# validates the artifact and starts the mission exactly as an ExecuteMission goal
+# would, but returns immediately with no feedback. Both resolve to one code path
+# inside dyx3_mission; no other package may implement either.
 # Content-addressed path artifact produced by the backend.
 string path_artifact_sha256
 ---

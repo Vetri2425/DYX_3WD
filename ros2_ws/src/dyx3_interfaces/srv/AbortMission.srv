@@ -1,8 +1,11 @@
+# Request an abort of the active mission. Owner: dyx3_mission (see ExecuteMission).
+# reason_code 0 is "unspecified" and is treated as an operator abort.
+uint8 REASON_UNSPECIFIED=0
 uint8 REASON_OPERATOR=1
 uint8 REASON_SAFETY=2
 uint8 reason_code
 ---
 bool accepted
-uint8 RESULT_OK=0
-uint8 RESULT_NOT_ACTIVE=1
-uint8 result_code
+uint8 REASON_OK=0
+uint8 REASON_NOT_ACTIVE=1
+uint8 reason_code

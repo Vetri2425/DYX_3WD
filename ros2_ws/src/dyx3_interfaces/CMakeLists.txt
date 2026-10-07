@@ -11,6 +11,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/MotionSetpoint.msg"
   "msg/MotionSetpointStatus.msg"
   "msg/VehicleState.msg"
+  "msg/EstimatorHealth.msg"
   "msg/RppStatus.msg"
   "msg/MissionState.msg"
   "msg/PointResult.msg"

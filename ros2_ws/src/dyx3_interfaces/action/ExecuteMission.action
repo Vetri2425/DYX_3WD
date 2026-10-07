@@ -1,3 +1,6 @@
+# CANONICAL mission-execution interface. Owner: dyx3_mission (single action server).
+# Cancel of an active goal is equivalent to AbortMission with REASON_OPERATOR.
+# See also srv/StartMission.srv (thin admission-only wrapper over the same code path).
 # Goal
 string path_artifact_sha256
 ---

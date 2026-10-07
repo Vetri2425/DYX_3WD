@@ -13,6 +13,17 @@ uint8 REASON_ESTOP=5
 uint8 REASON_RTK_GATE=6
 uint8 REASON_LIMIT_CLAMPED=7
 uint8 REASON_PX4_LINK_UNHEALTHY=8
+# GNSS-yaw / heading estimate is not trustworthy (EstimatorHealth: yaw rejected,
+# GNSS-yaw fault, or yaw test ratio over limit). A mostly-accepted heading fault
+# can leave yaw wrong for ~190 s with no other flag (HANDOFF 2026-10-07).
+uint8 REASON_HEADING_UNHEALTHY=9
+# Tablet heartbeat lost (spec 4.3.1). PX4 cannot see this; the Jetson owns it.
+uint8 REASON_OPERATOR_LINK_LOST=10
+# Vehicle not armed / not in the required nav state (VehicleState).
+uint8 REASON_ARMING_GATE=11
+# Position / velocity estimate unhealthy: dead reckoning, position test ratio,
+# or horizontal position/velocity rejection (EstimatorHealth).
+uint8 REASON_ESTIMATOR_UNHEALTHY=12
 uint8 reason_code
 
 bool accepted
