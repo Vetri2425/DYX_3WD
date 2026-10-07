@@ -1,0 +1,36 @@
+[Unit]
+Description=DYX 3WD — independent spray fail-closed watchdog
+After=dyx3-platform.service
+Wants=dyx3-platform.service
+# Deliberately NOT tied to dyx3-ros.service: it must survive the spray controller (and the whole control graph)
+# dying or restarting, and keep asking for OFF. It only ever requests OFF, through dyx3_px4_link.
+
+[Service]
+Type=exec
+User=dyx3
+Group=dyx3
+EnvironmentFile=-/etc/dyx3/ros.env
+ExecStart=/opt/dyx3/current/bin/dyx3-spray-watchdog
+Restart=always
+RestartSec=2
+# SIGTERM makes the watchdog send OFF and flush before exiting.
+KillSignal=SIGTERM
+TimeoutStopSec=5
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/dyx3 /var/log/dyx3 /run/dyx3
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+
+LimitNOFILE=65536
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=dyx3-spray-watchdog
+
+[Install]
+WantedBy=multi-user.target

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2016,SC2329
+# shellcheck disable=SC2016,SC2329,SC2030,SC2031,SC2163,SC2317
 # Installer tests. No root, no network, no systemd, no ROS: everything runs against a staged
 # root (DYX3_ROOT) with fake `colcon`/`ss`/`ping`. Run: installer/tests/run_tests.sh
 #
@@ -76,6 +76,36 @@ libs() {
   svc="$(manifest_section enabled_services)"
   check "manifest: only dyx3-platform enabled" '[ "${svc}" = "dyx3-platform" ]'
   check "manifest: legacy package absent from ros2_packages" '! manifest_section ros2_packages | grep -q legacy'
+  check "manifest: spray watchdog is its own service" 'manifest_section services | grep -qx dyx3-spray-watchdog'
+  local s2
+  for s2 in $(manifest_section services); do
+    check "service ${s2}: unit and launcher exist" '[ -f "${REPO}/deployment/systemd/${s2}.service" ] && [ -x "${REPO}/deployment/scripts/start-${s2#dyx3-}.sh" ]'
+  done
+  check "the spray watchdog unit is not tied to dyx3-ros" '! grep -E "^(Requires|BindsTo|PartOf)=.*dyx3-ros" "${REPO}/deployment/systemd/dyx3-spray-watchdog.service"'
+  check "no unit or template hard-codes a secret (comments excluded)" '! grep -rEi "^[^#]*(password|token)=." "${REPO}/deployment/systemd" "${REPO}/deployment/network"'
+
+  # runtime environment: never guess a ROS domain, never start without the pinned px4_msgs overlay
+  local e="${T}/envrel"
+  mkdir -p "${e}/rel/installer/pins" "${e}/rel/ros2_ws/install" "${e}/pm/$(sed -n 's/^FIRMWARE_SHA=//p' "${REPO}/installer/pins/firmware.pin")/install"
+  cp "${REPO}/installer/pins/firmware.pin" "${e}/rel/installer/pins/"
+  : >"${e}/ros.bash"
+  : >"${e}/rel/ros2_ws/install/setup.bash"
+  : >"${e}/pm/$(sed -n 's/^FIRMWARE_SHA=//p' "${REPO}/installer/pins/firmware.pin")/install/setup.bash"
+  envcall() { # args: VAR=VAL to export, -VAR to unset
+    (
+      . "${REPO}/deployment/scripts/dyx3-env.sh"
+      export DYX3_RELEASE_DIR="${e}/rel" DYX3_ROS_SETUP="${e}/ros.bash" DYX3_PX4_MSGS_DIR="${e}/pm"
+      local a
+      for a in "$@"; do case "${a}" in -*) unset "${a#-}" ;; *) export "${a}" ;; esac; done
+      dyx3_env_load
+    ) 2>&1
+  }
+  check "env: refuses to start without ROS_DOMAIN_ID" 'o="$(envcall -ROS_DOMAIN_ID)"; rc=$?; [ "${rc}" -ne 0 ] && case "${o}" in *"ROS_DOMAIN_ID is not set"*) true ;; *) false ;; esac'
+  check "env: loads with a domain set" 'envcall ROS_DOMAIN_ID=7 >/dev/null'
+  check "env: refuses when the px4_msgs overlay is missing" '! envcall ROS_DOMAIN_ID=7 DYX3_PX4_MSGS_DIR="${e}/nope" >/dev/null'
+  check "launcher exits non-zero without a domain" '! env -u ROS_DOMAIN_ID DYX3_RELEASE_DIR="${e}/rel" "${REPO}/deployment/scripts/start-spray-watchdog.sh" >/dev/null 2>&1'
+  check "backend launcher refuses without its venv" '! DYX3_RELEASE_DIR="${e}/rel" "${REPO}/deployment/scripts/start-backend.sh" >/dev/null 2>&1'
+  check "backend launcher binds the hotspot address, never 0.0.0.0" 'grep -q "10.42.0.1" "${REPO}/deployment/scripts/start-backend.sh" && ! grep -v "^#" "${REPO}/deployment/scripts/start-backend.sh" | grep -q "0.0.0.0"'
 
   printf 'ID=ubuntu\nVERSION_ID="22.04"\n' >"${T}/os22"
   printf 'ID=ubuntu\nVERSION_ID="24.04"\n' >"${T}/os24"
@@ -146,7 +176,7 @@ F
   : >"${T}/ros_setup.bash"
 
   export PATH="${fakebin}:${PATH}" ROS_SETUP="${T}/ros_setup.bash" DYX3_REPO_URL="file://${src}"
-  export DYX3_ROOT="${T}/lc" INSTALLER_DIR="${REPO}/installer" DYX3_SKIP_SYSTEMD=1
+  export DYX3_ROOT="${T}/lc" INSTALLER_DIR="${REPO}/installer" DYX3_SKIP_SYSTEMD=1 DYX3_SKIP_BACKEND=1
   # shellcheck disable=SC1091
   . "${INSTALLER_DIR}/lib/common.sh"
   for l in os_check dependencies ros_install permissions network_install systemd_install health_check release; do
@@ -170,7 +200,9 @@ F
   check "current -> A" '[ "$(basename "$(readlink -f "${DYX3_CURRENT}")")" = "${A}" ]'
   check "release has .complete and launchers" '[ -f "${DYX3_RELEASES}/${A}/.complete" ] && [ -x "${DYX3_RELEASES}/${A}/bin/dyx3-platform" ]'
   check "config templates installed" '[ -f "${DYX3_ETC}/platform.env" ] && [ -f "${DYX3_ETC}/mavlink-router.conf" ]'
-  check "operator shims installed" '[ -x "${DYX3_BIN}/dyx3-upgrade" ] && [ -x "${DYX3_BIN}/dyx3-health" ] && [ -x "${DYX3_BIN}/dyx3-install" ]'
+  check "operator shims installed" '[ -x "${DYX3_BIN}/dyx3-upgrade" ] && [ -x "${DYX3_BIN}/dyx3-health" ] && [ -x "${DYX3_BIN}/dyx3-install" ] && [ -x "${DYX3_BIN}/dyx3-rollback" ] && [ -x "${DYX3_BIN}/dyx3-version" ]'
+  check "config templates for ros/backend/ntrip installed" '[ -f "${DYX3_ETC}/ros.env" ] && [ -f "${DYX3_ETC}/backend.env" ] && [ -f "${DYX3_ETC}/ntrip.env" ]'
+  check "versions.json written for the recorder" 'grep -q "\"stack_sha\": \"${A}\"" "${DYX3_ETC}/versions.json" && grep -q firmware_expected_sha "${DYX3_ETC}/versions.json"'
   check "units copied, only platform marked enabled in manifest" '[ -f "${DYX3_ROOT}/etc/systemd/system/dyx3-platform.service" ]'
 
   echo "EDITED=1" >>"${DYX3_ETC}/platform.env"
@@ -212,6 +244,35 @@ F
   (upgrade_to nonexistent-ref) >"${T}/up_bad" 2>&1
   rc=$?
   check "unknown ref is refused" '[ "${rc}" -ne 0 ]'
+
+  # ---- dyx3-version / dyx3-rollback
+  (print_version) >"${T}/ver" 2>&1
+  check "dyx3-version prints the stack SHA, the firmware pin and the message-set hash" 'grep -q "^stack_sha=${D}$" "${T}/ver" && grep -q "^firmware_expected_sha=27a7ac92" "${T}/ver" && grep -q "^px4_msgs_msg_set_sha256=abc123def456$" "${T}/ver"'
+  check "dyx3-version admits the running firmware identity is unreadable" 'grep -q "^firmware_running=unavailable" "${T}/ver"'
+
+  (rollback_release) >"${T}/rb1" 2>&1
+  rc=$?
+  check "rollback returns to B (rc=0)" '[ "${rc}" -eq 0 ] && [ "$(basename "$(readlink -f "${DYX3_CURRENT}")")" = "${B}" ]'
+  check "rollback records the release it left as previous" '[ "$(cat "${DYX3_VAR_LIB}/state/previous_release")" = "${D}" ]'
+  check "versions.json describes the rolled-back release" 'grep -q "\"stack_sha\": \"${B}\"" "${DYX3_ETC}/versions.json"'
+  (rollback_release) >"${T}/rb2" 2>&1
+  check "a second rollback undoes the first" '[ "$(basename "$(readlink -f "${DYX3_CURRENT}")")" = "${D}" ]'
+  (FAKE_NO_AGENT="${T}/no_agent" rollback_release) >"${T}/rb3" 2>&1
+  rc=$?
+  check "an unhealthy rollback fails (rc!=0)" '[ "${rc}" -ne 0 ]'
+  check "an unhealthy rollback restores the release it started from" '[ "$(basename "$(readlink -f "${DYX3_CURRENT}")")" = "${D}" ] && [ "$(cat "${DYX3_VAR_LIB}/state/previous_release")" = "${B}" ]'
+  printf '%s\n' "0000000000000000000000000000000000000000" >"${DYX3_VAR_LIB}/state/previous_release"
+  (rollback_release) >"${T}/rb4" 2>&1
+  rc=$?
+  check "rollback to a pruned/unknown release is refused and changes nothing" '[ "${rc}" -ne 0 ] && [ "$(basename "$(readlink -f "${DYX3_CURRENT}")")" = "${D}" ]'
+  rm -f "${DYX3_VAR_LIB}/state/previous_release"
+  (rollback_release) >"${T}/rb5" 2>&1
+  rc=$?
+  check "rollback with nothing recorded is refused" '[ "${rc}" -ne 0 ] && grep -q "no previous release" "${T}/rb5"'
+
+  # ---- health extras
+  (health_extras "${DYX3_CURRENT}") >"${T}/hx" 2>&1
+  check "health reports the data volume" 'grep -q "^PASS  disk" "${T}/hx"'
 }
 
 sup

@@ -44,9 +44,12 @@ install_tmpfiles() {
 # have edited them; an upgrade must never overwrite field configuration.
 install_config_templates() {
   local rel="$1" f
-  for f in platform.env mavlink-router.conf; do
+  for f in platform.env mavlink-router.conf ros.env backend.env ntrip.env; do
     if [ -e "${DYX3_ETC}/${f}" ]; then
       log "keeping existing ${DYX3_ETC}/${f}"
+    elif [ "${f}" = "ntrip.env" ]; then
+      # Credentials: readable by root and the service group only.
+      install_file 0640 "root:${DYX3_GROUP}" "${rel}/deployment/network/${f}.tmpl" "${DYX3_ETC}/${f}"
     else
       install_file 0644 "root:root" "${rel}/deployment/network/${f}.tmpl" "${DYX3_ETC}/${f}"
     fi

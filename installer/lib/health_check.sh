@@ -58,6 +58,49 @@ health_platform() {
   fi
 }
 
+# _enabled <service>: is it in the manifest's [enabled_services]?
+_enabled() { manifest_section enabled_services "${2:-${DYX3_CURRENT}/installer/manifests/production.manifest}" 2>/dev/null | grep -qx "$1"; }
+
+# health_extras: the parts beyond the platform. Each check is gated on the service being ENABLED in the manifest, so an
+# unverified service never turns the health red; disk is always reported.
+health_extras() {
+  local rel="${1:-${DYX3_CURRENT}}" m="${1:-${DYX3_CURRENT}}/installer/manifests/production.manifest"
+  if _enabled dyx3-ros "${m}"; then
+    if [ -S "${DYX3_RUN}/gateway.sock" ]; then _pass "gateway socket present"; else _fail "gateway socket ${DYX3_RUN}/gateway.sock missing (dyx3-ros / system_gateway down?)"; fi
+  fi
+  if _enabled dyx3-backend "${m}" && have curl; then
+    local host="${DYX3_BACKEND_HOST:-10.42.0.1}" port="${DYX3_BACKEND_PORT:-8000}"
+    if curl -fsS --max-time 3 "http://${host}:${port}/api/ping" >/dev/null 2>&1; then _pass "backend answers on ${host}:${port}"; else _fail "backend does not answer on ${host}:${port}"; fi
+  fi
+  if _enabled dyx3-recorder "${m}" && [ ! -d "${DYX3_VAR_LIB}/runs" ]; then _fail "runs directory ${DYX3_VAR_LIB}/runs missing"; fi
+  # disk: report; FAIL only when the data volume is completely full (no threshold is invented here).
+  if have df; then
+    local line avail pct
+    line="$(df -Pk "${DYX3_VAR_LIB}" 2>/dev/null | awk 'NR==2 {print $4, $5}')"
+    avail="${line% *}"
+    pct="${line#* }"
+    if [ -n "${line}" ]; then
+      if [ "${avail:-0}" -le 0 ]; then _fail "disk ${DYX3_VAR_LIB} is full"; else _pass "disk ${DYX3_VAR_LIB}: $((avail / 1024)) MiB free (${pct} used)"; fi
+    fi
+  fi
+}
+
+# health_graph: deep. The control graph's nodes are visible (WARN, not FAIL: needs ROS and a running graph).
+health_graph() {
+  local rel="${1:-${DYX3_CURRENT}}" pm nodes
+  _enabled dyx3-ros "${rel}/installer/manifests/production.manifest" || return 0
+  [ -f "${ROS_SETUP}" ] || {
+    _warn "ROS not installed; graph check skipped"
+    return 0
+  }
+  pm="$(px4_msgs_dir)"
+  nodes="$(bash -c "set +u; . '${ROS_SETUP}'; . '${pm}/install/setup.bash'; . '${rel}/ros2_ws/install/setup.bash' 2>/dev/null; timeout 15 ros2 node list 2>/dev/null" || true)"
+  local n
+  for n in /dyx3_mission /motion_guard /px4_link /spray /system_gateway; do
+    if printf '%s\n' "${nodes}" | grep -qx "${n}"; then _pass "node ${n} up"; else _warn "node ${n} not visible"; fi
+  done
+}
+
 # health_dds: live /fmu topics (needs ROS + a running FCU session).
 health_dds() {
   local rel="${1:-${DYX3_CURRENT}}" pm n
@@ -82,7 +125,11 @@ health_run() {
   load_pin firmware
   health_release "$(readlink -f "${rel}")"
   health_platform "${rel}"
-  [ "${deep}" -eq 1 ] && health_dds "${rel}"
+  health_extras "${rel}"
+  if [ "${deep}" -eq 1 ]; then
+    health_dds "${rel}"
+    health_graph "${rel}"
+  fi
   if [ "${_health_fail}" -eq 0 ]; then
     log "health: OK"
     return 0

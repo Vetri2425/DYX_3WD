@@ -8,6 +8,7 @@ Wants=dyx3-ros.service
 Type=exec
 User=dyx3
 Group=dyx3
+EnvironmentFile=-/etc/dyx3/ros.env
 ExecStart=/opt/dyx3/current/bin/dyx3-recorder
 Restart=always
 RestartSec=5

@@ -7,6 +7,7 @@ Requires=dyx3-platform.service
 Type=exec
 User=dyx3
 Group=dyx3
+EnvironmentFile=-/etc/dyx3/ros.env
 ExecStart=/opt/dyx3/current/bin/dyx3-ros
 Restart=always
 RestartSec=5

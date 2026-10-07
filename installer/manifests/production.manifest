@@ -25,9 +25,10 @@ dyx3-ros
 dyx3-rtk
 dyx3-backend
 dyx3-recorder
+dyx3-spray-watchdog
 
-# Only these are implemented; the others are stubs that exit 1 and must not be enabled.
-# Each phase that implements a service moves it into this list (Phase 11a: platform only).
+# Implemented in code: all of the above. Only services VERIFIED ON A ROVER belong here: an enabled service that fails health makes
+# `dyx3-upgrade` revert. A human moves a service into this list after running it on the rover (Phase 11: platform only).
 [enabled_services]
 dyx3-platform
 

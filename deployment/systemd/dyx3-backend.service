@@ -7,6 +7,7 @@ Wants=dyx3-ros.service
 Type=exec
 User=dyx3
 Group=dyx3
+EnvironmentFile=-/etc/dyx3/backend.env
 ExecStart=/opt/dyx3/current/bin/dyx3-backend
 Restart=always
 RestartSec=5

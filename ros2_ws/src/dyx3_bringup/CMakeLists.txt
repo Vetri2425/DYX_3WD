@@ -3,13 +3,11 @@ project(dyx3_bringup)
 
 find_package(ament_cmake REQUIRED)
 
-# Skeleton: no build targets yet.
-# add_library()/add_executable() land once this package's contract in
-# docs/contracts/ is written and reviewed.
+install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 
 if(BUILD_TESTING)
-  find_package(ament_cmake_gtest REQUIRED)
-  # ament_add_gtest(<test_name> test/<file>.cpp) goes here once tests exist.
+  find_package(ament_cmake_pytest REQUIRED)
+  ament_add_pytest_test(test_control_graph_launch test/test_control_graph_launch.py)
 endif()
 
 ament_package()

@@ -12,7 +12,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "backend", "src"))
-from dyx3_backend.gateway.client import GatewayClient  # noqa: E402
+from dyx3_backend.gateway.client import GatewayClient
 
 
 async def main(path: str) -> int:

@@ -83,6 +83,8 @@ build_release() {
       --parallel-workers 1 --packages-select ${packages} --cmake-args -DCMAKE_BUILD_TYPE=Release" ||
     die "colcon build failed for ${sha:0:10}"
 
+  build_backend_venv "${rel}"
+
   # launchers: deployment/scripts/start-<svc>.sh -> bin/dyx3-<svc>
   run mkdir -p "${rel}/bin"
   local s name
@@ -110,7 +112,7 @@ switch_release() {
 # release is always operated by its own tooling and the shims never go stale.
 install_operator_shims() {
   local pair name target
-  for pair in "dyx3-install:install.sh" "dyx3-upgrade:upgrade.sh" "dyx3-health:verify.sh"; do
+  for pair in "dyx3-install:install.sh" "dyx3-upgrade:upgrade.sh" "dyx3-health:verify.sh" "dyx3-rollback:rollback.sh" "dyx3-version:version.sh"; do
     name="${pair%%:*}"
     target="${pair##*:}"
     if [ "${DYX3_DRY_RUN}" = "1" ]; then
@@ -171,6 +173,7 @@ upgrade_to() {
   install_units "${DYX3_CURRENT}"
   install_config_templates "${DYX3_CURRENT}"
   install_operator_shims
+  write_versions_file "${DYX3_CURRENT}"
   restart_enabled_services "${DYX3_CURRENT}"
 
   if health_run "${DYX3_CURRENT}"; then
@@ -193,4 +196,94 @@ health_release_only() {
   _health_fail=0
   health_release "$1"
   return "${_health_fail}"
+}
+
+# build_backend_venv <release-dir>: the backend's Python environment, inside the release (so a rollback restores it
+# with the code). NOT fatal: a failed pip install (no WAN) must not block the control graph's upgrade; it leaves the
+# backend unavailable, which dyx3-health reports once dyx3-backend is enabled. Skipped under DYX3_SKIP_BACKEND=1.
+build_backend_venv() {
+  local rel="$1"
+  [ "${DYX3_SKIP_BACKEND:-0}" = "1" ] && {
+    log "backend venv skipped (DYX3_SKIP_BACKEND=1)"
+    return 0
+  }
+  [ -f "${rel}/backend/pyproject.toml" ] || [ "${DYX3_DRY_RUN}" = "1" ] || {
+    warn "no backend/ in release; backend venv not built"
+    return 0
+  }
+  log "building backend venv"
+  if ! run python3 -m venv "${rel}/venv" || ! run "${rel}/venv/bin/pip" install --quiet "${rel}/backend[path-engine]"; then
+    warn "backend venv build FAILED (no network?); the backend will be unavailable until it is built"
+    return 0
+  fi
+}
+
+# write_versions_file <release-dir>: /etc/dyx3/versions.json — the provenance the recorder copies into every run.
+# Machine-written at every switch/rollback, so it always describes what is CURRENT.
+write_versions_file() {
+  local rel="$1" stack pm msgs
+  stack="$(basename "$(readlink -f "${rel}")")"
+  load_pin firmware
+  pm="$(px4_msgs_dir)"
+  msgs="$(cat "${pm}/px4_msgs.sha256" 2>/dev/null || echo unknown)"
+  if [ "${DYX3_DRY_RUN}" = "1" ]; then
+    printf '[dry-run] write %s/versions.json\n' "${DYX3_ETC}" >&2
+    return 0
+  fi
+  install -d "${DYX3_ETC}"
+  printf '{\n  "schema": 1,\n  "stack_sha": "%s",\n  "firmware_expected_sha": "%s",\n  "px4_msgs_msg_set_sha256": "%s",\n  "firmware_running": "unavailable: no FCU read path in this stack yet",\n  "installed_utc": "%s"\n}\n' \
+    "${stack}" "${FIRMWARE_SHA}" "${msgs}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"${DYX3_ETC}/versions.json.tmp"
+  chmod 0644 "${DYX3_ETC}/versions.json.tmp"
+  mv "${DYX3_ETC}/versions.json.tmp" "${DYX3_ETC}/versions.json"
+}
+
+# print_version: dyx3-version. The firmware identity is the PINNED expectation; the identity the running FCU reports needs a
+# parameter/version read path that does not exist yet (architecture 3.8 wants the overlay hash: OPEN).
+print_version() {
+  local cur="" pm msgs
+  [ -L "${DYX3_CURRENT}" ] && cur="$(basename "$(readlink -f "${DYX3_CURRENT}")")"
+  load_pin firmware
+  pm="$(px4_msgs_dir)"
+  msgs="$(cat "${pm}/px4_msgs.sha256" 2>/dev/null || echo unknown)"
+  printf 'stack_sha=%s\n' "${cur:-none}"
+  printf 'previous_release=%s\n' "$(cat "${DYX3_VAR_LIB}/state/previous_release" 2>/dev/null || echo none)"
+  printf 'firmware_expected_sha=%s\n' "${FIRMWARE_SHA}"
+  printf 'firmware_branch=%s\n' "${FIRMWARE_BRANCH}"
+  printf 'firmware_running=unavailable (no FCU read path yet)\n'
+  printf 'px4_msgs_msg_set_sha256=%s\n' "${msgs}"
+  printf 'px4_msgs_skeleton_ref=%s\n' "${PX4_MSGS_SKELETON_REF}"
+  printf 'profile=%s\n' "$(cat "${DYX3_ETC}/profile" 2>/dev/null || echo unset)"
+}
+
+# rollback_release: switch back to the release recorded by the last switch, verify, restart, health; revert if unhealthy.
+# After a rollback `previous_release` is the release we rolled away from, so a second rollback undoes the first.
+rollback_release() {
+  local cur="" prev=""
+  [ -L "${DYX3_CURRENT}" ] && cur="$(basename "$(readlink -f "${DYX3_CURRENT}")")"
+  prev="$(cat "${DYX3_VAR_LIB}/state/previous_release" 2>/dev/null || true)"
+  [ -n "${prev}" ] || die "no previous release is recorded; nothing to roll back to"
+  [ "${prev}" != "${cur}" ] || die "previous release equals current (${cur:0:10})"
+  [ -d "${DYX3_RELEASES}/${prev}" ] && [ -f "${DYX3_RELEASES}/${prev}/.complete" ] ||
+    die "previous release ${prev:0:10} is missing or incomplete (pruned?)"
+  load_pin firmware
+  health_release_only "${DYX3_RELEASES}/${prev}" || die "previous release ${prev:0:10} failed verification; current is unchanged"
+
+  log "rollback: ${cur:0:10} -> ${prev:0:10}"
+  atomic_symlink "${DYX3_RELEASES}/${prev}" "${DYX3_CURRENT}"
+  printf '%s\n' "${cur}" >"${DYX3_VAR_LIB}/state/previous_release"
+  install_units "${DYX3_CURRENT}"
+  install_operator_shims
+  write_versions_file "${DYX3_CURRENT}"
+  restart_enabled_services "${DYX3_CURRENT}"
+  if health_run "${DYX3_CURRENT}"; then
+    log "rollback complete: ${prev:0:10}"
+    return 0
+  fi
+  warn "post-rollback health FAILED: restoring ${cur:0:10}"
+  atomic_symlink "${DYX3_RELEASES}/${cur}" "${DYX3_CURRENT}"
+  printf '%s\n' "${prev}" >"${DYX3_VAR_LIB}/state/previous_release"
+  install_units "${DYX3_CURRENT}"
+  write_versions_file "${DYX3_CURRENT}"
+  restart_enabled_services "${DYX3_CURRENT}"
+  die "rollback to ${prev:0:10} was unhealthy; restored ${cur:0:10}"
 }

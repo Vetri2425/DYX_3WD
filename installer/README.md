@@ -10,7 +10,9 @@
 | `installer/install.sh --production [--ref R] [--skip-deps] [--dry-run]` (`dyx3-install`) | 11a | OS check → `dyx3` user → `/opt/dyx3`,`/etc/dyx3`,`/var/lib/dyx3`,`/var/log/dyx3` → tmpfiles for `/run/dyx3` → apt deps → pinned MicroXRCEAgent → pinned mavlink-router → ROS 2 Humble → FCU Ethernet profile → first release (same path as upgrade). Idempotent. |
 | `installer/upgrade.sh <git-ref>` (`dyx3-upgrade`) | 11a | fetch → `releases/<sha>` → colcon build (manifest packages) → **verify before switching** → atomic `current` symlink → install units → restart enabled services → health; **reverts automatically** if post-switch health fails. |
 | `installer/verify.sh [--deep]` (`dyx3-health`) | 11a (platform only) | release complete, px4_msgs built for the pinned firmware, enabled units active, XRCE agent listening, FCU ping (WARN only), `--deep`: live `/fmu` topics. Phase 11 extends it to the rest of the graph. |
-| `dyx3-rollback`, `dyx3-version`, `dyx3-param` | Phase 11 | not yet |
+| `installer/rollback.sh` (`dyx3-rollback`) | 11 | switch back to the release recorded at the last switch → verify it first → units, shims, `versions.json` → restart → health; an unhealthy rollback restores the release it started from; running it twice undoes it. Refuses when nothing is recorded or the previous release was pruned. |
+| `installer/version.sh` (`dyx3-version`) | 11 | `key=value` lines: stack SHA, previous release, **pinned** firmware SHA, `px4_msgs` message-set sha256, profile. The running FCU's own identity is reported as `unavailable` (no FCU read path yet; architecture 3.8's overlay hash is OPEN). |
+| `dyx3-param get\|set\|save` | not built | needs `dyx3_rpp`'s parameter authority (P5) |
 
 ## Pins (one place each)
 
@@ -39,3 +41,19 @@ after watching memory on the rover. Builds run under `nice -n 10`.
 
 apt, the ROS apt repo, the pinned XRCE agent / mavlink-router builds, NetworkManager, systemd, udev,
 real DDS to the FCU, and the supervisor under systemd. See HANDOFF "LOCAL ACTIONS NEEDED".
+
+
+## Phase 11 additions
+
+* **Services** (`[services]` in the manifest): `dyx3-platform`, `dyx3-ros` (mission, motion_guard, px4_link, spray, system_gateway via `dyx3_bringup/control_graph.launch.py`),
+  `dyx3-rtk`, `dyx3-backend`, `dyx3-recorder`, and **`dyx3-spray-watchdog` as its own unit** (not tied to `dyx3-ros`, so it survives the graph dying).
+  `[enabled_services]` is still **`dyx3-platform` only**: the others are implemented in code but have never run on a rover, and enabling one that fails its
+  environment would make the post-upgrade health check revert the whole upgrade. Move a service into `[enabled_services]` once it has been verified on the rover.
+* **Environment**: `/etc/dyx3/{ros,backend,ntrip}.env` templates are created once and never overwritten (`ntrip.env` is `root:dyx3 0640`). `ROS_DOMAIN_ID` has no default:
+  the launchers refuse to start without it. `dyx3-env.sh` also refuses to start without the px4_msgs overlay built for the pinned firmware.
+* **`/etc/dyx3/versions.json`** is rewritten on every switch/rollback; the recorder copies it into every run.
+* **Backend venv** (`<release>/venv`) is built with the release; a failed `pip install` (no WAN) is a warning, not a failed upgrade.
+* **Health**: gateway socket, backend ping (both only for ENABLED services), data-volume report (FAIL only when completely full: no threshold invented), `--deep` lists the graph's nodes (WARN).
+* **OPEN**: per-node real-time priority/affinity (the `dyx3-ros` unit applies FIFO 80 / CPU 4 to the whole tree), DDS scoping (loopback-only vs an eth0 whitelist), the backend port (8000, DERIVED), and the ROS domain number.
+
+Tested against a staged root (`installer/tests/run_tests.sh`, 69 checks); **never run on a Jetson**.
