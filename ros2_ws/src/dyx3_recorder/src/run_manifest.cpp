@@ -102,7 +102,10 @@ std::string manifest_json(const RunInfo& r) {
       .str("start_utc", r.start_utc)
       .str("vehicle_id", r.vehicle_id)
       .str("operator", r.operator_name)
-      .str("hostname", r.hostname);
+      .str("hostname", r.hostname)
+      .boolean("timesync_valid", r.timesync_valid)
+      .integer("timesync_offset_us", r.timesync_offset_us)
+      .integer("timesync_round_trip_us", r.timesync_round_trip_us);
   return o.dump() + "\n";
 }
 
@@ -117,6 +120,9 @@ std::string summary_json(const RunSummary& s) {
       .integer("ulog_gaps", static_cast<int64_t>(s.ulog_gaps))
       .boolean("bag_healthy_throughout", s.bag_healthy_throughout)
       .boolean("provenance_complete", s.provenance_complete)
+      .boolean("timesync_valid_end", s.timesync_valid_end)
+      .integer("timesync_offset_us_end", s.timesync_offset_us_end)
+      .integer("timesync_round_trip_us_end", s.timesync_round_trip_us_end)
       .str_list("notes", s.notes);
   return o.dump() + "\n";
 }

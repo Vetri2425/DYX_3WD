@@ -37,3 +37,12 @@ uint64 loop_overrun_count
 uint64 command_gap_events
 # Times the session was lost and re-established (agent restart, FCU reboot, cable pull).
 uint32 session_resets
+
+# uXRCE-DDS timesync (architecture 4.6, F-tasks A1.4: the offset can be ~40 ms for 5-10 minutes after boot = 1.4 cm at 0.35 m/s).
+# VALUES ONLY: no convergence criterion has a numeric source yet, so nothing gates on these (OPEN, docs/contracts/dyx3_px4_link.md).
+# True while /fmu/out/timesync_status is fresh AND at least one sample has been received; the two fields below are meaningless otherwise.
+bool timesync_valid
+# TimesyncStatus.estimated_offset (smoothed offset companion<->PX4, microseconds).
+int64 timesync_offset_us
+# TimesyncStatus.round_trip_time (microseconds) of the newest sample.
+uint32 timesync_round_trip_us

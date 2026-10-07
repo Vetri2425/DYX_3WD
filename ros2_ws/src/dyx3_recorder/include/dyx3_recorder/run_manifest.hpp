@@ -37,6 +37,11 @@ struct RunInfo {
   std::string vehicle_id;
   std::string operator_name;
   std::string hostname;
+  // FCU timesync at the start of the run (F-tasks A1.4). valid=false means no fresh sample: the
+  // offset is then not a measurement.
+  bool timesync_valid{false};
+  int64_t timesync_offset_us{0};
+  uint32_t timesync_round_trip_us{0};
 };
 
 struct RunSummary {
@@ -48,6 +53,9 @@ struct RunSummary {
   uint64_t ulog_gaps{0};
   bool bag_healthy_throughout{true};
   bool provenance_complete{true};
+  bool timesync_valid_end{false};
+  int64_t timesync_offset_us_end{0};
+  uint32_t timesync_round_trip_us_end{0};
   std::vector<std::string> notes;
 };
 

@@ -41,6 +41,7 @@ struct Rig {
   std::shared_ptr<rclcpp::executors::SingleThreadedExecutor> exec;
   rclcpp::Publisher<MissionState>::SharedPtr p_mission;
   rclcpp::Publisher<UlogChunk>::SharedPtr p_ulog;
+  rclcpp::Publisher<dyx3_interfaces::msg::Px4LinkStatus>::SharedPtr p_link;
   rclcpp::Subscription<RecorderStatus>::SharedPtr s_status;
   RecorderStatus status;
   std::vector<rclcpp::SubscriptionBase::SharedPtr> keep;
@@ -85,6 +86,8 @@ struct Rig {
     p_mission =
         world->create_publisher<MissionState>("/dyx3/mission/state", rclcpp::QoS(1).reliable());
     p_ulog = world->create_publisher<UlogChunk>("/dyx3/ulog_chunk", rclcpp::QoS(64).reliable());
+    p_link = world->create_publisher<dyx3_interfaces::msg::Px4LinkStatus>(
+        "/dyx3/px4_link/status", rclcpp::QoS(1).reliable());
     s_status = world->create_subscription<RecorderStatus>(
         "/dyx3/recorder/status", rclcpp::QoS(1).reliable(),
         [this](RecorderStatus::ConstSharedPtr m) { status = *m; });
@@ -93,6 +96,7 @@ struct Rig {
       exec->spin_some(5ms);
       if (world->count_subscribers("/dyx3/mission/state") > 0 &&
           world->count_subscribers("/dyx3/ulog_chunk") > 0 &&
+          world->count_subscribers("/dyx3/px4_link/status") > 0 &&
           rec->count_subscribers("/dyx3/recorder/status") > 0) {
         return;
       }
@@ -197,6 +201,43 @@ TEST(RecorderNode, FullRunProducesAnEvidenceDirectoryWithProvenance) {
   r.rec->step(r.now += 1.0);
   r.pump(100);
   EXPECT_EQ(r.status.state, RecorderStatus::STATE_IDLE);
+}
+
+TEST(RecorderNode, TimesyncAtStartAndEndIsRecordedAndAStaleSampleIsNotPassedOffAsCurrent) {
+  Rig r;
+  auto send = [&](bool valid, int64_t off, uint32_t rtt) {
+    dyx3_interfaces::msg::Px4LinkStatus s;
+    s.timesync_valid = valid;
+    s.timesync_offset_us = off;
+    s.timesync_round_trip_us = rtt;
+    r.p_link->publish(s);
+    r.pump(150);
+  };
+  send(true, -40000, 900);  // the #28519 symptom at the start of the run
+  r.mission(MissionState::STATE_RUNNING);
+  const std::string d = r.run_dir();
+  EXPECT_NE(slurp(d + "/manifest.json").find("\"timesync_offset_us\": -40000"), std::string::npos);
+  EXPECT_NE(slurp(d + "/manifest.json").find("\"timesync_valid\": true"), std::string::npos);
+  r.now += 30.0;
+  send(true, 4100, 800);  // converged by the end
+  r.mission(MissionState::STATE_COMPLETED);
+  const std::string summary = slurp(d + "/summary.json");
+  EXPECT_NE(summary.find("\"timesync_offset_us_end\": 4100"), std::string::npos);
+  EXPECT_EQ(summary.find("timesync not available"), std::string::npos);
+
+  // no fresh sample at the start or the end: recorded as not valid, with a note, never as a number
+  r.now += 10.0;
+  r.wall += 100;
+  r.mission(MissionState::STATE_RUNNING, 43);
+  r.now += 5.0;  // the last status is now 5 s old
+  r.mission(MissionState::STATE_COMPLETED, 43);
+  std::string second;
+  for (const auto& e : fs::directory_iterator(r.root + "/runs")) {
+    if (e.path().string().find("mission_0043") != std::string::npos) second = e.path().string();
+  }
+  ASSERT_FALSE(second.empty());
+  EXPECT_NE(slurp(second + "/manifest.json").find("\"timesync_valid\": false"), std::string::npos);
+  EXPECT_NE(slurp(second + "/summary.json").find("timesync not available"), std::string::npos);
 }
 
 TEST(RecorderNode, PauseKeepsRecordingAndANewMissionSplitsTheRun) {

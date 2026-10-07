@@ -111,6 +111,9 @@ private:
 
   // latest samples + arrival
   LocalPositionSample lp_;
+  int64_t ts_offset_us_{0};
+  uint32_t ts_rtt_us_{0};
+  bool ts_seen_{false};
   AttitudeSample att_;
   StatusSample st_;
   double lp_t_{-1e18}, att_t_{-1e18}, st_t_{-1e18};

@@ -239,3 +239,12 @@ fail-to-zero case, staleness boundaries, handshake lifecycle (pending, ok, perma
 re-arm after reset), a fake-PX4 fault-injection harness. **Not provable off-target:** DDS
 transport, the real timesync, jitter on the Jetson, the stop distance after a killed process, the
 actual `COM_OF_LOSS_T` behaviour. Those are GATE 4 / F5 on the bench.
+
+## Timesync evidence (interfaces 0.7.0)
+
+`Px4LinkStatus` carries `timesync_valid`, `timesync_offset_us` (`estimated_offset`) and `timesync_round_trip_us` of the newest `TimesyncStatus`; zero and
+not valid when the session is down or nothing arrived. **Values only.** F-tasks A1.4 (upstream #28519) says the offset can be ~40 ms for 5-10 minutes after boot
+(1.4 cm at 0.35 m/s) and asks for "a boot-time warm-up as a mission precondition". **That gate is NOT built:** no numeric convergence criterion exists in any
+source (the issue only says ~4 ms is expected), and inventing one would put an arbitrary number in a safety path. **OPEN (human):** the criterion (offset below X
+for Y seconds?) and who gates on it (`dyx3_mission` precondition vs `dyx3_motion_guard`). Until then the evidence is recorded: the recorder logs it at run start
+and end, and the gateway's telemetry shows it.

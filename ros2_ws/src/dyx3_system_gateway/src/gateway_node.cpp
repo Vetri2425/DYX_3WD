@@ -135,6 +135,9 @@ GatewayNode::GatewayNode(const rclcpp::NodeOptions& options, ClockFn clock, bool
             .integer("stale_topics_mask", m.stale_topics_mask)
             .num("worst_topic_age_s", m.worst_topic_age_s)
             .integer("session_resets", m.session_resets)
+            .boolean("timesync_valid", m.timesync_valid)
+            .integer("timesync_offset_us", m.timesync_offset_us)
+            .integer("timesync_round_trip_us", m.timesync_round_trip_us)
             .dump();
       })));
   subs_.push_back(create_subscription<SafetyGateStatus>(

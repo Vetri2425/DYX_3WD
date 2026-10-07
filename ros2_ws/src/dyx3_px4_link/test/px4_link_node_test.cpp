@@ -61,6 +61,8 @@ struct Rig {
 
   // fake-FCU publishers (/fmu/out)
   rclcpp::Publisher<px4_msgs::msg::TimesyncStatus>::SharedPtr p_ts;
+  int64_t ts_offset{0};
+  uint32_t ts_rtt{0};
   rclcpp::Publisher<px4_msgs::msg::VehicleLocalPosition>::SharedPtr p_lp;
   rclcpp::Publisher<px4_msgs::msg::VehicleStatus>::SharedPtr p_st;
   rclcpp::Publisher<px4_msgs::msg::VehicleAttitude>::SharedPtr p_att;
@@ -242,7 +244,12 @@ struct Rig {
 
   // Fake FCU samples at the current clock.
   void publish_fcu() {
-    if (alive) p_ts->publish(px4_msgs::msg::TimesyncStatus());
+    if (alive) {
+      px4_msgs::msg::TimesyncStatus ts;
+      ts.estimated_offset = ts_offset;
+      ts.round_trip_time = ts_rtt;
+      p_ts->publish(ts);
+    }
     if (alive) {
       px4_msgs::msg::VehicleStatus st;
       st.arming_state = arming_state;
@@ -692,6 +699,27 @@ TEST(Px4LinkNode, SprayCommandIsRefusedAtOnceWhenTheLinkIsNotProven) {
   ASSERT_EQ(r.spray_acks.size(), 1U);
   EXPECT_FALSE(r.spray_acks[0].success);
   for (const auto& c : r.cmds) EXPECT_NE(c.command, 187U);
+}
+
+TEST(Px4LinkNode, TimesyncEvidenceIsPublishedAsValuesOnlyAndZeroedWhenTheSessionIsLost) {
+  Rig r;
+  r.ts_offset = -40000;  // the upstream #28519 symptom: ~40 ms right after boot
+  r.ts_rtt = 1234;
+  r.bring_up();
+  r.run(0.5);
+  EXPECT_TRUE(r.status.timesync_valid);
+  EXPECT_EQ(r.status.timesync_offset_us, -40000);
+  EXPECT_EQ(r.status.timesync_round_trip_us, 1234U);
+  EXPECT_EQ(r.status.stale_topics_mask,
+            0U);  // a 40 ms offset does not make the link unhealthy: values only, no gate
+  EXPECT_TRUE(r.status.session_alive);
+  r.ts_offset = 4000;
+  r.run(0.3);
+  EXPECT_EQ(r.status.timesync_offset_us, 4000);
+  r.alive = false;
+  r.run(1.5);
+  EXPECT_FALSE(r.status.timesync_valid);
+  EXPECT_EQ(r.status.timesync_offset_us, 0);  // a stale offset is never presented as current
 }
 
 TEST(Px4LinkNode, EstimatorHealthDefaultsUnhealthyUntilFlagsArrive) {

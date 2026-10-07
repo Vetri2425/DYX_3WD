@@ -92,6 +92,15 @@ RecorderNode::RecorderNode(const rclcpp::NodeOptions& options, ClockFn clock, Wa
           ulog_.on_chunk(m->msg_sequence, m->first_message_offset, m->data.data(), m->data.size());
       },
       uo);
+  sub_link_ = create_subscription<dyx3_interfaces::msg::Px4LinkStatus>(
+      "/dyx3/px4_link/status", rclcpp::QoS(1).reliable(),
+      [this](dyx3_interfaces::msg::Px4LinkStatus::ConstSharedPtr m) {
+        std::lock_guard<std::mutex> lk(mu_);
+        ts_valid_ = m->timesync_valid;
+        ts_offset_us_ = m->timesync_offset_us;
+        ts_rtt_us_ = m->timesync_round_trip_us;
+        ts_stamp_s_ = clock_();
+      });
   if (create_timer) {
     timer_ = create_wall_timer(
         std::chrono::duration<double>(0.5 / status_hz_), [this]() { step(clock_()); },
@@ -184,6 +193,14 @@ void RecorderNode::start_run(uint32_t mission_id, uint32_t run_index, const std:
   info.vehicle_id = vehicle_id_;
   info.operator_name = operator_;
   info.hostname = hostname();
+  {
+    std::lock_guard<std::mutex> lk(mu_);
+    // A sample older than 1 s (the link publishes at 10 Hz) is not a measurement of "now".
+    const bool fresh = ts_valid_ && (clock_() - ts_stamp_s_) <= 1.0;
+    info.timesync_valid = fresh;
+    info.timesync_offset_us = fresh ? ts_offset_us_ : 0;
+    info.timesync_round_trip_us = fresh ? ts_rtt_us_ : 0U;
+  }
   fs::create_directories(runs_dir_, ec);
   const std::string dir = unique_run_path(runs_dir_, run_dir_name(now, mission_id, run_index));
   info.run_id = fs::path(dir).filename().string();
@@ -302,6 +319,12 @@ void RecorderNode::stop_run(const std::string& final_state) {
   {
     std::lock_guard<std::mutex> lk(mu_);
     if (bag_died_) summary.bag_healthy_throughout = false;
+    const bool fresh = ts_valid_ && (clock_() - ts_stamp_s_) <= 1.0;
+    summary.timesync_valid_end = fresh;
+    summary.timesync_offset_us_end = fresh ? ts_offset_us_ : 0;
+    summary.timesync_round_trip_us_end = fresh ? ts_rtt_us_ : 0U;
+    if (!info.timesync_valid || !fresh)
+      summary.notes.push_back("FCU timesync not available at the start or the end of the run");
     summary.bag_bytes = bag_.bytes();
     summary.ulog_bytes = ulog_.bytes();
     summary.ulog_gaps = ulog_.gaps().size();

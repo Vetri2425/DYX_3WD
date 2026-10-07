@@ -173,6 +173,9 @@ TEST(Px4LinkAbi, DefaultsAreUnhealthyAndConstantsAreFrozen) {
   EXPECT_EQ(l.loop_overrun_count, 0U);
   EXPECT_EQ(l.command_gap_events, 0U);
   EXPECT_EQ(l.session_resets, 0U);
+  EXPECT_FALSE(l.timesync_valid);  // 0.7.0: not valid until a sample arrived
+  EXPECT_EQ(l.timesync_offset_us, 0);
+  EXPECT_EQ(l.timesync_round_trip_us, 0U);
 
   const dyx3_interfaces::msg::GnssReport g{};
   EXPECT_FALSE(g.valid);

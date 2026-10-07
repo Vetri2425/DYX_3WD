@@ -10,7 +10,7 @@ recorder only observes; it publishes `RecorderStatus` and nothing else, runs as 
 <runs_dir>/<YYYY-MM-DD_HHMMSS>_mission_<id:04d>[_run<n>]/     (UTC, from the wall clock at start)
 ├── rosbag2/                  # produced by a supervised `ros2 bag record` child
 ├── ulog/stream.ulg          # reassembled from /dyx3/ulog_chunk; ulog/gaps.json lists every missing chunk range
-├── manifest.json             # run id, mission id/index, path artifact sha256, vehicle, operator, host, start time
+├── manifest.json             # run id, mission id/index, path artifact sha256, vehicle, operator, host, start time, FCU timesync at start
 ├── versions.json             # copy of the installer's versions file (stack SHA, px4_msgs SHA, firmware SHA, overlay hash) or {"status":"unavailable",...}
 ├── params_ros.json           # every ROS parameter of the configured nodes: "start" and "end"
 ├── params_fcu.json           # FCU parameters read live, or {"status":"unavailable","reason":...}
@@ -43,6 +43,7 @@ a reader can resync); a "negative" jump (> 32768) is out-of-order (dropped, coun
 | `versions.json` | `versions_file` (default `/etc/dyx3/versions.json`), written by the installer / `dyx3-version` (P11) | file format is defined by P11; missing -> "unavailable" |
 | `params_ros.json` | `SyncParametersClient` per node in `param_nodes` (a helper node on its own executor); values stored as `{type, value-as-string}` | nodes that do not answer within `param_timeout_s` are listed as `"unreachable"` |
 | `params_fcu.json` | **no FCU parameter read path exists in this stack yet** (DDS does not carry parameters; MAVLink is the service plane) | recorded as unavailable with this reason. **OPEN (human):** how to read FCU parameters live |
+| timesync (`manifest.json` / `summary.json`) | `Px4LinkStatus.timesync_*` (interfaces 0.7.0), recorded at run start and end; a sample older than 1 s is recorded as `timesync_valid: false` (never as a number) with a note | F-tasks A1.4: the offset can be ~40 ms for minutes after boot; no gate consumes it (OPEN, see `dyx3_px4_link.md`) |
 | `config_snapshot/` | copy of `config_dir` (default `/etc/dyx3/config`) excluding `*.env`, anything named `*secret*`, `*token*`, `*password*`, `*.key`, `*.pem`, `ntrip*` | secrets never reach a run directory (the run dir may be copied around) |
 
 ## 5. Parameters (all RESTART; none affects motion)

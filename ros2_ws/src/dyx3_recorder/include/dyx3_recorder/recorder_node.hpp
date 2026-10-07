@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "dyx3_interfaces/msg/mission_state.hpp"
+#include "dyx3_interfaces/msg/px4_link_status.hpp"
 #include "dyx3_interfaces/msg/recorder_status.hpp"
 #include "dyx3_interfaces/msg/ulog_chunk.hpp"
 #include "dyx3_recorder/bag_writer.hpp"
@@ -67,11 +68,17 @@ private:
   bool finalizing_{false};
   bool bag_died_{false};
   double last_status_s_{-1e18};
+  // newest FCU timesync evidence from dyx3_px4_link (guarded by mu_); stale after link_max_age_s
+  bool ts_valid_{false};
+  int64_t ts_offset_us_{0};
+  uint32_t ts_rtt_us_{0};
+  double ts_stamp_s_{-1e18};
 
   rclcpp::CallbackGroup::SharedPtr cb_mission_, cb_ulog_;
   rclcpp::Publisher<dyx3_interfaces::msg::RecorderStatus>::SharedPtr pub_status_;
   rclcpp::Subscription<dyx3_interfaces::msg::MissionState>::SharedPtr sub_mission_;
   rclcpp::Subscription<dyx3_interfaces::msg::UlogChunk>::SharedPtr sub_ulog_;
+  rclcpp::Subscription<dyx3_interfaces::msg::Px4LinkStatus>::SharedPtr sub_link_;
   rclcpp::TimerBase::SharedPtr timer_;
 };
 

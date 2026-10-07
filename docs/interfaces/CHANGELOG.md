@@ -57,3 +57,9 @@
   `SprayLease` (typed replacement for the prototype's JSON lease), `SprayWatchdogStatus`, `SprayStatus` (rich status for the
   recorder/backend), and the `SetSprayManual` service. No existing definition changed.
 
+
+## 0.7.0 — 2026-10-07 (timesync evidence)
+
+- `Px4LinkStatus`: appended `timesync_valid`, `timesync_offset_us`, `timesync_round_trip_us` (the FCU timesync estimate, for the recorder's
+  start/end log, `dyx3-health` and the gateway's telemetry). Appended fields — existing fields unchanged. Values only: no gate consumes them yet
+  (no numeric convergence criterion exists; F-tasks A1.4).

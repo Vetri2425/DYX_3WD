@@ -97,8 +97,11 @@ Px4LinkNode::Px4LinkNode(const rclcpp::NodeOptions& options, ClockFn clock, bool
 
   // --- /fmu/out
   sub_timesync_ = create_subscription<px4_msgs::msg::TimesyncStatus>(
-      "/fmu/out/timesync_status", sensor, [this](px4_msgs::msg::TimesyncStatus::ConstSharedPtr) {
+      "/fmu/out/timesync_status", sensor, [this](px4_msgs::msg::TimesyncStatus::ConstSharedPtr m) {
         mon_->on_sample(kTimesync, clock_());
+        ts_offset_us_ = m->estimated_offset;
+        ts_rtt_us_ = m->round_trip_time;
+        ts_seen_ = true;
       });
   sub_lp_ = create_subscription<px4_msgs::msg::VehicleLocalPosition>(
       "/fmu/out/vehicle_local_position_v1", sensor,
@@ -702,6 +705,10 @@ void Px4LinkNode::publish_status(double now_s, const StalenessReport& rep, const
   s.loop_overrun_count = overruns_;
   s.command_gap_events = gate_->gap_events();
   s.session_resets = mon_->session_resets();
+  // Timesync values only (OPEN: no convergence criterion has a source, so nothing gates on them).
+  s.timesync_valid = ts_seen_ && rep.session_alive;
+  s.timesync_offset_us = s.timesync_valid ? ts_offset_us_ : 0;
+  s.timesync_round_trip_us = s.timesync_valid ? ts_rtt_us_ : 0U;
   pub_status_->publish(s);
 }
 
