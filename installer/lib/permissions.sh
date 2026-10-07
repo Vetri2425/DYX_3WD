@@ -48,7 +48,7 @@ install_config_templates() {
     if [ -e "${DYX3_ETC}/${f}" ]; then
       log "keeping existing ${DYX3_ETC}/${f}"
     else
-      install_file 0644 "root:root" "${rel}/deployment/network/${f}" "${DYX3_ETC}/${f}"
+      install_file 0644 "root:root" "${rel}/deployment/network/${f}.tmpl" "${DYX3_ETC}/${f}"
     fi
   done
 }
