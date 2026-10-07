@@ -275,3 +275,64 @@ topics (28 out / 40 in) incl. `rover_{speed,attitude,rate}_setpoint`, `gps_injec
 **Open questions for the human:** hostname (`dyx-3wd` vs `rover-3wd`); whether the recorder's
 loss of FCU parameter snapshots (MAV_2 off) is acceptable for provenance or needs a USB/param
 dump step; the uncommitted EKF2 edits in the firmware working tree (other session) — owner?
+
+## 2026-10-07 — Codex — Phase 1 stopped before interface edits
+
+**Inspection completed**
+- Read the V1 architecture, `CLAUDE.md`, Phase plan, current handoff, accepted Ethernet/DDS
+  proposal, all current contracts, the `dyx3_interfaces` package manifest/CMake/message, and
+  the relevant `PX4_DXP` source, tests, README, and PX4 message definitions.
+- Confirmed that `ros2_ws/src/dyx3_interfaces/CMakeLists.txt` and
+  `ros2_ws/src/dyx3_interfaces/msg/MotionSetpoint.msg` were already uncommitted when this
+  session began. They were not modified by this session.
+
+**Resolved source/spec count mismatch — human decision 2026-10-07**
+- Freeze the registry at **173 = 119 RPP + 54 spray**. The old 120/174 figure is a broad-grep
+  artefact: its extra match was a comment at `PX4_DXP/src/rpp_controller_node.py:679`.
+- The source method is the count of executable `declare_parameter(` calls, excluding comments;
+  there are 119 unique RPP names and the count has been stable since prototype commit
+  `42d8d4b` (2026-08-20). See
+  `docs/architecture/proposals/2026-10-07_parameter-count-173.md`.
+
+**Not run at the stop point**
+- No build or test yet: the stop condition was reached before implementation.
+- `colcon` remains unavailable on this Mac.
+
+**Git state**
+- No commit had been created when the initial count question stopped the work.
+
+## 2026-10-07 — Codex — Phase 1 complete, pending Claude review
+
+**Changed**
+- Froze `dyx3_interfaces` at package version `0.1.0`: nine messages, six mission/emergency
+  services, and `ExecuteMission`; added an ABI/default gtest.
+- Corrected `MotionSetpoint`'s contract comments: ROS-time stamp, NED yaw/yaw-rate, signed
+  body-X speed, invalid-is-STOP semantics, and publisher-session sequence semantics.
+- Added the single frame/sign/unit/clock contract at `docs/contracts/frames.md`.
+- Added the 173-row registry at `docs/tuning/parameter_registry.md`; all classes are
+  `TBD — human` because the prototype evidence does not assign Phase 9 mutability classes.
+- Added the accepted 173-count proposal, updated the mutable Phase plan, and added the
+  interface changelog plus CI version/changelog enforcement.
+
+**Ran**
+- `git diff --check` — passed.
+- Basic ROS IDL field-syntax validation over all new `.msg`, `.srv`, and `.action` files —
+  passed.
+- Registry audit: 173 unique documented names equals 119 executable RPP declarations plus
+  54 executable spray declarations — passed.
+- `clang-format==20.1.8 --dry-run --Werror` over all C++ sources — passed.
+- Python YAML parse of `.github/workflows/ci.yml` — passed; confirms `interface_freeze` exists.
+
+**Not run**
+- `colcon build/test`: **colcon NOT RUN**. This Mac has no colcon and Docker is unavailable,
+  so the required Humble container command cannot run.
+- No hardware, DDS, or rover test was attempted.
+
+**DERIVED — NOT FROM V1 SPEC**
+- The concrete fields and ABI reason/state enum values in the interfaces are the minimum
+  typed surface needed by the named Phase 1 contracts. Their zero values are deliberately
+  safe states; all motion uses the separate invalid-is-STOP rule.
+
+**Next**
+- Claude should review the unpushed local Phase 1 commit. Do not start Phase 2 without human
+  approval.

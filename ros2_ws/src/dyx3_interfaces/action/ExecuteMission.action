@@ -1,0 +1,15 @@
+# Goal
+string path_artifact_sha256
+---
+# Result
+uint8 RESULT_COMPLETED=0
+uint8 RESULT_ABORTED=1
+uint8 RESULT_ERROR=2
+uint8 result_code
+uint32 completed_runs
+---
+# Feedback
+uint32 run_index
+uint32 point_index
+float32 progress_fraction
+uint8 mission_state

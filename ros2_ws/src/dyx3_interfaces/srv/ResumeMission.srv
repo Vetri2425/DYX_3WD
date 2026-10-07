@@ -1,0 +1,6 @@
+---
+bool accepted
+uint8 REASON_OK=0
+uint8 REASON_NOT_PAUSED=1
+uint8 REASON_SAFETY_GATE=2
+uint8 reason_code

@@ -1,0 +1,8 @@
+uint8 REASON_OPERATOR=1
+uint8 REASON_SAFETY=2
+uint8 reason_code
+---
+bool accepted
+uint8 RESULT_OK=0
+uint8 RESULT_NOT_ACTIVE=1
+uint8 result_code

@@ -92,7 +92,7 @@ Rules:
 
 Also in this phase (spec S1 deliverable):
 
-- **classify all 174 parameters** (120 RPP + 54 spray) as `LIVE` / `IDLE_ONLY` / `RESTART`,
+- **classify all 173 parameters** (119 RPP + 54 spray) as `LIVE` / `IDLE_ONLY` / `RESTART`,
   each with one owner. Required before Phase 5 and Phase 9.
 
 Current work:

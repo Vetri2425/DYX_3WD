@@ -15,6 +15,46 @@ on:
   push:
 
 jobs:
+  interface_freeze:
+    name: interface freeze (version + changelog)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Require a version bump and changelog for interface changes
+        shell: bash
+        env:
+          EVENT_BEFORE: ${{ github.event.before }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          base="${PR_BASE:-${EVENT_BEFORE:-}}"
+          if [ -z "$base" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          changed="$(git diff --name-only "$base" HEAD)"
+          if ! printf '%s\n' "$changed" | grep -Eq '^ros2_ws/src/dyx3_interfaces/(msg|srv|action)/'; then
+            exit 0
+          fi
+
+          if ! printf '%s\n' "$changed" | grep -qx 'ros2_ws/src/dyx3_interfaces/package.xml'; then
+            echo '::error::Interface fields changed without a dyx3_interfaces package version bump.'
+            exit 1
+          fi
+          if ! printf '%s\n' "$changed" | grep -qx 'docs/interfaces/CHANGELOG.md'; then
+            echo '::error::Interface fields changed without docs/interfaces/CHANGELOG.md entry.'
+            exit 1
+          fi
+
+          old_version="$(git show "$base:ros2_ws/src/dyx3_interfaces/package.xml" | sed -n 's|.*<version>\([^<]*\)</version>.*|\1|p')"
+          new_version="$(sed -n 's|.*<version>\([^<]*\)</version>.*|\1|p' ros2_ws/src/dyx3_interfaces/package.xml)"
+          if [ -z "$old_version" ] || [ -z "$new_version" ] || [ "$old_version" = "$new_version" ]; then
+            echo "::error::dyx3_interfaces version must change when its fields change (old=$old_version new=$new_version)."
+            exit 1
+          fi
+
   ros2_build_test:
     name: colcon build + test (ROS 2 Humble)
     runs-on: ubuntu-24.04-arm

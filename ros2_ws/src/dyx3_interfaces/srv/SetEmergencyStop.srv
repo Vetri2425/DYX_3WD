@@ -1,0 +1,7 @@
+bool asserted
+string source
+---
+bool accepted
+uint8 REASON_OK=0
+uint8 REASON_INVALID_SOURCE=1
+uint8 reason_code

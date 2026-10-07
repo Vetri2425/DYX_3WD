@@ -1,0 +1,10 @@
+# Content-addressed path artifact produced by the backend.
+string path_artifact_sha256
+---
+bool accepted
+uint8 REASON_OK=0
+uint8 REASON_INVALID_ARTIFACT=1
+uint8 REASON_BUSY=2
+uint8 REASON_SAFETY_GATE=3
+uint8 reason_code
+uint32 mission_id
