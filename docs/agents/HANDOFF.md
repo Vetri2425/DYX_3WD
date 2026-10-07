@@ -203,3 +203,75 @@ tens of degrees wrong for ~190 s with no flag. Mitigation belongs in the compani
 Firmware option for later (design decision): reset on rejection *ratio*. Add a heading-disturbance
 field test (e.g. shade one antenna) with recovery time logged. Correction: an earlier report of
 "stuck ≥ 30 s on both logs" was a measurement error (window maximum included pre-reset time).
+
+## 2026-10-07 (evening) — Claude — 3WD_PROD move, Jetson bring-up, first flashes, DDS link proven
+
+**Branch:** `claude/proposal-ethernet-dds-only` (this repo, docs only). Firmware commits in
+`Vetri2425/PX4-Autopilot-3WD-Prod` on `dyx-3wd-production`.
+
+**Roles from here (human decision):** ChatGPT writes code. Claude reviews, deploys and installs
+(Claude has human-equivalent authority in this repo, incl. `installer/`/`deployment/` and merging
+its own PRs after green CI). Flow: code on the Mac → `claude|codex/<topic>` branch → PR → merge →
+Jetson pulls and builds → services restart. Never hand-edit on the Jetson.
+
+**Layout:** production repos moved `~/Vetri/Way_to_Mark/` → `~/Vetri/3WD_PROD/`
+(`DYX_3WD`, `PX4-Autopilot-3WD-Prod`, `PX4-Firmware/3WD/`). Way_to_Mark is 4WD-only.
+⚠ Commit `196e3db` (path update) was pushed **directly to master** — a §5 violation; not repeated.
+
+**Hardware (Holybro Pixhawk Jetson Baseboard, Orin Nano 8 GB, Ubuntu 22.04.5, L4T R36.5, NVMe):**
+hostname `dyx-3wd`, user `flash`, SSH key from the Mac (`ssh dyx-3wd`, finds the Jetson by MAC),
+passwordless sudo until 2026-12-07 (systemd timer removes it). JetPack/CUDA deliberately not
+installed — no GPU workload in the spec. Bring-up gotchas are in
+`docs/architecture/proposals/2026-10-07_ethernet-dds-only-companion-link.md` (recovery switch,
+POWER1 powers the Ethernet switch, netman `/fs/mtd_net` survives flashing).
+
+**Firmware flashed (first time on hardware):**
+
+| Commit | What | CI | Archive | Flashed |
+|---|---|---|---|---|
+| `f4f99058c0` | SYS_AUTOSTART 50000; DDS over Ethernet defaults; static 10.41.10.2 (DHCPC removed); CI fetches tags → reports v1.17.0 not 0.0.0 (tag `v1.17.0` pushed to origin) | 37626647252 ✅ | ✅ sha256 f4c9c0db… | ✅ |
+| `27a7ac9284` | `MAV_2_CONFIG 0` — Jetson↔PX4 is Ethernet + uXRCE-DDS only | 37628456182 ✅ | ✅ sha256 56e8134d… | ✅ **current** |
+
+Board network switched once via `net.cfg` + `netman update` (it had a stored 192.168.0.3
+fallback). The firmware agent's Slack summary says "nothing flashed" and "27a7ac9284 has no
+archive" — both superseded by this table.
+
+**Verified on hardware (2026-10-07):** `ver` = 1.17.0 release, NuttX 12.12.0; PX4 eth0
+10.41.10.2 ↔ Jetson 10.41.10.1 ping 0.2 ms; MicroXRCEAgent v2.4.3 on :8888 → session from
+10.41.10.2, `uxrce_dds_client` connected, timesync converged; `ros2 topic list` shows 68 `/fmu`
+topics (28 out / 40 in) incl. `rover_{speed,attitude,rate}_setpoint`, `gps_inject_data`,
+`ulog_stream`. MAVLink now only on TELEM1 (57600) + USB.
+**Not verified:** topic payloads (px4_msgs build unfinished), RTK, any motion, agent across reboot.
+
+**Jetson software state — NOT production yet:** installed by ad-hoc scripts in `~flash`
+(`~/dyx3_deps_stage{1,2,3}.sh`), which must be replaced by `installer/`:
+- stage 1 ✅ ROS 2 Humble ros-base, ros-dev-tools, rosdep, ament_cmake_gtest, clang-format (no `apt upgrade`)
+- stage 2 partial: MicroXRCEAgent v2.4.3 → `/usr/local` ✅; `~/px4_ws` px4_msgs (release/1.17
+  skeleton + firmware `msg/`+`srv/` @ f4f99058c0, identical to 27a7ac9284 — the firmware changes
+  `EstimatorAidSource3d.msg`, so stock px4_msgs would silently mismatch) was building when the
+  Jetson became unreachable (SSH banner timeout → likely memory pressure at `-j3`); backend venv
+  and DYX_3WD colcon build not reached
+- stage 3 queued: mavlink-router → would enable upstream `mavlink-router.service` with
+  `/etc/mavlink-router/main.conf` (PX4 UDP server 10.41.10.1:14550, QGC TCP 5760) — must be
+  folded into `dyx3-platform` instead
+- the XRCE agent was started by hand (nohup) — does not survive reboot
+
+**Next (in order)**
+1. Installer (`installer/lib/*`) reproducing the above into the §12 layout: `dyx3` user,
+   `/opt/dyx3/{releases,current,bin}`, `/etc/dyx3`, `/var/lib/dyx3`; pinned XRCE agent v2.4.3,
+   pinned mavlink-router, px4_msgs built from a firmware-SHA pin with `MAKEFLAGS=-j1/-j2`;
+   NM profile for the FCU Ethernet; systemd units. Then `dyx3-upgrade/rollback/health/version`.
+2. `dyx3-platform` = XRCE agent + mavlink-router under systemd. Enable only implemented services
+   (the other four units are still `exit 1` stubs).
+3. Run the installer on the Jetson, prove it, delete the `~flash` ad-hoc files.
+4. Spec work: Milestone 2 (`MotionSetpoint`), 174-parameter classification, F3 reconnect gate.
+
+**DERIVED — NOT FROM V1 SPEC**
+- `dyx3-platform` (not a separate `dyx3-px4-link.service`) supervises the agent — see proposal.
+- Bench network: FCU Ethernet profile keeps DHCP alongside 10.41.10.1/24 while on a site router;
+  production is static-only with external RJ45 ports empty.
+- Hostname `dyx-3wd`; §4.3 names `rover-3wd.local`. Open.
+
+**Open questions for the human:** hostname (`dyx-3wd` vs `rover-3wd`); whether the recorder's
+loss of FCU parameter snapshots (MAV_2 off) is acceptable for provenance or needs a USB/param
+dump step; the uncommitted EKF2 edits in the firmware working tree (other session) — owner?

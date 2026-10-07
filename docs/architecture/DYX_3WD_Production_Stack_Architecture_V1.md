@@ -1,7 +1,7 @@
 # DYX 3WD Production Stack Architecture — V1
 
 **Vehicle:** 3-wheel precision ground-marking rover
-**This repository:** `Way_to_Mark/DYX_3WD` — the production stack. Built here, from zero.
+**This repository:** `3WD_PROD/DYX_3WD` — the production stack. Built here, from zero.
 **Evidence source:** `PX4_DXP` @ `baseline_master` lineage — **read-only**. Nothing is edited there.
 **Firmware source:** `Vetri2425/PX4-Autopilot` @ `main` — ⛔ never `~/px4-rover-build`
 **Date:** 2026-09-05 · **Revision:** V1 (supersedes the 2026-09-04 draft written inside PX4_DXP)
