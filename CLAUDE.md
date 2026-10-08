@@ -53,16 +53,19 @@ human decision.
 
 ---
 
-## 3b. Current status — 2026-10-08 (end of first rover bring-up day)
+## 3b. Current status — 2026-10-09 (night before the bench day; field demo planned 2026-10-10)
 
-**The stack runs on the 3WD rover.** Control graph and Cloud Review fixes (phases A–F) are implemented on
-branch **`claude/cloud-phases`** (not yet merged to `master`), CI green, deployed to the rover from CI-built
-artifacts, and survive a full power cycle. **Nothing has driven yet**: no calibration, no motion, no field RTK.
+**The stack runs on the 3WD rover** (deployed 2026-10-08 from `claude/cloud-phases` `84518cd`, power-cycle tested).
+**`master` is now the single authoritative companion branch.** It holds the old deploy branch, production RTK
+(NTRIP or LoRa → USB or PX4 DDS, no automatic failover) and the px4_link flaky-test fix. Agent work merges into
+`master` only after Claude's review. No branch is deleted unless the human asks. **Nothing has driven yet**: no
+calibration, no motion, no field RTK. Bench runbook: `~/Vetri/3WD_PROD/BENCH_2026-10-09.md`.
 
 | | |
 |---|---|
-| This repo | `Vetri2425/DYX_3WD`, deploy branch `claude/cloud-phases` (head `84518cd` + docs); `master` is behind |
-| Firmware | `Vetri2425/PX4-Autopilot-3WD-Prod` `dyx-3wd-production`, **flashed `9ab2ad3162`** (v1.17.0 + our patches; RoboClaw hang fix). Installer pin `27a7ac9284` = same `msg/` set |
+| This repo | `Vetri2425/DYX_3WD`, **`master` = `ad58e72`** (release `rover-ad58e72…` once CI publishes; `rover-cb8ea42…` is the same code minus docs and the test fix). Pending merge after review: `codex/rover-app-gaps` |
+| Firmware | `Vetri2425/PX4-Autopilot-3WD-Prod` `dyx-3wd-production` = **`8279fa4be3`, the V1 final candidate** (stall fix, XRCE fd, RTCM writes, WENC timers). **Flashed: still `9ab2ad3162`**. NuttX from the fork `Vetri2425/NuttX` `dyx-3wd-production` @ `e462af8eb3`. Installer pin `27a7ac9284` = same `msg/` set |
+| Operator app | `yasarbaiiiii-blip/Three_Wheel_v2` (push rights for Vetri2425); authoritative branch **`main`** after review. Work in progress: `agy/prod-transport`. Today's APK is signed with the DEBUG key: watch only, never drive with it |
 | Rover hardware | Holybro Pixhawk Jetson Baseboard: Pixhawk 6X + Jetson Orin Nano 8 GB, UM982 on TELEM1, RoboClaw on GPS2, spray on FMU PWM OUT 1, 8S LiFePO4 24 Ah |
 | Rover release | `/opt/dyx3/current` → `84518cd`, `build_origin` = CI prebuilt; all six services **enabled at boot**, health OK |
 | Artifact archive | firmware: `3WD_PROD/PX4-Firmware/3WD/<short-sha>-<slug>/`; stack: GitHub Releases `rover-<sha>` (last 20) |
@@ -93,19 +96,20 @@ PX4 "rate RTCM injection 5.77 Hz", CRC OK (indoors: no fix, expected); upgrade f
   integrity = SHA-256 over GitHub TLS for now; signing + branch protection before customer deliveries.
 - Transport and command interface migrate together; gates are acceptance gates, not start gates.
 
-### Immediate next steps
+### Immediate next steps (bench 2026-10-09; details in HANDOFF 2026-10-09)
 
-1. **OPEN, safety-relevant: PX4 Ethernet TX stall.** Twice on 2026-10-08 PX4 kept answering ping but stopped
-   sending anything it originates (DDS, MAVLink, ARP) until an FCU reboot — both times right after the XRCE agent
-   was restarted (dyx3-platform restart/upgrade). Reproduce with USB attached, then fix in firmware
-   (STM32H7 Ethernet/NuttX, upstream #26160-like) and/or a PX4-side link watchdog. Until fixed, any agent
-   restart may need an FCU power cycle. See HANDOFF 2026-10-08.
-2. Calibration on the rover: gyro, **simple (level-only) accelerometer** (`PREFLIGHT_CALIBRATION` param5=4 —
-   QGC does not expose it), level horizon. No magnetometer.
-3. RoboClaw motion test (wheels off the ground), then outdoor RTK fix with the Emlid "office" base.
-4. Merge `claude/cloud-phases` → `master` (human review), then the pending list: timing proposal + `dds_topics.yaml`,
-   production cleanup of unused A/B params, RTK USB-primary/DDS-fallback, hotspot profile (backend still binds
-   0.0.0.0 on the bench).
+1. **Upgrade the stack** to `master`. The upgrade restarts the XRCE agent, so watch for the stall right there.
+2. **PX4 Ethernet TX stall (safety-relevant).**
+   - Reproduce on `9ab2ad3162` (at most 1 h), with captures at the stall and again 75 s later.
+   - Flash `8279fa4be3` and run the stress test: 60 agent restarts plus FCU and Jetson power cycles.
+   - Procedure: `3WD_PROD/OPUS or ChatGPT report for Firmware stall/2026-10-09_eth_tx_stall_procedure.md`.
+3. **RTK:** the 4 source × transport combinations, 10 min each. First collect the UM982 USB and LoRa by-id names,
+   bauds, and whether GGA is output on the USB COM.
+4. **Wi-Fi:** `nmcli device`, `iw reg get`, then the range test at 5/10/15/25 m on both bands.
+5. **Calibration** (gyro, simple level-only accel `PREFLIGHT_CALIBRATION` param5=4, level horizon; no
+   magnetometer), Acro wheels-up, then one mission on the ground, then the valve-close test.
+6. **After the bench:** review and merge `codex/rover-app-gaps` and the app's `agy/prod-transport` → `main`, with
+   signed APK builds. Bring the five rover hand fixes listed in HANDOFF 2026-10-09 into the repo.
 
 ### Known risks carried into this repo
 

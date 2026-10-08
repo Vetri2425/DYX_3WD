@@ -988,3 +988,99 @@ are NOT yet reproducible on a fresh rover. Each one is a bug until the repo carr
    scripted apply step for the next rover.
 5. NTRIP credentials in `/etc/dyx3/ntrip.env`: correctly kept off Git. The creation procedure must be in
    installer/README (template exists; the step does not).
+
+---
+
+## 2026-10-09 (night) — Claude — session close: what is ready for the bench, and what is open
+
+**Single branches (human rule).** One authoritative branch per repo. Agent work merges only after Claude's review.
+Branches are never deleted unless the human asks.
+
+| Repo | Authoritative branch | State |
+|---|---|---|
+| DYX_3WD | `master` = `ad58e72` | Fast-forwarded from `claude/cloud-phases` `a1f7cd4`, plus merge of `claude/px4link-flaky-tests` (`545c05d`). CI publishes `rover-<sha>` from `master` (and `claude/cloud-phases`) |
+| PX4-Autopilot-3WD-Prod | `dyx-3wd-production` = `8279fa4be3` | **V1 final candidate.** No firmware work after the bench, unless the bench finds a defect |
+| NuttX (new fork `Vetri2425/NuttX`) | `dyx-3wd-production` = `e462af8eb3` | PX4's pinned `fb2fadf6` + one backport commit |
+| Three_Wheel_v2 (app) | `main` | Nothing merged yet. Agy branches: `agy/prod-contract-plan` → `agy/debug-client` → `agy/prod-transport` |
+
+**Firmware since `9ab2ad3162`.** Each commit was pushed alone, CI is green, and every build is archived in
+`3WD_PROD/PX4-Firmware/3WD/`:
+- `58154ff8f1`: NuttX STM32H7 RX replies never transmit into a full TX ring. Backport of Apache NuttX
+  `be559984e549` / PR #19930, the suspected cause of the 2026-10-08 Ethernet stall. +24 B.
+- `f991ebb98a`: the XRCE client closes its UDP fd once on deinit; the transport owns it.
+- `4393fb07e1`: GPS RTCM injection:
+  - runs every UART pass;
+  - partial or EAGAIN writes are finished from their offset, never restarted;
+  - a fragment pending more than 500 ms (DERIVED) is dropped and counted;
+  - new `gps status` counters.
+- `8279fa4be3`: wheel-encoder fusion no longer refreshes `_time_last_hor_vel_fuse` / `_ver_`. Before this, it
+  blocked the EKF-GSF yaw emergency reset (`gps_control.cpp` `isTimedOut(_time_last_hor_vel_fuse)`) and hid inertial
+  dead reckoning while GNSS velocity was rejected. The rover runs `EKF2_WENC_CTRL 1`. sha256 `21288e6d…`,
+  FLASH 1,789,852 B (+600 B vs `9ab2ad3162`), AXI unchanged, `msg/` unchanged.
+- Verification:
+  - CI builds of all four;
+  - local `px4_sitl_default` compile;
+  - `make tests TESTFILTER=EKF`: 24/26 pass. `EKF_accelerometer` and `EKF_flow` fail **identically without the
+    WENC fix**, so the failures pre-exist; WENC is compiled only on `fmu-v6x/rover`, so the SITL tests do not reach it.
+- **Not done:** the GATE-2 replay of the WENC change; the pty RTCM byte test. **The bench decides acceptance.**
+- The `.gitmodules` NuttX URL now points to the fork. The main firmware checkout
+  `~/Vetri/3WD_PROD/PX4-Autopilot-3WD-Prod` still holds the original uncommitted WENC edit (identical to
+  `8279fa4be3`). Its local `dyx-3wd-production` is 4 behind. All work was done in the worktree
+  `~/Vetri/3WD_PROD/PX4-3WD-ethfix`, branch `fw/eth-stall-rtcm`.
+
+**Companion, reviewed and merged into `master` this session:**
+- Codex RTK (`07d541c`, `5dae379`, `0720549`): LoRa source; USB sink that accepts only validated RTCM3 frames; single
+  transport authority with no failover; persistent config and secrets in `/var/lib/dyx3/rtk/` (0700/0600); control
+  socket; REST.
+- `f18d008`: an invalid config or seed starts STOPPED / ERROR `CONFIG_INVALID` with the control socket up, instead
+  of crash-looping.
+- `cb8ea42`: `StateDirectory=dyx3/rtk` in the unit, because an upgrade runs the OLD release's installer scripts with
+  the NEW unit files.
+- `545c05d`: px4_link spray-watchdog tests wait for delivery. CI failed once on a commit that did not touch
+  px4_link. Not reproduced locally even on one loaded core, so the timing assumption was removed rather than a
+  race fixed. No assertion was weakened.
+- `a1f7cd4`: CLAUDE.md §4 rule "every hardware fix persists in the repo" and the list of five rover hand edits
+  (previous HANDOFF entry).
+
+**Companion, done by Codex but NOT yet reviewed or merged:** `codex/rover-app-gaps`, rebased on `master`.
+- Reviewed by Claude:
+  - `945979d` `POST /api/missions/plan`: rover contract `docs/contracts/app_planned_mission.md` v1.1. Rules
+    R1 one spray state per run, R2 strict mark/travel alternation, R3 contiguous runs within 1 mm, R4 shared-point
+    encoding (spray bit from the earlier run, must-hit ORed). The path engine is never imported; RPP and mission
+    code are unchanged. A C++ boundary test runs on a backend-generated fixture.
+  - `99554ea`: parse-only `POST /api/path/parse-dxf`. The CSV parse endpoints have no UI caller and were not added.
+  - `f3d4c8e`: optional isolated hotspot at 10.42.0.1, configured from `/etc/dyx3/hotspot.env`.
+  - `b129b6a`: tablet token command:
+    `sudo -u dyx3 /opt/dyx3/current/venv/bin/python -m dyx3_backend.auth.tokens create --file /var/lib/dyx3/state/auth.json --name tablet-1 --role operator`,
+    then restart `dyx3-backend`.
+- Not yet reviewed: `5955163` Socket.IO ping 5 s / 5 s (DERIVED), `0135dee` Wi-Fi country IN, power save off,
+  non-DFS band/channel, `0edbc44` body-size limit on `/missions/plan`.
+- Codex reports: backend pytest 564 passed / 43 skipped, installer 97/0, ROS 459 / 0 failures.
+- **To do:** review E–G, run the full checks, merge into `master`, CI release.
+
+**App (Agy):**
+- `docs/PROD_CONTRACT_UPGRADE_PLAN.md`: 77 app interactions mapped; 13 rover gaps found. GAP-04 and the parse
+  endpoint are now built by Codex.
+- `agy/debug-client`: production client layer (prod REST/Socket.IO, staleness 1.0 s / 2.5 s, heartbeat, E-stop
+  confirm-to-clear, mission builder, discovery).
+- `agy/prod-transport`: single transport, honest disconnect, 401 stops retry, AppState; heartbeat fixed-rate with
+  a 350 ms cap (the old version computed the next delay before awaiting, so one slow request gave a 1.7 s gap,
+  past the rover's 1.5 s limit); builder R1–R3 and 422 mapping. One uncommitted file.
+- **Signing gap:** release builds use the DEBUG key, and `android/` is git-ignored (also in the 4WD app, whose
+  signing lives only in an untracked build.gradle). Required: a committed Expo config plugin that injects release
+  signing from `DYX_RELEASE_*` in `~/.gradle/gradle.properties` (the existing DYX key).
+- Owner direction: one product; the engineering panel shows only in debug builds or behind a protected toggle.
+- **Tablet safety for 2026-10-09:** the 00:37 APK is for watching only. Drive with RC and QGC (TCP 5760) until the
+  reviewed, signed build lands.
+
+**Wi-Fi.** The baseboard has the dev-kit Realtek RTL8822CE (2.4 and 5 GHz). On the 4WD it stalled at 5–8 m.
+Likely causes: Wi-Fi power save, regulatory domain "00", antenna placement, DFS/channel. 15 m should be easily
+possible. Plan: 5 GHz on channel 36 or 149 (non-DFS), country IN, power save off, external antennas outside the
+enclosure. Fallback: a MT7612U or MT7921AU USB adapter.
+
+**Notes for the next session:**
+- Codex and Claude shared one DYX_3WD clone once tonight, and a Claude docs commit landed on Codex's branch (moved
+  to the deploy branch by fast-forward, nothing lost). Claude now edits in its own worktree
+  (scratchpad `dyx3-master`) while an agent works in `~/Vetri/3WD_PROD/DYX_3WD`.
+- Upgrade target: `master` `ad58e72` once its CI release `rover-ad58e72…` is published
+  (otherwise `cb8ea42`, the same code minus docs and the test fix).
