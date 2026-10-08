@@ -126,6 +126,13 @@ libs() {
     check "install dry-run mentions: ${s}" 'printf "%s" "${out}" | grep -q -- "${s}"'
   done
   check "install without --production is refused" '! "${REPO}/installer/install.sh" >/dev/null 2>&1'
+  # FCU profile: production is static with no default route; the bench (FCU_KEEP_DHCP=1) keeps the
+  # site router's DHCP route, its only WAN, or the release fetch fails (2026-10-08 on the rover).
+  local net_prod net_bench
+  net_prod="$(DYX3_DRY_RUN=1 install_fcu_network 2>&1)"
+  net_bench="$(DYX3_DRY_RUN=1 FCU_KEEP_DHCP=1 install_fcu_network 2>&1)"
+  check "fcu profile (production): manual, never-default yes" 'printf "%s" "${net_prod}" | grep -q "ipv4.method manual" && printf "%s" "${net_prod}" | grep -q "ipv4.never-default yes"'
+  check "fcu profile (bench): auto, keeps default route" 'printf "%s" "${net_bench}" | grep -q "ipv4.method auto" && printf "%s" "${net_bench}" | grep -q "ipv4.never-default no"'
 
   # staged real directory creation (no chown)
   (create_directories >/dev/null 2>&1)

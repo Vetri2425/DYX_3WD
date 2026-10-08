@@ -10,6 +10,8 @@ FCU_IFACE="${FCU_IFACE:-enP8p1s0}"
 FCU_JETSON_CIDR="${FCU_JETSON_CIDR:-10.41.10.1/24}"
 # Bench only: keep DHCP alongside the static address while the board is on a site router.
 # DERIVED — NOT FROM V1 SPEC (HANDOFF 2026-10-07). Production is static-only.
+# On the bench the site router behind the FCU switch is the Jetson's only WAN, so its DHCP
+# default route is kept too; otherwise the release fetch from GitHub fails (seen 2026-10-08).
 FCU_KEEP_DHCP="${FCU_KEEP_DHCP:-0}"
 
 install_fcu_network() {
@@ -17,14 +19,17 @@ install_fcu_network() {
     warn "nmcli not found: skipping FCU network profile"
     return 0
   fi
-  local method="manual"
-  [ "${FCU_KEEP_DHCP}" = "1" ] && method="auto"
+  local method="manual" never_default="yes"
+  if [ "${FCU_KEEP_DHCP}" = "1" ]; then
+    method="auto"
+    never_default="no"
+  fi
   local common=(
     connection.interface-name "${FCU_IFACE}"
     connection.autoconnect yes
     ipv4.method "${method}"
     ipv4.addresses "${FCU_JETSON_CIDR}"
-    ipv4.never-default yes
+    ipv4.never-default "${never_default}"
     ipv6.method disabled
   )
   if [ "${DYX3_DRY_RUN}" != "1" ] && nmcli -t -f NAME connection show | grep -qx "${FCU_CON_NAME}"; then
