@@ -25,10 +25,12 @@ question of WHERE the nozzle is, slow means thin flow, never off).
 
 1. **Controller** (`spray_node`) is the sole final spray verdict owner: conditioned MARK/TRANSIT geometry, RPP heading cut and entry hold, safety gates, and valve ON/OFF. It drives the FSM and never talks to the FCU. RPP publishes tracking evidence only; `spray_request` is deprecated diagnostics and is ignored.
 2. **`dyx3_px4_link`** is the only package touching `/fmu/**`. It turns `SprayActuatorCommand` into
-   `VEHICLE_CMD_DO_SET_ACTUATOR` (187; value in slot `actuator_set_index`, the other five NaN) or `DO_SET_SERVO` (183;
-   `pwm_us` clamped to 2200) and maps `/fmu/out/vehicle_command_ack` back into `SprayActuatorAck`. A command that cannot
-   be sent (handshake not proven, session dead, uninterpretable) is acked **false at once** (`result 255`), so a forced OFF
-   retries and an ON is never latched.
+  `VEHICLE_CMD_DO_SET_ACTUATOR` (187; value in slot `actuator_set_index`, the other five NaN) or `DO_SET_SERVO` (183;
+   `pwm_us` clamped to 2200) and maps `/fmu/out/vehicle_command_ack` back into `SprayActuatorAck`. It serializes valve
+   transactions and correlates each ACK by command ID plus a unique per-dispatch `source_component` token echoed in
+   `target_component` by the pinned PX4 firmware. Queue replacement, link loss, and timeout are acked **false** (`result 255`);
+   late or unmatched FCU ACKs are discarded and cannot confirm a newer transaction. See the D1 details in
+   `docs/contracts/dyx3_px4_link.md` section 14.
 3. **Independent watchdog** (`spray_watchdog`, its own process and unit): sends OFF whenever the lease is absent,
    denied, malformed or stale, and publishes `SprayWatchdogStatus`. It must survive the controller dying. **Open hardware
    question (human):** if `dyx3_px4_link` or the FCU path dies while the valve is ON, nothing in this repository can close

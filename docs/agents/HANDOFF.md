@@ -577,3 +577,34 @@ Removed the RPP heading cut and entry hold from `RppCore`. `RppStatus.spray_requ
 Moved `spray_heading_cut_deg`, `spray_entry_max_heading_deg`, and `spray_entry_release_travel_m` ownership from RPP to spray; defaults and mutability remain unchanged. Generated parameter counts are RPP 117 / spray 49. `segment_command_mode` remains `heading`. Bumped `dyx3_interfaces` to 0.10.0 for the appended heading evidence validity and path progress fields; `spray_request` was documented as deprecated.
 
 Checks run: generator check OK (117 / 49); backend 529 passed, 44 skipped; native spray heading harness 5 assertions passed (MARK healthy, heading cut, invalid heading evidence, TRANSIT); RPP/spray core changed sources compile with `-Werror`; clang-format dry-run and `git diff --check` clean. Archived C1 station comparison remains `square_2x2` 2.13e-14 m / `mission_straight_5m` 0.10 m. Not run: RPP/spray C++ gtests (including node, gates, core, conditioner/orchestrator equivalence), Motion Guard gtests, or colcon build/test; this Mac has no ROS 2, `colcon`, or GoogleTest.
+
+## 2026-10-08 — Phase C CI regression fix and D1 ACK integrity
+
+Phase C test-only integration fixes are committed and pushed in `aefe7cf` and `7bef9de`.
+`RppNode.PublishesFreshHeadingAndProgressEvidenceOnlyForActiveTracking` now follows RPP commands
+and waits boundedly for active tracking; `SprayEquivalence.AllVectors` supplies healthy heading
+evidence to isolate its legacy gate vectors, while dedicated tests continue to check fail-closed
+heading evidence. Phase C CI run `37740472931` passed all jobs, including `colcon build` and
+`colcon test` (386 tests, 0 failures, 2 skipped).
+
+Inspected the exact production firmware tree at
+`27a7ac92845317b0276776242c504215809b2a0f`. `VehicleCommand.source_component` and
+`VehicleCommandAck.target_component` are both `uint16`; `Commander::answer_command` copies the
+former into the latter (firmware `src/modules/commander/Commander.cpp:2674-2679`). Command 187
+uses that helper for its ACCEPTED response (`:1495-1497`); command 183 reaches the same helper for
+the UNSUPPORTED response (`:1544-1548`). This verifies source-component ACK correlation for both
+IDs without modifying firmware.
+
+D1 is implemented locally in `dyx3_px4_link`: only one spray `VehicleCommand` is sent at a time;
+the queue is bounded, newest-wins per source, and watchdog OFF purges queued ON and takes priority.
+Each dispatched request gets a source-component transaction token from 2 through 999 (1000+ is
+reserved for PX4 mode executors). Final ACKs require command plus matching target-component;
+timeouts and queue/link failures publish false acknowledgements, and late/unmatched ACKs are
+discarded and counted. Added regression coverage for token matching, serialized/reassert-flood
+behavior, watchdog OFF priority, OFF/OFF overlap, and a late ACK after timeout. Updated the PX4
+link and spray contracts and clarified result 255 in the ack message comment; no wire fields
+changed and no interface version bump is required.
+
+Checks run for D1: `clang-format --dry-run --Werror` and `git diff --check` pass. Not run: D1
+`px4_link_node_test`, other ROS gtests, or colcon build/test; ROS 2 and `colcon` are unavailable
+on this Mac. D1 has not been pushed and has no CI result yet.

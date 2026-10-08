@@ -23,7 +23,7 @@ the DDS topic when the version is above 0:
 | in | `/fmu/in/rover_speed_setpoint` | RoverSpeedSetpoint | reliable, depth 1 | |
 | in | `/fmu/in/rover_attitude_setpoint` | RoverAttitudeSetpoint | reliable, depth 1 | |
 | in | `/fmu/in/rover_rate_setpoint` | RoverRateSetpoint | reliable, depth 1 | |
-| in | `/fmu/in/vehicle_command` | VehicleCommand (v0) | reliable, depth 10 | arm, mode, logging start |
+| in | `/fmu/in/vehicle_command` | VehicleCommand (v0) | reliable, depth 10 | arm, mode, logging, serialized spray |
 | in | `/fmu/in/gps_inject_data` | GpsInjectData | reliable, depth 10 | RTCM pass-through |
 | in | `/fmu/in/ulog_stream_ack` | UlogStreamAck | reliable, depth 16 | |
 | in | `/fmu/in/message_format_request` | MessageFormatRequest | reliable, depth 10 | handshake |
@@ -239,6 +239,33 @@ fail-to-zero case, staleness boundaries, handshake lifecycle (pending, ok, perma
 re-arm after reset), a fake-PX4 fault-injection harness. **Not provable off-target:** DDS
 transport, the real timesync, jitter on the Jetson, the stop distance after a killed process, the
 actual `COM_OF_LOSS_T` behaviour. Those are GATE 4 / F5 on the bench.
+
+## 14. Spray command/ACK transactions (D1)
+
+Spray valve commands are serialized: at most one spray `VehicleCommand` is in flight, with a
+bounded queue of 16 total in-flight/queued requests. While queued, the newest request from each
+source replaces that source's older queued request; a replaced request receives a failed
+`SprayActuatorAck` (`result=255`). A watchdog OFF removes queued ON requests and is placed at the
+front of the queue. If all queue capacity is occupied by watchdog OFF requests, a new request is
+refused rather than displacing them. Link loss fails the in-flight request and all queued requests.
+
+Each dispatched logical transaction receives a `VehicleCommand.source_component` token
+(the companion's ordinary component ID is 1; spray tokens advance from 2 to 999 and then wrap; 1000+
+is reserved for PX4 mode executors).
+ACK matching requires both `command` and `VehicleCommandAck.target_component` to match the
+in-flight transaction. The pinned firmware at
+`27a7ac92845317b0276776242c504215809b2a0f` copies `VehicleCommand.source_component` into
+`VehicleCommandAck.target_component` in `Commander::answer_command`; command 187 is explicitly
+accepted there, while command 183 reaches the unsupported-command response through that same
+helper. `IN_PROGRESS` is not final. An unmatched final spray ACK, including a late ACK after the
+five-second transaction timeout, is discarded and increments the link's late/unmatched counter;
+it cannot acknowledge a newer request with the same command ID. The timeout fails the request
+with result 255 and allows the next queued request to proceed. Tokens are unique over the 998-value
+component-token cycle; command ID plus token are both required for a match.
+
+The queue and token are owned by `dyx3_px4_link`. Neither spray producer infers FCU completion
+from publication; controller and watchdog state advance only from their matching
+`SprayActuatorAck` sequence/source.
 
 ## Timesync evidence (interfaces 0.7.0)
 

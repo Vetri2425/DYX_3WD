@@ -5,6 +5,7 @@
 #include <deque>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -69,10 +70,11 @@ public:
   // One publish cycle at link-clock time `now_s`. Public for deterministic tests.
   void step(double now_s);
 
-  // Read-only views for tests.
+  // Read-only views for tests/diagnostics.
   const Handshake& handshake() const { return *handshake_; }
   const CommandGate& gate() const { return *gate_; }
   const LinkParams& params() const { return p_; }
+  uint64_t spray_late_ack_count() const { return spray_late_ack_count_; }
 
 private:
   using ArmSrv = dyx3_interfaces::srv::ArmDisarm;
@@ -99,6 +101,9 @@ private:
   void start_ulog_if_due(double now_s, bool link_ok);
   void on_spray_command(const dyx3_interfaces::msg::SprayActuatorCommand& m);
   void on_vehicle_command_ack(const px4_msgs::msg::VehicleCommandAck& a);
+  void service_spray_transactions(double now_s);
+  void dispatch_next_spray_transaction();
+  void publish_spray_ack(uint32_t seq, uint8_t source, bool success, uint8_t result);
 
   ClockFn clock_;
   LinkParams p_;
@@ -135,12 +140,18 @@ private:
   uint64_t last_ulog_gen_{~0ULL};
   std::deque<Pending> pending_;
   struct SprayPending {
+    px4_msgs::msg::VehicleCommand vehicle_command;
     uint32_t command;  // MAVLink command id the ack will name
     uint32_t seq;
     uint8_t source;
+    bool on;
+    uint16_t ack_token{0};
     double sent_s;
   };
-  std::deque<SprayPending> spray_pending_;
+  std::deque<SprayPending> spray_queue_;
+  std::optional<SprayPending> spray_inflight_;
+  uint16_t next_spray_ack_token_{2};
+  uint64_t spray_late_ack_count_{0};
 
   // /fmu publishers
   rclcpp::Publisher<px4_msgs::msg::OffboardControlMode>::SharedPtr pub_ocm_;

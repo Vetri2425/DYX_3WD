@@ -22,8 +22,10 @@ constexpr uint32_t kCmdArmDisarm = 400;      // VEHICLE_CMD_COMPONENT_ARM_DISARM
 constexpr uint32_t kCmdLoggingStart = 2510;  // VEHICLE_CMD_LOGGING_START
 constexpr uint32_t kCmdDoSetServo = 183;     // VEHICLE_CMD_DO_SET_SERVO
 constexpr uint32_t kCmdDoSetActuator = 187;  // VEHICLE_CMD_DO_SET_ACTUATOR
-constexpr size_t kMaxSprayPending = 16;
-constexpr double kSprayPendingMaxAgeS = 5.0;
+constexpr size_t kMaxSprayTransactions = 16;
+constexpr double kSprayTransactionTimeoutS = 5.0;
+constexpr uint16_t kFirstSprayAckToken = 2;
+constexpr uint16_t kModeExecutorComponentStart = 1000;
 
 struct UsedTopic {
   const char* request_name;  // BASE topic name: the firmware matches the uORB name, no _vN suffix
@@ -442,17 +444,12 @@ void Px4LinkNode::publish_vehicle_command(uint32_t command, float p1, float p2, 
 
 void Px4LinkNode::on_spray_command(const dyx3_interfaces::msg::SprayActuatorCommand& m) {
   using Cmd = dyx3_interfaces::msg::SprayActuatorCommand;
-  dyx3_interfaces::msg::SprayActuatorAck refuse;
-  refuse.stamp = ros_now();
-  refuse.seq = m.seq;
-  refuse.source = m.source;
-  refuse.success = false;
-  refuse.result = dyx3_interfaces::msg::SprayActuatorAck::RESULT_LINK_REFUSED;
   // The VehicleCommand format must be proven identical on both sides and the session alive:
   // otherwise refuse AT ONCE so the sender's FSM takes its failure path (a forced OFF retries, an
   // ON is never latched) instead of waiting for a timeout.
   if (handshake_->state() != HandshakeState::Ok || !last_rep_.session_alive) {
-    pub_spray_ack_->publish(refuse);
+    publish_spray_ack(m.seq, m.source, false,
+                      dyx3_interfaces::msg::SprayActuatorAck::RESULT_LINK_REFUSED);
     return;
   }
   px4_msgs::msg::VehicleCommand c;
@@ -460,7 +457,8 @@ void Px4LinkNode::on_spray_command(const dyx3_interfaces::msg::SprayActuatorComm
   c.target_system = 1;
   c.target_component = 1;
   c.source_system = 1;
-  c.source_component = 1;
+  // `source_component` is echoed as VehicleCommandAck.target_component by the pinned firmware.
+  // It is therefore the transaction discriminator for spray ACKs, not the companion identity.
   c.from_external = true;
   uint32_t command;
   if (m.backend == Cmd::BACKEND_SERVO_PWM) {
@@ -486,29 +484,129 @@ void Px4LinkNode::on_spray_command(const dyx3_interfaces::msg::SprayActuatorComm
     c.param6 = static_cast<double>(p[5]);
     c.param7 = 0.0F;
   } else {
-    pub_spray_ack_->publish(refuse);  // an uninterpretable request is never sent
+    publish_spray_ack(m.seq, m.source, false,
+                      dyx3_interfaces::msg::SprayActuatorAck::RESULT_LINK_REFUSED);
     return;
   }
-  pub_cmd_->publish(c);
-  spray_pending_.push_back({command, m.seq, m.source, clock_()});
-  while (spray_pending_.size() > kMaxSprayPending) spray_pending_.pop_front();
+
+  SprayPending request;
+  request.vehicle_command = c;
+  request.command = command;
+  request.seq = m.seq;
+  request.source = m.source;
+  request.on = m.on;
+
+  const bool watchdog_off = m.source == Cmd::SOURCE_WATCHDOG && !m.on;
+  // Newest request from each source wins while queued. A dropped request is explicitly failed so
+  // its sender cannot mistake queue replacement for an FCU confirmation.
+  for (auto it = spray_queue_.begin(); it != spray_queue_.end();) {
+    if ((watchdog_off && it->on) || it->source == m.source) {
+      publish_spray_ack(it->seq, it->source, false,
+                        dyx3_interfaces::msg::SprayActuatorAck::RESULT_LINK_REFUSED);
+      it = spray_queue_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+
+  const size_t active_count = spray_queue_.size() + (spray_inflight_ ? 1U : 0U);
+  if (active_count >= kMaxSprayTransactions) {
+    auto evict = std::find_if(spray_queue_.begin(), spray_queue_.end(), [](const SprayPending& p) {
+      return !(p.source == Cmd::SOURCE_WATCHDOG && !p.on);
+    });
+    if (evict == spray_queue_.end()) {
+      publish_spray_ack(request.seq, request.source, false,
+                        dyx3_interfaces::msg::SprayActuatorAck::RESULT_LINK_REFUSED);
+      return;
+    }
+    publish_spray_ack(evict->seq, evict->source, false,
+                      dyx3_interfaces::msg::SprayActuatorAck::RESULT_LINK_REFUSED);
+    spray_queue_.erase(evict);
+  }
+
+  if (watchdog_off) {
+    spray_queue_.push_front(std::move(request));
+  } else {
+    spray_queue_.push_back(std::move(request));
+  }
+  dispatch_next_spray_transaction();
 }
 
 void Px4LinkNode::on_vehicle_command_ack(const px4_msgs::msg::VehicleCommandAck& a) {
-  if (a.result == px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_IN_PROGRESS)
-    return;  // wait for the final result
-  for (auto it = spray_pending_.begin(); it != spray_pending_.end(); ++it) {
-    if (it->command != a.command) continue;
-    dyx3_interfaces::msg::SprayActuatorAck out;
-    out.stamp = ros_now();
-    out.seq = it->seq;
-    out.source = it->source;
-    out.success = a.result == px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_ACCEPTED;
-    out.result = a.result;
-    spray_pending_.erase(it);
-    pub_spray_ack_->publish(out);
-    return;  // FIFO: the oldest pending command with this id
+  if (a.result == px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_IN_PROGRESS) return;
+  if (!spray_inflight_ || spray_inflight_->command != a.command ||
+      spray_inflight_->ack_token != a.target_component) {
+    if (a.command == kCmdDoSetServo || a.command == kCmdDoSetActuator) {
+      ++spray_late_ack_count_;
+      RCLCPP_WARN(
+          get_logger(),
+          "discarded unmatched spray ACK command=%u target_component=%u (late/unmatched=%llu)",
+          static_cast<unsigned>(a.command), static_cast<unsigned>(a.target_component),
+          static_cast<unsigned long long>(spray_late_ack_count_));
+    }
+    return;
   }
+
+  const SprayPending completed = *spray_inflight_;
+  spray_inflight_.reset();
+  publish_spray_ack(completed.seq, completed.source,
+                    a.result == px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_ACCEPTED,
+                    a.result);
+  dispatch_next_spray_transaction();
+}
+
+void Px4LinkNode::publish_spray_ack(uint32_t seq, uint8_t source, bool success, uint8_t result) {
+  dyx3_interfaces::msg::SprayActuatorAck ack;
+  ack.stamp = ros_now();
+  ack.seq = seq;
+  ack.source = source;
+  ack.success = success;
+  ack.result = result;
+  pub_spray_ack_->publish(ack);
+}
+
+void Px4LinkNode::dispatch_next_spray_transaction() {
+  if (spray_inflight_ || spray_queue_.empty()) return;
+  if (handshake_->state() != HandshakeState::Ok || !last_rep_.session_alive) return;
+
+  SprayPending request = std::move(spray_queue_.front());
+  spray_queue_.pop_front();
+  if (next_spray_ack_token_ < kFirstSprayAckToken ||
+      next_spray_ack_token_ >= kModeExecutorComponentStart)
+    next_spray_ack_token_ = kFirstSprayAckToken;
+  request.ack_token = next_spray_ack_token_;
+  request.vehicle_command.source_component = request.ack_token;
+  request.vehicle_command.timestamp = stamp_us();
+  ++next_spray_ack_token_;
+  if (next_spray_ack_token_ >= kModeExecutorComponentStart)
+    next_spray_ack_token_ = kFirstSprayAckToken;
+  request.sent_s = clock_();
+  spray_inflight_ = std::move(request);
+  pub_cmd_->publish(spray_inflight_->vehicle_command);
+}
+
+void Px4LinkNode::service_spray_transactions(double now_s) {
+  if (!last_link_ok_) {
+    if (spray_inflight_) {
+      publish_spray_ack(spray_inflight_->seq, spray_inflight_->source, false,
+                        dyx3_interfaces::msg::SprayActuatorAck::RESULT_LINK_REFUSED);
+      spray_inflight_.reset();
+    }
+    while (!spray_queue_.empty()) {
+      const auto request = spray_queue_.front();
+      spray_queue_.pop_front();
+      publish_spray_ack(request.seq, request.source, false,
+                        dyx3_interfaces::msg::SprayActuatorAck::RESULT_LINK_REFUSED);
+    }
+    return;
+  }
+
+  if (spray_inflight_ && now_s - spray_inflight_->sent_s > kSprayTransactionTimeoutS) {
+    publish_spray_ack(spray_inflight_->seq, spray_inflight_->source, false,
+                      dyx3_interfaces::msg::SprayActuatorAck::RESULT_LINK_REFUSED);
+    spray_inflight_.reset();
+  }
+  dispatch_next_spray_transaction();
 }
 
 void Px4LinkNode::start_ulog_if_due(double /*now_s*/, bool link_ok) {
@@ -527,8 +625,6 @@ void Px4LinkNode::step(double now_s) {
   if (last_step_s_ >= 0.0 && now_s - last_step_s_ > 1.5 * period) ++overruns_;
   last_step_s_ = now_s;
 
-  while (!spray_pending_.empty() && now_s - spray_pending_.front().sent_s > kSprayPendingMaxAgeS)
-    spray_pending_.pop_front();
   last_rep_ = mon_->evaluate(now_s);
   if (mon_->consume_reset()) {
     handshake_->rearm();  // possibly a different firmware on the other side
@@ -552,6 +648,7 @@ void Px4LinkNode::step(double now_s) {
                           handshake_->first_mismatch_reason().c_str());
   }
   last_link_ok_ = hs_ok && last_rep_.session_alive;
+  service_spray_transactions(now_s);
 
   last_gate_ = gate_->step({now_s, hs_ok, last_rep_.session_alive, last_rep_.mask});
   const std::string reason_key = std::to_string(static_cast<int>(last_gate_.reason));

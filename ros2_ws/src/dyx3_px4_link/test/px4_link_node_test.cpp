@@ -5,6 +5,7 @@
 #include <gtest/gtest.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -632,9 +633,14 @@ TEST(Px4LinkNode, SprayActuatorCommandsBecomeVehicleCommandsAndFcuAcksAreMapped)
     EXPECT_TRUE(std::isnan(c.param4));
   }
   EXPECT_EQ(n187, 1);
+  const auto actuator_command =
+      std::find_if(r.cmds.rbegin(), r.cmds.rend(), [](const auto& c) { return c.command == 187; });
+  ASSERT_NE(actuator_command, r.cmds.rend());
+  EXPECT_NE(actuator_command->source_component, 1U);
   EXPECT_TRUE(r.spray_acks.empty());  // no ack until the FCU answers
   px4_msgs::msg::VehicleCommandAck a;
   a.command = 187;
+  a.target_component = actuator_command->source_component;
   a.result = px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_IN_PROGRESS;
   r.p_ack->publish(a);
   r.pump(100);
@@ -661,13 +667,198 @@ TEST(Px4LinkNode, SprayActuatorCommandsBecomeVehicleCommandsAndFcuAcksAreMapped)
     }
   }
   EXPECT_TRUE(saw_servo);
+  const auto servo_command =
+      std::find_if(r.cmds.rbegin(), r.cmds.rend(), [](const auto& c) { return c.command == 183; });
+  ASSERT_NE(servo_command, r.cmds.rend());
+  EXPECT_NE(servo_command->source_component, actuator_command->source_component);
   a.command = 183;
+  a.target_component = servo_command->source_component;
   a.result = px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_DENIED;
   r.p_ack->publish(a);
   r.pump(150);
   ASSERT_EQ(r.spray_acks.size(), 2U);
   EXPECT_EQ(r.spray_acks[1].seq, 42U);
   EXPECT_FALSE(r.spray_acks[1].success);
+}
+
+TEST(Px4LinkNode, SprayTransactionsSerializeAndWatchdogOffPreemptsQueuedOn) {
+  using Cmd = dyx3_interfaces::msg::SprayActuatorCommand;
+  Rig r;
+  r.bring_up();
+  r.run(0.2);
+  r.clear();
+
+  auto publish = [&](uint32_t seq, uint8_t source, bool on, float value) {
+    Cmd m;
+    m.seq = seq;
+    m.source = source;
+    m.backend = Cmd::BACKEND_ACTUATOR;
+    m.on = on;
+    m.actuator_set_index = 1;
+    m.value = value;
+    r.p_spray->publish(m);
+    r.pump(40);
+  };
+  auto last_spray_command = [&]() {
+    return std::find_if(r.cmds.rbegin(), r.cmds.rend(),
+                        [](const auto& c) { return c.command == 187 || c.command == 183; });
+  };
+
+  publish(1, Cmd::SOURCE_CONTROLLER, true, 1.0F);
+  ASSERT_NE(last_spray_command(), r.cmds.rend());
+  const auto first_token = last_spray_command()->source_component;
+  ASSERT_EQ(last_spray_command()->command, 187U);
+  for (uint32_t seq = 2; seq <= 10; ++seq)
+    publish(seq, Cmd::SOURCE_CONTROLLER, true, 0.8F);  // reassert flood; only newest remains queued
+  publish(11, Cmd::SOURCE_WATCHDOG, false, -1.0F);     // purges queued ON and jumps ahead
+
+  size_t sent = 0;
+  for (const auto& c : r.cmds)
+    if (c.command == 183 || c.command == 187) ++sent;
+  EXPECT_EQ(sent, 1U);  // only one spray VehicleCommand may be in flight
+  ASSERT_EQ(r.spray_acks.size(), 9U);
+  for (size_t i = 0; i < r.spray_acks.size(); ++i) {
+    EXPECT_EQ(r.spray_acks[i].seq, i + 2);
+    EXPECT_FALSE(r.spray_acks[i].success);
+  }
+
+  px4_msgs::msg::VehicleCommandAck ack;
+  ack.command = 187;
+  ack.target_component = first_token;
+  ack.result = px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_ACCEPTED;
+  r.p_ack->publish(ack);
+  r.pump(60);
+  ASSERT_NE(last_spray_command(), r.cmds.rend());
+  const auto watchdog_off = *last_spray_command();
+  ASSERT_EQ(watchdog_off.command, 187U);
+  EXPECT_EQ(watchdog_off.param1, -1.0F);
+  EXPECT_EQ(watchdog_off.source_component, 3U);
+  EXPECT_NE(watchdog_off.source_component, first_token);
+
+  // A duplicate late ACK for the earlier controller ON cannot confirm watchdog OFF.
+  r.p_ack->publish(ack);
+  r.pump(40);
+  ASSERT_EQ(r.spray_acks.size(), 10U);
+  EXPECT_NE(r.spray_acks.back().source, Cmd::SOURCE_WATCHDOG);
+  ack.target_component = watchdog_off.source_component;
+  r.p_ack->publish(ack);
+  r.pump(60);
+  ASSERT_EQ(r.spray_acks.size(), 11U);
+  EXPECT_EQ(r.spray_acks.back().seq, 11U);
+  EXPECT_EQ(r.spray_acks.back().source, Cmd::SOURCE_WATCHDOG);
+  EXPECT_TRUE(r.spray_acks.back().success);
+}
+
+TEST(Px4LinkNode, LateSprayAckAfterTimeoutCannotMatchTheNextSameCommand) {
+  using Cmd = dyx3_interfaces::msg::SprayActuatorCommand;
+  Rig r;
+  r.bring_up();
+  r.run(0.2);
+  r.clear();
+
+  Cmd on;
+  on.seq = 10;
+  on.source = Cmd::SOURCE_CONTROLLER;
+  on.backend = Cmd::BACKEND_ACTUATOR;
+  on.on = true;
+  on.actuator_set_index = 1;
+  on.value = 1.0F;
+  r.p_spray->publish(on);
+  r.pump(40);
+  const auto old_command =
+      std::find_if(r.cmds.rbegin(), r.cmds.rend(), [](const auto& c) { return c.command == 187; });
+  ASSERT_NE(old_command, r.cmds.rend());
+  const uint16_t old_token = old_command->source_component;
+
+  r.tick(5.01);
+  ASSERT_EQ(r.spray_acks.size(), 1U);
+  EXPECT_EQ(r.spray_acks[0].seq, 10U);
+  EXPECT_FALSE(r.spray_acks[0].success);
+  EXPECT_EQ(r.spray_acks[0].result, dyx3_interfaces::msg::SprayActuatorAck::RESULT_LINK_REFUSED);
+
+  Cmd off = on;
+  off.seq = 11;
+  off.on = false;
+  off.value = -1.0F;
+  r.p_spray->publish(off);
+  r.pump(40);
+  const auto current_command =
+      std::find_if(r.cmds.rbegin(), r.cmds.rend(), [](const auto& c) { return c.command == 187; });
+  ASSERT_NE(current_command, r.cmds.rend());
+  ASSERT_NE(current_command->source_component, old_token);
+
+  px4_msgs::msg::VehicleCommandAck ack;
+  ack.command = 187;
+  ack.target_component = old_token;
+  ack.result = px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_ACCEPTED;
+  r.p_ack->publish(ack);
+  r.pump(40);
+  EXPECT_EQ(r.spray_acks.size(), 1U);  // the old token cannot acknowledge seq 11
+  EXPECT_EQ(r.link->spray_late_ack_count(), 1U);
+
+  ack.target_component = current_command->source_component;
+  r.p_ack->publish(ack);
+  r.pump(40);
+  ASSERT_EQ(r.spray_acks.size(), 2U);
+  EXPECT_EQ(r.spray_acks.back().seq, 11U);
+  EXPECT_TRUE(r.spray_acks.back().success);
+}
+
+TEST(Px4LinkNode, WatchdogOffWinsQueuedControllerOffAndOldAckCannotConfirmIt) {
+  using Cmd = dyx3_interfaces::msg::SprayActuatorCommand;
+  Rig r;
+  r.bring_up();
+  r.run(0.2);
+  r.clear();
+
+  auto publish_off = [&](uint32_t seq, uint8_t source) {
+    Cmd m;
+    m.seq = seq;
+    m.source = source;
+    m.backend = Cmd::BACKEND_ACTUATOR;
+    m.on = false;
+    m.actuator_set_index = 1;
+    m.value = -1.0F;
+    r.p_spray->publish(m);
+    r.pump(40);
+  };
+  publish_off(20, Cmd::SOURCE_CONTROLLER);
+  auto first =
+      std::find_if(r.cmds.rbegin(), r.cmds.rend(), [](const auto& c) { return c.command == 187; });
+  ASSERT_NE(first, r.cmds.rend());
+  const uint16_t first_token = first->source_component;
+  publish_off(21, Cmd::SOURCE_CONTROLLER);
+  publish_off(22, Cmd::SOURCE_WATCHDOG);
+  publish_off(23, Cmd::SOURCE_WATCHDOG);  // newest watchdog OFF replaces queued watchdog OFF
+  ASSERT_EQ(r.spray_acks.size(), 2U);
+  EXPECT_EQ(r.spray_acks[0].seq, 21U);
+  EXPECT_EQ(r.spray_acks[1].seq, 22U);
+  EXPECT_FALSE(r.spray_acks[0].success);
+  EXPECT_FALSE(r.spray_acks[1].success);
+
+  px4_msgs::msg::VehicleCommandAck ack;
+  ack.command = 187;
+  ack.target_component = first_token;
+  ack.result = px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_ACCEPTED;
+  r.p_ack->publish(ack);
+  r.pump(50);
+  auto watchdog = std::find_if(r.cmds.rbegin(), r.cmds.rend(), [&](const auto& c) {
+    return c.command == 187 && c.source_component != first_token;
+  });
+  ASSERT_NE(watchdog, r.cmds.rend());
+  EXPECT_EQ(watchdog->source_component, 3U);
+  r.p_ack->publish(ack);  // duplicate controller OFF response
+  r.pump(30);
+  ASSERT_EQ(r.spray_acks.size(), 3U);
+  EXPECT_NE(r.spray_acks.back().source, Cmd::SOURCE_WATCHDOG);
+
+  ack.target_component = watchdog->source_component;
+  r.p_ack->publish(ack);
+  r.pump(50);
+  ASSERT_EQ(r.spray_acks.size(), 4U);
+  EXPECT_EQ(r.spray_acks.back().seq, 23U);
+  EXPECT_EQ(r.spray_acks.back().source, Cmd::SOURCE_WATCHDOG);
+  EXPECT_TRUE(r.spray_acks.back().success);
 }
 
 TEST(Px4LinkNode, SprayCommandIsRefusedAtOnceWhenTheLinkIsNotProven) {
