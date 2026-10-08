@@ -104,8 +104,24 @@ PY
 # _backend_env <KEY>: one value from /etc/dyx3/backend.env (what the service really binds), never executed.
 _backend_env() { sed -n "s/^$1=//p" "${DYX3_ETC}/backend.env" 2>/dev/null | tail -n1; }
 
+health_wifi() {
+  if [ -f "${DYX3_ROOT}/etc/NetworkManager/system-connections/dyx3-hotspot.nmconnection" ]; then
+    local wifi_iface reg_state power_state
+    wifi_iface="$(sed -n 's/^interface-name=//p' "${DYX3_ROOT}/etc/NetworkManager/system-connections/dyx3-hotspot.nmconnection" | head -n1)"
+    if have iw; then
+      reg_state="$(iw reg get 2>&1 || true)"
+      power_state="$(iw dev "${wifi_iface}" get power_save 2>&1 || true)"
+      _pass "Wi-Fi regulatory domain (iw reg get): ${reg_state//$'\n'/; }"
+      _pass "Wi-Fi ${wifi_iface} power save: ${power_state//$'\n'/; }"
+    else
+      _warn "iw unavailable; Wi-Fi regulatory domain and power save not checked"
+    fi
+  fi
+}
+
 health_extras() {
   local rel="${1:-${DYX3_CURRENT}}" m="${1:-${DYX3_CURRENT}}/installer/manifests/production.manifest"
+  health_wifi
   if _enabled dyx3-ros "${m}"; then
     if _settle _gateway_up; then _pass "gateway socket present"; else _fail "gateway socket ${DYX3_RUN}/gateway.sock missing (dyx3-ros / system_gateway down?)"; fi
   fi

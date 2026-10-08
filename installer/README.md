@@ -82,6 +82,15 @@ and `DYX3_HOTSPOT_PSK` (8–63 characters from the template's supported ASCII pu
 letters/digits). Leave either blank to disable the access point. The installer skips profile
 creation when no Wi-Fi device is present. It writes the secret only to a root-owned `0600`
 NetworkManager keyfile; it never sends the passphrase in a command argument or log.
+Set `DYX3_WIFI_COUNTRY` to the operating country's two-letter code (template: `IN`).
+The installer applies it at boot through `dyx3-wifi-regdom.service`. Set
+`DYX3_WIFI_BAND=a` (5 GHz, default) or `bg` (2.4 GHz), an optional
+`DYX3_WIFI_CHANNEL` (default 36 or 6 respectively), and `DYX3_WIFI_WIDTH=20|40`
+(default 20). Only non-DFS 5 GHz channels 36–48 and 149–165 are accepted.
+NetworkManager before 1.50 uses its safe 20 MHz auto width; 40 MHz is refused
+on those versions. The profile uses WPA2-PSK only and disables Wi-Fi power save.
+If the installed RTL8822CE driver exposes a known power-save option through
+`modinfo`, the installer also writes a matching modprobe option for the next boot.
 
 Bench check after filling the env file and rerunning the installer or upgrading:
 
@@ -90,7 +99,15 @@ nmcli device
 sudo nmcli connection up dyx3-hotspot
 # Connect the tablet to the configured SSID, then from the tablet:
 curl http://10.42.0.1:8000/api/ping
+iw reg get
+iw dev <if> get power_save
 ```
+
+For the 15-minute bench range check, test both `a` and `bg` bands. At 5, 10,
+15, and 25 m, keep the tablet connected for 15 minutes and record continuous
+ping loss/latency to `10.42.0.1`, the app's telemetry age, and RSSI from
+`iw dev <if> station dump` on the rover. Record any reconnects and the actual
+channel/width; rerun the installer after changing the band in `hotspot.env`.
 
 The bench backend's existing `DYX3_BACKEND_HOST=0.0.0.0` in `/etc/dyx3/backend.env` is left
 as configured.

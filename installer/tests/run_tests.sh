@@ -249,13 +249,39 @@ F
   local hotspot_profile="${DYX3_ROOT}/etc/NetworkManager/system-connections/dyx3-hotspot.nmconnection"
   check "hotspot has no profile before configuration" '[ ! -e "${hotspot_profile}" ]'
   printf 'DYX3_HOTSPOT_SSID=TestRover\nDYX3_HOTSPOT_PSK=DummyBenchPass123\n' >"${DYX3_ETC}/hotspot.env"
-  nmcli() { if [ "${1:-}" = "-t" ]; then printf '%s\n' "eth0:ethernet"; else printf '%s\n' "$*" >>"${T}/nmcli_argv"; fi; }
+  nmcli() { if [ "${1:-}" = "-t" ]; then printf '%s\n' "eth0:ethernet"; elif [ "${1:-}" = "--version" ]; then echo 'nmcli tool, version 1.50.0'; else printf '%s\n' "$*" >>"${T}/nmcli_argv"; fi; }
   install_hotspot_network >"${T}/hotspot_log" 2>&1
   check "configured hotspot skips cleanly without Wi-Fi hardware" '[ ! -e "${hotspot_profile}" ] && grep -q "no Wi-Fi device" "${T}/hotspot_log"'
-  nmcli() { if [ "${1:-}" = "-t" ]; then printf '%s\n' "wlan0:wifi"; else printf '%s\n' "$*" >>"${T}/nmcli_argv"; fi; }
+  nmcli() { if [ "${1:-}" = "-t" ]; then printf '%s\n' "wlan0:wifi"; elif [ "${1:-}" = "--version" ]; then echo 'nmcli tool, version 1.50.0'; else printf '%s\n' "$*" >>"${T}/nmcli_argv"; fi; }
+  lsmod() { printf 'Module Size Used by\nrtl8822ce 100 0\n'; }
+  modinfo() { if [ "${1:-}" = "-p" ] && [ "${2:-}" = "rtl8822ce" ]; then echo 'rtw_power_mgnt:Power management'; else return 1; fi; }
   install_hotspot_network >>"${T}/hotspot_log" 2>&1
   check "hotspot profile created only when configured and Wi-Fi exists" '[ -f "${hotspot_profile}" ] && grep -qx "method=shared" "${hotspot_profile}" && grep -qx "address1=10.42.0.1/24" "${hotspot_profile}" && grep -qx "never-default=true" "${hotspot_profile}" && [ "$(stat -c %a "${hotspot_profile}")" = 600 ]'
   check "hotspot isolation hook blocks Wi-Fi to FCU both ways" 'grep -q -- "-i \"wlan0\" -o \"${FCU_IFACE}\" -j DROP" "${DYX3_ROOT}/etc/NetworkManager/dispatcher.d/pre-up.d/90-dyx3-hotspot-isolation" && grep -q -- "-i \"${FCU_IFACE}\" -o \"wlan0\" -j DROP" "${DYX3_ROOT}/etc/NetworkManager/dispatcher.d/pre-up.d/90-dyx3-hotspot-isolation"'
+  check "hotspot profile pins safe 5 GHz and WPA2 without power save" 'grep -qx "band=a" "${hotspot_profile}" && grep -qx "channel=36" "${hotspot_profile}" && grep -qx "channel-width=20" "${hotspot_profile}" && grep -qx "powersave=2" "${hotspot_profile}" && grep -qx "proto=rsn" "${hotspot_profile}"'
+  check "Wi-Fi country is applied by persistent boot service" 'grep -qx "ExecStart=/usr/bin/env iw reg set IN" "${DYX3_ROOT}/etc/systemd/system/dyx3-wifi-regdom.service" && [ -L "${DYX3_ROOT}/etc/systemd/system/multi-user.target.wants/dyx3-wifi-regdom.service" ]'
+  check "verified RTL8822CE module option is installed" 'grep -qx "options rtl8822ce rtw_power_mgnt=0" "${DYX3_ROOT}/etc/modprobe.d/dyx3-rtl8822ce-powersave.conf"'
+  iw() { if [ "${1:-}" = reg ]; then echo 'global'; echo 'country IN: DFS-UNSET'; else echo 'Power save: off'; fi; }
+  local wifi_health
+  wifi_health="$(health_wifi)"
+  check "health reports regulatory domain and power save" 'printf "%s" "${wifi_health}" | grep -q "iw reg get.*country IN" && printf "%s" "${wifi_health}" | grep -q "Power save: off"'
+  lsmod() { printf 'Module Size Used by\nrtw88_8822ce 100 0\n'; }
+  modinfo() { if [ "${1:-}" = "-p" ] && [ "${2:-}" = "rtw88_core" ]; then echo 'disable_lps_deep:Disable deep power save'; else return 1; fi; }
+  install_hotspot_network >>"${T}/hotspot_log" 2>&1
+  check "rtw88 core option is verified before installation" 'grep -qx "options rtw88_core disable_lps_deep=1" "${DYX3_ROOT}/etc/modprobe.d/dyx3-rtl8822ce-powersave.conf"'
+  lsmod() { printf 'Module Size Used by\n'; }
+  install_hotspot_network >>"${T}/hotspot_log" 2>&1
+  check "missing RTL8822CE module skips power-save file cleanly" '[ ! -e "${DYX3_ROOT}/etc/modprobe.d/dyx3-rtl8822ce-powersave.conf" ] && grep -q "driver module not found" "${T}/hotspot_log"'
+  printf 'DYX3_HOTSPOT_SSID=TestRover\nDYX3_HOTSPOT_PSK=DummyBenchPass123\nDYX3_WIFI_COUNTRY=IN\nDYX3_WIFI_BAND=bg\nDYX3_WIFI_CHANNEL=6\nDYX3_WIFI_WIDTH=40\n' >"${DYX3_ETC}/hotspot.env"
+  install_hotspot_network >>"${T}/hotspot_log" 2>&1
+  check "2.4 GHz 40 MHz configuration is generated" 'grep -qx "band=bg" "${hotspot_profile}" && grep -qx "channel=6" "${hotspot_profile}" && grep -qx "channel-width=40" "${hotspot_profile}"'
+  printf 'DYX3_HOTSPOT_SSID=TestRover\nDYX3_HOTSPOT_PSK=DummyBenchPass123\nDYX3_WIFI_BAND=a\nDYX3_WIFI_CHANNEL=52\n' >"${DYX3_ETC}/hotspot.env"
+  install_hotspot_network >>"${T}/hotspot_log" 2>&1
+  check "5 GHz DFS channel is refused" '[ ! -e "${hotspot_profile}" ] && grep -q "DFS or invalid channel refused" "${T}/hotspot_log"'
+  nmcli() { if [ "${1:-}" = "-t" ]; then printf '%s\n' "wlan0:wifi"; elif [ "${1:-}" = "--version" ]; then echo 'nmcli tool, version 1.36.6'; else printf '%s\n' "$*" >>"${T}/nmcli_argv"; fi; }
+  printf 'DYX3_HOTSPOT_SSID=TestRover\nDYX3_HOTSPOT_PSK=DummyBenchPass123\nDYX3_WIFI_WIDTH=40\n' >"${DYX3_ETC}/hotspot.env"
+  install_hotspot_network >>"${T}/hotspot_log" 2>&1
+  check "40 MHz is refused by old NetworkManager" '[ ! -e "${hotspot_profile}" ] && grep -q "NetworkManager 1.50+ is required" "${T}/hotspot_log"'
   check "no hotspot credential appears in argv or installer logs" '! grep -q "DummyBenchPass123" "${T}/hotspot_log" "${T}/nmcli_argv" 2>/dev/null'
   install_config_templates "${DYX3_CURRENT}" >/dev/null 2>&1
   check "existing hotspot.env is never overwritten" 'grep -q "DummyBenchPass123" "${DYX3_ETC}/hotspot.env"'
