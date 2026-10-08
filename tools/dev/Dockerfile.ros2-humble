@@ -1,0 +1,18 @@
+# Local reproduction of the CI `ros2_build_test` job (.github/workflows/ci.yml):
+# ros:humble-ros-base + mavros_msgs + the tools the workspace and the installer's
+# build_px4_msgs need. The firmware-pinned px4_msgs overlay is NOT baked in: it lives in a
+# persistent volume and is built by installer/lib/ros_install.sh (see tools/dev/ros2_humble.sh).
+FROM ros:humble-ros-base
+
+RUN apt-get update -qq \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+      ros-humble-mavros-msgs \
+      ros-humble-ament-cmake-gtest \
+      ros-humble-ament-cmake-pytest \
+      ros-humble-launch-testing-ament-cmake \
+      ros-humble-launch-testing-ros \
+      ros-humble-ament-lint-auto \
+      ros-humble-ament-lint-common \
+      build-essential cmake git rsync python3-pip python3-numpy python3-yaml python3-pytest \
+      python3-colcon-common-extensions ca-certificates \
+ && rm -rf /var/lib/apt/lists/*

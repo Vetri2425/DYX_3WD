@@ -761,3 +761,26 @@ was built natively with GoogleTest and passed all 97 archived scenarios / 13,166
 with zero mismatches. No new expected vectors or mutation-failure claims were fabricated.
 The four scenarios require reference generation and baseline/mutant verification in the
 Humble environment before F6 can be committed.
+
+### Local ROS 2 Humble environment + Phase F verification (2026-10-08, claude)
+
+Added a persistent local environment: Colima profile `dyx3-ros2` (aarch64, vz), image
+`dyx3-ros2-humble:local` from `ros:humble-ros-base`, firmware-pinned px4_msgs overlay built by the repo's
+own `build_px4_msgs` into a persistent volume. **ROS 2 IS available on the Mac via
+`./tools/dev/ros2_humble.sh build-test`** — see `docs/agents/LOCAL_ROS2_BUILD_ENV.md`. Do not report ROS
+as unavailable. `CLAUDE.md` §9 got a one-paragraph pointer (human-authorized); `AGENTS.md` created.
+
+Verified on Phase F HEAD `8ed46be` + F4 follow-up: 12 packages built; `colcon test-result`: **437 tests,
+0 errors, 0 failures, 2 skipped** (CI baseline before Phase F: 432). The F2 (mission), F3 (MotionGuard)
+and F4 (px4_link) node tests ran and passed, as did spray/watchdog, gnss_rtk, RPP, interfaces. Repeated
+after a Colima stop/start with no reinstall (overlay "already built", incremental build 1.5 s).
+One compiler warning (`dyx3_system_gateway/src/json.cpp:252` missing-field-initializers), pre-existing.
+
+F4 follow-up (separate commit): the Phase F early return in `Px4LinkNode::step()` on a non-finite or
+backward clock now publishes an explicit `stop_setpoint()` instead of omitting the tick; node test extended
+to assert one STOP per bad tick. Review findings F2 "stricter than active" (state != IDLE) and the
+`use_sim_time` rejection in MotionGuard remain documented, unchanged.
+
+**F6 remains OPEN** and is an acceptance item: the carried-reference generator
+(`tools/gate4/gen_orchestrator_vectors.py`) has not been retried in this environment; the four scenarios
+still have no reference outputs or baseline-pass / mutation-fail evidence. Not pushed.

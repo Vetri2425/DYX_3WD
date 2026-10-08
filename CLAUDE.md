@@ -252,6 +252,10 @@ pip install -e "backend[dev,path-engine]" && ruff check backend/src backend/test
 
 **Authoritative:** CI on `ubuntu-24.04-arm`, matching the Jetson's architecture.
 
+**Local ROS 2:** local builds and tests must use the documented reusable Humble environment. Before
+claiming ROS tests are unavailable, check `docs/agents/LOCAL_ROS2_BUILD_ENV.md` and run the project
+wrapper: `./tools/dev/ros2_humble.sh build-test`.
+
 **Not testable off-target, ever:** timing and latency figures, DDS transport to PX4, systemd
 behaviour, the installer, udev, network configuration, and anything requiring RTK fix. Do not
 report these as verified from a laptop.
