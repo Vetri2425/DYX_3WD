@@ -23,6 +23,7 @@ class Settings:
     data_dir: str = "/var/lib/dyx3"
     auth_file: str = ""
     gateway_socket: str = "/run/dyx3/gateway.sock"
+    rtk_socket: str = "/run/dyx3/rtk-control.sock"
     # DERIVED — NOT FROM V1 SPEC: large DXF drawings exist; the cap only bounds memory. OPEN.
     upload_max_bytes: int = 20 * 1024 * 1024
     # gateway reply wait; must exceed the gateway's own service_timeout_s (2.0) so its verdict arrives first
@@ -59,6 +60,7 @@ class Settings:
             data_dir=e.get("DYX3_DATA_DIR", "/var/lib/dyx3"),
             auth_file=e.get("DYX3_AUTH_FILE", ""),
             gateway_socket=e.get("DYX3_GATEWAY_SOCKET", "/run/dyx3/gateway.sock"),
+            rtk_socket=e.get("DYX3_RTK_CONTROL_SOCKET", "/run/dyx3/rtk-control.sock"),
             upload_max_bytes=int(_f(e, "DYX3_UPLOAD_MAX_BYTES", 20 * 1024 * 1024)),
             request_timeout_s=_f(e, "DYX3_REQUEST_TIMEOUT_S", 3.0),
             heartbeat_relay_s=_f(e, "DYX3_HEARTBEAT_RELAY_S", 0.5),

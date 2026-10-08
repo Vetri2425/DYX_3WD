@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Annotated, Literal
 
 import anyio
@@ -12,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, StrictBool
 from dyx3_backend.auth.tokens import Identity, Role
 from dyx3_backend.gateway.client import GatewayError
 from dyx3_backend.mission.service import MissionError, PlanParams, summarize
+from dyx3_backend.rtk.client import RtkRejected, RtkUnavailable
 from dyx3_backend.storage import runs as runs_store
 
 router = APIRouter(prefix="/api")
@@ -39,6 +41,16 @@ class OffboardBody(_Body):
 
 class SprayBody(_Body):
     on: StrictBool
+
+
+class RtkSourceBody(_Body):
+    source: Literal["NTRIP", "LORA"]
+    revision: int | None = None
+
+
+class RtkTransportBody(_Body):
+    transport: Literal["USB_DIRECT", "PX4_DDS"]
+    revision: int | None = None
 
 
 # ------------------------------------------------------------------------------------------------ auth
@@ -243,3 +255,125 @@ async def get_run(run_id: str, request: Request, _: Identity = Viewer):
     return run
 
 
+# ------------------------------------------------------------------------------------------------ RTK
+async def _rtk(request: Request, command: str, **arguments) -> dict:
+    try:
+        return await request.app.state.rtk.request(command, **arguments)
+    except RtkUnavailable as exc:
+        raise HTTPException(503, "RTK worker unavailable") from exc
+    except RtkRejected as exc:
+        status = 409 if exc.code == "conflict" or "revision conflict" in exc.reason else 400
+        raise HTTPException(status, {"code": exc.code, "reason": exc.reason}) from exc
+
+
+async def _rtk_config(request: Request) -> dict:
+    config = await _rtk(request, "GET_CONFIG")
+    if not isinstance(config, dict):
+        raise HTTPException(503, "invalid RTK worker reply")
+    return config
+
+
+@router.get("/rtk/status")
+async def rtk_status(request: Request, _: Identity = Viewer) -> dict:
+    return await _rtk(request, "GET_STATUS")
+
+
+@router.get("/rtk/config")
+async def rtk_config(request: Request, _: Identity = Viewer) -> dict:
+    return await _rtk_config(request)
+
+
+@router.put("/rtk/config")
+async def set_rtk_config(request: Request, config: dict, _: Identity = Operator) -> dict:
+    return await _rtk(request, "SET_CONFIG", config=config)
+
+
+@router.post("/rtk/start")
+async def start_rtk(request: Request, _: Identity = Operator) -> dict:
+    return await _rtk(request, "START")
+
+
+@router.post("/rtk/stop")
+async def stop_rtk(request: Request, _: Identity = Operator) -> dict:
+    return await _rtk(request, "STOP")
+
+
+@router.get("/rtk/source")
+async def get_rtk_source(request: Request, _: Identity = Viewer) -> dict:
+    config = await _rtk_config(request)
+    return {"source": config["source"], "revision": config["revision"]}
+
+
+@router.put("/rtk/source")
+async def set_rtk_source(request: Request, body: RtkSourceBody, _: Identity = Operator) -> dict:
+    config = await _rtk_config(request)
+    if body.revision is not None and body.revision != config["revision"]:
+        raise HTTPException(409, "RTK configuration revision conflict")
+    config["source"] = body.source
+    return await _rtk(request, "SET_CONFIG", config=config)
+
+
+@router.get("/rtk/transport")
+async def get_rtk_transport(request: Request, _: Identity = Viewer) -> dict:
+    config = await _rtk_config(request)
+    return {"transport": config["transport"], "revision": config["revision"]}
+
+
+@router.put("/rtk/transport")
+async def set_rtk_transport(request: Request, body: RtkTransportBody, _: Identity = Operator) -> dict:
+    config = await _rtk_config(request)
+    if body.revision is not None and body.revision != config["revision"]:
+        raise HTTPException(409, "RTK configuration revision conflict")
+    config["transport"] = body.transport
+    return await _rtk(request, "SET_CONFIG", config=config)
+
+
+@router.get("/rtk/profiles")
+async def list_rtk_profiles(request: Request, _: Identity = Viewer) -> dict:
+    config = await _rtk_config(request)
+    return {"profiles": config["ntrip"]["profiles"], "active_profile_id": config["ntrip"]["active_profile_id"],
+            "revision": config["revision"]}
+
+
+@router.post("/rtk/profiles")
+async def create_rtk_profile(request: Request, profile: dict, _: Identity = Operator) -> dict:
+    config = await _rtk_config(request)
+    config["ntrip"]["profiles"].append(profile)
+    return await _rtk(request, "SET_CONFIG", config=config)
+
+
+@router.patch("/rtk/profiles/{profile_id}")
+async def update_rtk_profile(profile_id: str, request: Request, changes: dict, _: Identity = Operator) -> dict:
+    config = await _rtk_config(request)
+    for profile in config["ntrip"]["profiles"]:
+        if profile["id"] == profile_id:
+            if "id" in changes and changes["id"] != profile_id:
+                raise HTTPException(400, "profile id cannot change")
+            profile.update(changes)
+            return await _rtk(request, "SET_CONFIG", config=config)
+    raise HTTPException(404, "RTK profile not found")
+
+
+@router.delete("/rtk/profiles/{profile_id}")
+async def delete_rtk_profile(profile_id: str, request: Request, _: Identity = Operator) -> dict:
+    config = await _rtk_config(request)
+    profiles = config["ntrip"]["profiles"]
+    remaining = [profile for profile in profiles if profile["id"] != profile_id]
+    if len(remaining) == len(profiles):
+        raise HTTPException(404, "RTK profile not found")
+    config["ntrip"]["profiles"] = remaining
+    if config["ntrip"]["active_profile_id"] == profile_id:
+        config["ntrip"]["active_profile_id"] = ""
+    return await _rtk(request, "SET_CONFIG", config=config)
+
+
+@router.get("/rtk/serial-ports")
+async def rtk_serial_ports(_: Identity = Viewer) -> dict:
+    by_id = Path("/dev/serial/by-id")
+    if not by_id.is_dir():
+        return {"ports": []}
+    ports = []
+    for entry in sorted(by_id.iterdir(), key=lambda item: item.name)[:128]:
+        if entry.is_symlink() and entry.name not in (".", ".."):
+            ports.append({"path": str(entry), "present": entry.exists()})
+    return {"ports": ports}

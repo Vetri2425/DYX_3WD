@@ -25,6 +25,7 @@ from dyx3_backend.gateway.client import GatewayClient
 from dyx3_backend.mission.service import MissionService
 from dyx3_backend.realtime.hub import RealtimeHub
 from dyx3_backend.realtime.relay import OperatorLinkRelay
+from dyx3_backend.rtk.client import RtkClient
 
 
 class Combined:
@@ -47,6 +48,7 @@ def create_api(
     tokens: TokenStore | None = None,
     gateway: GatewayClient | None = None,
     missions: MissionService | None = None,
+    rtk: RtkClient | None = None,
     sio: socketio.AsyncServer | None = None,
 ) -> tuple[FastAPI, RealtimeHub, socketio.AsyncServer]:
     gw = gateway or GatewayClient(settings.gateway_socket, request_timeout_s=settings.request_timeout_s)
@@ -73,6 +75,7 @@ def create_api(
     api.state.gateway = gw
     api.state.relay = relay
     api.state.missions = missions or MissionService(settings)
+    api.state.rtk = rtk or RtkClient(settings.rtk_socket, settings.request_timeout_s)
     api.include_router(router)
 
     @server.event
