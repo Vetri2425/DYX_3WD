@@ -724,3 +724,10 @@ marks the candidate `.failed` and removes its completion marker. A failed first 
 and disables its enabled services and clears `current`; a failed upgrade restores units,
 shims, version provenance, and services for the prior release. Staged-root suite: 80/80 on
 macOS with GNU Bash/coreutils/findutils; no Jetson validation claimed.
+
+F2 applies the four mission IDLE_ONLY values in one validated callback batch and replaces the
+state timer when its rate changes. Requests outside IDLE or with invalid values are refused.
+The production entry point uses `rclcpp::spin` (single-threaded); Humble has no post-set
+parameter callback. Mission node tests cover atomic batches, timer frequency, effective gate
+freshness, invalid values, and active-mission rejection, but ROS 2/colcon is unavailable on
+this Mac, so these tests require Claude's independent CI review.

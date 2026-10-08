@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <functional>
+#include <utility>
 
 #include "dyx3_interfaces/msg/motion_setpoint_status.hpp"
 
@@ -155,6 +156,10 @@ rcl_interfaces::msg::SetParametersResult MissionNode::on_parameters(
     const std::vector<rclcpp::Parameter>& ps) {
   rcl_interfaces::msg::SetParametersResult res;
   res.successful = true;
+  double next_hz = state_publish_hz_;
+  double next_gate_age = gate_max_age_s_;
+  double next_capture_radius = point_capture_radius_m_;
+  double next_ack_timeout = rpp_ack_timeout_s_;
   for (const auto& p : ps) {
     const std::string& n = p.get_name();
     if (n == "missions_dir") {
@@ -164,9 +169,9 @@ rcl_interfaces::msg::SetParametersResult MissionNode::on_parameters(
     }
     if (n == "state_publish_hz" || n == "gate_status_max_age_s" || n == "point_capture_radius_m" ||
         n == "rpp_ack_timeout_s") {
-      if (fsm_.active()) {
+      if (fsm_.state() != State::kIdle) {
         res.successful = false;
-        res.reason = n + " is IDLE_ONLY: rejected while a mission is active";
+        res.reason = n + " is IDLE_ONLY: mission must be IDLE";
         return res;
       }
       if (p.get_type() != rclcpp::ParameterType::PARAMETER_DOUBLE) {
@@ -182,8 +187,25 @@ rcl_interfaces::msg::SetParametersResult MissionNode::on_parameters(
         res.reason = n + " out of range";
         return res;
       }
+      if (n == "state_publish_hz") next_hz = v;
+      if (n == "gate_status_max_age_s") next_gate_age = v;
+      if (n == "point_capture_radius_m") next_capture_radius = v;
+      if (n == "rpp_ack_timeout_s") next_ack_timeout = v;
     }
   }
+  // Humble has no post-set callback. Validate the entire atomic request before changing any
+  // effective value. Production and tests use a SingleThreadedExecutor, so the timer and parameter
+  // callbacks cannot overlap. Construct a replacement timer before committing cached values.
+  if (next_hz != state_publish_hz_) {
+    auto next_timer =
+        create_wall_timer(std::chrono::duration<double>(1.0 / next_hz), [this]() { on_timer(); });
+    timer_->cancel();
+    timer_ = std::move(next_timer);
+  }
+  state_publish_hz_ = next_hz;
+  gate_max_age_s_ = next_gate_age;
+  point_capture_radius_m_ = next_capture_radius;
+  rpp_ack_timeout_s_ = next_ack_timeout;
   return res;
 }
 

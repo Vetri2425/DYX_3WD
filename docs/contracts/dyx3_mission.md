@@ -73,5 +73,11 @@ C++ reader + SHA-256 (`path_artifact.cpp`, `sha256.cpp`); must refuse everything
 | `point_capture_radius_m` | 0.10 | IDLE_ONLY | prototype `point_hold_acceptance_m` — DERIVED |
 | `rpp_ack_timeout_s` | 0 (disabled) | IDLE_ONLY | **no source** — human to set; disabled means READY can wait forever (rover not moving) |
 
+The four IDLE_ONLY values are applied as one validated batch only while the FSM is IDLE.
+`state_publish_hz` replaces the wall timer, while the freshness, capture-radius and RPP-ACK
+values update their effective caches together. A rejected atomic parameter request leaves both
+ROS values and effective values unchanged. The node runs on a single-threaded executor, so
+parameter application and timer callbacks do not overlap.
+
 ## 9. Open questions
 E-stop → ABORTED vs PAUSED; whether `rpp_ack_timeout_s` and an RPP-status staleness auto-pause are wanted (no numeric source); mission-id persistence across reboot (currently per-boot counter).

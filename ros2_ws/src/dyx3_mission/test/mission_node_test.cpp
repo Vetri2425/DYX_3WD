@@ -56,6 +56,7 @@ protected:
         "/dyx3/mission/state", rclcpp::QoS(1).reliable(), [this](const di::msg::MissionState& m) {
           last_state_ = m;
           have_state_ = true;
+          ++state_count_;
         });
     point_sub_ = helper_->create_subscription<di::msg::PointResult>(
         "/dyx3/mission/point_result", rclcpp::QoS(100).reliable(),
@@ -150,10 +151,67 @@ protected:
   rclcpp_action::Client<dyx3_mission::MissionNode::ExecuteMission>::SharedPtr action_;
   di::msg::MissionState last_state_;
   bool have_state_ = false;
+  std::size_t state_count_ = 0;
   std::vector<di::msg::PointResult> points_;
 };
 
 }  // namespace
+
+TEST_F(MissionNodeTest, IdleParameterBatchAppliesAndChangesPublicationPeriod) {
+  spin_until([] { return false; }, 350ms);
+  const auto before = state_count_;
+  spin_until([] { return false; }, 350ms);
+  const auto slow_count = state_count_ - before;
+  const auto result =
+      node_->set_parameters_atomically({rclcpp::Parameter("state_publish_hz", 50.0),
+                                        rclcpp::Parameter("gate_status_max_age_s", 0.05),
+                                        rclcpp::Parameter("point_capture_radius_m", 0.20),
+                                        rclcpp::Parameter("rpp_ack_timeout_s", 0.25)});
+  ASSERT_TRUE(result.successful) << result.reason;
+  EXPECT_DOUBLE_EQ(node_->get_parameter("state_publish_hz").as_double(), 50.0);
+  EXPECT_DOUBLE_EQ(node_->get_parameter("gate_status_max_age_s").as_double(), 0.05);
+  EXPECT_DOUBLE_EQ(node_->get_parameter("point_capture_radius_m").as_double(), 0.20);
+  EXPECT_DOUBLE_EQ(node_->get_parameter("rpp_ack_timeout_s").as_double(), 0.25);
+  const auto fast_before = state_count_;
+  spin_until([] { return false; }, 350ms);
+  EXPECT_GT(state_count_ - fast_before, slow_count * 2);
+
+  // The effective freshness cache changes too: a formerly fresh gate cannot start a mission.
+  gate(true);
+  spin_until([] { return false; }, 120ms);
+  auto req = std::make_shared<di::srv::StartMission::Request>();
+  req->path_artifact_sha256 = square_sha();
+  EXPECT_FALSE(call(start_, req)->accepted);
+  EXPECT_EQ(node_->fsm().state(), dyx3_mission::State::kIdle);
+}
+
+TEST_F(MissionNodeTest, InvalidAtomicParameterBatchChangesNothing) {
+  const auto result =
+      node_->set_parameters_atomically({rclcpp::Parameter("state_publish_hz", 50.0),
+                                        rclcpp::Parameter("gate_status_max_age_s", -1.0)});
+  EXPECT_FALSE(result.successful);
+  EXPECT_DOUBLE_EQ(node_->get_parameter("state_publish_hz").as_double(), 10.0);
+  EXPECT_DOUBLE_EQ(node_->get_parameter("gate_status_max_age_s").as_double(), 0.5);
+  const auto before = state_count_;
+  spin_until([] { return false; }, 350ms);
+  EXPECT_LT(state_count_ - before, 7U);  // the effective timer is still 10 Hz
+  EXPECT_FALSE(node_
+                   ->set_parameters_atomically(
+                       {rclcpp::Parameter("point_capture_radius_m", std::string("bad"))})
+                   .successful);
+}
+
+TEST_F(MissionNodeTest, ActiveMissionRejectsIdleOnlyParameterChanges) {
+  start_running();
+  const auto result =
+      node_->set_parameters_atomically({rclcpp::Parameter("gate_status_max_age_s", 1.0),
+                                        rclcpp::Parameter("state_publish_hz", 50.0)});
+  EXPECT_FALSE(result.successful);
+  EXPECT_NE(result.reason.find("IDLE_ONLY"), std::string::npos);
+  EXPECT_DOUBLE_EQ(node_->get_parameter("gate_status_max_age_s").as_double(), 0.5);
+  EXPECT_DOUBLE_EQ(node_->get_parameter("state_publish_hz").as_double(), 10.0);
+  EXPECT_EQ(node_->fsm().state(), dyx3_mission::State::kRunning);
+}
 
 TEST_F(MissionNodeTest, StartIsRefusedWithoutAFreshSafetyGate) {
   auto req = std::make_shared<di::srv::StartMission::Request>();
