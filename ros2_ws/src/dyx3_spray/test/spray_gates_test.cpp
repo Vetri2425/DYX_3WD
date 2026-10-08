@@ -50,28 +50,61 @@ TEST(RtkGate, DropIsInstantRecoveryNeedsAContinuousHold) {
   RtkGate g;
   const auto c = cfg();
   double t = 10.0;
-  EXPECT_FALSE(g.evaluate(c, 6, 0.02, 0.05, t).ok);  // first good sample starts the hold
+  EXPECT_FALSE(g.evaluate(c, 6, 0.02, 0.05, true, t).ok);  // first good sample starts the hold
   t += 0.6;
-  EXPECT_FALSE(g.evaluate(c, 6, 0.02, 0.05, t).ok);
+  EXPECT_FALSE(g.evaluate(c, 6, 0.02, 0.05, true, t).ok);
   t += 0.5;
-  EXPECT_TRUE(g.evaluate(c, 6, 0.02, 0.05, t).ok);  // 1.1 s of continuous good fix
+  EXPECT_TRUE(g.evaluate(c, 6, 0.02, 0.05, true, t).ok);  // 1.1 s of continuous good fix
   t += 0.02;
-  EXPECT_FALSE(g.evaluate(c, 5, 0.5, 0.05, t).ok);  // float with poor accuracy: instant drop
+  EXPECT_FALSE(g.evaluate(c, 5, 0.5, 0.05, true, t).ok);  // float with poor accuracy: instant drop
   t += 0.02;
-  const auto back = g.evaluate(c, 6, 0.02, 0.05, t);
+  const auto back = g.evaluate(c, 6, 0.02, 0.05, true, t);
   EXPECT_FALSE(back.ok);  // one good sample after a dropout does NOT reopen the valve
   EXPECT_NE(back.reason.find("recovering"), std::string::npos);
   t += 1.1;
-  EXPECT_TRUE(g.evaluate(c, 6, 0.02, 0.05, t).ok);
+  EXPECT_TRUE(g.evaluate(c, 6, 0.02, 0.05, true, t).ok);
 }
 
 TEST(RtkGate, AStaleSampleResetsTheHold) {
   RtkGate g;
   const auto c = cfg();
-  g.evaluate(c, 6, 0.02, 0.05, 1.0);
-  EXPECT_TRUE(g.evaluate(c, 6, 0.02, 0.05, 2.5).ok);
-  EXPECT_FALSE(g.evaluate(c, 6, 0.02, 0.9, 2.52).ok);  // sample older than the timeout
-  EXPECT_FALSE(g.evaluate(c, 6, 0.02, 0.05, 2.54).ok);
+  g.evaluate(c, 6, 0.02, 0.05, true, 1.0);
+  EXPECT_TRUE(g.evaluate(c, 6, 0.02, 0.05, true, 2.5).ok);
+  EXPECT_FALSE(g.evaluate(c, 6, 0.02, 0.9, true, 2.52).ok);  // sample older than the timeout
+  EXPECT_FALSE(g.evaluate(c, 6, 0.02, 0.05, true, 2.54).ok);
+}
+
+TEST(RtkGate, CorrectionsFreshnessIsMandatoryForFixedAndFloatSolutions) {
+  RtkGate g;
+  RtkGateConfig c = cfg();
+  c.recover_hold_s = 0.0;
+  EXPECT_TRUE(g.evaluate(c, 6, 0.02, 0.05, true, 1.0).ok);  // FIXED + good HRMS
+  const auto fixed_stale = g.evaluate(c, 6, 0.02, 0.05, false, 1.1);
+  EXPECT_FALSE(fixed_stale.ok);
+  EXPECT_EQ(fixed_stale.reason, "RTK corrections stale");
+  EXPECT_TRUE(g.evaluate(c, 6, 0.02, 0.05, true, 1.2).ok);  // correction recovery
+
+  c.min_fix_type = 5;
+  EXPECT_TRUE(g.evaluate(c, 5, 0.02, 0.05, true, 1.3).ok);  // configured FLOAT acceptance
+  EXPECT_FALSE(g.evaluate(c, 5, 0.02, 0.05, false, 1.4).ok);
+}
+
+TEST(RtkGate, StaleStatusAndInvalidRequiredAccuracyFailClosed) {
+  RtkGate g;
+  RtkGateConfig c = cfg();
+  c.recover_hold_s = 0.0;
+  EXPECT_FALSE(g.evaluate(c, 6, 0.02, 0.51, true, 1.0).ok);  // stale RTK status
+  EXPECT_FALSE(g.evaluate(c, 6, std::nullopt, 0.05, true, 1.1).ok);
+  EXPECT_FALSE(g.evaluate(c, 6, -0.01, 0.05, true, 1.2).ok);
+  EXPECT_FALSE(g.evaluate(c, 6, 0.2, 0.05, true, 1.3).ok);
+}
+
+TEST(RtkGate, DisabledFixGateStillRequiresFreshCorrections) {
+  RtkGate g;
+  RtkGateConfig c = cfg();
+  c.require_rtk_fix = false;
+  EXPECT_FALSE(g.evaluate(c, 0, std::nullopt, std::nullopt, false, 1.0).ok);
+  EXPECT_TRUE(g.evaluate(c, 0, std::nullopt, std::nullopt, true, 1.1).ok);
 }
 
 TEST(PivotGate, OnlyPivotingCountsAndStaleStateFailsOpenImmediately) {

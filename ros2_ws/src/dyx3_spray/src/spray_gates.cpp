@@ -83,7 +83,12 @@ RtkQuality evaluate_rtk_quality(int fix_type, std::optional<double> h_acc_m,
 }
 
 GateResult RtkGate::evaluate(const RtkGateConfig& cfg, int fix_type, std::optional<double> h_acc_m,
-                             std::optional<double> sample_age_s, double now_s) {
+                             std::optional<double> sample_age_s, bool corrections_fresh,
+                             double now_s) {
+  if (!corrections_fresh) {
+    have_since_ = false;
+    return {false, "RTK corrections stale"};
+  }
   if (!cfg.require_rtk_fix) {
     have_since_ = false;  // re-enabling the production gate must earn a new recovery hold
     return {true, ""};

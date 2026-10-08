@@ -80,6 +80,7 @@ struct Rig {
   bool armed{true};
   bool estop{false};
   bool publish_mission{true};
+  bool corrections_fresh{true};
   bool heading_evidence_valid{true};
   bool legacy_spray_request{false};
   double heading_error_rad{0.0};
@@ -202,7 +203,7 @@ struct Rig {
     p_veh->publish(v);
     dyx3_interfaces::msg::RtkStatus r;
     r.fix_type = 6;
-    r.corrections_fresh = true;
+    r.corrections_fresh = corrections_fresh;
     r.horizontal_accuracy_m = 0.02F;
     p_rtk->publish(r);
     if (rpp_state >= 0) {
@@ -300,6 +301,17 @@ TEST(SprayNode, FullRunOpensEarlyOnTheMarkAndClosesAtItsEnd) {
     EXPECT_EQ(c.actuator_set_index, 1);
     EXPECT_FLOAT_EQ(c.value, c.on ? 1.0F : -1.0F);
   }
+}
+
+TEST(SprayNode, StaleCorrectionsBlockValveEvenWithFixedSolutionAndGoodAccuracy) {
+  Rig r;
+  r.settle();
+  r.corrections_fresh = false;
+  for (r.north = 0.0; r.north < 4.0; r.north += 0.007) r.cycle();
+  EXPECT_EQ(r.count(true, SprayActuatorCommand::SOURCE_CONTROLLER), 0);
+  EXPECT_FALSE(r.status.safety_ok);
+  EXPECT_EQ(r.status.safety_reason, "RTK corrections stale");
+  EXPECT_FALSE(r.lease.allow_on);
 }
 
 TEST(SprayNode, ControllerDeathIsClosedByTheIndependentWatchdog) {

@@ -34,6 +34,7 @@ struct VehicleSnapshot {
 struct RtkSnapshot {
   int fix_type{0};
   std::optional<double> h_acc_m;  // nullopt: unknown (sentinel 0)
+  bool corrections_fresh{false};
 };
 
 // What to put on the wire for a dispatched command.

@@ -46,7 +46,7 @@ struct GateResult {
 class RtkGate {
 public:
   GateResult evaluate(const RtkGateConfig& cfg, int fix_type, std::optional<double> h_acc_m,
-                      std::optional<double> sample_age_s, double now_s);
+                      std::optional<double> sample_age_s, bool corrections_fresh, double now_s);
   void reset() { have_since_ = false; }
 
 private:

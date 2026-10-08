@@ -255,7 +255,8 @@ std::optional<SprayCommand> SprayController::tick(double now_s) {
   rc.recover_hold_s = p_->num(P::gps_recover_hold_s);
   std::optional<double> rtk_age;
   if (have_rtk_) rtk_age = now_s - rtk_recv_s_;
-  const GateResult rtk = rtk_gate_.evaluate(rc, rtk_.fix_type, rtk_.h_acc_m, rtk_age, now_s);
+  const GateResult rtk =
+      rtk_gate_.evaluate(rc, rtk_.fix_type, rtk_.h_acc_m, rtk_age, rtk_.corrections_fresh, now_s);
 
   GateInputs gi;
   gi.ownership = ownership(now_s);

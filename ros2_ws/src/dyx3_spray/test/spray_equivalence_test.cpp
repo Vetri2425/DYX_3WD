@@ -243,7 +243,7 @@ TEST(SprayEquivalence, AllVectors) {
             gi.tracking_seen = true;
         gi.estop_clear = true;
         gi.require_offboard = require_offboard;
-        gi.rtk = gate.evaluate(rc, std::atoi(in[2].c_str()), opt(in[3]), opt(in[4]), now);
+        gi.rtk = gate.evaluate(rc, std::atoi(in[2].c_str()), opt(in[3]), opt(in[4]), true, now);
         gi.pivoting = piv.active(off_during_pivot, seg_timeout, now);
         const GateResult res = auto_safety_status(gi);
         EXPECT_EQ(res.ok, flag(out[0])) << line;

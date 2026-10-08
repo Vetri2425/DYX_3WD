@@ -74,6 +74,7 @@ SprayNode::SprayNode(const rclcpp::NodeOptions& options, ClockFn clock, bool cre
       "/dyx3/rtk_status", rel1, [this](dyx3_interfaces::msg::RtkStatus::ConstSharedPtr m) {
         RtkSnapshot r;
         r.fix_type = m->fix_type;
+        r.corrections_fresh = m->corrections_fresh;
         // horizontal_accuracy_m == 0 is the "unknown" sentinel (A14), never a perfect fix.
         if (m->horizontal_accuracy_m > 0.0F && std::isfinite(m->horizontal_accuracy_m)) {
           r.h_acc_m = static_cast<double>(m->horizontal_accuracy_m);

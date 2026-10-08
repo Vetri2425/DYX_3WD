@@ -163,9 +163,13 @@ only trusted while fresh (`pose_timeout_s`), so manual ON cannot ride a dead sta
   PRE_CORNER_SLOWDOWN) have no one-to-one mapping (our 2 is STOPPING, which is not tracking); fail closed: it can only delay the
   first mark, never advance it. Pivot gate: PIVOTING only (CORNER_ALIGN); STOPPING (CORNER_STOP) never gates.
 
-RTK gate (carried from `rtk_quality.py`): only fix types 5 and 6 at or above `spray_min_fix_type`; unknown accuracy (0) fails
-closed when `spray_require_accuracy`; accuracy <= `spray_max_hrms_m`; sample age <= `gps_fix_timeout_s`; **asymmetric
-hysteresis**: a drop is instant, re-enable only after `gps_recover_hold_s` of continuous good fix.
+RTK gate (carried from `rtk_quality.py`): `RtkStatus.corrections_fresh` is mandatory, including when
+`spray_require_rtk_fix` is disabled. With the fix gate enabled, only fix types 5 and 6 at or above
+`spray_min_fix_type` qualify; unknown accuracy (0) fails closed when `spray_require_accuracy`;
+accuracy must be <= `spray_max_hrms_m`; RTK status sample age must be <= `gps_fix_timeout_s`;
+**asymmetric hysteresis**: any loss of corrections, fix, required accuracy, or status freshness is
+immediate, and re-enable requires `gps_recover_hold_s` of continuous good RTK input. FLOAT remains
+accepted only when the configured minimum fix type permits it.
 
 Heading evidence is part of the gate stack after mission/RPP ownership: it must be marked valid, finite, and received within `rpp_timeout_s`; stale or unavailable heading evidence refuses ON. The heading cut is evaluated from the current `RppStatus.heading_error_rad` and forces the normal immediate OFF safety path. Entry hold releases from that same current heading metric or RPP's `path_travel_m` progress evidence. STOPPING remains eligible for the final leg portion; PIVOTING remains blocked by the existing production pivot gate.
 

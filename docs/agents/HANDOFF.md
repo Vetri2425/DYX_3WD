@@ -632,7 +632,7 @@ passed; node/gtest/colcon execution is unavailable locally. Operational limit: o
 transactions per ledger lifetime; after exhaustion, reinitialize only after PX4 and companion are
 reset together and old ACKs are gone.
 
-### D2 — watchdog OFF proof bound to mapping (local, not yet committed)
+### D2 — watchdog OFF proof bound to mapping — commit `3ca04dc`
 
 Watchdog proof identity is `(backend, actuator_set_index, off_value, servo_instance, off_pwm_us)`.
 An identical update keeps proof; a changed mapping clears it immediately, cancels the matching
@@ -641,3 +641,20 @@ Stale A ACKs cannot satisfy B. Added core tests for A-to-B transition, map chang
 each mapping field, identical update, and shutdown fail-closed behavior. Standalone watchdog
 mapping smoke test, `-Werror` source compilation, clang-format dry-run, and `git diff --check` pass;
 ROS/gtest is unavailable locally.
+
+### D3 — require fresh RTK corrections in spray — commit `03763c6`
+
+`RtkSnapshot` now carries `RtkStatus.corrections_fresh`; the spray `RtkGate` fails immediately and
+resets its recovery timer when false, even if the RTK fix gate parameter is disabled. Existing
+configured FIXED/FLOAT minimum and horizontal-accuracy rules and RTK status timeout remain intact.
+RPP/mission/geometry/heading checks remain separate subsequent gates. Motion Guard already consumes
+`corrections_fresh` in its pure RTK predicate, but sharing that predicate would couple spray's
+configurable accuracy/recovery behavior to Motion Guard's fixed rule; both now require the same
+correction-freshness evidence without changing either policy. Added gate and controller tests plus a
+spray-node test for FIXED + good accuracy + stale corrections. Existing vector equivalence feeds
+fresh corrections explicitly so it continues to compare the prior gate dimensions; dedicated tests
+cover stale and missing correction evidence. Changed core sources compile with `-Werror`; an eight-
+assertion standalone RTK-gate smoke test passed; parameter check passes (RPP 117 / spray 49);
+backend suite passes 529 with 44 skipped; clang-format dry-run and full branch `git diff --check`
+pass. ROS 2, colcon, and GoogleTest are unavailable, so package gtests and full colcon build/test
+were not run.

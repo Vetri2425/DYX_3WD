@@ -358,6 +358,7 @@ struct Rig {
     RtkSnapshot r;
     r.fix_type = 6;
     r.h_acc_m = 0.02;
+    r.corrections_fresh = true;
     c->note_rtk(r, t);
     c->set_mission(mission_running, 1);
     if (rpp_alive) {
@@ -507,7 +508,7 @@ TEST(Controller, DisarmedOrWatchdogLostOrDisabledBlocksSprayAndTheLease) {
   ASSERT_TRUE(w.c->lease(w.t).allow_on);
   w.t += 1.2;  // the watchdog heartbeat is not refreshed (note_watchdog only runs in world())
   w.c->note_vehicle(VehicleSnapshot{true, true, true, true, true, 4.0, 0.0, 0.0, 0.35, 0.0}, w.t);
-  w.c->note_rtk(RtkSnapshot{6, 0.02}, w.t);
+  w.c->note_rtk(RtkSnapshot{6, 0.02, true}, w.t);
   w.c->note_rpp(static_cast<uint8_t>(RppState::Tracking), 1, 0, 0.0, 1.0, true, w.t);
   w.c->note_estop(false, w.t);
   w.run_cmd(w.c->tick(w.t));
@@ -522,10 +523,50 @@ TEST(Controller, RtkLossCutsTheValveWithinOneTick) {
   ASSERT_TRUE(r.c->status(r.t).spraying);
   r.t += 0.02;
   r.world(n, true);
-  r.c->note_rtk(RtkSnapshot{5, 0.4}, r.t);  // float with poor accuracy
+  r.c->note_rtk(RtkSnapshot{5, 0.4, true}, r.t);  // float with poor accuracy
   r.run_cmd(r.c->tick(r.t));
   EXPECT_FALSE(r.c->status(r.t).spraying);
   EXPECT_FALSE(r.c->lease(r.t).allow_on);
+}
+
+TEST(Controller, StaleCorrectionsCutValveAndRecoveryDoesNotBypassOtherGates) {
+  Rig r;
+  double n = 0.0;
+  for (; n < 4.0; n += 0.007) r.step(n);
+  ASSERT_TRUE(r.c->status(r.t).spraying);
+
+  r.t += 0.02;
+  r.world(n, true);
+  r.c->note_rtk(RtkSnapshot{6, 0.02, false}, r.t);
+  r.run_cmd(r.c->tick(r.t));
+  EXPECT_FALSE(r.c->status(r.t).spraying);
+  EXPECT_FALSE(r.c->lease(r.t).allow_on);
+  EXPECT_EQ(r.c->status(r.t).safety_reason, "RTK corrections stale");
+
+  // Fresh corrections restore only the RTK gate; invalid heading evidence still blocks ON.
+  r.t += 0.02;
+  r.world(n, true);
+  r.c->note_rpp(static_cast<uint8_t>(RppState::Tracking), 1, 0, 0.0, 1.0, false, r.t);
+  r.run_cmd(r.c->tick(r.t));
+  EXPECT_FALSE(r.c->lease(r.t).allow_on);
+  EXPECT_NE(r.c->status(r.t).safety_reason.find("heading"), std::string::npos);
+
+  // Fresh RTK and valid heading still do not spray on a TRANSIT section of the conditioned path.
+  r.t += 0.02;
+  r.north = 0.5;
+  r.world(r.north, true);
+  r.run_cmd(r.c->tick(r.t));
+  EXPECT_FALSE(r.c->status(r.t).geometry_desired);
+  EXPECT_FALSE(r.c->status(r.t).spraying);
+
+  // Restoring RPP evidence does not bypass mission ownership either.
+  r.t += 0.02;
+  r.north = n;
+  r.world(n, true);
+  r.c->set_mission(false, 1);
+  r.run_cmd(r.c->tick(r.t));
+  EXPECT_FALSE(r.c->lease(r.t).allow_on);
+  EXPECT_EQ(r.c->status(r.t).safety_reason, "mission not running");
 }
 
 TEST(Controller, NoSprayUntilTrackingIsSeenAndPivotingSuppressesIt) {
