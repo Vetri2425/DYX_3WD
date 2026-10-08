@@ -750,3 +750,14 @@ The legacy 173-count is corrected in this handoff's old action list; the registr
 distinguishes that legacy total from the generated current 117 RPP / 49 spray tables and
 two production-only additions. A proposal requests the corresponding human-owned
 `CLAUDE.md` corrections; that file and the frozen architecture were not edited.
+
+F6 remains open. The archived `seg_boundary_55deg` fixture has one conditioned run, so it
+cannot exercise a run boundary; `seg_overshoot` does not cross the end plane; and the
+existing loose-corner and blackout/jump episodes do not reach the two remaining mutation
+sites. The generator's approved carried-node workflow failed at `rclpy.parameter` on this
+Mac (`python3 tools/gate4/gen_orchestrator_vectors.py --check`); ROS 2 Humble, colcon,
+and a container runtime are absent. The existing pure C++ orchestrator equivalence test
+was built natively with GoogleTest and passed all 97 archived scenarios / 13,166 ticks
+with zero mismatches. No new expected vectors or mutation-failure claims were fabricated.
+The four scenarios require reference generation and baseline/mutant verification in the
+Humble environment before F6 can be committed.
