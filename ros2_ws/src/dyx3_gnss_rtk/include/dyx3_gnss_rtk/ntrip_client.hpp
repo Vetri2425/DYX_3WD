@@ -3,6 +3,8 @@
 // credentials are ever logged or placed in a status string.
 #pragma once
 
+#include <openssl/ssl.h>
+
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -44,12 +46,16 @@ double backoff_s(int attempt, double base_s, double max_s);
 
 // ---- threaded client
 // -----------------------------------------------------------------------------------
+enum class NtripSecurity : uint8_t { Plaintext = 1, Tls = 2 };
+
 struct NtripConfig {
   std::string host;
   int port{2101};
   std::string mountpoint;
   std::string user;
-  std::string password;  // never logged
+  std::string password;                   // never logged
+  std::optional<NtripSecurity> security;  // required; never inferred from the port
+  std::string ca_file;                    // optional PEM trust anchor; otherwise system trust store
   double connect_timeout_s{10.0};
   double stream_timeout_s{10.0};
   double gga_interval_s{10.0};
@@ -77,6 +83,10 @@ struct NtripSnapshot {
   uint64_t crc_failures{0};
   uint64_t resync_bytes{0};
   uint64_t gga_sent{0};
+  std::optional<NtripSecurity> security;
+  bool tls_verified{false};
+  bool tls_verification_failed{false};
+  bool plaintext_credentials_warning{false};
 };
 
 class NtripClient {
@@ -102,6 +112,8 @@ private:
   void set_state(NtripState s, const std::string& detail = std::string());
   void close_fd();
   bool own_fd(int fd);
+  bool begin_tls(int fd, std::string* error);
+  void close_tls();
 
   NtripConfig cfg_;
   FrameSink sink_;
@@ -111,7 +123,9 @@ private:
   std::atomic<bool> stop_{false};
   // Guard both shutdown and close so a recycled fd number can never be targeted by stop().
   std::mutex fd_m_;
-  int active_fd_{-1};  // worker owns close; stop only shutdowns while holding fd_m_
+  int active_fd_{-1};          // worker owns close; stop only shutdowns while holding fd_m_
+  SSL_CTX* tls_ctx_{nullptr};  // worker-owned; never accessed by stop()
+  SSL* tls_{nullptr};
   mutable std::mutex m_;
   std::condition_variable cv_;
   NtripSnapshot snap_;

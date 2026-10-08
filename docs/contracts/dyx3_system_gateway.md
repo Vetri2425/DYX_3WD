@@ -43,6 +43,7 @@ One JSON object, assembled from the latest message of each source with its recei
 (age <= `snapshot_fresh_s`, default 1.0, DERIVED); a consumer must treat a stale or missing source as unknown, never as the last value. Sources: `vehicle_state`, `estimator_health`,
 `rtk_status`, `gnss_report`, `ntrip_status`, `px4_link`, `safety_gate`, `emergency_stop`, `motion_guard`, `rpp`, `mission`, `last_point_result`, `spray`, `recorder`, plus `gateway`
 (`operator_alive`, `clients`, `schema`). Field subsets are chosen for the tablet; the recorder, not the gateway, is the evidence path.
+The existing `ntrip_status` subset includes the selected security mode, verified TLS state, verification failure, plaintext credential warning, source bytes, valid frames, and RTK handoff count. The existing `px4_link` subset includes accepted/refused RTCM chunk counts. No credential or Authorization value is serialized. These are observation fields, not an RTK control API.
 
 ## 4. Operator link (R13)
 

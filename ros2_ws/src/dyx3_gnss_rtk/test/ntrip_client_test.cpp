@@ -6,6 +6,8 @@
 #include <gtest/gtest.h>
 #include <netinet/in.h>
 #include <poll.h>
+#include <pthread.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -53,7 +55,17 @@ struct Script {
 
 class FakeCaster {
 public:
-  FakeCaster() {
+  explicit FakeCaster(bool tls = false) : tls_server_(tls) {
+    if (tls_server_) {
+      server_ctx_ = SSL_CTX_new(TLS_server_method());
+      const std::string base = std::string(DYX3_FIXTURES) + "/";
+      EXPECT_EQ(SSL_CTX_use_certificate_file(server_ctx_, (base + "tls_test_cert.pem").c_str(),
+                                             SSL_FILETYPE_PEM),
+                1);
+      EXPECT_EQ(SSL_CTX_use_PrivateKey_file(server_ctx_, (base + "tls_test_key.pem").c_str(),
+                                            SSL_FILETYPE_PEM),
+                1);
+    }
     fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
     int one = 1;
     ::setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
@@ -73,6 +85,7 @@ public:
     ::shutdown(fd_, SHUT_RDWR);
     ::close(fd_);
     if (thread_.joinable()) thread_.join();
+    if (server_ctx_) SSL_CTX_free(server_ctx_);
   }
   int port() const { return port_; }
   void push_script(Script s) {
@@ -109,10 +122,30 @@ private:
         ::setsockopt(c, SOL_SOCKET, SO_RCVBUF, &s.receive_buffer_bytes,
                      sizeof s.receive_buffer_bytes);
       }
+      SSL* ssl = nullptr;
+      if (tls_server_ && s.pause_read_ms > 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(s.pause_read_ms));
+      }
+      if (tls_server_) {
+        ssl = SSL_new(server_ctx_);
+        SSL_set_fd(ssl, c);
+        if (SSL_accept(ssl) != 1) {
+          SSL_free(ssl);
+          ::close(c);
+          continue;
+        }
+      }
+      auto read_caster = [&](char* out, size_t count) {
+        return ssl ? SSL_read(ssl, out, static_cast<int>(count)) : ::recv(c, out, count, 0);
+      };
+      auto write_caster = [&](const char* data, size_t count) {
+        return ssl ? SSL_write(ssl, data, static_cast<int>(count))
+                   : ::send(c, data, count, MSG_NOSIGNAL);
+      };
       std::string req;
       char buf[1024];
       while (req.find("\r\n\r\n") == std::string::npos) {
-        const ssize_t n = ::recv(c, buf, sizeof buf, 0);
+        const ssize_t n = read_caster(buf, sizeof buf);
         if (n <= 0) break;
         req.append(buf, static_cast<size_t>(n));
       }
@@ -120,11 +153,12 @@ private:
         std::lock_guard<std::mutex> lk(m_);
         last_request_ = req;
       }
-      ::send(c, s.header.data(), s.header.size(), MSG_NOSIGNAL);
-      if (!s.payload.empty()) ::send(c, s.payload.data(), s.payload.size(), MSG_NOSIGNAL);
+      write_caster(s.header.data(), s.header.size());
+      if (!s.payload.empty())
+        write_caster(reinterpret_cast<const char*>(s.payload.data()), s.payload.size());
       for (int k = 0; k < s.repeat_payload && !stop_; ++k) {
         std::this_thread::sleep_for(20ms);
-        ::send(c, s.payload.data(), s.payload.size(), MSG_NOSIGNAL);
+        write_caster(reinterpret_cast<const char*>(s.payload.data()), s.payload.size());
       }
       if (!s.close_after) {
         // stay open, collecting whatever the client sends (GGA), until it hangs up or we stop
@@ -132,12 +166,16 @@ private:
           std::this_thread::sleep_for(std::chrono::milliseconds(s.pause_read_ms));
         while (!stop_) {
           pollfd q{c, POLLIN, 0};
-          if (::poll(&q, 1, 50) <= 0) continue;
-          const ssize_t n = ::recv(c, buf, sizeof buf, 0);
+          if ((!ssl || SSL_pending(ssl) == 0) && ::poll(&q, 1, 50) <= 0) continue;
+          const ssize_t n = read_caster(buf, sizeof buf);
           if (n <= 0) break;
           std::lock_guard<std::mutex> lk(m_);
           gga_.append(buf, static_cast<size_t>(n));
         }
+      }
+      if (ssl) {
+        SSL_shutdown(ssl);
+        SSL_free(ssl);
       }
       ::close(c);
     }
@@ -151,6 +189,8 @@ private:
   std::vector<Script> scripts_;
   std::string last_request_;
   std::string gga_;
+  bool tls_server_{false};
+  SSL_CTX* server_ctx_{nullptr};
 };
 
 NtripConfig cfg_for(int port) {
@@ -160,6 +200,7 @@ NtripConfig cfg_for(int port) {
   c.mountpoint = "MOUNT";
   c.user = "rover";
   c.password = "s3cr3t-pw";
+  c.security = NtripSecurity::Plaintext;
   c.connect_timeout_s = 2.0;
   c.stream_timeout_s = 0.5;
   c.gga_interval_s = 0.2;
@@ -330,6 +371,21 @@ TEST(NtripClient, BadCrcFramesAreCountedAndNeverDelivered) {
   c.stop();
 }
 
+TEST(NtripClient, ArbitrarySourceBytesDoNotBecomeValidFrames) {
+  FakeCaster caster;
+  Script s;
+  s.payload = {1, 2, 3, 4, 5, 6, 7};
+  caster.push_script(s);
+  NtripClient c(
+      cfg_for(caster.port()),
+      [](const std::vector<uint8_t>&) { FAIL() << "invalid RTCM delivered"; },
+      [] { return std::nullopt; });
+  c.start();
+  ASSERT_TRUE(wait_for([&] { return c.snapshot().bytes == s.payload.size(); }));
+  EXPECT_EQ(c.snapshot().frames, 0U);
+  c.stop();
+}
+
 TEST(NtripClient, StopUnblocksQuicklyWhileWaitingForData) {
   FakeCaster caster;
   caster.push_script(Script{});
@@ -392,6 +448,216 @@ TEST(NtripClient, FiftyStartStopCyclesDoNotLeakDescriptors) {
     c.stop();
   }
   EXPECT_EQ(open_fd_count(), before);
+}
+
+TEST(NtripClient, RepeatedConnectFailureDoesNotLeakDescriptors) {
+  const int before = open_fd_count();
+  ASSERT_GT(before, 0);
+  for (int i = 0; i < 50; ++i) {
+    NtripClient c(cfg_for(1), [](const std::vector<uint8_t>&) {}, [] { return std::nullopt; });
+    c.start();
+    ASSERT_TRUE(wait_for([&] { return c.snapshot().reconnects >= 1; }));
+    c.stop();
+  }
+  EXPECT_EQ(open_fd_count(), before);
+}
+
+TEST(NtripClient, ExplicitPlaintextReportsCredentialWarning) {
+  FakeCaster caster;
+  caster.push_script(Script{});
+  NtripClient c(
+      cfg_for(caster.port()), [](const std::vector<uint8_t>&) {}, [] { return std::nullopt; });
+  c.start();
+  ASSERT_TRUE(wait_for([&] { return c.snapshot().state == NtripState::Streaming; }));
+  EXPECT_EQ(c.snapshot().security, NtripSecurity::Plaintext);
+  EXPECT_TRUE(c.snapshot().plaintext_credentials_warning);
+  EXPECT_FALSE(c.snapshot().tls_verified);
+  c.stop();
+}
+
+TEST(NtripClient, MissingSecurityFailsClosed) {
+  NtripConfig cfg = cfg_for(2101);
+  cfg.security.reset();
+  NtripClient c(cfg, [](const std::vector<uint8_t>&) {}, [] { return std::nullopt; });
+  c.start();
+  ASSERT_TRUE(wait_for([&] { return c.snapshot().state == NtripState::Error; }));
+  EXPECT_NE(c.snapshot().last_error.find("explicit"), std::string::npos);
+  c.stop();
+}
+
+TEST(NtripClient, VerifiedTlsStreamsAndSendsGga) {
+  FakeCaster caster(true);
+  Script s;
+  s.payload = make_frame(40, 7);
+  caster.push_script(s);
+  NtripConfig cfg = cfg_for(caster.port());
+  cfg.security = NtripSecurity::Tls;
+  cfg.ca_file = std::string(DYX3_FIXTURES) + "/tls_test_cert.pem";
+  const std::string gga = "$GPGGA,123*00\r\n";
+  NtripClient c(cfg, [](const std::vector<uint8_t>&) {}, [gga] { return gga; });
+  c.start();
+  ASSERT_TRUE(wait_for([&] { return c.snapshot().frames == 1; }));
+  ASSERT_TRUE(wait_for([&] { return c.snapshot().gga_sent >= 1; }));
+  EXPECT_TRUE(c.snapshot().tls_verified);
+  EXPECT_FALSE(c.snapshot().plaintext_credentials_warning);
+  ASSERT_TRUE(wait_for([&] { return caster.gga_received().find(gga) != std::string::npos; }));
+  c.stop();
+}
+
+TEST(NtripClient, UntrustedTlsCertificateFailsWithoutDowngrade) {
+  FakeCaster caster(true);
+  caster.push_script(Script{});
+  NtripConfig cfg = cfg_for(caster.port());
+  cfg.security = NtripSecurity::Tls;
+  NtripClient c(cfg, [](const std::vector<uint8_t>&) {}, [] { return std::nullopt; });
+  c.start();
+  ASSERT_TRUE(wait_for([&] { return c.snapshot().tls_verification_failed; }));
+  EXPECT_FALSE(c.snapshot().tls_verified);
+  EXPECT_EQ(c.snapshot().security, NtripSecurity::Tls);
+  EXPECT_TRUE(caster.last_request().empty());
+  c.stop();
+}
+
+TEST(NtripClient, TlsHostnameMismatchFailsWithoutCredentialsInError) {
+  FakeCaster caster(true);
+  caster.push_script(Script{});
+  NtripConfig cfg = cfg_for(caster.port());
+  cfg.security = NtripSecurity::Tls;
+  cfg.host = "localhost";  // trusted certificate contains only 127.0.0.1 IP SAN
+  cfg.ca_file = std::string(DYX3_FIXTURES) + "/tls_test_cert.pem";
+  NtripClient c(cfg, [](const std::vector<uint8_t>&) {}, [] { return std::nullopt; });
+  c.start();
+  ASSERT_TRUE(wait_for([&] { return c.snapshot().tls_verification_failed; }));
+  EXPECT_FALSE(c.snapshot().tls_verified);
+  EXPECT_EQ(c.snapshot().last_error.find(cfg.password), std::string::npos);
+  EXPECT_EQ(c.snapshot().last_error.find(cfg.user), std::string::npos);
+  c.stop();
+}
+
+TEST(NtripClient, TlsNeverFallsBackToPlainCaster) {
+  FakeCaster caster;
+  caster.push_script(Script{});
+  NtripConfig cfg = cfg_for(caster.port());
+  cfg.security = NtripSecurity::Tls;
+  cfg.connect_timeout_s = 0.4;
+  NtripClient c(cfg, [](const std::vector<uint8_t>&) {}, [] { return std::nullopt; });
+  c.start();
+  ASSERT_TRUE(wait_for([&] { return c.snapshot().reconnects >= 1; }));
+  EXPECT_FALSE(c.snapshot().tls_verified);
+  EXPECT_TRUE(caster.last_request().find("Authorization:") == std::string::npos);
+  c.stop();
+}
+
+TEST(NtripClient, TlsGgaLargeWriteIsByteExact) {
+  FakeCaster caster(true);
+  Script s;
+  s.receive_buffer_bytes = 4096;
+  caster.push_script(s);
+  NtripConfig cfg = cfg_for(caster.port());
+  cfg.security = NtripSecurity::Tls;
+  cfg.ca_file = std::string(DYX3_FIXTURES) + "/tls_test_cert.pem";
+  cfg.stream_timeout_s = 20.0;
+  cfg.gga_interval_s = 60.0;
+  const std::string gga = "$GPGGA," + std::string(128 * 1024, 'T') + "*00\r\n";
+  NtripClient c(cfg, [](const std::vector<uint8_t>&) {}, [gga] { return gga; });
+  c.start();
+  ASSERT_TRUE(wait_for([&] { return c.snapshot().gga_sent == 1; }, 20.0));
+  ASSERT_TRUE(wait_for([&] { return caster.gga_received().size() == gga.size(); }, 20.0));
+  EXPECT_EQ(caster.gga_received(), gga);
+  c.stop();
+}
+
+TEST(NtripClient, StopInterruptsTlsHandshake) {
+  FakeCaster caster(true);
+  Script s;
+  s.pause_read_ms = 1500;
+  caster.push_script(s);
+  NtripConfig cfg = cfg_for(caster.port());
+  cfg.security = NtripSecurity::Tls;
+  cfg.ca_file = std::string(DYX3_FIXTURES) + "/tls_test_cert.pem";
+  NtripClient c(cfg, [](const std::vector<uint8_t>&) {}, [] { return std::nullopt; });
+  c.start();
+  ASSERT_TRUE(wait_for([&] { return caster.connections() == 1; }));
+  const auto t0 = std::chrono::steady_clock::now();
+  c.stop();
+  EXPECT_LT(std::chrono::steady_clock::now() - t0, 1s);
+}
+
+TEST(NtripClient, TlsReconnectsWithoutDowngrading) {
+  FakeCaster caster(true);
+  Script s;
+  s.payload = make_frame(32, 8);
+  s.close_after = true;
+  caster.push_script(s);
+  caster.push_script(s);
+  NtripConfig cfg = cfg_for(caster.port());
+  cfg.security = NtripSecurity::Tls;
+  cfg.ca_file = std::string(DYX3_FIXTURES) + "/tls_test_cert.pem";
+  NtripClient c(cfg, [](const std::vector<uint8_t>&) {}, [] { return std::nullopt; });
+  c.start();
+  ASSERT_TRUE(wait_for([&] { return c.snapshot().frames >= 2; }));
+  EXPECT_GE(caster.connections(), 2);
+  EXPECT_EQ(c.snapshot().security, NtripSecurity::Tls);
+  c.stop();
+}
+
+TEST(NtripClient, GgaSendDeadlineReportsTimeout) {
+  FakeCaster caster;
+  Script s;
+  s.receive_buffer_bytes = 4096;
+  s.pause_read_ms = 1500;
+  caster.push_script(s);
+  NtripConfig cfg = cfg_for(caster.port());
+  cfg.stream_timeout_s = 0.2;
+  cfg.gga_interval_s = 60.0;
+  std::atomic<bool> timeout_seen{false};
+  const std::string gga = "$GPGGA," + std::string(4 * 1024 * 1024, 'Z') + "*00\r\n";
+  NtripClient c(cfg, [](const std::vector<uint8_t>&) {}, [gga] { return gga; });
+  c.set_event_callback([&](NtripState state, const std::string& detail) {
+    if (state == NtripState::Error && detail == "GGA send timeout") timeout_seen = true;
+  });
+  c.start();
+  EXPECT_TRUE(wait_for([&] { return timeout_seen.load(); }, 5.0));
+  EXPECT_EQ(c.snapshot().gga_sent, 0U);
+  c.stop();
+}
+
+TEST(NtripClient, InterruptedGgaWriteAndPollResume) {
+  FakeCaster caster;
+  Script s;
+  s.receive_buffer_bytes = 4096;
+  s.pause_read_ms = 300;
+  caster.push_script(s);
+  NtripConfig cfg = cfg_for(caster.port());
+  cfg.stream_timeout_s = 20.0;
+  cfg.gga_interval_s = 60.0;
+  const std::string gga = "$GPGGA," + std::string(256 * 1024, 'I') + "*00\r\n";
+  std::atomic<bool> in_gga{false};
+  pthread_t worker{};
+  auto old_handler = ::signal(SIGUSR1, +[](int) {});
+  NtripClient c(
+      cfg, [](const std::vector<uint8_t>&) {},
+      [&] {
+        worker = pthread_self();
+        in_gga = true;
+        return std::optional<std::string>(gga);
+      });
+  c.start();
+  if (!wait_for([&] { return in_gga.load(); })) {
+    ADD_FAILURE() << "GGA callback did not start";
+    c.stop();
+    ::signal(SIGUSR1, old_handler);
+    return;
+  }
+  for (int i = 0; i < 30 && c.snapshot().gga_sent == 0; ++i) {
+    EXPECT_EQ(pthread_kill(worker, SIGUSR1), 0);
+    std::this_thread::sleep_for(5ms);
+  }
+  EXPECT_TRUE(wait_for([&] { return c.snapshot().gga_sent == 1; }, 20.0));
+  EXPECT_TRUE(wait_for([&] { return caster.gga_received().size() == gga.size(); }, 20.0));
+  EXPECT_EQ(caster.gga_received(), gga);
+  c.stop();
+  ::signal(SIGUSR1, old_handler);
 }
 
 TEST(NtripClient, UnreachableCasterBacksOffAndStopsPromptly) {

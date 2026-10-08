@@ -13,7 +13,9 @@
 #include <cerrno>
 #include <chrono>
 #include <cmath>
+#include <csignal>
 #include <cstring>
+#include <limits>
 
 namespace dyx3_gnss_rtk {
 
@@ -151,19 +153,32 @@ int wait_fd(int fd, short events, int wake_fd, double timeout_s) {
 
 enum class SendResult { Complete, Timeout, Stopped, Failed };
 
-SendResult send_all(int fd, const char* data, size_t size, int wake_fd,
+SendResult send_all(int fd, SSL* ssl, const char* data, size_t size, int wake_fd,
                     const std::atomic<bool>& stopped, double deadline) {
   size_t sent = 0;
   while (sent < size) {
     if (stopped) return SendResult::Stopped;
     if (now_s() >= deadline) return SendResult::Timeout;
-    const ssize_t n = ::send(fd, data + sent, size - sent, MSG_NOSIGNAL);
+    const ssize_t n =
+        ssl ? SSL_write(ssl, data + sent,
+                        static_cast<int>(std::min(
+                            size - sent, static_cast<size_t>(std::numeric_limits<int>::max()))))
+            : ::send(fd, data + sent, size - sent, MSG_NOSIGNAL);
     if (n > 0) {
       sent += static_cast<size_t>(n);
       continue;
     }
-    if (n < 0 && errno == EINTR) continue;
-    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+    const int ssl_error = ssl ? SSL_get_error(ssl, static_cast<int>(n)) : 0;
+    if (ssl && (ssl_error == SSL_ERROR_WANT_READ || ssl_error == SSL_ERROR_WANT_WRITE)) {
+      const int w = wait_fd(fd, ssl_error == SSL_ERROR_WANT_READ ? POLLIN : POLLOUT, wake_fd,
+                            deadline - now_s());
+      if (w < 0) return stopped ? SendResult::Stopped : SendResult::Failed;
+      if (w == 0) return SendResult::Timeout;
+      continue;
+    }
+    if (ssl && ssl_error == SSL_ERROR_SYSCALL && errno == EINTR) continue;
+    if (!ssl && n < 0 && errno == EINTR) continue;
+    if (!ssl && n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
       const int w = wait_fd(fd, POLLOUT, wake_fd, deadline - now_s());
       if (w < 0) return stopped ? SendResult::Stopped : SendResult::Failed;
       if (w == 0) return SendResult::Timeout;
@@ -174,6 +189,35 @@ SendResult send_all(int fd, const char* data, size_t size, int wake_fd,
   return SendResult::Complete;
 }
 
+// >0 bytes, 0 EOF, -1 failure, -2 cancellation, -3 deadline.
+ssize_t read_some(int fd, SSL* ssl, uint8_t* data, size_t size, int wake_fd,
+                  const std::atomic<bool>& stopped, double deadline) {
+  short events = POLLIN;
+  for (;;) {
+    if (stopped) return -2;
+    const double left = deadline - now_s();
+    if (left <= 0.0) return -3;
+    if (!ssl || SSL_pending(ssl) == 0) {
+      const int w = wait_fd(fd, events, wake_fd, left);
+      if (w < 0) return stopped ? -2 : -1;
+      if (w == 0) return -3;
+    }
+    const ssize_t n = ssl ? SSL_read(ssl, data, static_cast<int>(size)) : ::recv(fd, data, size, 0);
+    if (n > 0 || n == 0) return n;
+    if (ssl) {
+      const int e = SSL_get_error(ssl, static_cast<int>(n));
+      if (e == SSL_ERROR_ZERO_RETURN) return 0;
+      if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) {
+        events = e == SSL_ERROR_WANT_READ ? POLLIN : POLLOUT;
+        continue;
+      }
+      if (e == SSL_ERROR_SYSCALL && errno == EINTR) continue;
+      return -1;
+    }
+    if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) return -1;
+  }
+}
+
 std::string short_errno(const char* what) {
   return std::string(what) + ": " + std::strerror(errno);
 }
@@ -182,6 +226,15 @@ std::string short_errno(const char* what) {
 
 NtripClient::NtripClient(NtripConfig cfg, FrameSink sink, GgaSource gga)
     : cfg_(std::move(cfg)), sink_(std::move(sink)), gga_(std::move(gga)) {
+  // OpenSSL writes to the socket without MSG_NOSIGNAL. RTK is a standalone service; a
+  // peer close must become a reconnectable I/O error, never terminate the process.
+  if (cfg_.security == NtripSecurity::Tls) {
+    static std::once_flag ignore_sigpipe;
+    std::call_once(ignore_sigpipe, [] { std::signal(SIGPIPE, SIG_IGN); });
+  }
+  snap_.security = cfg_.security;
+  snap_.plaintext_credentials_warning =
+      cfg_.security == NtripSecurity::Plaintext && (!cfg_.user.empty() || !cfg_.password.empty());
   if (::pipe(wake_) == 0) {
     ::fcntl(wake_[0], F_SETFL, O_NONBLOCK);
     ::fcntl(wake_[1], F_SETFL, O_NONBLOCK);
@@ -201,6 +254,7 @@ void NtripClient::set_state(NtripState s, const std::string& detail) {
     std::lock_guard<std::mutex> lk(m_);
     snap_.state = s;
     snap_.connected = (s == NtripState::Streaming);
+    if (s != NtripState::Streaming) snap_.tls_verified = false;
     if (s == NtripState::Error) snap_.last_error = detail;
     if (s == NtripState::Streaming) snap_.last_error.clear();
   }
@@ -239,11 +293,87 @@ void NtripClient::stop() {
 }
 
 void NtripClient::close_fd() {
+  close_tls();
   std::lock_guard<std::mutex> lk(fd_m_);
   if (active_fd_ >= 0) {
     ::close(active_fd_);
     active_fd_ = -1;
   }
+}
+
+void NtripClient::close_tls() {
+  if (tls_) {
+    if (SSL_is_init_finished(tls_)) SSL_shutdown(tls_);  // one nonblocking close-notify attempt
+    SSL_free(tls_);
+    tls_ = nullptr;
+  }
+  if (tls_ctx_) {
+    SSL_CTX_free(tls_ctx_);
+    tls_ctx_ = nullptr;
+  }
+}
+
+bool NtripClient::begin_tls(int fd, std::string* error) {
+  tls_ctx_ = SSL_CTX_new(TLS_client_method());
+  if (!tls_ctx_) {
+    *error = "TLS context failed";
+    return false;
+  }
+  SSL_CTX_set_verify(tls_ctx_, SSL_VERIFY_PEER, nullptr);
+  const int trust_ok = cfg_.ca_file.empty()
+                           ? SSL_CTX_set_default_verify_paths(tls_ctx_)
+                           : SSL_CTX_load_verify_locations(tls_ctx_, cfg_.ca_file.c_str(), nullptr);
+  if (trust_ok != 1) {
+    *error = "TLS trust store failed";
+    return false;
+  }
+  tls_ = SSL_new(tls_ctx_);
+  if (!tls_ || SSL_set_fd(tls_, fd) != 1) {
+    *error = "TLS setup failed";
+    return false;
+  }
+  in_addr ip4{};
+  in6_addr ip6{};
+  if (::inet_pton(AF_INET, cfg_.host.c_str(), &ip4) == 1 ||
+      ::inet_pton(AF_INET6, cfg_.host.c_str(), &ip6) == 1) {
+    if (X509_VERIFY_PARAM_set1_ip_asc(SSL_get0_param(tls_), cfg_.host.c_str()) != 1) {
+      *error = "TLS identity setup failed";
+      return false;
+    }
+  } else if (SSL_set1_host(tls_, cfg_.host.c_str()) != 1 ||
+             SSL_set_tlsext_host_name(tls_, cfg_.host.c_str()) != 1) {
+    *error = "TLS hostname setup failed";
+    return false;
+  }
+  const double deadline = now_s() + cfg_.connect_timeout_s;
+  while (!stop_ && now_s() < deadline) {
+    const int n = SSL_connect(tls_);
+    if (n == 1) {
+      std::lock_guard<std::mutex> lk(m_);
+      snap_.tls_verified = true;
+      snap_.tls_verification_failed = false;
+      return true;
+    }
+    const int e = SSL_get_error(tls_, n);
+    if (e != SSL_ERROR_WANT_READ && e != SSL_ERROR_WANT_WRITE) {
+      const bool verify_failed = SSL_get_verify_result(tls_) != X509_V_OK;
+      {
+        std::lock_guard<std::mutex> lk(m_);
+        snap_.tls_verification_failed = verify_failed;
+      }
+      *error =
+          verify_failed ? "TLS certificate/hostname verification failed" : "TLS handshake failed";
+      return false;
+    }
+    const int w =
+        wait_fd(fd, e == SSL_ERROR_WANT_READ ? POLLIN : POLLOUT, wake_[0], deadline - now_s());
+    if (w <= 0) {
+      *error = stop_ ? "stopped" : w == 0 ? "TLS handshake timeout" : "TLS handshake failed";
+      return false;
+    }
+  }
+  *error = stop_ ? "stopped" : "TLS handshake timeout";
+  return false;
 }
 
 bool NtripClient::own_fd(int fd) {
@@ -301,9 +431,14 @@ bool NtripClient::connect_and_handshake(int* out_fd, std::vector<uint8_t>* lefto
   int one = 1;
   ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
 
+  if (cfg_.security == NtripSecurity::Tls && !begin_tls(fd, error)) {
+    close_fd();
+    return false;
+  }
+
   const std::string req = build_request(cfg_.host, cfg_.mountpoint, cfg_.user, cfg_.password);
   const double deadline = now_s() + cfg_.connect_timeout_s;
-  const auto request_result = send_all(fd, req.data(), req.size(), wake_[0], stop_, deadline);
+  const auto request_result = send_all(fd, tls_, req.data(), req.size(), wake_[0], stop_, deadline);
   if (request_result != SendResult::Complete) {
     *error = stop_                                   ? "stopped"
              : request_result == SendResult::Timeout ? "request send timeout"
@@ -314,28 +449,15 @@ bool NtripClient::connect_and_handshake(int* out_fd, std::vector<uint8_t>* lefto
 
   std::vector<uint8_t> rx;
   for (;;) {
-    const double left = deadline - now_s();
-    if (left <= 0.0) {
-      *error = "handshake timeout";
-      close_fd();
-      return false;
-    }
-    const int w = wait_fd(fd, POLLIN, wake_[0], left);
-    if (w <= 0) {
-      *error = stop_ ? "stopped" : "handshake timeout";
-      close_fd();
-      return false;
-    }
     uint8_t buf[512];
-    const ssize_t n = ::recv(fd, buf, sizeof buf, 0);
+    const ssize_t n = read_some(fd, tls_, buf, sizeof buf, wake_[0], stop_, deadline);
+    if (n < 0) {
+      *error = stop_ ? "stopped" : n == -3 ? "handshake timeout" : "handshake read failed";
+      close_fd();
+      return false;
+    }
     if (n == 0) {
       *error = "caster closed the connection during the handshake";
-      close_fd();
-      return false;
-    }
-    if (n < 0) {
-      if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) continue;
-      *error = short_errno("handshake read failed");
       close_fd();
       return false;
     }
@@ -348,13 +470,15 @@ bool NtripClient::connect_and_handshake(int* out_fd, std::vector<uint8_t>* lefto
       return false;
     }
     if (!response_is_success(hp.header)) {
-      const auto nl = hp.header.find_first_of("\r\n");
-      std::string first = hp.header.substr(0, nl);
-      if (first.size() > 60) first.resize(60);
-      for (auto& c : first) {
-        if (static_cast<unsigned char>(c) < 0x20 || static_cast<unsigned char>(c) > 0x7e) c = '?';
-      }
-      *error = "caster rejected: " + (first.empty() ? std::string("empty response") : first);
+      // A caster's response is untrusted: it may echo Authorization or a password.
+      const auto first_space = hp.header.find(' ');
+      const std::string status =
+          first_space == std::string::npos ? std::string() : hp.header.substr(first_space + 1, 3);
+      *error =
+          status.size() == 3 && std::all_of(status.begin(), status.end(),
+                                            [](unsigned char c) { return std::isdigit(c) != 0; })
+              ? "caster rejected: status " + status
+              : "caster rejected request";
       close_fd();
       return false;
     }
@@ -365,6 +489,10 @@ bool NtripClient::connect_and_handshake(int* out_fd, std::vector<uint8_t>* lefto
 }
 
 void NtripClient::run() {
+  if (!cfg_.security) {
+    set_state(NtripState::Error, "NTRIP security must be explicit");
+    return;
+  }
   int attempt = 0;
   RtcmParser parser(cfg_.max_buffer_bytes);
   while (!stop_) {
@@ -401,7 +529,7 @@ void NtripClient::run() {
           const auto gga = gga_ ? gga_() : std::nullopt;
           if (gga) {
             // DERIVED: bound a GGA write by the existing stream-liveness timeout.
-            const auto result = send_all(fd, gga->data(), gga->size(), wake_[0], stop_,
+            const auto result = send_all(fd, tls_, gga->data(), gga->size(), wake_[0], stop_,
                                          now_s() + cfg_.stream_timeout_s);
             if (result == SendResult::Stopped) break;
             if (result == SendResult::Complete) {
@@ -418,9 +546,11 @@ void NtripClient::run() {
         }
         const double until_gga = std::max(0.0, next_gga - now_s());
         const double until_timeout = std::max(0.0, cfg_.stream_timeout_s - (now_s() - last_rx));
-        const int w = wait_fd(fd, POLLIN, wake_[0], std::min(until_gga, until_timeout) + 0.001);
-        if (w < 0) break;  // stop requested
-        if (w == 0) {
+        uint8_t buf[4096];
+        const ssize_t n = read_some(fd, tls_, buf, sizeof buf, wake_[0], stop_,
+                                    now_s() + std::min(until_gga, until_timeout) + 0.001);
+        if (n == -2) break;  // stop requested
+        if (n == -3) {
           if (now_s() - last_rx >= cfg_.stream_timeout_s) {
             error = "stream timeout";
             had_error = true;
@@ -428,8 +558,6 @@ void NtripClient::run() {
           }
           continue;
         }
-        uint8_t buf[4096];
-        const ssize_t n = ::recv(fd, buf, sizeof buf, 0);
         if (n > 0) {
           last_rx = now_s();
           {
@@ -441,8 +569,8 @@ void NtripClient::run() {
           error = "stream ended";
           had_error = true;
           break;
-        } else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
-          error = short_errno("stream read failed");
+        } else {
+          error = "stream read failed";
           had_error = true;
           break;
         }

@@ -1,5 +1,9 @@
 # Interface changelog
 
+## 0.13.0 — 2026-10-08 (Cloud Review E3 explicit NTRIP security)
+
+- `NtripStatus` appends `security` (`UNSPECIFIED` only for invalid legacy environment, `PLAINTEXT`, `TLS`), `tls_verified`, `tls_verification_failed`, and `plaintext_credentials_warning`. No secret or Authorization value is included. Rebuild interface consumers together before deployment.
+
 ## 0.12.0 — 2026-10-08 (Cloud Review E1 RTCM stage accounting)
 
 - **BREAKING** `NtripStatus.chunks_forwarded` was removed because it counted before publication. New `source_bytes_received`, `valid_rtcm_frames`, and `chunks_handed_off` identify source, parser, and successful ROS publication separately. Existing `frames_total` and `bytes_total` remain valid-frame counts and valid-frame bytes.

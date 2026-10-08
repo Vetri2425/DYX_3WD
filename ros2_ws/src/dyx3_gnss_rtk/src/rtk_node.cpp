@@ -61,11 +61,18 @@ RtkNode::RtkNode(const rclcpp::NodeOptions& options, ClockFn clock, bool create_
   cfg.mountpoint = env("DYX3_NTRIP_MOUNTPOINT");
   cfg.user = env("DYX3_NTRIP_USER");
   cfg.password = env("DYX3_NTRIP_PASSWORD");
+  const std::string security = env("DYX3_NTRIP_SECURITY");
+  if (security == "PLAINTEXT") cfg.security = NtripSecurity::Plaintext;
+  if (security == "TLS") cfg.security = NtripSecurity::Tls;
+  cfg.ca_file = env("DYX3_NTRIP_CA_FILE");
   const std::string port = env("DYX3_NTRIP_PORT");
   if (!port.empty()) cfg.port = std::atoi(port.c_str());
   configured_ = !cfg.host.empty() && !cfg.mountpoint.empty() && !cfg.user.empty() &&
-                !cfg.password.empty() && cfg.port > 0 && cfg.port < 65536;
-  if (!configured_) config_error_ = "NTRIP not configured (DYX3_NTRIP_* environment incomplete)";
+                !cfg.password.empty() && cfg.port > 0 && cfg.port < 65536 && cfg.security;
+  if (!configured_) config_error_ = "NTRIP not configured (including explicit DYX3_NTRIP_SECURITY)";
+  if (cfg.security == NtripSecurity::Plaintext && !cfg.user.empty()) {
+    RCLCPP_WARN(get_logger(), "NTRIP PLAINTEXT sends credentials without transport encryption");
+  }
 
   pub_rtcm_ =
       create_publisher<dyx3_interfaces::msg::RtcmData>("/dyx3/rtcm", rclcpp::QoS(32).reliable());
@@ -247,6 +254,14 @@ void RtkNode::publish_ntrip_status(double now_s) {
     n.gga_sent = snap.gga_sent;
     n.fix_transitions = fix_monitor_.transitions();
     n.fix_type = fix_monitor_.fix_type();
+    n.security = snap.security == NtripSecurity::Plaintext
+                     ? dyx3_interfaces::msg::NtripStatus::SECURITY_PLAINTEXT
+                 : snap.security == NtripSecurity::Tls
+                     ? dyx3_interfaces::msg::NtripStatus::SECURITY_TLS
+                     : dyx3_interfaces::msg::NtripStatus::SECURITY_UNSPECIFIED;
+    n.tls_verified = snap.tls_verified;
+    n.tls_verification_failed = snap.tls_verification_failed;
+    n.plaintext_credentials_warning = snap.plaintext_credentials_warning;
   }
   pub_ntrip_->publish(n);
 }

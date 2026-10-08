@@ -196,6 +196,10 @@ TEST(Px4LinkAbi, DefaultsAreUnhealthyAndConstantsAreFrozen) {
   EXPECT_EQ(n.source_bytes_received, 0U);
   EXPECT_EQ(n.valid_rtcm_frames, 0U);
   EXPECT_EQ(n.chunks_handed_off, 0U);
+  EXPECT_EQ(n.security, dyx3_interfaces::msg::NtripStatus::SECURITY_UNSPECIFIED);
+  EXPECT_FALSE(n.tls_verified);
+  EXPECT_FALSE(n.tls_verification_failed);
+  EXPECT_FALSE(n.plaintext_credentials_warning);
   EXPECT_TRUE(n.last_error.empty());
   EXPECT_EQ(dyx3_interfaces::msg::NtripStatus::STATE_STREAMING, 2);
   const dyx3_interfaces::msg::SprayActuatorCommand sc{};  // default = OFF from the controller

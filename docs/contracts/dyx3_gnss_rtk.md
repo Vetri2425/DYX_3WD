@@ -16,6 +16,7 @@ protocol behaviour into its own service, plus the structure the prototype lacked
 * **No credentials in argv, logs, status or Git.** The prototype read the password from stdin; here the host, port,
   mountpoint, user and password come from the environment (`EnvironmentFile=/etc/dyx3/ntrip.env`, `root:dyx3 0640`),
   and the password is never formatted into any string except the single Authorization header.
+* `DYX3_NTRIP_SECURITY=PLAINTEXT|TLS` is mandatory in the existing environment configuration. A missing/unknown value leaves NTRIP unconfigured and surfaces an error; port numbers never select security. `DYX3_NTRIP_CA_FILE` optionally selects a PEM trust anchor for a private caster; otherwise OpenSSL's system trust paths are used. TLS verifies the certificate and DNS hostname or IP identity and never downgrades to plaintext. PLAINTEXT with credentials sets `NtripStatus.plaintext_credentials_warning` and logs a fixed warning without credentials.
 * Only `dyx3_px4_link` touches `/fmu/**`. This package publishes `RtcmData` and never talks to the FCU.
 
 ## 2. Interfaces
@@ -83,6 +84,8 @@ protocol behaviour into its own service, plus the structure the prototype lacked
 |---|---|---|---|
 | `ntrip_host`, `ntrip_port`, `ntrip_mountpoint`, `ntrip_user` | from environment | RESTART | prototype CLI args; secrets via `EnvironmentFile` |
 | `ntrip_password` | environment only, never a ROS parameter | RESTART | CLAUDE.md §4 |
+| `DYX3_NTRIP_SECURITY` | required `PLAINTEXT` or `TLS` | RESTART | frozen E3 decision; no port inference |
+| `DYX3_NTRIP_CA_FILE` | empty (system trust paths) | RESTART | optional private CA PEM |
 | `connect_timeout_s`, `stream_timeout_s` | 10, 10 | RESTART | prototype constants |
 | `gga_interval_s`, `gga_max_fix_age_s` | 10, 5 | RESTART | prototype constants |
 | `backoff_base_s`, `backoff_max_s` | 5, 60 | RESTART | prototype formula |

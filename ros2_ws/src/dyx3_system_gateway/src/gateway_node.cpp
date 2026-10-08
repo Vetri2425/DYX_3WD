@@ -119,6 +119,13 @@ GatewayNode::GatewayNode(const rclcpp::NodeOptions& options, ClockFn clock, bool
             .num("correction_age_s", m.correction_age_s)
             .num("correction_rate_hz", m.correction_rate_hz)
             .integer("reconnect_count", m.reconnect_count)
+            .integer("source_bytes_received", m.source_bytes_received)
+            .integer("valid_rtcm_frames", m.valid_rtcm_frames)
+            .integer("chunks_handed_off", m.chunks_handed_off)
+            .integer("security", m.security)
+            .boolean("tls_verified", m.tls_verified)
+            .boolean("tls_verification_failed", m.tls_verification_failed)
+            .boolean("plaintext_credentials_warning", m.plaintext_credentials_warning)
             .str("last_error", m.last_error)
             .integer("fix_transitions", m.fix_transitions)
             .dump();
@@ -138,6 +145,8 @@ GatewayNode::GatewayNode(const rclcpp::NodeOptions& options, ClockFn clock, bool
             .boolean("timesync_valid", m.timesync_valid)
             .integer("timesync_offset_us", m.timesync_offset_us)
             .integer("timesync_round_trip_us", m.timesync_round_trip_us)
+            .integer("rtcm_chunks_accepted", m.rtcm_chunks_accepted)
+            .integer("rtcm_chunks_dropped", m.rtcm_chunks_dropped)
             .dump();
       })));
   subs_.push_back(create_subscription<SafetyGateStatus>(

@@ -36,3 +36,15 @@ uint64 gga_sent
 # FIX transitions seen (RtkStatus.fix_type changes) and the current fix, for the recorder's evidence trail.
 uint32 fix_transitions
 uint8 fix_type
+
+# Explicit NTRIP configuration (0 only for an unconfigured/invalid legacy environment).
+uint8 SECURITY_UNSPECIFIED=0
+uint8 SECURITY_PLAINTEXT=1
+uint8 SECURITY_TLS=2
+uint8 security
+# True only after a TLS handshake with verified certificate and matching host identity.
+bool tls_verified
+# Sticky since the last successful TLS handshake; inspect last_error for the failure class.
+bool tls_verification_failed
+# True while a plaintext profile carries credentials. Safe to expose to status/UI.
+bool plaintext_credentials_warning

@@ -10,6 +10,7 @@
   <buildtool_depend>ament_cmake</buildtool_depend>
   <depend>rclcpp</depend>
   <depend>dyx3_interfaces</depend>
+  <depend>openssl</depend>
 
   <test_depend>ament_cmake_gtest</test_depend>
 

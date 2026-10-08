@@ -9,6 +9,7 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(dyx3_interfaces REQUIRED)
 find_package(Threads REQUIRED)
+find_package(OpenSSL REQUIRED)
 
 # Pure C++ core (no ROS): RTCM framing, chunking, NTRIP protocol and socket client, health and GGA.
 add_library(dyx3_gnss_rtk_core STATIC
@@ -20,7 +21,7 @@ add_library(dyx3_gnss_rtk_core STATIC
 target_include_directories(dyx3_gnss_rtk_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
-target_link_libraries(dyx3_gnss_rtk_core PUBLIC Threads::Threads)
+target_link_libraries(dyx3_gnss_rtk_core PUBLIC Threads::Threads OpenSSL::SSL OpenSSL::Crypto)
 set_target_properties(dyx3_gnss_rtk_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_compile_options(dyx3_gnss_rtk_core PRIVATE -Wall -Wextra -Wpedantic)
 
@@ -44,6 +45,7 @@ if(BUILD_TESTING)
   target_compile_definitions(ntrip_equivalence_test PRIVATE DYX3_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
   ament_add_gtest(ntrip_client_test test/ntrip_client_test.cpp TIMEOUT 120)
   target_link_libraries(ntrip_client_test dyx3_gnss_rtk_core)
+  target_compile_definitions(ntrip_client_test PRIVATE DYX3_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
   ament_add_gtest(rtk_node_test test/rtk_node_test.cpp TIMEOUT 120)
   target_link_libraries(rtk_node_test dyx3_gnss_rtk_node_lib)
   ament_target_dependencies(rtk_node_test rclcpp dyx3_interfaces)
