@@ -32,6 +32,10 @@ class Settings:
     heartbeat_relay_s: float = 0.5
     tablet_heartbeat_timeout_s: float = 1.5
     telemetry_stale_s: float = 2.0
+    # DERIVED — re-validate in field Wi-Fi. Session cleanup, not motion safety.
+    sio_ping_interval_s: float = 5.0
+    # DERIVED — re-validate in field Wi-Fi. Tablet heartbeat owns the safety timeout.
+    sio_ping_timeout_s: float = 5.0
     allowed_extensions: tuple[str, ...] = field(default=(".dxf", ".csv", ".waypoints"))
 
     @property
@@ -66,6 +70,8 @@ class Settings:
             heartbeat_relay_s=_f(e, "DYX3_HEARTBEAT_RELAY_S", 0.5),
             tablet_heartbeat_timeout_s=_f(e, "DYX3_TABLET_HEARTBEAT_TIMEOUT_S", 1.5),
             telemetry_stale_s=_f(e, "DYX3_TELEMETRY_STALE_S", 2.0),
+            sio_ping_interval_s=_f(e, "DYX3_SIO_PING_INTERVAL_S", 5.0),
+            sio_ping_timeout_s=_f(e, "DYX3_SIO_PING_TIMEOUT_S", 5.0),
         )
         if s.heartbeat_relay_s >= s.tablet_heartbeat_timeout_s:
             raise ValueError("heartbeat_relay_s must be shorter than tablet_heartbeat_timeout_s")

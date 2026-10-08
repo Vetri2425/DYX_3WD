@@ -55,7 +55,12 @@ def create_api(
     gw = gateway or GatewayClient(settings.gateway_socket, request_timeout_s=settings.request_timeout_s)
     relay = OperatorLinkRelay(gw, relay_s=settings.heartbeat_relay_s, tablet_timeout_s=settings.tablet_heartbeat_timeout_s)
     # Same-origin only until the tablet app's origin is decided (OPEN); native clients send no Origin header.
-    server = sio or socketio.AsyncServer(async_mode="asgi", cors_allowed_origins=[])
+    server = sio or socketio.AsyncServer(
+        async_mode="asgi",
+        cors_allowed_origins=[],
+        ping_interval=settings.sio_ping_interval_s,
+        ping_timeout=settings.sio_ping_timeout_s,
+    )
     hub = RealtimeHub(tokens or TokenStore.load(settings.auth_path), gw, relay, server.emit)
 
     @asynccontextmanager
