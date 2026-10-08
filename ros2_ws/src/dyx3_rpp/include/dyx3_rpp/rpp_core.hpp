@@ -88,7 +88,7 @@ struct DebugRow {
       dist_goal{kNaN}, pose_age_ms{kNaN};
   int state{0};
   double l_d_raw{kNaN}, kappa_speed{kNaN}, yaw_rate{0};
-  bool spray_active{false};  // AFTER the heading gates
+  bool spray_active{false};  // Planner MARK/TRANSIT diagnostic; never an actuator verdict
   double speed_raw{kNaN}, v_lat_limit{kNaN}, accel_scale{kNaN}, speed_mode{kNaN};
 };
 
@@ -137,7 +137,7 @@ double yaw_ned_from_enu_quaternion(double w, double x, double y, double z);
 struct CoreState {
   double last_speed_cmd, last_yaw_cmd, path_travel_m, tick_dt;
   int segment_idx, run_idx, hint_seg;
-  bool hint_valid, kappa_hard_latched, stop_latched, entry_spray_hold, path_done, run_align_pending;
+  bool hint_valid, kappa_hard_latched, stop_latched, path_done, run_align_pending;
   double ekf_offset_n, ekf_offset_e;
   int ekf_reset_count;
   bool have_last_pos;
@@ -225,7 +225,6 @@ private:
   void publish_segment_debug(SegState s, int seg_idx, double dist_end, double dist_corner,
                              double corner_angle, double target_heading, double heading_err,
                              double yaw_rate_body);
-  bool gate_spray(bool spray_active, double heading_err);
   void handoff(Handoff h);
 
   // ---- tracking ----
@@ -279,7 +278,6 @@ private:
   double last_speed_cmd_{0.0};
   bool kappa_hard_latched_{false};
   double last_yaw_cmd_{0.0};
-  bool entry_spray_hold_{true};
   int64_t last_tick_ns_{0};
   bool have_last_tick_{false};
   double tick_dt_{1.0 / kControlHz};

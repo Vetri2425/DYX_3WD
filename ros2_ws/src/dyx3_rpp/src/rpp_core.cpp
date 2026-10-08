@@ -105,7 +105,6 @@ void RppCore::apply_run(int idx, bool pre_stopped) {
   const ConditionedRun& run = runs_[static_cast<size_t>(idx)];
   run_align_pending_ = false;
   run_align_turn_rad_ = 0.0;
-  entry_spray_hold_ = true;
   if (prev != nullptr && prev->pts.size() > 1 && run.pts.size() > 1) {
     const Point p0 = prev->pts[prev->pts.size() - 2];
     const Point p1 = prev->pts[prev->pts.size() - 1];
@@ -253,26 +252,8 @@ void RppCore::publish_velocity(double v_n, double v_e) {
 
 void RppCore::publish_yaw_rate(double yr) { out_.yaw_rate = yr; }
 
-bool RppCore::gate_spray(bool spray_active, double heading_err) {
-  if (!spray_active) return false;
-  const double hd_deg = std::fabs(heading_err * (180.0 / kPi));
-  const double cut_deg = params_.num(P::spray_heading_cut_deg);
-  if (cut_deg > 0.0 && hd_deg >= cut_deg) return false;
-  if (entry_spray_hold_) {
-    const double entry_deg = params_.num(P::spray_entry_max_heading_deg);
-    const double release_travel = params_.num(P::spray_entry_release_travel_m);
-    if (entry_deg <= 0.0 || hd_deg <= entry_deg || path_travel_m_ >= release_travel) {
-      entry_spray_hold_ = false;
-    } else {
-      return false;
-    }
-  }
-  return true;
-}
-
 void RppCore::publish_debug(const DebugRow& row) {
   out_.debug = row;
-  out_.debug.spray_active = gate_spray(row.spray_active, row.heading_err);
   out_.state = static_cast<StateCode>(row.state);
   out_.debug_valid = true;
 }
@@ -1351,7 +1332,6 @@ CoreState RppCore::snapshot() const {
   s.hint_valid = hint_.valid;
   s.kappa_hard_latched = kappa_hard_latched_;
   s.stop_latched = stop_latched_;
-  s.entry_spray_hold = entry_spray_hold_;
   s.path_done = path_done_;
   s.run_align_pending = run_align_pending_;
   s.ekf_offset_n = ekf_off_n_;

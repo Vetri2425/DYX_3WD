@@ -278,7 +278,7 @@ struct Rig {
                           : pivot      ? RppState::Pivoting
                           : tracking   ? RppState::Tracking
                                        : RppState::Stopping;
-      c->note_rpp(static_cast<uint8_t>(st), 1, t);
+      c->note_rpp(static_cast<uint8_t>(st), 1, 0, 0.0, 1.0, true, t);
     }
     c->note_estop(estop, t);
     c->note_watchdog(true, true, t);
@@ -400,7 +400,7 @@ TEST(Controller, DisarmedOrWatchdogLostOrDisabledBlocksSprayAndTheLease) {
   w.t += 1.2;  // the watchdog heartbeat is not refreshed (note_watchdog only runs in world())
   w.c->note_vehicle(VehicleSnapshot{true, true, true, true, true, 4.0, 0.0, 0.0, 0.35, 0.0}, w.t);
   w.c->note_rtk(RtkSnapshot{6, 0.02}, w.t);
-  w.c->note_rpp(static_cast<uint8_t>(RppState::Tracking), 1, w.t);
+  w.c->note_rpp(static_cast<uint8_t>(RppState::Tracking), 1, 0, 0.0, 1.0, true, w.t);
   w.c->note_estop(false, w.t);
   w.run_cmd(w.c->tick(w.t));
   EXPECT_FALSE(w.c->lease(w.t).allow_on);
@@ -553,7 +553,8 @@ TEST(Controller, TrackingOfAnotherMissionIsNotEvidence) {
   Rig r(/*tracking0=*/false);
   double n = 0.0;
   for (; n < 1.0; n += 0.007) r.step(n);
-  r.c->note_rpp(static_cast<uint8_t>(RppState::Tracking), 2, r.t);  // stale RPP of mission 2
+  r.c->note_rpp(static_cast<uint8_t>(RppState::Tracking), 2, 0, 0.0, 1.0, true,
+                r.t);                     // stale RPP of mission 2
   for (; n < 4.0; n += 0.007) r.step(n);  // RPP of mission 1 never TRACKING
   EXPECT_FALSE(r.c->status(r.t).spraying);
   EXPECT_EQ(r.c->status(r.t).safety_reason, "awaiting tracking");

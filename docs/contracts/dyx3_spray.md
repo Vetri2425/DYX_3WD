@@ -10,20 +10,20 @@
 | Ported (C++, equivalence-tested against the verbatim Python) | Not ported (listed so nobody assumes it) |
 |---|---|
 | `SpraySafetyStateMachine` (7 states, invariants 1 and 2, ack timeout, RECOVERY backoff) | **Dash mode** (`spray_modes.DashMeter`) and **point mode** (`PointMeter`) — the session-config schema that drives them |
-| safety lease validation + freshness monitor; the **independent watchdog** as its own executable | the `/spray/active` heartbeat net (B4) and the RPP-progress boundary source (G2): `dyx3_rpp`'s `spray_gate` and `RppStatus` boundaries do not exist yet |
+| safety lease validation + freshness monitor; the **independent watchdog** as its own executable | the `/spray/active` heartbeat net (B4) and RPP-authored boundary source (G2); spray owns boundaries from the conditioned artifact |
 | speed-proportional flow modulator | the legacy `allow_legacy_spray_active_fallback` / `use_distance_aware_spray` switch (distance-aware is the only path) |
 | distance-aware continuous decision: path model, windowed projection **with the direction gate**, MARK-boundary lead, terminal shutoff, cross-track hysteresis | MAVROS (`command_service`): the valve is driven through `dyx3_px4_link` |
-| gate stack: armed / OFFBOARD, pose + velocity freshness, RTK gate with recovery hold, tracking-seen (B5), pivot (CORNER_ALIGN) gate, E-stop | |
+| gate stack: armed / OFFBOARD, pose + velocity freshness, RTK gate with recovery hold, tracking-seen (B5), fresh RPP heading evidence and cut, pivot (CORNER_ALIGN) gate, E-stop | |
 | manual override with a hard expiry; debounce; ON re-assertion | |
 
-45 of the 54 registry parameters are carried (`tools/gen_param_tables.py`); the 9 that belong to the unported features
+48 of the 57 parameters assigned to spray in the updated registry are carried (`tools/gen_param_tables.py`); the 9 that belong to the unported features
 are excluded with a reason in the generator. Two carried parameters do nothing in the prototype either and are kept only for
 registry parity: `anticipatory_margin_m` (declared, never read) and `min_spray_speed_mps` (its gate was removed: spraying is a
 question of WHERE the nozzle is, slow means thin flow, never off).
 
 ## 2. Authority and the three layers
 
-1. **Controller** (`spray_node`) decides *where* paint is wanted and drives the FSM. It never talks to the FCU.
+1. **Controller** (`spray_node`) is the sole final spray verdict owner: conditioned MARK/TRANSIT geometry, RPP heading cut and entry hold, safety gates, and valve ON/OFF. It drives the FSM and never talks to the FCU. RPP publishes tracking evidence only; `spray_request` is deprecated diagnostics and is ignored.
 2. **`dyx3_px4_link`** is the only package touching `/fmu/**`. It turns `SprayActuatorCommand` into
    `VEHICLE_CMD_DO_SET_ACTUATOR` (187; value in slot `actuator_set_index`, the other five NaN) or `DO_SET_SERVO` (183;
    `pwm_us` clamped to 2200) and maps `/fmu/out/vehicle_command_ack` back into `SprayActuatorAck`. A command that cannot
@@ -136,7 +136,7 @@ needs fresh TRACKING. Manual (bench) spray is exempt, as before (armed + watchdo
 disarmed; not OFFBOARD (`require_offboard`); path not loaded; pose stale (`pose_timeout_s`); velocity stale
 (`velocity_timeout_s`); RTK gate (below); awaiting tracking (B5: no `RppStatus` TRACKING since the path loaded, so a rover parked
 on a spray-flagged vertex 0 cannot open the valve); pivoting in place (`RppStatus.state == PIVOTING`, CORNER_ALIGN only — never
-CORNER_STOP, which still lays the last 2 cm of the leg; stale state fails open immediately). DERIVED additions: **E-stop asserted or
+CORNER_STOP, which still lays the last 2 cm of the leg; stale pivot state fails open immediately). DERIVED additions: **fresh RPP heading evidence must be valid and the heading cut refuses ON; E-stop asserted or
 its state missing/stale (> 0.5 s) -> OFF** (consumers treat absence as asserted; first in the order), and the watchdog heartbeat
 must be fresh and `off_authority_ready` (`spray_watchdog_required`). Also DERIVED: the vehicle state (armed / OFFBOARD / pose) is
 only trusted while fresh (`pose_timeout_s`), so manual ON cannot ride a dead state stream; the prototype read a latched `/state`.
@@ -152,13 +152,15 @@ RTK gate (carried from `rtk_quality.py`): only fix types 5 and 6 at or above `sp
 closed when `spray_require_accuracy`; accuracy <= `spray_max_hrms_m`; sample age <= `gps_fix_timeout_s`; **asymmetric
 hysteresis**: a drop is instant, re-enable only after `gps_recover_hold_s` of continuous good fix.
 
+Heading evidence is part of the gate stack after mission/RPP ownership: it must be marked valid, finite, and received within `rpp_timeout_s`; stale or unavailable heading evidence refuses ON. The heading cut is evaluated from the current `RppStatus.heading_error_rad` and forces the normal immediate OFF safety path. Entry hold releases from that same current heading metric or RPP's `path_travel_m` progress evidence. STOPPING remains eligible for the final leg portion; PIVOTING remains blocked by the existing production pivot gate.
+
 ## 8. Interfaces
 
 | Direction | Name | Type |
 |---|---|---|
 | in | `/dyx3/vehicle_state` | VehicleState (pose NED, heading, velocity, arming/nav state) |
 | in | `/dyx3/rtk_status` | RtkStatus |
-| in | `/dyx3/rpp/status` | RppStatus (tracking / pivoting evidence) |
+| in | `/dyx3/rpp/status` | RppStatus (fresh state, heading error/validity, run index, progress; `spray_request` ignored) |
 | in | `/dyx3/mission/state` | MissionState (`path_artifact_sha256`: the flags come from the same artifact RPP loads) |
 | in | `/dyx3/emergency_stop_state` | EmergencyStopState |
 | in | `/dyx3/spray/watchdog_status` | SprayWatchdogStatus |
@@ -173,7 +175,7 @@ and `/dyx3/spray/actuator_command` (source = watchdog).
 
 ## 9. Parameters
 
-45 carried parameters + 1 production addition (`rpp_timeout_s`, see section 7) (`docs/tuning/parameter_registry.md`, classes as proposed there; defaults verbatim from the prototype and
+45 carried parameters + 1 production addition (`rpp_timeout_s`) + 3 C2 heading-verdict parameters moved from RPP. The final verdict parameters are owned by `dyx3_spray` (`docs/tuning/parameter_registry.md`, classes as proposed there; defaults verbatim from the prototype and
 **re-validated at GATE 5**). Two are `TBD — human` in the registry and are treated as follows until decided: `spray_enabled`
 default true, **IDLE_ONLY**. The actuator value range is validated structurally (`off_value`, `on_value` in [-1, 1]; `min_flow_value`
 within [off, on]); no tuning value is invented. Watchdog constants (`lease_timeout_s` 0.35, `off_retry_hz` 2, `off_burst_hz` 20,

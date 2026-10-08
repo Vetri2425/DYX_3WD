@@ -90,7 +90,8 @@ SprayNode::SprayNode(const rclcpp::NodeOptions& options, ClockFn clock, bool cre
         // Tracking evidence (B5): TRACKING of the RUNNING mission only (fail closed: it delays,
         // never advances, the first mark). Pivot gate: PIVOTING only (CORNER_ALIGN), never STOPPING
         // (CORNER_STOP still lays the last 2 cm of the leg). Ownership gate (C1): see spray_gates.
-        ctl_->note_rpp(m->state, m->mission_id, clock_());
+        ctl_->note_rpp(m->state, m->mission_id, m->run_index, m->heading_error_rad,
+                       m->path_travel_m, m->heading_evidence_valid, clock_());
       });
   sub_mission_ = create_subscription<dyx3_interfaces::msg::MissionState>(
       "/dyx3/mission/state", rel1,

@@ -36,7 +36,7 @@
 
 ## 3. Parameters
 
-All 119 RPP parameters are ROS parameters with their `ParamSet` class: a change is validated (range, enumerations, cross-parameter relations) and applied
+All 117 RPP parameters are ROS parameters with their `ParamSet` class: a change is validated (range, enumerations, cross-parameter relations) and applied
 atomically in the set-callback, recorded in the journal, and **refused** (never deferred) when it is RESTART at runtime or IDLE_ONLY while a mission runs.
 Startup values (launch file) go through `init_many`: any class, same validation, fail loud (the constructor throws) — never a silent fallback to a default.
 Node-level: `tick_hz` (50, in [20, 100]; DERIVED from the prototype's `CONTROL_HZ`), `artifact_dir` (`/var/lib/dyx3/missions`).
@@ -57,6 +57,5 @@ The stand-in vehicle does exactly what the last command asks: it proves the wiri
 ## 6. Open questions for the human
 
 * `TRACK_HEADING` for segment runs vs `TRACK_RATE` with `segment_yaw_rate_gain * theta_e` (DERIVED choice, GATE 4).
-* `spray_request` is not wired into `dyx3_spray`: the spray controller's own boundary projection is the valve authority; whether the heading gate (entry hold, cut)
-  should veto it is a spray-contract decision. Note the conditioned run fuses a short unpainted lead into the mark, so the request can be true on that lead.
+* `spray_request` is diagnostic/deprecated and never wired into actuator authority. The exact RPP heading error, validity, run index, and progress are telemetry consumed by `dyx3_spray`; the spray controller owns MARK/TRANSIT, heading cut/entry hold, safety, and final valve decision.
 * SCHED_FIFO priority / CPU affinity; `ROS_DOMAIN_ID`; `artifact_dir` provisioning (the backend writes it, the services read it).

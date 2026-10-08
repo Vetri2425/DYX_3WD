@@ -80,3 +80,7 @@
 
 - `RppStatus`: appended `conditioned_execution_sha256`, naming the immutable content-addressed `DYX3COND 1` geometry artifact produced by RPP from the
   original mission artifact and its active conditioner configuration. Consumers must verify the source SHA against `MissionState.path_artifact_sha256`.
+
+## 0.10.0 — 2026-10-08 (Phase C2 spray verdict ownership)
+
+- `RppStatus`: `spray_request` is deprecated diagnostic only; appended `heading_evidence_valid` and `path_travel_m`. Existing `heading_error_rad`, `run_index`, and state provide the exact RPP evidence consumed by spray. No valve authority belongs to RPP.

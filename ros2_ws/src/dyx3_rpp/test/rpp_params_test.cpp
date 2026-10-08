@@ -41,8 +41,8 @@ std::map<std::string, Row> registry() {
 
 TEST(RppParams, TableMatchesTheRegistry) {
   const auto reg = registry();
-  ASSERT_EQ(reg.size(), 120U);
-  ASSERT_EQ(kParamCount, 120U);
+  ASSERT_EQ(reg.size(), 117U);
+  ASSERT_EQ(kParamCount, 117U);
   const auto* d = descriptors();
   for (size_t i = 0; i < kParamCount; ++i) {
     const auto it = reg.find(d[i].name);

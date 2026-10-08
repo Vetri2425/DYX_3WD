@@ -22,6 +22,7 @@ GateInputs all_good() {
   g.require_offboard = true;
   g.rtk = {true, ""};
   g.ownership = {true, ""};
+  g.heading_evidence = {true, ""};
   return g;
 }
 }  // namespace
@@ -94,6 +95,8 @@ TEST(GateStack, EveryGateFailsOnItsOwnAndTheFirstFailureWinsInOrder) {
   const Case cases[] = {
       {[](GateInputs& g) { g.estop_clear = false; }, "emergency stop asserted or unknown"},
       {[](GateInputs& g) { g.ownership = {false, "rpp stale"}; }, "rpp stale"},
+      {[](GateInputs& g) { g.heading_evidence = {false, "rpp heading evidence stale"}; },
+       "rpp heading evidence stale"},
       {[](GateInputs& g) { g.armed = false; }, "disarmed"},
       {[](GateInputs& g) { g.offboard = false; }, "not OFFBOARD"},
       {[](GateInputs& g) { g.path_loaded = false; }, "path not loaded"},
@@ -115,6 +118,7 @@ TEST(GateStack, EveryGateFailsOnItsOwnAndTheFirstFailureWinsInOrder) {
   g.require_offboard = true;
   const char* order[] = {"emergency stop asserted or unknown",
                          "mission not running",
+                         "rpp heading evidence unavailable",
                          "disarmed",
                          "not OFFBOARD",
                          "path not loaded",
@@ -130,20 +134,22 @@ TEST(GateStack, EveryGateFailsOnItsOwnAndTheFirstFailureWinsInOrder) {
   EXPECT_EQ(auto_safety_status(g).reason, order[1]);  // the default ownership is fail-closed
   g.ownership = {true, ""};
   EXPECT_EQ(auto_safety_status(g).reason, order[2]);
-  g.armed = true;
+  g.heading_evidence = {true, ""};
   EXPECT_EQ(auto_safety_status(g).reason, order[3]);
-  g.offboard = true;
+  g.armed = true;
   EXPECT_EQ(auto_safety_status(g).reason, order[4]);
-  g.path_loaded = true;
+  g.offboard = true;
   EXPECT_EQ(auto_safety_status(g).reason, order[5]);
-  g.pose_fresh = true;
+  g.path_loaded = true;
   EXPECT_EQ(auto_safety_status(g).reason, order[6]);
-  g.velocity_fresh = true;
+  g.pose_fresh = true;
   EXPECT_EQ(auto_safety_status(g).reason, order[7]);
-  g.rtk = {true, ""};
+  g.velocity_fresh = true;
   EXPECT_EQ(auto_safety_status(g).reason, order[8]);
-  g.tracking_seen = true;
+  g.rtk = {true, ""};
   EXPECT_EQ(auto_safety_status(g).reason, order[9]);
+  g.tracking_seen = true;
+  EXPECT_EQ(auto_safety_status(g).reason, order[10]);
 }
 
 TEST(GateStack, OffboardNotRequiredWhenSwitchedOff) {

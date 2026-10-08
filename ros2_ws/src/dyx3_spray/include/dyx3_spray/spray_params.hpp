@@ -1,5 +1,5 @@
-// spray_params — the 45 carried spray parameters with class, structural validation and change
-// recording. See docs/contracts/dyx3_spray.md section 9. Pure C++, no ROS.
+// spray_params — the 49 carried/production spray parameters with class, structural validation and
+// change recording. See docs/contracts/dyx3_spray.md section 9. Pure C++, no ROS.
 //
 // Every tunable is classified LIVE / IDLE_ONLY / RESTART (spec section 9). A change is validated
 // before it is applied, an IDLE_ONLY change while a mission is running and any RESTART change at

@@ -142,6 +142,7 @@ GateResult ownership_status(const OwnershipInputs& in) {
 GateResult auto_safety_status(const GateInputs& in) {
   if (!in.estop_clear) return {false, "emergency stop asserted or unknown"};
   if (!in.ownership.ok) return in.ownership;
+  if (!in.heading_evidence.ok) return in.heading_evidence;
   if (!in.armed) return {false, "disarmed"};
   if (in.require_offboard && !in.offboard) return {false, "not OFFBOARD"};
   if (!in.path_loaded) return {false, "path not loaded"};

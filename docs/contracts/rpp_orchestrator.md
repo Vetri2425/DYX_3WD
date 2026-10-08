@@ -17,8 +17,8 @@ run through the explicit `stop_pivot_fsm` classes: the hard-corner stop-and-pivo
 tangent-corner advance, the run-boundary hold (and the carried stop into the next run's entry pivot), the run-entry alignment
 pivot, the endpoint precise stop (default ON in the prototype), the completion hold and `DONE`; also single-point runs,
 `_apply_run` / `_install_mission` state reset, the RTK gate with recovery hold, pose staleness with the extrapolation horizon,
-velocity-based pose extrapolation with the latency bias, the EKF jump guard with reset compensation, the spray heading gates
-(`_gate_spray`), `_publish_zero` semantics, and the `/rpp/debug` and `/rpp/segment_debug` rows.
+velocity-based pose extrapolation with the latency bias, the EKF jump guard with reset compensation, `_publish_zero` semantics,
+and the `/rpp/debug` and `/rpp/segment_debug` rows. Phase C2 removes the legacy heading spray verdict from RPP; the planner mark diagnostic has no valve authority.
 
 **One stop confirmation, shared.** The prototype keeps a single stop-confirmation state (`_corner_stop_entered` /
 `_corner_stop_settle_since`) used by the corner flow, the run-boundary hold, the completion hold and the endpoint precise stop;
@@ -28,8 +28,7 @@ one `StopConfirm` owned by `RppCore`, referenced by `CornerFsm` and both `StopHo
 
 **Not ported — the one remaining handoff.** `point_hold_enabled` (the per-point dwell overlay, default OFF in the prototype):
 a tick with it enabled publishes **zero** (`v = 0`, `yaw_rate = 0`, commanded-speed memory cleared) and reports
-`Handoff::PointHold`. Not ported at all: the point handshake (`/point/done`, `/point/advance`), precise point stop, progress
-publication, `RppStatus` and the node. This slice produces the decision; it is not yet a running controller.
+`Handoff::PointHold`. Not ported at all: the point handshake (`/point/done`, `/point/advance`) and precise point stop. The ROS node, `RppStatus`, and coarse tracking progress evidence exist; point-level progress remains unported.
 
 **Two command encodings.** The prototype speaks a NED velocity vector; the firmware-aware pivot and brake are vectors too. `TickOutput`
 carries that vector (`v_n`, `v_e`, `yaw_rate`) so the tick can be compared exactly, and also the decision in the controller's own
@@ -93,7 +92,7 @@ Episodes include a full square (four hard corners), entry alignments (large, sma
 completion hold.
 
 Mutation check (each applied to `rpp_core.cpp`, rebuilt, test must fail; not committed): about 45 mutations, **caught** — speed memory,
-jump absorb, jump threshold velocity term, recovery hold, spray entry hold, stop-latch capture, along-run remaining approach,
+jump absorb, jump threshold velocity term, recovery hold, stop-latch capture, along-run remaining approach,
 forward-cone angle, curvature used for the accel gate, latency bias, extrapolation horizon, velocity-age horizon, pose-gap window,
 hint invalidation on JUMP_SKIP, JUMP_SKIP memory exemption, GPS staleness bound, lateral-correction sign, preview-curvature lookahead
 and count, approach distance, corner slowdown distance, accel gate, yaw-command freeze, hard-kappa latch input, run-out minimum speed,

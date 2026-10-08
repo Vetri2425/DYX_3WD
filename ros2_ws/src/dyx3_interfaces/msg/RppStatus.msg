@@ -34,12 +34,8 @@ uint64 loop_overrun_count
 int8 tick_state
 # segment_state: 0 INACTIVE, 1 TRACK_SEGMENT, 2 PRE_CORNER_SLOWDOWN, 3 CORNER_ALIGN, 4 DONE, 5 CORNER_STOP.
 uint8 segment_state
-# RPP's request to open the valve: the MARK flag of the tracked segment of the CONDITIONED run, AFTER the heading
-# gates (cut at spray_heading_cut_deg; entry hold until the pivot residual is inside spray_entry_max_heading_deg).
-# The conditioned run fuses a short unpainted lead into the mark (so the rover does not stop at every mark start),
-# hence this can be true where the planner's flag is false: it is a heading verdict for the tracked leg, NOT the
-# valve boundary. A request, never an actuation: the valve is owned by dyx3_spray (lease, watchdog, boundary
-# projection on the artifact).
+# Deprecated diagnostic only. This legacy field has no actuator authority. Final spray geometry,
+# heading, safety, and valve verdict belong to dyx3_spray.
 bool spray_request
 # Features this RPP does not run: 0 none, 1 point hold (point_hold_enabled). Non-zero with state ERROR.
 uint8 handoff
@@ -50,3 +46,8 @@ uint8 rtk_reason
 # SHA256 id of the immutable conditioned execution geometry published by RPP.
 # Empty unless the artifact belongs to the active mission and verified source hash.
 string conditioned_execution_sha256
+
+# Phase C2 heading/tracking evidence. Valid only for the fresh status sample; heading is NED radians and
+# path_travel_m is RPP's exact progress value used by its tracker.
+bool heading_evidence_valid
+float32 path_travel_m

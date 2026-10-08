@@ -402,6 +402,7 @@ void RppNode::publish_status(uint8_t state, const TickOutput* out, const MotionC
   s.loop_jitter_us = static_cast<float>(timer_stats_.jitter_us());
   s.loop_jitter_max_us = static_cast<float>(timer_stats_.max_abs_jitter_us());
   s.loop_overrun_count = timer_stats_.overruns();
+  if (loaded_) s.path_travel_m = finite_or_zero(core_.snapshot().path_travel_m);
   if (out != nullptr) {
     s.cross_track_right_m = finite_or_zero(out->debug.cross_track);
     s.heading_error_rad = finite_or_zero(out->debug.heading_err);
@@ -410,6 +411,11 @@ void RppNode::publish_status(uint8_t state, const TickOutput* out, const MotionC
     s.spray_request = out->debug.spray_active;
     s.handoff = static_cast<uint8_t>(out->handoff);
     s.rtk_reason = static_cast<uint8_t>(out->rtk_reason);
+    const bool spray_state =
+        state == RppStatus::STATE_TRACKING || state == RppStatus::STATE_STOPPING ||
+        state == RppStatus::STATE_PIVOTING || state == RppStatus::STATE_CREEPING;
+    s.heading_evidence_valid =
+        out->debug_valid && std::isfinite(out->debug.heading_err) && loaded_ && spray_state;
   }
   pub_status_->publish(s);
 }

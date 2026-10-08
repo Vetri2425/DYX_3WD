@@ -107,6 +107,7 @@ GateResult ownership_status(const OwnershipInputs& in);
 // -------------------------------------------------------------------------------------------------
 struct GateInputs {
   GateResult ownership{false, "mission not running"};  // result of ownership_status()
+  GateResult heading_evidence{false, "rpp heading evidence unavailable"};
   bool armed{false};
   bool offboard{false};
   bool path_loaded{false};
@@ -119,8 +120,8 @@ struct GateInputs {
   GateResult rtk;  // result of RtkGate::evaluate()
 };
 
-// Order: E-stop, mission/RPP ownership, disarmed, not OFFBOARD, path not loaded, pose stale,
-// velocity stale, RTK, awaiting tracking, pivoting.
+// Order: E-stop, mission/RPP ownership, heading evidence, disarmed, not OFFBOARD, path not loaded,
+// pose stale, velocity stale, RTK, awaiting tracking, pivoting.
 GateResult auto_safety_status(const GateInputs& in);
 
 }  // namespace dyx3_spray

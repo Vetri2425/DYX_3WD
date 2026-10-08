@@ -80,6 +80,9 @@ struct Rig {
   bool armed{true};
   bool estop{false};
   bool publish_mission{true};
+  bool heading_evidence_valid{true};
+  bool legacy_spray_request{false};
+  double heading_error_rad{0.0};
   uint8_t mission_state{dyx3_interfaces::msg::MissionState::STATE_RUNNING};
   int rpp_state{dyx3_interfaces::msg::RppStatus::STATE_TRACKING};  // -1: RPP is dead (silent)
   std::string mission_sha;
@@ -206,6 +209,10 @@ struct Rig {
       dyx3_interfaces::msg::RppStatus p;
       p.state = static_cast<uint8_t>(rpp_state);
       p.conditioned_execution_sha256 = conditioned_sha;
+      p.heading_evidence_valid = heading_evidence_valid;
+      p.heading_error_rad = static_cast<float>(heading_error_rad);
+      p.path_travel_m = static_cast<float>(north);
+      p.spray_request = legacy_spray_request;
       p_rpp->publish(p);
     }
     if (publish_mission) {
@@ -417,6 +424,62 @@ TEST(SprayNode, ConditionedArtifactWithWrongSourceShaIsRefused) {
   r.run(0.5);
   EXPECT_FALSE(r.status.spraying);
   EXPECT_EQ(r.status.safety_reason, "path not loaded");
+}
+
+TEST(SprayNode, HeadingVerdictUsesFreshRppEvidenceAndIgnoresLegacySprayRequest) {
+  Rig r;
+  r.settle();
+  r.north = 3.0;
+  r.run(0.4);
+  ASSERT_TRUE(r.status.spraying);
+
+  r.legacy_spray_request = true;
+  r.run(0.2);
+  EXPECT_TRUE(r.status.spraying);
+  r.legacy_spray_request = false;
+  r.run(0.2);
+  EXPECT_TRUE(r.status.spraying);
+
+  r.heading_error_rad = 35.0 * 3.14159265358979323846 / 180.0;
+  r.run(0.2);
+  EXPECT_FALSE(r.status.spraying);
+  EXPECT_FALSE(r.lease.allow_on);
+
+  r.heading_error_rad = 0.0;
+  r.heading_evidence_valid = false;
+  r.run(0.2);
+  EXPECT_FALSE(r.status.spraying);
+  EXPECT_EQ(r.status.safety_reason, "rpp heading evidence stale or unavailable");
+}
+
+TEST(SprayNode, TransitStaysOffAndStoppingStillLaysTheCurrentMark) {
+  Rig transit;
+  transit.settle();
+  transit.north = 0.5;
+  transit.run(0.4);
+  EXPECT_FALSE(transit.status.spraying);
+
+  Rig stopping;
+  stopping.settle();
+  stopping.north = 3.0;
+  stopping.rpp_state = dyx3_interfaces::msg::RppStatus::STATE_STOPPING;
+  stopping.run(0.4);
+  EXPECT_TRUE(stopping.status.spraying);
+}
+
+TEST(SprayNode, HeadingEntryHoldReleasesFromFreshRppHeadingOrProgress) {
+  const std::vector<rclcpp::Parameter> params{
+      rclcpp::Parameter("spray_entry_release_travel_m", 100.0)};
+  Rig r(true, params);
+  r.settle();
+  r.north = 3.0;
+  r.heading_error_rad = 20.0 * 3.14159265358979323846 / 180.0;
+  r.run(0.4);
+  EXPECT_FALSE(r.status.spraying);
+
+  r.heading_error_rad = 2.0 * 3.14159265358979323846 / 180.0;
+  r.run(0.4);
+  EXPECT_TRUE(r.status.spraying);
 }
 
 TEST(SprayNode, ManualServiceHonoursTheFailSafes) {

@@ -7,9 +7,9 @@ row says `TBD — human`.
 
 ## Count method
 
-This registry contains **173** parameters: **119 RPP + 54 spray**. The count is the number of
+This registry contains **173** prototype parameters: **119 originally in RPP + 54 originally in spray**. The count is the number of
 executable `declare_parameter(` calls in the read-only prototype; comment-only occurrences are
-excluded. In particular, the comment at `PX4_DXP/src/rpp_controller_node.py:679` is not a
+excluded. In production ownership, three heading-verdict parameters have moved from RPP to `dyx3_spray` (Phase C2). In particular, the comment at `PX4_DXP/src/rpp_controller_node.py:679` is not a
 parameter. The historical 120/174 discrepancy is recorded in
 `docs/architecture/proposals/2026-10-07_parameter-count-173.md`.
 
@@ -114,9 +114,9 @@ Owner: the package in the `Owner` column is the single owner (CLAUDE.md "one dec
 | `segment_corner_acceptance_radius` | float | `0.05` | PX4_DXP/src/rpp_controller_node.py:725 | **LIVE** | terminal/capture threshold; spec §9 lists terminal thresholds as LIVE | dyx3_rpp |
 | `segment_heading_tolerance_deg` | float | `2.0` | PX4_DXP/src/rpp_controller_node.py:753 | **LIVE** | terminal/capture threshold; spec §9 lists terminal thresholds as LIVE | dyx3_rpp |
 | `segment_yaw_rate_gain` | float | `1.5` | PX4_DXP/src/rpp_controller_node.py:754 | **LIVE** | guidance gain/lookahead; spec §9 lists lookahead and gains as LIVE | dyx3_rpp |
-| `spray_entry_max_heading_deg` | float | `5.0` | PX4_DXP/src/rpp_controller_node.py:770 | **IDLE_ONLY** | spray-entry gate: changes WHERE the spray valve may open, which is part of the accuracy spec; never mid-mission | dyx3_rpp |
-| `spray_entry_release_travel_m` | float | `0.6` | PX4_DXP/src/rpp_controller_node.py:771 | **IDLE_ONLY** | spray-entry gate: changes WHERE the spray valve may open, which is part of the accuracy spec; never mid-mission | dyx3_rpp |
-| `spray_heading_cut_deg` | float | `30.0` | PX4_DXP/src/rpp_controller_node.py:772 | **IDLE_ONLY** | spray-entry gate: changes WHERE the spray valve may open, which is part of the accuracy spec; never mid-mission | dyx3_rpp |
+| `spray_entry_max_heading_deg` | float | `5.0` | PX4_DXP/src/rpp_controller_node.py:770 | **IDLE_ONLY** | spray-entry acceptance gate; dyx3_spray owns the final heading and valve verdict | dyx3_spray |
+| `spray_entry_release_travel_m` | float | `0.6` | PX4_DXP/src/rpp_controller_node.py:771 | **IDLE_ONLY** | spray-entry hold release progress; dyx3_spray consumes RPP tracking progress evidence | dyx3_spray |
+| `spray_heading_cut_deg` | float | `30.0` | PX4_DXP/src/rpp_controller_node.py:772 | **IDLE_ONLY** | spray heading cut; dyx3_spray owns the final heading and valve verdict | dyx3_spray |
 | `segment_stop_speed_threshold` | float | `0.02` | PX4_DXP/src/rpp_controller_node.py:778 | **LIVE** | terminal/capture threshold; spec §9 lists terminal thresholds as LIVE | dyx3_rpp |
 | `segment_stop_yaw_rate_threshold` | float | `0.05` | PX4_DXP/src/rpp_controller_node.py:779 | **LIVE** | terminal/capture threshold; spec §9 lists terminal thresholds as LIVE | dyx3_rpp |
 | `segment_stop_dwell_s` | float | `0.30` | PX4_DXP/src/rpp_controller_node.py:780 | **LIVE** | terminal/capture threshold; spec §9 lists terminal thresholds as LIVE | dyx3_rpp |

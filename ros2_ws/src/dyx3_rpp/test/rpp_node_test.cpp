@@ -222,6 +222,21 @@ TEST(RppNode, LoadsTheArtifactByIdAndAcknowledgesWithStop) {
   }
 }
 
+TEST(RppNode, PublishesFreshHeadingAndProgressEvidenceOnlyForActiveTracking) {
+  Rig r;
+  r.mission_state = MissionState::STATE_RUNNING;
+  r.run(0.5);
+  ASSERT_EQ(r.status.state, RppStatus::STATE_TRACKING);
+  EXPECT_TRUE(r.status.heading_evidence_valid);
+  EXPECT_TRUE(std::isfinite(r.status.heading_error_rad));
+  EXPECT_TRUE(std::isfinite(r.status.path_travel_m));
+  EXPECT_EQ(r.status.run_index, 0U);
+
+  r.mission_state = MissionState::STATE_PAUSED;
+  r.run(0.1);
+  EXPECT_FALSE(r.status.heading_evidence_valid);
+}
+
 TEST(RppNode, AMissingArtifactIsAnErrorAndStopsNeverGuesses) {
   Rig r({}, /*with_artifact=*/false);
   r.run(0.5);

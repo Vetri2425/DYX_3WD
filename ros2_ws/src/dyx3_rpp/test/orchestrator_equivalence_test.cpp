@@ -112,6 +112,9 @@ TEST(OrchestratorEquivalence, TickByTickAgainstTheCarriedNode) {
       Item it;
       it.name = t[1];
       it.num = num(t[2]);
+      if (it.name == "spray_entry_max_heading_deg" || it.name == "spray_entry_release_travel_m" ||
+          it.name == "spray_heading_cut_deg")
+        continue;  // Phase C2 moved these final spray verdict parameters to dyx3_spray.
       items.push_back(it);
     }
     SetContext ctx;
@@ -212,7 +215,8 @@ TEST(OrchestratorEquivalence, TickByTickAgainstTheCarriedNode) {
             CHECK_NEAR(st, "dbg.l_d_raw", d[8], g.l_d_raw);
             CHECK_NEAR(st, "dbg.kappa_speed", d[9], g.kappa_speed);
             CHECK_NEAR(st, "dbg.yaw_rate", d[10], g.yaw_rate);
-            CHECK_NEAR(st, "dbg.spray", d[11], g.spray_active ? 1.0 : 0.0);
+            // Legacy DXP row is a heading-gated valve request. C2 removes that owner from RPP;
+            // the retained field reports planner MARK/TRANSIT only and is not equivalent.
             CHECK_NEAR(st, "dbg.speed_raw", d[12], g.speed_raw);
             CHECK_NEAR(st, "dbg.v_lat_limit", d[13], g.v_lat_limit);
             CHECK_NEAR(st, "dbg.accel_scale", d[14], g.accel_scale);
@@ -252,8 +256,7 @@ TEST(OrchestratorEquivalence, TickByTickAgainstTheCarriedNode) {
             CHECK_EQ(st, "st.kappa_hard_latched", inum(s[q++]),
                      static_cast<long long>(c.kappa_hard_latched));
             CHECK_EQ(st, "st.stop_latched", inum(s[q++]), static_cast<long long>(c.stop_latched));
-            CHECK_EQ(st, "st.entry_spray_hold", inum(s[q++]),
-                     static_cast<long long>(c.entry_spray_hold));
+            ++q;  // frozen legacy snapshot column; RPP no longer owns the spray entry hold
             CHECK_EQ(st, "st.path_done", inum(s[q++]), static_cast<long long>(c.path_done));
             CHECK_EQ(st, "st.run_align_pending", inum(s[q++]),
                      static_cast<long long>(c.run_align_pending));

@@ -77,7 +77,8 @@ public:
   void note_vehicle(const VehicleSnapshot& v, double now_s);
   void note_rtk(const RtkSnapshot& r, double now_s);
   // state: RppStatus.state (RppState values); mission_id: RppStatus.mission_id.
-  void note_rpp(uint8_t state, uint32_t mission_id, double now_s);
+  void note_rpp(uint8_t state, uint32_t mission_id, uint32_t run_index, double heading_error_rad,
+                double path_travel_m, bool heading_evidence_valid, double now_s);
   void note_estop(bool asserted, double now_s);
   void note_watchdog(bool alive, bool off_authority_ready, double now_s);
   // MissionState: any non-RUNNING state or a different mission id clears the tracking evidence.
@@ -145,7 +146,12 @@ private:
   bool rpp_known_{false};
   uint8_t rpp_state_{0};
   uint32_t rpp_mission_id_{0};
+  uint32_t rpp_run_index_{0};
+  double rpp_heading_error_rad_{0.0};
+  double rpp_path_travel_m_{0.0};
+  bool rpp_heading_evidence_valid_{false};
   double rpp_recv_s_{0.0};
+  bool heading_entry_hold_{true};
 
   bool manual_active_{false};
   double manual_deadline_s_{0.0};

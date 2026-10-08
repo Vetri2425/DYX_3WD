@@ -1,4 +1,9 @@
-# Contract — `dyx3_rpp::spray_gate`
+# Historical prototype behavior — heading spray gate (superseded by Phase C2)
+
+The implementation described here is the legacy DXP behavior. Production RPP no longer applies
+these heading gates or owns a valve request. `dyx3_spray` now consumes RPP's fresh tracking
+evidence and owns planner boundary geometry, heading cut/entry hold, safety, and the valve verdict.
+This file is retained as source-behavior evidence only.
 
 Source: `rpp_controller_node.py` — `_segment_spray_active` 5900, `_publish_spray_active` 5909, `_gate_spray` 6079, `_apply_run` entry hold 2380.
 Spray position is part of the precision product: this gate decides, from the rover's *heading*, whether the planner's MARK flag may reach the valve.

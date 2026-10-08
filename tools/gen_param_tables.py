@@ -54,9 +54,9 @@ INT_RANGE = {  # name -> (lo, hi)
 }
 
 PACKAGES = {
-    "dyx3_rpp": {"expect": 120, "exclude": {}},  # 119 carried + segment_command_mode (production addition)
+    "dyx3_rpp": {"expect": 117, "exclude": {}},  # 119 carried + segment_command_mode - 3 spray verdict params
     "dyx3_spray": {
-        "expect": 46,  # 45 carried + rpp_timeout_s (production addition, 2026-10-08)
+        "expect": 49,  # + rpp_timeout_s and C2 heading verdict parameters
         "exclude": {
             "command_service": "MAVROS service name: the valve is driven through dyx3_px4_link",
             "use_distance_aware_spray": "the legacy /spray/active path is not carried; distance-aware is the only path",

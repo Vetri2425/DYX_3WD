@@ -35,8 +35,7 @@ This is **module-level** proof on synthetic and archived-mission inputs; the fie
 * The node (`rpp_node.md`) exists and is proven in-process against a kinematic stand-in vehicle; it has never run against PX4 or on a rover, and the closed-loop
   model behind the controller proof is a stand-in too: real-bag replay is a LOCAL ACTION. Timing, jitter and the firmware's reaction to the pivot and brake
   commands are not provable off-target.
-* `run_sequencer` and `spray_gate` are not separate modules: the run sequence (`_apply_run` / `_advance_run`) and the heading gates (`_gate_spray`) are inside `RppCore`,
-  where the shared state they need lives. The empty stubs were removed.
+* The run sequence (`_apply_run` / `_advance_run`) remains inside `RppCore`. The historical heading gate is removed from RPP in Phase C2; its exact heading/progress evidence is reported to `dyx3_spray`, the sole final spray verdict owner.
 
 Until the shadow run (GATE 7) the precision path on a rover is `dyx3_rpp_legacy` (quarantined, GATE 7 deletes it). `RppCore` is the thing the shadow-run oracle compares tick by tick.
 

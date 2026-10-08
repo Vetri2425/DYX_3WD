@@ -1,5 +1,5 @@
-// rpp_params — the 119 RPP parameters with class, structural validation and change recording.
-// See docs/contracts/dyx3_rpp.md section on parameters. Pure C++, no ROS.
+// rpp_params — the 117 motion/tracking parameters with class, structural validation and change
+// recording. See docs/contracts/dyx3_rpp.md section on parameters. Pure C++, no ROS.
 //
 // Every tunable is classified LIVE / IDLE_ONLY / RESTART (spec section 9). A change is validated
 // before it is applied, an IDLE_ONLY change while a mission is running and any RESTART change at

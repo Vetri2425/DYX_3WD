@@ -22,6 +22,7 @@ void SprayController::load_path(std::shared_ptr<const PathModel> model) {
   // B5: any new path resets the "run has started" evidence; the next projection must acquire
   // globally.
   tracking_seen_ = false;
+  heading_entry_hold_ = true;
   dstate_ = DecisionState{};
   xtrack_trip_s_.reset();
   last_decision_.reset();
@@ -40,10 +41,18 @@ void SprayController::note_rtk(const RtkSnapshot& r, double now_s) {
   rtk_recv_s_ = now_s;
 }
 
-void SprayController::note_rpp(uint8_t state, uint32_t mission_id, double now_s) {
+void SprayController::note_rpp(uint8_t state, uint32_t mission_id, uint32_t run_index,
+                               double heading_error_rad, double path_travel_m,
+                               bool heading_evidence_valid, double now_s) {
+  if (mission_id != rpp_mission_id_ || run_index != rpp_run_index_) heading_entry_hold_ = true;
   rpp_known_ = true;
   rpp_state_ = state;
   rpp_mission_id_ = mission_id;
+  rpp_run_index_ = run_index;
+  rpp_heading_error_rad_ = heading_error_rad;
+  rpp_path_travel_m_ = path_travel_m;
+  rpp_heading_evidence_valid_ =
+      heading_evidence_valid && std::isfinite(heading_error_rad) && std::isfinite(path_travel_m);
   rpp_recv_s_ = now_s;
   // Tracking evidence (B5) counts only for the mission that is RUNNING now (review C1): it was a
   // permanent latch, cleared only on path load.
@@ -54,7 +63,10 @@ void SprayController::note_rpp(uint8_t state, uint32_t mission_id, double now_s)
 }
 
 void SprayController::set_mission(bool running, uint32_t mission_id) {
-  if (!running || mission_id != mission_id_) tracking_seen_ = false;
+  if (!running || mission_id != mission_id_) {
+    tracking_seen_ = false;
+    heading_entry_hold_ = true;
+  }
   mission_running_ = running;
   mission_id_ = mission_id;
 }
@@ -247,6 +259,15 @@ std::optional<SprayCommand> SprayController::tick(double now_s) {
 
   GateInputs gi;
   gi.ownership = ownership(now_s);
+  const double rpp_age = now_s - rpp_recv_s_;
+  const bool fresh_heading =
+      rpp_heading_evidence_valid_ && rpp_age >= 0.0 && rpp_age <= p_->num(P::rpp_timeout_s);
+  const double heading_deg =
+      fresh_heading ? std::fabs(rpp_heading_error_rad_) * (180.0 / 3.14159265358979323846) : 0.0;
+  const double cut_deg = p_->num(P::spray_heading_cut_deg);
+  gi.heading_evidence = {
+      fresh_heading && !(cut_deg > 0.0 && heading_deg >= cut_deg),
+      !fresh_heading ? "rpp heading evidence stale or unavailable" : "heading exceeds spray cut"};
   gi.armed = vehicle_fresh(now_s) && veh_.armed;
   gi.offboard = vehicle_fresh(now_s) && veh_.offboard;
   gi.require_offboard = p_->flag(P::require_offboard);
@@ -275,6 +296,16 @@ std::optional<SprayCommand> SprayController::tick(double now_s) {
   in.safety_reason = safety.reason;
   dstate_.xtrack_tripped_elapsed_s = xtrack_trip_s_ ? (now_s - *xtrack_trip_s_) : 1e300;
   Decision d = make_decision(in, decision_params(), dstate_);
+  if (!manual_active_ && d.geometry_desired && d.safety_ok) {
+    const double entry_deg = p_->num(P::spray_entry_max_heading_deg);
+    const double release_travel = p_->num(P::spray_entry_release_travel_m);
+    if (heading_entry_hold_) {
+      if (entry_deg <= 0.0 || heading_deg <= entry_deg || rpp_path_travel_m_ >= release_travel)
+        heading_entry_hold_ = false;
+      else
+        d.desired = false;
+    }
+  }
   if (d.projection)
     dstate_.prev_projection_s =
         d.projection->s;  // carry the station so the next search stays on this leg
