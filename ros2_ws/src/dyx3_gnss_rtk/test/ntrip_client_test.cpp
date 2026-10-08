@@ -2,6 +2,7 @@
 #include "dyx3_gnss_rtk/ntrip_client.hpp"
 
 #include <arpa/inet.h>
+#include <dirent.h>
 #include <gtest/gtest.h>
 #include <netinet/in.h>
 #include <poll.h>
@@ -46,6 +47,8 @@ struct Script {
   int repeat_payload = 0;        // extra copies sent 20 ms apart
   bool close_after = false;      // close right after the payload (stream ended)
   bool hold_open = true;         // otherwise stay silent until the client leaves
+  int receive_buffer_bytes = 0;
+  int pause_read_ms = 0;
 };
 
 class FakeCaster {
@@ -102,6 +105,10 @@ private:
           scripts_.erase(scripts_.begin());
         }
       }
+      if (s.receive_buffer_bytes > 0) {
+        ::setsockopt(c, SOL_SOCKET, SO_RCVBUF, &s.receive_buffer_bytes,
+                     sizeof s.receive_buffer_bytes);
+      }
       std::string req;
       char buf[1024];
       while (req.find("\r\n\r\n") == std::string::npos) {
@@ -121,6 +128,8 @@ private:
       }
       if (!s.close_after) {
         // stay open, collecting whatever the client sends (GGA), until it hangs up or we stop
+        if (s.pause_read_ms > 0)
+          std::this_thread::sleep_for(std::chrono::milliseconds(s.pause_read_ms));
         while (!stop_) {
           pollfd q{c, POLLIN, 0};
           if (::poll(&q, 1, 50) <= 0) continue;
@@ -167,6 +176,18 @@ bool wait_for(F pred, double seconds = 5.0) {
     std::this_thread::sleep_for(5ms);
   }
   return pred();
+}
+
+int open_fd_count() {
+  DIR* d = ::opendir("/proc/self/fd");
+  if (!d) d = ::opendir("/dev/fd");
+  if (!d) return -1;
+  int count = 0;
+  while (auto* e = ::readdir(d)) {
+    if (e->d_name[0] != '.') ++count;
+  }
+  ::closedir(d);
+  return count;
 }
 
 }  // namespace
@@ -320,6 +341,57 @@ TEST(NtripClient, StopUnblocksQuicklyWhileWaitingForData) {
   const auto t0 = std::chrono::steady_clock::now();
   c.stop();
   EXPECT_LT(std::chrono::steady_clock::now() - t0, 1s);
+}
+
+TEST(NtripClient, LargeGgaIsByteExactAfterPartialNonblockingWrites) {
+  FakeCaster caster;
+  Script s;
+  s.receive_buffer_bytes = 4096;
+  caster.push_script(s);
+  NtripConfig cfg = cfg_for(caster.port());
+  cfg.stream_timeout_s = 20.0;
+  cfg.gga_interval_s = 60.0;
+  const std::string gga = "$GPGGA," + std::string(128 * 1024, 'A') + "*00\r\n";
+  NtripClient c(cfg, [](const std::vector<uint8_t>&) {}, [gga] { return gga; });
+  c.start();
+  ASSERT_TRUE(wait_for([&] { return c.snapshot().gga_sent == 1; }, 20.0));
+  ASSERT_TRUE(wait_for([&] { return caster.gga_received().size() == gga.size(); }, 20.0));
+  EXPECT_EQ(caster.gga_received(), gga);
+  c.stop();
+}
+
+TEST(NtripClient, StopCancelsBlockedGgaWithoutFurtherWrites) {
+  FakeCaster caster;
+  Script s;
+  s.receive_buffer_bytes = 4096;
+  s.pause_read_ms = 1500;
+  caster.push_script(s);
+  NtripConfig cfg = cfg_for(caster.port());
+  cfg.stream_timeout_s = 10.0;
+  cfg.gga_interval_s = 60.0;
+  const std::string gga = "$GPGGA," + std::string(4 * 1024 * 1024, 'B') + "*00\r\n";
+  NtripClient c(cfg, [](const std::vector<uint8_t>&) {}, [gga] { return gga; });
+  c.start();
+  ASSERT_TRUE(wait_for([&] { return c.snapshot().state == NtripState::Streaming; }));
+  std::this_thread::sleep_for(100ms);
+  const auto t0 = std::chrono::steady_clock::now();
+  c.stop();
+  EXPECT_LT(std::chrono::steady_clock::now() - t0, 1s);
+  EXPECT_EQ(c.snapshot().gga_sent, 0U);
+}
+
+TEST(NtripClient, FiftyStartStopCyclesDoNotLeakDescriptors) {
+  FakeCaster caster;
+  const int before = open_fd_count();
+  ASSERT_GT(before, 0);
+  for (int i = 0; i < 50; ++i) {
+    NtripClient c(
+        cfg_for(caster.port()), [](const std::vector<uint8_t>&) {}, [] { return std::nullopt; });
+    c.start();
+    ASSERT_TRUE(wait_for([&] { return c.snapshot().state == NtripState::Streaming; }));
+    c.stop();
+  }
+  EXPECT_EQ(open_fd_count(), before);
 }
 
 TEST(NtripClient, UnreachableCasterBacksOffAndStopsPromptly) {

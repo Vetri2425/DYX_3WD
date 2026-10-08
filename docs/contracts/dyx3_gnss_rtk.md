@@ -52,13 +52,14 @@ protocol behaviour into its own service, plus the structure the prototype lacked
   Bytes after the header are RTCM and are kept.
 * Connect/handshake timeout 10 s; stream read timeout 10 s (`_STREAM_SOCKET_TIMEOUT_S`): a silent stream is a dead one
   and triggers a reconnect. Reconnect backoff `min(5 * 2^attempt, 60)` s, reset on a successful handshake, interruptible
-  on shutdown. A half-open stream is repaired by closing the socket after 3 consecutive failed GGA back-feeds.
+  on shutdown. A failed or timed-out GGA send closes the stream immediately, because a partial sentence may already be on the wire.
 * **GGA back-feed** (VRS casters withhold RTCM until they hear a position): sent immediately after the handshake and then
   every 10 s, only if the position is usable (finite, in range, not older than 5 s — `gga_position_is_usable`). The
   prototype used placeholders for satellites (8) and HDOP (1.0) and a quality derived from covariance; here the receiver's
   own `satellites_used`, `hdop` and `fix_type` are used (quality: 1 GPS, 2 DGPS, 4 RTK fixed, 5 RTK float). NMEA checksum is
   the XOR of the bytes between `$` and `*`.
-* I/O runs on its own thread; the ROS thread only reads atomics/snapshots. Shutdown closes the socket to unblock `recv`.
+* I/O runs on its own thread; the ROS thread only reads atomics/snapshots. The worker alone closes its socket. `stop()` sets the cancellation flag, wakes `poll`, and shuts down the current socket while holding the same mutex used by the worker for close and replacement. It joins before returning, preventing further writes and fd reuse races.
+* GGA uses bounded nonblocking send-all. Partial writes continue; `EINTR` retries; `EAGAIN` waits for writable with the stop wake fd. The finite send deadline uses `stream_timeout_s` (DERIVED from the existing stream liveness bound); `gga_sent` increments only after all bytes have been accepted by the socket. Timeout and connection failure have distinct diagnostics.
 
 ## 5. Correction health and `RtkStatus`
 

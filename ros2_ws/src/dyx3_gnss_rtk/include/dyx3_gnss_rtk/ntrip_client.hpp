@@ -93,7 +93,7 @@ public:
 
   void set_event_callback(Event e) { event_ = std::move(e); }
   void start();
-  void stop();  // idempotent; closes the socket to unblock recv and joins
+  void stop();  // idempotent; requests shutdown and joins; worker alone closes the socket
   NtripSnapshot snapshot() const;
 
 private:
@@ -101,6 +101,7 @@ private:
   bool connect_and_handshake(int* fd, std::vector<uint8_t>* leftover, std::string* error);
   void set_state(NtripState s, const std::string& detail = std::string());
   void close_fd();
+  bool own_fd(int fd);
 
   NtripConfig cfg_;
   FrameSink sink_;
@@ -108,7 +109,9 @@ private:
   Event event_;
   std::thread thread_;
   std::atomic<bool> stop_{false};
-  std::atomic<int> active_fd_{-1};
+  // Guard both shutdown and close so a recycled fd number can never be targeted by stop().
+  std::mutex fd_m_;
+  int active_fd_{-1};  // worker owns close; stop only shutdowns while holding fd_m_
   mutable std::mutex m_;
   std::condition_variable cv_;
   NtripSnapshot snap_;

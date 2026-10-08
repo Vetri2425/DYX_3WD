@@ -134,17 +134,44 @@ int wait_fd(int fd, short events, int wake_fd, double timeout_s) {
   pollfd p[2];
   p[0] = {fd, events, 0};
   p[1] = {wake_fd, POLLIN, 0};
-  const int ms =
-      timeout_s <= 0.0 ? 0 : static_cast<int>(std::min(timeout_s, 3600.0) * 1000.0 + 0.5);
+  const double deadline = now_s() + std::max(0.0, timeout_s);
   for (;;) {
+    const int ms =
+        static_cast<int>(std::min(std::max(0.0, deadline - now_s()), 3600.0) * 1000.0 + 0.5);
     const int r = ::poll(p, wake_fd >= 0 ? 2 : 1, ms);
     if (r < 0 && errno == EINTR) continue;
     if (r < 0) return -1;
     if (r == 0) return 0;
     if (wake_fd >= 0 && (p[1].revents & POLLIN) != 0) return -1;
-    if ((p[0].revents & (events | POLLERR | POLLHUP)) != 0) return 1;
+    if ((p[0].revents & events) != 0) return 1;
+    if ((p[0].revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) return -1;
     return 0;
   }
+}
+
+enum class SendResult { Complete, Timeout, Stopped, Failed };
+
+SendResult send_all(int fd, const char* data, size_t size, int wake_fd,
+                    const std::atomic<bool>& stopped, double deadline) {
+  size_t sent = 0;
+  while (sent < size) {
+    if (stopped) return SendResult::Stopped;
+    if (now_s() >= deadline) return SendResult::Timeout;
+    const ssize_t n = ::send(fd, data + sent, size - sent, MSG_NOSIGNAL);
+    if (n > 0) {
+      sent += static_cast<size_t>(n);
+      continue;
+    }
+    if (n < 0 && errno == EINTR) continue;
+    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+      const int w = wait_fd(fd, POLLOUT, wake_fd, deadline - now_s());
+      if (w < 0) return stopped ? SendResult::Stopped : SendResult::Failed;
+      if (w == 0) return SendResult::Timeout;
+      continue;
+    }
+    return SendResult::Failed;
+  }
+  return SendResult::Complete;
 }
 
 std::string short_errno(const char* what) {
@@ -187,6 +214,11 @@ NtripSnapshot NtripClient::snapshot() const {
 
 void NtripClient::start() {
   if (thread_.joinable()) return;
+  if (wake_[0] >= 0) {
+    char buf[64];
+    while (::read(wake_[0], buf, sizeof buf) > 0) {
+    }
+  }
   stop_ = false;
   thread_ = std::thread([this] { run(); });
 }
@@ -198,18 +230,27 @@ void NtripClient::stop() {
     [[maybe_unused]] const ssize_t w = ::write(wake_[1], &c, 1);
   }
   cv_.notify_all();
-  const int fd = active_fd_.exchange(-1);
-  if (fd >= 0) ::shutdown(fd, SHUT_RDWR);
+  {
+    std::lock_guard<std::mutex> lk(fd_m_);
+    if (active_fd_ >= 0) ::shutdown(active_fd_, SHUT_RDWR);
+  }
   if (thread_.joinable()) thread_.join();
   set_state(NtripState::Stopped);
 }
 
 void NtripClient::close_fd() {
-  const int fd = active_fd_.exchange(-1);
-  if (fd >= 0) {
-    ::shutdown(fd, SHUT_RDWR);
-    ::close(fd);
+  std::lock_guard<std::mutex> lk(fd_m_);
+  if (active_fd_ >= 0) {
+    ::close(active_fd_);
+    active_fd_ = -1;
   }
+}
+
+bool NtripClient::own_fd(int fd) {
+  std::lock_guard<std::mutex> lk(fd_m_);
+  if (stop_) return false;
+  active_fd_ = fd;
+  return true;
 }
 
 bool NtripClient::connect_and_handshake(int* out_fd, std::vector<uint8_t>* leftover,
@@ -224,11 +265,14 @@ bool NtripClient::connect_and_handshake(int* out_fd, std::vector<uint8_t>* lefto
     return false;
   }
   int fd = -1;
-  for (addrinfo* a = res; a != nullptr && fd < 0; a = a->ai_next) {
+  for (addrinfo* a = res; a != nullptr && fd < 0 && !stop_; a = a->ai_next) {
     const int s = ::socket(a->ai_family, a->ai_socktype, a->ai_protocol);
     if (s < 0) continue;
     ::fcntl(s, F_SETFL, ::fcntl(s, F_GETFL, 0) | O_NONBLOCK);
-    active_fd_ = s;
+    if (!own_fd(s)) {
+      ::close(s);
+      break;
+    }
     int r = ::connect(s, a->ai_addr, a->ai_addrlen);
     if (r < 0 && errno == EINPROGRESS) {
       const int w = wait_fd(s, POLLOUT, wake_[0], cfg_.connect_timeout_s);
@@ -246,8 +290,7 @@ bool NtripClient::connect_and_handshake(int* out_fd, std::vector<uint8_t>* lefto
     if (r == 0) {
       fd = s;
     } else {
-      active_fd_ = -1;
-      ::close(s);
+      close_fd();
     }
   }
   ::freeaddrinfo(res);
@@ -259,22 +302,12 @@ bool NtripClient::connect_and_handshake(int* out_fd, std::vector<uint8_t>* lefto
   ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
 
   const std::string req = build_request(cfg_.host, cfg_.mountpoint, cfg_.user, cfg_.password);
-  size_t sent = 0;
   const double deadline = now_s() + cfg_.connect_timeout_s;
-  while (sent < req.size()) {
-    const ssize_t n = ::send(fd, req.data() + sent, req.size() - sent, MSG_NOSIGNAL);
-    if (n > 0) {
-      sent += static_cast<size_t>(n);
-      continue;
-    }
-    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-      if (wait_fd(fd, POLLOUT, wake_[0], deadline - now_s()) != 1) break;
-      continue;
-    }
-    break;
-  }
-  if (sent < req.size()) {
-    *error = stop_ ? "stopped" : "request send failed";
+  const auto request_result = send_all(fd, req.data(), req.size(), wake_[0], stop_, deadline);
+  if (request_result != SendResult::Complete) {
+    *error = stop_                                   ? "stopped"
+             : request_result == SendResult::Timeout ? "request send timeout"
+                                                     : "request send failed";
     close_fd();
     return false;
   }
@@ -344,7 +377,6 @@ void NtripClient::run() {
       attempt = 0;
       parser.clear();
       set_state(NtripState::Streaming);
-      int gga_failures = 0;
       double next_gga =
           now_s();  // VRS casters withhold RTCM until the first position: feed at once
       double last_rx = now_s();
@@ -368,18 +400,19 @@ void NtripClient::run() {
           next_gga = t + cfg_.gga_interval_s;
           const auto gga = gga_ ? gga_() : std::nullopt;
           if (gga) {
-            const ssize_t n = ::send(fd, gga->data(), gga->size(), MSG_NOSIGNAL);
-            if (n == static_cast<ssize_t>(gga->size())) {
-              gga_failures = 0;
+            // DERIVED: bound a GGA write by the existing stream-liveness timeout.
+            const auto result = send_all(fd, gga->data(), gga->size(), wake_[0], stop_,
+                                         now_s() + cfg_.stream_timeout_s);
+            if (result == SendResult::Stopped) break;
+            if (result == SendResult::Complete) {
               std::lock_guard<std::mutex> lk(m_);
               ++snap_.gga_sent;
             } else {
-              ++gga_failures;
-              if (gga_failures >= 3) {  // a failed back-feed usually means a half-open stream
-                error = "GGA back-feed failing: stream looks half-open";
-                had_error = true;
-                break;
-              }
+              // Some bytes may already be on the wire. Reconnect rather than start a new
+              // sentence behind an incomplete GGA on the same stream.
+              error = result == SendResult::Timeout ? "GGA send timeout" : "GGA send failed";
+              had_error = true;
+              break;
             }
           }
         }

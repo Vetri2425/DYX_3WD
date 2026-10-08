@@ -712,3 +712,4 @@ allocator and unmatched-ACK count are exposed on `Px4LinkStatus` (interface 0.11
 ACK-completed token recycling. The remaining capacity risk is exhaustion of 254,490 distinct
 logical epochs before a proven joint reset; exhaustion fails closed.
 Cloud Review E1 local: interface 0.12.0 separates NTRIP source bytes, CRC-valid frames, RTK publication handoff, and px4_link accepted/refused chunk counters. The latter stop at `GpsInjectData` publication; receiver health remains separate. Phase D CI 37749513456 is red on the spray ACK test; do not push E1 until Phase D is resolved.
+Cloud Review E2 local: NTRIP GGA send-all is nonblocking, cancellation-aware, and bounded by the existing stream timeout. The worker owns final socket close; stop only wakes and shuts down the current fd under the ownership mutex, then joins. No socket integer is used without the lifetime lock for shutdown/close.
