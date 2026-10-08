@@ -1,0 +1,11 @@
+DYX3PATH 1
+frame local_ned
+engine app_v1
+meta {"num_waypoints":5,"origin_ne_m":[0.0,0.0],"source":{"client":"Three_Wheel_v2","client_version":"1.0.0","name":"run_boundary_cross_check","num_runs":3,"type":"app_planned"},"total_mark_length_m":2.0,"total_transit_length_m":2.0}
+points 5
+0.0 0.0 2
+1.0 0.0 2
+2.0 0.0 3
+2.0 1.0 3
+3.0 1.0 0
+end 5

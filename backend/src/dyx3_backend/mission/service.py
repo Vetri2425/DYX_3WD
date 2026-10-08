@@ -108,6 +108,17 @@ class MissionService:
             raise MissionError(422, "artifact_failed", f"{type(exc).__name__}: {exc}") from exc
         return summarize(art)
 
+    def ingest_app_plan(self, body: object) -> dict:
+        """Store a validated app plan; this path never imports the path engine."""
+        from dyx3_backend.mission.app_plan import compile_plan
+
+        try:
+            blob = compile_plan(body)
+            digest, _ = pa.store(self._s.missions_dir, blob)
+            return summarize(pa.load(self._s.missions_dir, digest))
+        except (pa.ArtifactError, OSError) as exc:
+            raise MissionError(422, "ARTIFACT_FAILED", f"{type(exc).__name__}: {exc}") from exc
+
     def get(self, sha256: str) -> pa.PathArtifact:
         try:
             return pa.load(self._s.missions_dir, sha256)

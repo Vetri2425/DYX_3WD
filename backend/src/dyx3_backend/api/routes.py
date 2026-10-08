@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -180,6 +181,19 @@ async def spray_manual(request: Request, body: SprayBody, _: Identity = Operator
 # ------------------------------------------------------------------------------------------------ missions
 def _mission_error(exc: MissionError) -> JSONResponse:
     return JSONResponse({"ok": False, "code": exc.code, "reason": exc.reason}, status_code=exc.status)
+
+
+@router.post("/missions/plan")
+async def ingest_app_plan(request: Request, _: Identity = Operator) -> JSONResponse:
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        return _mission_error(MissionError(400, "INVALID_PAYLOAD", f"invalid JSON: {exc}"))
+    try:
+        summary = await anyio.to_thread.run_sync(request.app.state.missions.ingest_app_plan, body)
+    except MissionError as exc:
+        return _mission_error(exc)
+    return JSONResponse({"ok": True, "mission": summary}, status_code=201)
 
 
 @router.post("/missions")
