@@ -274,6 +274,9 @@ TEST(NtripClient, GgaBackFeedImmediatelyAndPeriodicallyOnlyWhenUsable) {
   // the caster reads the back-feed after its own send loop: allow it time
   EXPECT_TRUE(wait_for([&] { return caster.gga_received().find("$GPGGA") != std::string::npos; }));
   usable = false;  // an unusable position is never back-fed
+  // A send may already be in flight (the provider answered before the flip, the send and the
+  // counter come after): let one full interval (0.2 s) pass before sampling the baseline.
+  std::this_thread::sleep_for(300ms);
   const auto before = c.snapshot().gga_sent;
   std::this_thread::sleep_for(500ms);
   EXPECT_EQ(c.snapshot().gga_sent, before);
