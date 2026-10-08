@@ -74,7 +74,8 @@ libs() {
 
   local svc
   svc="$(manifest_section enabled_services)"
-  check "manifest: only dyx3-platform enabled" '[ "${svc}" = "dyx3-platform" ]'
+  # The six services verified on the 3WD rover 2026-10-08; a new one joins only after a rover run.
+  check "manifest: the six rover-verified services are enabled" '[ "$(printf "%s" "${svc}" | tr "\n" " ")" = "dyx3-platform dyx3-ros dyx3-rtk dyx3-spray-watchdog dyx3-recorder dyx3-backend" ]'
   check "manifest: legacy package absent from ros2_packages" '! manifest_section ros2_packages | grep -q legacy'
   check "manifest: spray watchdog is its own service" 'manifest_section services | grep -qx dyx3-spray-watchdog'
   local s2
@@ -223,7 +224,7 @@ F
   check "operator shims installed" '[ -x "${DYX3_BIN}/dyx3-upgrade" ] && [ -x "${DYX3_BIN}/dyx3-health" ] && [ -x "${DYX3_BIN}/dyx3-install" ] && [ -x "${DYX3_BIN}/dyx3-rollback" ] && [ -x "${DYX3_BIN}/dyx3-version" ]'
   check "config templates for ros/backend/ntrip installed" '[ -f "${DYX3_ETC}/ros.env" ] && [ -f "${DYX3_ETC}/backend.env" ] && [ -f "${DYX3_ETC}/ntrip.env" ]'
   check "versions.json written for the recorder" 'grep -q "\"stack_sha\": \"${A}\"" "${DYX3_ETC}/versions.json" && grep -q firmware_expected_sha "${DYX3_ETC}/versions.json"'
-  check "units copied, only platform marked enabled in manifest" '[ -f "${DYX3_ROOT}/etc/systemd/system/dyx3-platform.service" ]'
+  check "systemd units copied" '[ -f "${DYX3_ROOT}/etc/systemd/system/dyx3-platform.service" ]'
 
   # This ledger belongs to the PX4 correlation epoch, not a software release.
   printf 'v2 12345\n' >"${DYX3_VAR_LIB}/state/px4_link_spray_ack_next"

@@ -28,9 +28,16 @@ dyx3-recorder
 dyx3-spray-watchdog
 
 # Implemented in code: all of the above. Only services VERIFIED ON A ROVER belong here: an enabled service that fails health makes
-# `dyx3-upgrade` revert. A human moves a service into this list after running it on the rover (Phase 11: platform only).
+# `dyx3-upgrade` revert. All six verified running on the 3WD rover 2026-10-08 (release 42c065b + the 4bb213a launcher fix):
+# platform (agent session, 68 /fmu topics), ros (graph + gateway socket), rtk (NTRIP login, reconnect), spray-watchdog,
+# recorder (22 topics), backend (/api/ping 200; bench binds 0.0.0.0 via /etc/dyx3/backend.env until the hotspot exists).
 [enabled_services]
 dyx3-platform
+dyx3-ros
+dyx3-rtk
+dyx3-spray-watchdog
+dyx3-recorder
+dyx3-backend
 
 [filesystem]
 /opt/dyx3/{current,releases,bin}

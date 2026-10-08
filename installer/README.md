@@ -69,8 +69,8 @@ real DDS to the FCU, and the supervisor under systemd. See HANDOFF "LOCAL ACTION
 
 * **Services** (`[services]` in the manifest): `dyx3-platform`, `dyx3-ros` (mission, motion_guard, px4_link, spray, system_gateway via `dyx3_bringup/control_graph.launch.py`),
   `dyx3-rtk`, `dyx3-backend`, `dyx3-recorder`, and **`dyx3-spray-watchdog` as its own unit** (not tied to `dyx3-ros`, so it survives the graph dying).
-  `[enabled_services]` is still **`dyx3-platform` only**: the others are implemented in code but have never run on a rover, and enabling one that fails its
-  environment would make the post-upgrade health check revert the whole upgrade. Move a service into `[enabled_services]` once it has been verified on the rover.
+  `[enabled_services]` lists **all six** since 2026-10-08, when each was verified running on the 3WD rover. An enabled service that fails its environment
+  makes the post-upgrade health check revert the whole upgrade, so a new service joins the list only after it has run on the rover.
 * **Environment**: `/etc/dyx3/{ros,backend,ntrip}.env` templates are created once and never overwritten (`ntrip.env` is `root:dyx3 0640`). `ROS_DOMAIN_ID` has no default: the launchers refuse to start without it. `dyx3-env.sh` also refuses to start without the px4_msgs overlay built for the pinned firmware.
   Existing `ntrip.env` files must be migrated explicitly to set `DYX3_NTRIP_SECURITY=PLAINTEXT` or `TLS`; no port-based or legacy default is applied. Optional `DYX3_NTRIP_CA_FILE` supplies a private TLS CA PEM. TLS uses system trust paths when that value is absent.
 * **`/etc/dyx3/versions.json`** is rewritten on every switch/rollback; the recorder copies it into every run.
