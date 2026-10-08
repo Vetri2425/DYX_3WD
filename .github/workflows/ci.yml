@@ -69,7 +69,7 @@ jobs:
         shell: bash
         run: |
           apt-get update -qq
-          apt-get install -y -qq ros-humble-mavros-msgs
+          apt-get install -y -qq ros-humble-mavros-msgs nlohmann-json3-dev
 
       # px4_msgs generated from the PINNED FIRMWARE's msg/ + srv/ (never stock): dyx3_px4_link needs
       # it, and the install is the same function the installer uses on the rover. Cached by pin.
@@ -322,7 +322,7 @@ jobs:
         shell: bash
         run: |
           apt-get update -qq
-          apt-get install -y -qq --no-install-recommends git zstd python3-venv python3-pip
+          apt-get install -y -qq --no-install-recommends git zstd python3-venv python3-pip nlohmann-json3-dev
           git config --global --add safe.directory '*'
 
       # Same key as ros2_build_test: the px4_msgs that passed the tests is the one shipped.

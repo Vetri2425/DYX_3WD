@@ -10,6 +10,7 @@ find_package(rclcpp REQUIRED)
 find_package(dyx3_interfaces REQUIRED)
 find_package(Threads REQUIRED)
 find_package(OpenSSL REQUIRED)
+find_package(nlohmann_json REQUIRED)
 
 # Pure C++ core (no ROS): RTCM framing, chunking, NTRIP protocol and socket client, health and GGA.
 add_library(dyx3_gnss_rtk_core STATIC
@@ -17,11 +18,19 @@ add_library(dyx3_gnss_rtk_core STATIC
   src/rtcm_transport.cpp
   src/correction_health.cpp
   src/gga_provider.cpp
-  src/ntrip_client.cpp)
+  src/ntrip_client.cpp
+  src/validated_frame.cpp
+  src/serial_port.cpp
+  src/transport_sink.cpp
+  src/injection_authority.cpp
+  src/lora_source.cpp
+  src/rtk_config.cpp
+  src/control_socket.cpp
+  src/worker_state.cpp)
 target_include_directories(dyx3_gnss_rtk_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
-target_link_libraries(dyx3_gnss_rtk_core PUBLIC Threads::Threads OpenSSL::SSL OpenSSL::Crypto)
+target_link_libraries(dyx3_gnss_rtk_core PUBLIC Threads::Threads OpenSSL::SSL OpenSSL::Crypto nlohmann_json::nlohmann_json)
 set_target_properties(dyx3_gnss_rtk_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_compile_options(dyx3_gnss_rtk_core PRIVATE -Wall -Wextra -Wpedantic)
 
@@ -49,6 +58,8 @@ if(BUILD_TESTING)
   ament_add_gtest(rtk_node_test test/rtk_node_test.cpp TIMEOUT 120)
   target_link_libraries(rtk_node_test dyx3_gnss_rtk_node_lib)
   ament_target_dependencies(rtk_node_test rclcpp dyx3_interfaces)
+  ament_add_gtest(production_core_test test/production_core_test.cpp TIMEOUT 120)
+  target_link_libraries(production_core_test dyx3_gnss_rtk_core util)
 endif()
 
 ament_package()

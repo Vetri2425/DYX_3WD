@@ -81,7 +81,10 @@ struct NtripSnapshot {
   uint64_t frames{0};
   uint64_t bytes{0};
   uint64_t crc_failures{0};
+  uint64_t invalid_headers{0};
   uint64_t resync_bytes{0};
+  uint64_t partial_timeouts{0};
+  uint16_t last_message_type{0};
   uint64_t gga_sent{0};
   std::optional<NtripSecurity> security;
   bool tls_verified{false};

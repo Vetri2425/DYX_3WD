@@ -13,6 +13,8 @@ namespace dyx3_gnss_rtk {
 
 // CRC-24Q (polynomial 0x1864CFB) over data[0, length).
 uint32_t crc24q(const uint8_t* data, size_t length);
+// 12-bit RTCM message number from a complete frame, or 0 for a payload shorter than 2 bytes.
+uint16_t rtcm_message_type(const std::vector<uint8_t>& frame);
 
 class RtcmParser {
 public:
@@ -26,6 +28,7 @@ public:
 
   uint64_t frames() const { return frames_; }
   uint64_t crc_failures() const { return crc_failures_; }
+  uint64_t invalid_headers() const { return invalid_headers_; }
   uint64_t resync_bytes() const { return resync_bytes_; }
   size_t buffered() const { return buf_.size(); }
   void clear() { buf_.clear(); }
@@ -35,6 +38,7 @@ private:
   std::vector<uint8_t> buf_;
   uint64_t frames_{0};
   uint64_t crc_failures_{0};
+  uint64_t invalid_headers_{0};
   uint64_t resync_bytes_{0};
 };
 

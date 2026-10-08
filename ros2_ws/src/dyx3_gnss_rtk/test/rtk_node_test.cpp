@@ -7,7 +7,10 @@
 
 #include <chrono>
 #include <cmath>
+#include <filesystem>
 #include <thread>
+
+#include "dyx3_gnss_rtk/rtcm_parser.hpp"
 
 using namespace dyx3_gnss_rtk;
 using namespace std::chrono_literals;
@@ -25,15 +28,21 @@ struct Rig {
   dyx3_interfaces::msg::RtkStatus rtk;
   dyx3_interfaces::msg::NtripStatus ntrip;
   std::vector<dyx3_interfaces::msg::RtcmData> chunks;
+  std::string config_dir;
 
   Rig() {
+    char pattern[] = "/tmp/dyx3-node-config-XXXXXX";
+    config_dir = ::mkdtemp(pattern);
+    ::setenv("DYX3_RTK_STATE_DIR", config_dir.c_str(), 1);
     ctx = std::make_shared<rclcpp::Context>();
     rclcpp::InitOptions io;
     io.set_domain_id(150 + (getpid() % 80));
     ctx->init(0, nullptr, io);
     rclcpp::NodeOptions no;
     no.context(ctx);
-    node = std::make_shared<RtkNode>(no, [this]() { return now; }, false, false);
+    auto config = RtkConfigStore::initial_from_environment();
+    config["transport"] = "PX4_DDS";
+    node = std::make_shared<RtkNode>(no, [this]() { return now; }, false, false, config);
     rclcpp::NodeOptions wo;
     wo.context(ctx);
     world = std::make_shared<rclcpp::Node>("world", wo);
@@ -71,6 +80,8 @@ struct Rig {
     node.reset();
     world.reset();
     ctx->shutdown("test done");
+    ::unsetenv("DYX3_RTK_STATE_DIR");
+    std::filesystem::remove_all(config_dir);
   }
   void pump(int ms = 60) {
     const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
@@ -90,6 +101,13 @@ struct Rig {
   std::vector<uint8_t> frame(size_t n) {
     std::vector<uint8_t> f(n, 0x11);
     f[0] = 0xD3;
+    const size_t payload = n - 6;
+    f[1] = static_cast<uint8_t>((payload >> 8) & 0x03);
+    f[2] = static_cast<uint8_t>(payload);
+    const uint32_t crc = crc24q(f.data(), n - 3);
+    f[n - 3] = static_cast<uint8_t>(crc >> 16);
+    f[n - 2] = static_cast<uint8_t>(crc >> 8);
+    f[n - 1] = static_cast<uint8_t>(crc);
     return f;
   }
 };
@@ -181,4 +199,24 @@ TEST(RtkNode, FixTransitionsAreCounted) {
   EXPECT_EQ(r.ntrip.fix_transitions, 1U);
   EXPECT_EQ(r.ntrip.fix_type, 6);
   EXPECT_EQ(r.ntrip.chunks_handed_off, 0U);
+}
+
+TEST(RtkNode, InvalidConfigLeavesDdsActiveAndUsbSwitchStopsDdsPublication) {
+  Rig r;
+  const auto before = r.node->handle_control({{"v", 1}, {"cmd", "GET_CONFIG"}})["data"];
+  auto invalid = before;
+  invalid["source"] = "UNKNOWN";
+  EXPECT_THROW(r.node->handle_control({{"v", 1}, {"cmd", "SET_CONFIG"}, {"config", invalid}}),
+               ConfigError);
+  r.node->on_frame(r.frame(40));
+  r.pump();
+  ASSERT_EQ(r.chunks.size(), 1U);
+  auto usb = before;
+  usb["transport"] = "USB_DIRECT";  // no by-id path: fail closed, never publish DDS
+  const auto reply = r.node->handle_control({{"v", 1}, {"cmd", "SET_CONFIG"}, {"config", usb}});
+  EXPECT_EQ(reply["data"]["transport"], "USB_DIRECT");
+  r.node->on_frame(r.frame(40));
+  r.pump();
+  EXPECT_EQ(r.chunks.size(), 1U);
+  EXPECT_EQ(r.node->status_json(r.now)["transport"]["selected"], "USB_DIRECT");
 }

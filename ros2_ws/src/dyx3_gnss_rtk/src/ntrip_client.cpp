@@ -510,11 +510,16 @@ void NtripClient::run() {
       double last_rx = now_s();
       auto deliver = [&](const uint8_t* d, size_t n) {
         for (const auto& f : parser.feed(d, n)) {
+          {
+            std::lock_guard<std::mutex> lk(m_);
+            snap_.last_message_type = rtcm_message_type(f);
+          }
           if (sink_) sink_(f);
         }
         std::lock_guard<std::mutex> lk(m_);
         snap_.frames = parser.frames();
         snap_.crc_failures = parser.crc_failures();
+        snap_.invalid_headers = parser.invalid_headers();
         snap_.resync_bytes = parser.resync_bytes();
       };
       if (!pending.empty()) {
@@ -552,6 +557,11 @@ void NtripClient::run() {
         if (n == -2) break;  // stop requested
         if (n == -3) {
           if (now_s() - last_rx >= cfg_.stream_timeout_s) {
+            if (parser.buffered() > 0) {
+              parser.clear();
+              std::lock_guard<std::mutex> lk(m_);
+              ++snap_.partial_timeouts;
+            }
             error = "stream timeout";
             had_error = true;
             break;

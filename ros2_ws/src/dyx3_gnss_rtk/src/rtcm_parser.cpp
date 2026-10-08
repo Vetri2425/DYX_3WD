@@ -35,6 +35,11 @@ uint32_t crc24q(const uint8_t* data, size_t length) {
   return crc;
 }
 
+uint16_t rtcm_message_type(const std::vector<uint8_t>& frame) {
+  if (frame.size() < 8 || frame[0] != 0xD3) return 0;
+  return static_cast<uint16_t>((static_cast<uint16_t>(frame[3]) << 4) | (frame[4] >> 4));
+}
+
 std::vector<std::vector<uint8_t>> RtcmParser::feed(const uint8_t* data, size_t length) {
   buf_.insert(buf_.end(), data, data + length);
   std::vector<std::vector<uint8_t>> frames;
@@ -51,6 +56,9 @@ std::vector<std::vector<uint8_t>> RtcmParser::feed(const uint8_t* data, size_t l
         length_field & 0x03FFU;  // reserved bits (0xFC00) tolerated, as the prototype does
     const size_t total = kHeaderLen + msg_len + kCrcLen;
     if (i + total > buf_.size()) break;  // incomplete frame
+    // The prototype tolerates reserved header bits. Count them for diagnostics without
+    // changing frame acceptance or the equivalence-tested resynchronization behavior.
+    if ((buf_[i + 1] & 0xFCU) != 0) ++invalid_headers_;
     const size_t payload_len = kHeaderLen + msg_len;
     const uint32_t expected = (static_cast<uint32_t>(buf_[i + payload_len]) << 16) |
                               (static_cast<uint32_t>(buf_[i + payload_len + 1]) << 8) |

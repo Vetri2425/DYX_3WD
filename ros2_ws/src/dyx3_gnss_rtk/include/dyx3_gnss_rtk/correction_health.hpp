@@ -16,6 +16,11 @@ public:
   void on_frame(double now_s, size_t bytes);
   void on_connected(double now_s) { connected_since_s_ = now_s; }
   void on_disconnected() { connected_since_s_.reset(); }
+  void reset_stream() {
+    connected_since_s_.reset();
+    have_frame_ = false;
+    stamps_.clear();
+  }
 
   // Seconds since the last CRC-valid frame; 1e9 when none ever arrived.
   double age_s(double now_s) const;
@@ -28,6 +33,7 @@ public:
   }
   bool connected() const { return connected_since_s_.has_value(); }
   uint64_t frames() const { return frames_; }
+  bool has_frame() const { return have_frame_; }
   uint64_t bytes() const { return bytes_; }
 
 private:
