@@ -694,6 +694,167 @@ TEST(Px4LinkNode, SprayActuatorCommandsBecomeVehicleCommandsAndFcuAcksAreMapped)
   EXPECT_FALSE(r.spray_acks[1].success);
 }
 
+TEST(Px4LinkNode, TenThousandIdenticalOnReassertsReuseTheConfirmedLogicalTransaction) {
+  using Cmd = dyx3_interfaces::msg::SprayActuatorCommand;
+  const std::string path = Rig::unique_token_path();
+  {
+    std::ofstream state(path);
+    state << "2\n";
+  }
+  Rig r(nullptr, "", path);
+  r.bring_up();
+  r.run(0.2);
+  r.clear();
+
+  Cmd on;
+  on.seq = 42;
+  on.source = Cmd::SOURCE_CONTROLLER;
+  on.backend = Cmd::BACKEND_ACTUATOR;
+  on.on = true;
+  on.actuator_set_index = 2;
+  on.value = 1.0F;
+  r.p_spray->publish(on);
+  r.pump(100);
+  ASSERT_EQ(r.cmds.size(), 1U);
+  const uint16_t token = r.cmds.back().source_component;
+
+  px4_msgs::msg::VehicleCommandAck ack;
+  ack.command = 187;
+  ack.target_component = token;
+  ack.result = px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_ACCEPTED;
+  r.p_ack->publish(ack);
+  r.pump(80);
+  ASSERT_EQ(r.spray_acks.size(), 1U);
+  ASSERT_TRUE(r.spray_acks.front().success);
+
+  for (int batch = 0; batch < 100; ++batch) {
+    for (int i = 0; i < 100; ++i) r.p_spray->publish(on);
+    r.pump(3);
+  }
+
+  EXPECT_EQ(r.cmds.size(), 1U);
+  EXPECT_EQ(r.spray_acks.size(), 1U);  // the original logical transaction was already confirmed
+  std::ifstream state(path);
+  unsigned next_token = 0;
+  state >> next_token;
+  EXPECT_EQ(next_token, 3U);  // one token for the initial request; 10,000 reasserts consume none
+  unlink(path.c_str());
+}
+
+TEST(Px4LinkNode, OnToOffIsANewTransactionAndOldOnAckCannotConfirmOff) {
+  using Cmd = dyx3_interfaces::msg::SprayActuatorCommand;
+  Rig r;
+  r.bring_up();
+  r.run(0.2);
+  r.clear();
+
+  Cmd request;
+  request.seq = 42;
+  request.source = Cmd::SOURCE_CONTROLLER;
+  request.backend = Cmd::BACKEND_ACTUATOR;
+  request.on = true;
+  request.actuator_set_index = 2;
+  request.value = 1.0F;
+  r.p_spray->publish(request);
+  r.pump(80);
+  ASSERT_EQ(r.cmds.size(), 1U);
+  const uint16_t on_token = r.cmds.back().source_component;
+
+  px4_msgs::msg::VehicleCommandAck ack;
+  ack.command = 187;
+  ack.target_component = on_token;
+  ack.result = px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_ACCEPTED;
+  r.p_ack->publish(ack);
+  r.pump(60);
+  ASSERT_EQ(r.spray_acks.size(), 1U);
+
+  request.seq = 43;
+  request.on = false;
+  request.value = -1.0F;
+  r.p_spray->publish(request);
+  r.pump(80);
+  ASSERT_EQ(r.cmds.size(), 2U);
+  const uint16_t off_token = r.cmds.back().source_component;
+  EXPECT_NE(off_token, on_token);
+
+  ack.target_component = on_token;
+  r.p_ack->publish(ack);
+  r.pump(50);
+  ASSERT_EQ(r.spray_acks.size(), 1U);
+  EXPECT_EQ(r.link->spray_late_ack_count(), 1U);
+
+  ack.target_component = off_token;
+  r.p_ack->publish(ack);
+  r.pump(60);
+  ASSERT_EQ(r.spray_acks.size(), 2U);
+  EXPECT_EQ(r.spray_acks.back().seq, 43U);
+  EXPECT_TRUE(r.spray_acks.back().success);
+}
+
+TEST(Px4LinkNode, ActuatorMappingChangeAndWatchdogOffIdentityAreHandledPrecisely) {
+  using Cmd = dyx3_interfaces::msg::SprayActuatorCommand;
+  const std::string path = Rig::unique_token_path();
+  {
+    std::ofstream state(path);
+    state << "2\n";
+  }
+  Rig r(nullptr, "", path);
+  r.bring_up();
+  r.run(0.2);
+  r.clear();
+
+  Cmd request;
+  request.seq = 1;
+  request.source = Cmd::SOURCE_CONTROLLER;
+  request.backend = Cmd::BACKEND_ACTUATOR;
+  request.on = true;
+  request.actuator_set_index = 1;
+  request.value = 0.8F;
+  r.p_spray->publish(request);
+  r.pump(60);
+  ASSERT_EQ(r.cmds.size(), 1U);
+  px4_msgs::msg::VehicleCommandAck ack;
+  ack.command = 187;
+  ack.target_component = r.cmds.back().source_component;
+  ack.result = px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_ACCEPTED;
+  r.p_ack->publish(ack);
+  r.pump(50);
+
+  request.actuator_set_index = 2;  // same seq and intent, a different physical actuator mapping
+  r.p_spray->publish(request);
+  r.pump(60);
+  ASSERT_EQ(r.cmds.size(), 2U);
+  const uint16_t mapping_token = r.cmds.back().source_component;
+  EXPECT_NE(mapping_token, ack.target_component);
+  ack.target_component = mapping_token;
+  r.p_ack->publish(ack);
+  r.pump(50);
+
+  Cmd watchdog = request;
+  watchdog.seq = 77;
+  watchdog.source = Cmd::SOURCE_WATCHDOG;
+  watchdog.on = false;
+  watchdog.value = -1.0F;
+  r.p_spray->publish(watchdog);
+  r.pump(60);
+  ASSERT_EQ(r.cmds.size(), 3U);
+  const uint16_t watchdog_token = r.cmds.back().source_component;
+  ack.target_component = watchdog_token;
+  r.p_ack->publish(ack);
+  r.pump(50);
+
+  for (int i = 0; i < 100; ++i) {
+    r.p_spray->publish(watchdog);
+    r.pump(2);
+  }
+  EXPECT_EQ(r.cmds.size(), 3U);
+  std::ifstream state(path);
+  unsigned next_token = 0;
+  state >> next_token;
+  EXPECT_EQ(next_token, 5U);  // controller mapping A, mapping B, watchdog OFF; reasserts add none
+  unlink(path.c_str());
+}
+
 TEST(Px4LinkNode, ExhaustedIdentityCannotConfirmWatchdogOff) {
   const std::string path = Rig::unique_token_path();
   {

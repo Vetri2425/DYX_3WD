@@ -7,6 +7,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "dyx3_interfaces/msg/estimator_health.hpp"
@@ -147,11 +148,20 @@ private:
     uint32_t seq;
     uint8_t source;
     bool on;
+    uint8_t backend;
+    uint8_t actuator_set_index;
+    float value;
+    uint8_t servo_instance;
+    uint16_t pwm_us;
     uint16_t ack_token{0};
     double sent_s;
   };
+  static bool same_spray_transaction(const SprayPending& a, const SprayPending& b);
   std::deque<SprayPending> spray_queue_;
   std::optional<SprayPending> spray_inflight_;
+  // Last positively acknowledged logical request per producer. Periodic exact reasserts
+  // are already satisfied and must not consume another durable PX4 ACK token.
+  std::unordered_map<uint8_t, SprayPending> spray_confirmed_;
   std::unique_ptr<SprayAckTokens> spray_ack_tokens_;
   uint64_t spray_late_ack_count_{0};
 

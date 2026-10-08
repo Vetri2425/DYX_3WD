@@ -658,3 +658,36 @@ assertion standalone RTK-gate smoke test passed; parameter check passes (RPP 117
 backend suite passes 529 with 44 skipped; clang-format dry-run and full branch `git diff --check`
 pass. ROS 2, colcon, and GoogleTest are unavailable, so package gtests and full colcon build/test
 were not run.
+
+### D1 logical-request reassert correction — local follow-up
+
+At branch HEAD `63ec3d3`, inspection confirmed every spray publish was enqueued/dispatched as a
+new request, so the spray node's same-sequence 2 Hz ON reassert could consume another durable
+`source_component` token per dispatch. The px4-link correction keys an exact request by producer
+source, sequence, ON/OFF, backend, actuator/servo mapping, physical value/PWM, and translated PX4
+command/parameters. Exact duplicates are coalesced while pending/in flight; after an ACCEPTED PX4
+ACK, the same request is suppressed until that source changes its request. A distinct request or a
+retry after an unconfirmed failure gets a new never-reused token. Companion restart clears only the
+in-memory duplicate cache; the durable high-water mark continues. Therefore 10,000 repeated ON
+heartbeats after the original accepted request consume zero additional tokens (one token total for
+that original request).
+
+`source_system` expansion remains excluded. Rechecked exact production PX4 SHA
+`27a7ac92845317b0276776242c504215809b2a0f`: Commander echoes source system/component into ACK
+target system/component; the MAVLink ACK router uses target system for routing. Component IDs
+1000+ retain mode-executor semantics. There is no companion-visible verified reset generation, so
+the 2..999 IDs remain finite and fail closed at exhaustion; only a coordinated PX4 + companion
+reset with the old ACK stream gone permits operator reinitialization.
+
+Remaining capacity risk: `WatchdogCore` increments its sequence for each OFF retry. Those retries
+are distinct proof transactions and therefore still consume one token each; a prolonged watchdog
+retry condition can exhaust the 998-token pool. The link does not reuse a prior OFF token because
+the older ACK must not be treated as proof of a newer sequence. This needs a separate design
+decision if prolonged watchdog retry availability must be guaranteed.
+
+Added px4-link node tests for 10,000 acknowledged same-request reasserts, new ON→OFF identity and
+late-ACK rejection, actuator mapping change, and repeated watchdog OFF suppression. Local
+`clang-format --dry-run --Werror`, `git diff --check`, and generated parameter check pass. Backend
+suite passes 529 with 44 skipped. ROS 2 and `colcon` are not installed, so the px4-link node gtests,
+remaining D1/D2/D3 ROS gtests, and colcon build/test were not run. The exact firmware tree was at
+the required SHA but contains pre-existing modifications; it was read-only during this work.

@@ -249,7 +249,7 @@ source replaces that source's older queued request; a replaced request receives 
 front of the queue. If all queue capacity is occupied by watchdog OFF requests, a new request is
 refused rather than displacing them. Link loss fails the in-flight request and all queued requests.
 
-Each dispatched logical transaction receives a `VehicleCommand.source_component` token
+Each dispatched logical proof transaction receives a `VehicleCommand.source_component` token
 (the companion's ordinary component ID is 1; spray tokens advance from 2 through 999 and never
 wrap; 1000+ identifies PX4 mode executors). The next token is durably recorded at
 `/var/lib/dyx3/state/px4_link_spray_ack_next` before its command is published. The first-install
@@ -259,6 +259,17 @@ unwritable state file, or exhaustion after token 999, fails the request closed; 
 not reported successful unless PX4 acknowledged the emitted OFF command. Do not delete or roll
 back this state while PX4 may retain ACKs from prior spray commands. After a full vehicle reset, an
 operator may reinitialize it to 2 only after PX4 is also reset and its prior ACK stream is gone.
+
+The link identifies an exact request by `(source, seq, on, backend, actuator_set_index, value,
+servo_instance, pwm_us)` and the translated PX4 command ID, target fields, and all seven command
+parameters (NaNs compare equal). Identical requests are coalesced while queued or in flight. After
+an ACCEPTED ACK, an exact repeated request from that source is suppressed until that source sends
+a different request. Therefore the spray node's same-sequence 2 Hz ON heartbeat consumes only the
+token allocated for its initial dispatch. A new sequence, source, intent, mapping, or physical value
+is a distinct request and receives its own token. Failed or timed-out requests are not cached as
+confirmed; a later retry is a new proof attempt and receives a fresh token so a delayed ACK from the
+failed attempt cannot satisfy it. Process restart clears the in-memory duplicate cache but does not
+reset the durable token allocator.
 
 The pinned firmware reserves component IDs at or above 1000 for mode executors: Commander
 classifies them as `ModeExecutor`, and normal MAVLink command sending suppresses their ACK
@@ -274,7 +285,15 @@ helper. `IN_PROGRESS` is not final. An unmatched final spray ACK, including a la
 five-second transaction timeout, is discarded and increments the link's late/unmatched counter;
 it cannot acknowledge a newer request with the same command ID. The timeout fails the request
 with result 255 and allows the next queued request to proceed. The 998 component IDs are allocated
-at most once per durable ledger; command ID plus token are both required for a match.
+at most once per durable ledger; command ID plus token are both required for a match. Identical
+confirmed reasserts do not consume IDs, but genuine requests and retry attempts still have the finite
+998-proof lifetime. No verified protocol reset boundary exists in the companion graph; reuse remains
+allowed only after an operator has reset both PX4 and the companion and confirmed the old ACK stream
+is gone. Otherwise exhaustion stays fail closed, including for watchdog OFF proof.
+The watchdog currently advances its sequence for each OFF retry, so each retry is a distinct proof
+transaction under this identity rule. A prolonged watchdog retry period can therefore consume the
+finite pool; this availability limit is recorded for a separate design decision and is not hidden by
+reusing an earlier OFF token.
 
 The queue and token allocator are owned by `dyx3_px4_link`. Neither spray producer infers FCU completion
 from publication; controller and watchdog state advance only from their matching

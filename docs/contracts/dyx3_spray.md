@@ -27,8 +27,9 @@ question of WHERE the nozzle is, slow means thin flow, never off).
 2. **`dyx3_px4_link`** is the only package touching `/fmu/**`. It turns `SprayActuatorCommand` into
   `VEHICLE_CMD_DO_SET_ACTUATOR` (187; value in slot `actuator_set_index`, the other five NaN) or `DO_SET_SERVO` (183;
    `pwm_us` clamped to 2200) and maps `/fmu/out/vehicle_command_ack` back into `SprayActuatorAck`. It serializes valve
-   transactions and correlates each ACK by command ID plus a unique per-dispatch `source_component` token echoed in
-   `target_component` by the pinned PX4 firmware. Queue replacement, link loss, and timeout are acked **false** (`result 255`);
+   transactions and correlates each ACK by command ID plus a unique logical-proof `source_component` token echoed in
+   `target_component` by the pinned PX4 firmware. Exact reasserts are coalesced while pending and suppressed after an
+   ACCEPTED ACK; they do not dispatch another command or consume another token. Queue replacement, link loss, and timeout are acked **false** (`result 255`);
    late or unmatched FCU ACKs are discarded and cannot confirm a newer transaction. See the D1 details in
    `docs/contracts/dyx3_px4_link.md` section 14.
 3. **Independent watchdog** (`spray_watchdog`, its own process and unit): sends OFF whenever the lease is absent,
@@ -204,8 +205,9 @@ within [off, on]); no tuning value is invented. Watchdog constants (`lease_timeo
 
 Control tick 50 Hz (`tick_hz`, DERIVED = the prototype's 20 ms timer; node-level, RESTART). The lease is published every tick
 (reliable, depth 1; the watchdog's timeout is 0.35 s); `SprayStatus`/`SprayState` at 10 Hz and on every FSM or event change. An ON
-already commanded is re-asserted on the wire at `reassert_hz` with the same `cmd_seq` (a heartbeat: no FSM transition; a late
-duplicate ack is a no-op in the FSM). Events and safety-loss edges are handled at the next tick (<= 20 ms), not inside the
+already commanded is re-published to `dyx3_px4_link` at `reassert_hz` with the same `cmd_seq` (a heartbeat: no FSM transition).
+The link coalesces the exact same source/sequence/intent/actuator mapping/physical value while pending, then suppresses it after
+PX4 accepted that logical request. A late duplicate ACK remains a no-op in the FSM. Events and safety-loss edges are handled at the next tick (<= 20 ms), not inside the
 subscription callbacks as the prototype did. The signal handler only raises a flag so the shutdown OFF can still be published while
 the DDS context is up (rclcpp's own handler would kill the context first); both executables then flush for a bounded time.
 Runtime parameter changes go through `ParamSet` (class rules, validation, journal); `use_sim_time` passes through; the two

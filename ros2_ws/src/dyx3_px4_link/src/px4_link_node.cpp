@@ -443,6 +443,26 @@ void Px4LinkNode::publish_vehicle_command(uint32_t command, float p1, float p2, 
   pub_cmd_->publish(c);
 }
 
+bool Px4LinkNode::same_spray_transaction(const SprayPending& a, const SprayPending& b) {
+  const auto same_float = [](float lhs, float rhs) {
+    return lhs == rhs || (std::isnan(lhs) && std::isnan(rhs));
+  };
+  const auto same_param = [](double lhs, double rhs) {
+    return lhs == rhs || (std::isnan(lhs) && std::isnan(rhs));
+  };
+  const auto& lhs = a.vehicle_command;
+  const auto& rhs = b.vehicle_command;
+  return a.source == b.source && a.seq == b.seq && a.on == b.on && a.backend == b.backend &&
+         a.actuator_set_index == b.actuator_set_index && same_float(a.value, b.value) &&
+         a.servo_instance == b.servo_instance && a.pwm_us == b.pwm_us && a.command == b.command &&
+         lhs.target_system == rhs.target_system && lhs.target_component == rhs.target_component &&
+         lhs.source_system == rhs.source_system && lhs.from_external == rhs.from_external &&
+         same_param(lhs.param1, rhs.param1) && same_param(lhs.param2, rhs.param2) &&
+         same_param(lhs.param3, rhs.param3) && same_param(lhs.param4, rhs.param4) &&
+         same_param(lhs.param5, rhs.param5) && same_param(lhs.param6, rhs.param6) &&
+         same_param(lhs.param7, rhs.param7);
+}
+
 void Px4LinkNode::on_spray_command(const dyx3_interfaces::msg::SprayActuatorCommand& m) {
   using Cmd = dyx3_interfaces::msg::SprayActuatorCommand;
   // The VehicleCommand format must be proven identical on both sides and the session alive:
@@ -496,6 +516,27 @@ void Px4LinkNode::on_spray_command(const dyx3_interfaces::msg::SprayActuatorComm
   request.seq = m.seq;
   request.source = m.source;
   request.on = m.on;
+  request.backend = m.backend;
+  request.actuator_set_index = m.actuator_set_index;
+  request.value = m.value;
+  request.servo_instance = m.servo_instance;
+  request.pwm_us = m.pwm_us;
+
+  // The spray node publishes the same cmd_seq at reassert_hz. Treat an exact match as the same
+  // logical request while pending, or as already proven after an ACCEPTED ACK. The request key
+  // includes producer/sequence/intent plus the full ROS mapping and physical VehicleCommand
+  // payload.
+  if (spray_inflight_ && same_spray_transaction(*spray_inflight_, request)) return;
+  if (std::any_of(spray_queue_.begin(), spray_queue_.end(), [&](const SprayPending& queued) {
+        return same_spray_transaction(queued, request);
+      })) {
+    return;
+  }
+  const auto confirmed = spray_confirmed_.find(request.source);
+  if (confirmed != spray_confirmed_.end()) {
+    if (same_spray_transaction(confirmed->second, request)) return;
+    spray_confirmed_.erase(confirmed);
+  }
 
   const bool watchdog_off = m.source == Cmd::SOURCE_WATCHDOG && !m.on;
   // Newest request from each source wins while queued. A dropped request is explicitly failed so
@@ -550,9 +591,9 @@ void Px4LinkNode::on_vehicle_command_ack(const px4_msgs::msg::VehicleCommandAck&
 
   const SprayPending completed = *spray_inflight_;
   spray_inflight_.reset();
-  publish_spray_ack(completed.seq, completed.source,
-                    a.result == px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_ACCEPTED,
-                    a.result);
+  const bool accepted = a.result == px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_ACCEPTED;
+  if (accepted) spray_confirmed_[completed.source] = completed;
+  publish_spray_ack(completed.seq, completed.source, accepted, a.result);
   dispatch_next_spray_transaction();
 }
 
