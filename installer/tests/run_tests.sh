@@ -194,6 +194,18 @@ F
   # shellcheck disable=SC2317  # invoked indirectly by upgrade_to
   build_px4_msgs() { :; }
 
+  # A failed first installation must not advertise a release or touch persistent state.
+  printf 'keep mission and recorder data\n' >"${DYX3_VAR_LIB}/runs/persistent"
+  : >"${T}/no_agent"
+  (stop_enabled_services() { printf 'stopped\n' >"${T}/first_stop"; }; \
+    FAKE_NO_AGENT="${T}/no_agent" upgrade_to "${A}") >"${T}/up_first_fail" 2>&1
+  rc=$?
+  check "unhealthy first install fails" '[ "${rc}" -ne 0 ] && grep -q "first install" "${T}/up_first_fail"'
+  check "failed first install stops new services" '[ -f "${T}/first_stop" ]'
+  check "failed first install leaves no current symlink" '[ ! -e "${DYX3_CURRENT}" ] && [ ! -L "${DYX3_CURRENT}" ]'
+  check "failed first release is marked unsuccessful and ineligible" '[ -f "${DYX3_RELEASES}/${A}/.failed" ] && [ ! -f "${DYX3_RELEASES}/${A}/.complete" ]'
+  check "first-install failure preserves persistent data" 'grep -q "keep mission and recorder data" "${DYX3_VAR_LIB}/runs/persistent"'
+
   (upgrade_to "${A}") >"${T}/up_a" 2>&1
   rc=$?
   check "first release installs (rc=0)" '[ "${rc}" -eq 0 ]'
@@ -235,6 +247,18 @@ F
   rc=$?
   check "unhealthy upgrade fails (rc!=0)" '[ "${rc}" -ne 0 ]'
   check "unhealthy upgrade reverted to B" '[ "$(basename "$(readlink -f "${DYX3_CURRENT}")")" = "${B}" ]'
+  check "unhealthy upgrade is ineligible and records its failure" '[ ! -f "${DYX3_RELEASES}/${D}/.complete" ] && [ -f "${DYX3_RELEASES}/${D}/.failed" ]'
+  check "unhealthy upgrade restores recorded version and persistent state" 'grep -q "\"stack_sha\": \"${B}\"" "${DYX3_ETC}/versions.json" && grep -q "keep mission and recorder data" "${DYX3_VAR_LIB}/runs/persistent"'
+
+  # A static failure happens after a successful build but before activation.
+  rm -f "${src}/deployment/scripts/start-platform.sh"
+  git -C "${src}" add -A && git -C "${src}" commit -q -m E
+  local E
+  E="$(git -C "${src}" rev-parse HEAD)"
+  (upgrade_to "${E}") >"${T}/up_static_fail" 2>&1
+  rc=$?
+  check "static verification rejects a built release" '[ "${rc}" -ne 0 ] && grep -q "failed verification" "${T}/up_static_fail"'
+  check "static verification failure leaves no completion marker" '[ ! -f "${DYX3_RELEASES}/${E}/.complete" ] && [ "$(basename "$(readlink -f "${DYX3_CURRENT}")")" = "${B}" ]'
 
   (upgrade_to "${D}") >"${T}/up_d2" 2>&1
   rc=$?

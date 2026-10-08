@@ -16,8 +16,10 @@ _fail() {
 
 # health_release <release-dir>: a built release is internally complete (no services needed).
 health_release() {
-  local rel="$1"
-  [ -f "${rel}/.complete" ] && _pass "release ${rel##*/} marked complete" || _fail "release ${rel##*/} not complete"
+  local rel="$1" require_complete="${2:-1}"
+  if [ "${require_complete}" = 1 ]; then
+    [ -f "${rel}/.complete" ] && _pass "release ${rel##*/} marked complete" || _fail "release ${rel##*/} not complete"
+  fi
   [ -f "${rel}/ros2_ws/install/setup.bash" ] && _pass "ros2_ws install present" || _fail "ros2_ws/install/setup.bash missing"
   [ -x "${rel}/bin/dyx3-platform" ] && _pass "bin/dyx3-platform executable" || _fail "bin/dyx3-platform missing"
   local pm

@@ -8,7 +8,7 @@
 | Command | Implemented | What it does |
 |---|---|---|
 | `installer/install.sh --production [--ref R] [--skip-deps] [--dry-run]` (`dyx3-install`) | 11a | OS check → `dyx3` user → `/opt/dyx3`,`/etc/dyx3`,`/var/lib/dyx3`,`/var/log/dyx3` → tmpfiles for `/run/dyx3` → apt deps → pinned MicroXRCEAgent → pinned mavlink-router → ROS 2 Humble → FCU Ethernet profile → first release (same path as upgrade). Idempotent. |
-| `installer/upgrade.sh <git-ref>` (`dyx3-upgrade`) | 11a | fetch → `releases/<sha>` → colcon build (manifest packages) → **verify before switching** → atomic `current` symlink → install units → restart enabled services → health; **reverts automatically** if post-switch health fails. |
+| `installer/upgrade.sh <git-ref>` (`dyx3-upgrade`) | 11a | fetch → `releases/<sha>` → colcon build (manifest packages) → static verification → `.complete` → atomic `current` symlink → install units → restart enabled services → health. Failed health removes `.complete` and records `.failed`; an upgrade restores the previous release and a first install stops its services and removes `current`. |
 | `installer/verify.sh [--deep]` (`dyx3-health`) | 11a (platform only) | release complete, px4_msgs built for the pinned firmware, enabled units active, XRCE agent listening, FCU ping (WARN only), `--deep`: live `/fmu` topics. Phase 11 extends it to the rest of the graph. |
 | `installer/rollback.sh` (`dyx3-rollback`) | 11 | switch back to the release recorded at the last switch → verify it first → units, shims, `versions.json` → restart → health; an unhealthy rollback restores the release it started from; running it twice undoes it. Refuses when nothing is recorded or the previous release was pruned. |
 | `installer/version.sh` (`dyx3-version`) | 11 | `key=value` lines: stack SHA, previous release, **pinned** firmware SHA, `px4_msgs` message-set sha256, profile. The running FCU's own identity is reported as `unavailable` (no FCU read path yet; architecture 3.8's overlay hash is OPEN). |
@@ -56,4 +56,4 @@ real DDS to the FCU, and the supervisor under systemd. See HANDOFF "LOCAL ACTION
 * **Health**: gateway socket, backend ping (both only for ENABLED services), data-volume report (FAIL only when completely full: no threshold invented), `--deep` lists the graph's nodes (WARN).
 * **OPEN**: per-node real-time priority/affinity (the `dyx3-ros` unit applies FIFO 80 / CPU 4 to the whole tree), DDS scoping (loopback-only vs an eth0 whitelist), the backend port (8000, DERIVED), and the ROS domain number.
 
-Tested against a staged root (`installer/tests/run_tests.sh`, 69 checks); **never run on a Jetson**.
+Tested against a staged root (`installer/tests/run_tests.sh`, 80 checks); **never run on a Jetson**.

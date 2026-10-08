@@ -50,3 +50,23 @@ restart_enabled_services() {
     run systemctl restart "${name}.service"
   done < <(manifest_section enabled_services "${rel}/installer/manifests/production.manifest")
 }
+
+# Stop services started by an unsuccessful first installation before removing current.
+stop_enabled_services() {
+  local rel="$1" name
+  systemd_available || return 0
+  while IFS= read -r name; do
+    [ -n "${name}" ] || continue
+    log "stopping ${name}"
+    run systemctl stop "${name}.service" || warn "could not stop ${name}.service after failed activation"
+  done < <(manifest_section enabled_services "${rel}/installer/manifests/production.manifest")
+}
+
+disable_enabled_services() {
+  local rel="$1" name
+  systemd_available || return 0
+  while IFS= read -r name; do
+    [ -n "${name}" ] || continue
+    run systemctl disable "${name}.service" || warn "could not disable ${name}.service after failed first install"
+  done < <(manifest_section enabled_services "${rel}/installer/manifests/production.manifest")
+}

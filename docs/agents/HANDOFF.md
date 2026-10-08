@@ -714,3 +714,13 @@ logical epochs before a proven joint reset; exhaustion fails closed.
 Cloud Review E1 local: interface 0.12.0 separates NTRIP source bytes, CRC-valid frames, RTK publication handoff, and px4_link accepted/refused chunk counters. The latter stop at `GpsInjectData` publication; receiver health remains separate. Phase D CI 37749513456 is red on the spray ACK test; do not push E1 until Phase D is resolved.
 Cloud Review E2 local: NTRIP GGA send-all is nonblocking, cancellation-aware, and bounded by the existing stream timeout. The worker owns final socket close; stop only wakes and shuts down the current fd under the ownership mutex, then joins. No socket integer is used without the lifetime lock for shutdown/close.
 Cloud Review E3 local: existing `ntrip.env` installations require explicit `DYX3_NTRIP_SECURITY=PLAINTEXT|TLS` migration. TLS verifies system or configured CA trust and host identity, with no downgrade; plaintext credentials trigger a fixed warning and status bit. Interface 0.13.0 appends security status fields. The full E4 profile/backend architecture remains unimplemented.
+
+### Cloud Review Phase F implementation authorization (2026-10-08)
+
+The human explicitly assigned Phase F implementation, local tests, and local commits to Codex.
+Claude retains the independent safety-critical review and push decision. Codex must not push.
+F1 makes `.complete` follow successful build and static verification; runtime health failure
+marks the candidate `.failed` and removes its completion marker. A failed first install stops
+and disables its enabled services and clears `current`; a failed upgrade restores units,
+shims, version provenance, and services for the prior release. Staged-root suite: 80/80 on
+macOS with GNU Bash/coreutils/findutils; no Jetson validation claimed.

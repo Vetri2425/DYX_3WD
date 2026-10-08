@@ -93,7 +93,6 @@ build_release() {
     name="$(basename "${s}" .sh)"
     run install -m 0755 "${s}" "${rel}/bin/dyx3-${name#start-}"
   done
-  run touch "${rel}/.complete"
 }
 
 # switch_release <sha>: atomically point current at it; remember the previous one.
@@ -164,10 +163,13 @@ upgrade_to() {
     return 0
   fi
 
-  # Verify BEFORE switching: a bad build never becomes current.
-  if ! (health_release_only "${DYX3_RELEASES}/${sha}"); then
+  # Verify the built files before writing the marker that makes the release eligible.
+  if ! (health_release_only "${DYX3_RELEASES}/${sha}" 0); then
+    run rm -f "${DYX3_RELEASES}/${sha}/.complete"
     die "release ${sha:0:10} failed verification; current is unchanged"
   fi
+  run rm -f "${DYX3_RELEASES}/${sha}/.failed"
+  run touch "${DYX3_RELEASES}/${sha}/.complete"
 
   switch_release "${sha}"
   install_units "${DYX3_CURRENT}"
@@ -181,20 +183,30 @@ upgrade_to() {
     log "upgrade complete: ${sha:0:10}"
     return 0
   fi
+  warn "release ${sha:0:10} failed post-switch health verification"
+  run rm -f "${DYX3_RELEASES}/${sha}/.complete"
+  run touch "${DYX3_RELEASES}/${sha}/.failed"
   if [ -n "${prev}" ] && [ -d "${DYX3_RELEASES}/${prev}" ]; then
     warn "post-switch health FAILED: reverting to ${prev:0:10}"
+    stop_enabled_services "${DYX3_RELEASES}/${sha}"
     atomic_symlink "${DYX3_RELEASES}/${prev}" "${DYX3_CURRENT}"
     install_units "${DYX3_CURRENT}"
+    install_operator_shims
+    write_versions_file "${DYX3_CURRENT}"
     restart_enabled_services "${DYX3_CURRENT}"
     die "upgrade to ${sha:0:10} reverted to ${prev:0:10}"
   fi
+  stop_enabled_services "${DYX3_RELEASES}/${sha}"
+  disable_enabled_services "${DYX3_RELEASES}/${sha}"
+  run rm -f "${DYX3_CURRENT}"
+  run rm -f "${DYX3_ETC}/versions.json"
   die "health failed on first install of ${sha:0:10}; no previous release to revert to"
 }
 
 # health_release_only <release-dir>: static verification (no services).
 health_release_only() {
   _health_fail=0
-  health_release "$1"
+  health_release "$1" "${2:-1}"
   return "${_health_fail}"
 }
 
