@@ -35,7 +35,7 @@ Limited apply_limits(const Motion& in, double dt, const Limits& lim, LimitState&
     reset(st);
     return out;
   }
-  // 1. static clamps
+  // 1. Production hard envelopes. These are the only limits the normal guard path applies.
   float v = in.speed_body_x;
   const float vmax = lim.max_forward_speed_mps;
   const float vmin = -lim.max_reverse_speed_mps;
@@ -60,6 +60,17 @@ Limited apply_limits(const Motion& in, double dt, const Limits& lim, LimitState&
     }
   }
 
+  // B2 / review H5: RPP is the sole normal speed/yaw-rate profile owner. Do not ramp, jerk-limit,
+  // or yaw-accel-limit a valid RPP command. Reset the legacy shaper state so it can never leak into
+  // production output.
+  if (!lim.profile_shaping_test_mode) {
+    reset(st);
+    out.motion.speed_body_x = v;
+    out.motion.yaw_rate_setpoint = uses_rate(in.mode) ? r : in.yaw_rate_setpoint;
+    return out;
+  }
+
+  // TEST ONLY below: retained to exercise the old second-line shaper in isolation.
   // 2. speed ramp. PIVOT requires speed 0 (contract), so it is never stretched.
   if (in.mode == Mode::Pivot) {
     v = 0.0F;

@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <limits>
 #include <stdexcept>
 
 namespace dyx3_motion_guard {
@@ -175,16 +174,12 @@ void MotionGuardNode::declare_and_validate_params() {
   require(std::isfinite(gate_cfg_.rtk.max_hrms_m) && gate_cfg_.rtk.max_hrms_m > 0.0F,
           "rtk_max_hrms_m must be > 0");
   gate_cfg_.require_gnss_yaw_fusion = declare_parameter<bool>("require_gnss_yaw_fusion", true);
-  const double nan = std::numeric_limits<double>::quiet_NaN();
   limits_.max_forward_speed_mps = static_cast<float>(d("max_forward_speed_mps", 1.0));
   limits_.max_reverse_speed_mps = static_cast<float>(d("max_reverse_speed_mps", 0.10));
   limits_.max_yaw_rate_radps = static_cast<float>(d("max_yaw_rate_radps", 0.45));
-  limits_.max_accel_mps2 = static_cast<float>(d("max_accel_mps2", 0.20));
-  limits_.max_decel_mps2 = static_cast<float>(d("max_decel_mps2", 0.50));
-  limits_.max_yaw_accel_radps2 = static_cast<float>(d("max_yaw_accel_radps2", nan));
-  limits_.max_jerk_mps3 = static_cast<float>(d("max_jerk_mps3", nan));
-  require(limits_valid(limits_),
-          "limits (finite and positive; reverse >= 0; yaw_accel and jerk positive or NaN)");
+  // B2 / review H5: accel/decel/jerk/yaw-accel are owned by RPP and are intentionally not ROS
+  // parameters here. profile_shaping_test_mode remains false in the production node.
+  require(limits_valid(limits_), "hard limits (forward/yaw > 0; reverse >= 0)");
 }
 
 GateInputs MotionGuardNode::gather(double now_s) const {

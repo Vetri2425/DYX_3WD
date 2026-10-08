@@ -52,7 +52,7 @@ For the freshest RPP command, the first failing check wins and yields STOP with 
 | 9 | heading: estimator health fresh and `flags_valid`, GNSS yaw fusion intended and not faulted, yaw not rejected, `VehicleState.attitude_valid` | `HEADING_UNHEALTHY` (9) |
 | 10 | estimator: position and velocity valid, no inertial dead reckoning, no horizontal position/velocity rejection | `ESTIMATOR_UNHEALTHY` (12) |
 | 11 | mission: `MissionState` fresh and `RUNNING` | `MISSION_GATE` (4) |
-| 12 | limits (section 5): clamp, never refuse | `LIMIT_CLAMPED` (7) with `accepted=true`, `clamped=true` |
+| 12 | hard envelopes (section 5): clamp, never refuse | `LIMIT_CLAMPED` (7) with `accepted=true`, `clamped=true` |
 
 `SafetyGateStatus` is the aggregate of checks 4–10 (everything except the mission gate and the
 command's own validity) at a fixed 10 Hz with the same priority order; `ok=false` is
@@ -78,26 +78,22 @@ boot-asserted. `EmergencyStopState` is published at 10 Hz; a consumer treats its
 
 Applied after every gate passed, to the forwarded command, never to STOP:
 
-| Limit | Parameter | Default | Source |
+| Hard envelope | Parameter | Default | Source |
 |---|---|---|---|
-| forward speed | `max_forward_speed_mps` | 1.0 | prototype `max_linear_vel` default. Field runs 0.35; the guard's envelope is a human decision. Re-validate at GATE 4 |
-| reverse speed | `max_reverse_speed_mps` | **0.10** | **DERIVED — human decision 2026-10-08 (review H6 / fix plan B1).** RPP's active brake is capped at 0.08 m/s and terminal creep is 0.10 m/s, so 0.10 m/s is the initial hard reverse envelope. It is not field-tuned; re-validate reverse/brake behaviour at GATE 1. |
-| yaw rate | `max_yaw_rate_radps` | 0.45 | prototype `max_yaw_rate_body` default. Re-validate at GATE 4 |
-| acceleration | `max_accel_mps2` | 0.20 | prototype `max_linear_accel` default |
-| deceleration | `max_decel_mps2` | 0.50 | prototype `max_linear_decel` default |
-| yaw-rate change | `max_yaw_accel_radps2` | NaN = off | **no source**; spec lists jerk limits, no prototype value exists |
-| jerk | `max_jerk_mps3` | NaN = off | **no source** |
+| forward speed | `max_forward_speed_mps` | 1.0 | prototype `max_linear_vel` default. Field runs 0.35; re-validate at GATE 4 |
+| reverse speed | `max_reverse_speed_mps` | **0.10** | **DERIVED — human decision 2026-10-08 (review H6 / fix plan B1).** RPP's active brake is capped at 0.08 m/s and terminal creep is 0.10 m/s. Initial bench value; re-validate at GATE 1. |
+| absolute yaw rate | `max_yaw_rate_radps` | 0.45 | prototype `max_yaw_rate_body` default. Re-validate at GATE 4 |
 
-The speed limiter rate-limits the signed speed against the last guard output: moving away from zero
-uses the acceleration limit, toward zero the deceleration limit, a sign change goes through zero.
-`TRACK_HEADING` carries a heading, not a rate, so the yaw-rate limit applies to `TRACK_RATE`,
-`PIVOT` and `CREEP` only; the firmware's own rate limit (`RO_YAW_RATE_LIM`) bounds the
-heading-tracking case. A limit that cannot be honoured is a clamp, not a refusal. `PIVOT` requires speed 0 by contract, so it
-bypasses the speed ramp (the deceleration limit is not applied to `PIVOT` or `STOP`; RPP owns the stop
-profile). The limiter state is reset to zero by every fail-to-zero.
+**B2 / review H5 authority decision (human, 2026-10-08): RPP is the sole normal motion-profile
+owner.** Motion Guard does not ramp acceleration/deceleration, jerk-limit speed, or limit yaw-rate
+change. If an RPP speed/yaw-rate is inside the three hard envelopes above, the guard forwards it
+unchanged. A hard-envelope violation is clamped and reported `LIMIT_CLAMPED`; any safety-gate
+failure is still an immediate canonical STOP.
 
-**B1 scope:** the 0.10 m/s change is only the hard reverse envelope. The existing normal-path
-acceleration/deceleration/jerk shaping is unchanged here and is decided separately in B2.
+The previous accel/decel/jerk/yaw-accel shaper is retained only in the pure-C++ `Limits` test harness
+behind `profile_shaping_test_mode`. That flag defaults false, is not a ROS parameter, and the
+production node does not declare the four shaping values as ROS parameters. It exists only to keep
+the old limiter mechanics directly testable; it is not a second production controller.
 
 ## 6. Parameters
 
@@ -111,12 +107,12 @@ acceleration/deceleration/jerk shaping is unchanged here and is decided separate
 | `rtk_min_fix_type` | 6 | IDLE_ONLY | prototype `min_fix_type` |
 | `rtk_max_hrms_m` | 0.10 | IDLE_ONLY | prototype `rtk_max_hrms_m` |
 | `require_gnss_yaw_fusion` | true | IDLE_ONLY | DERIVED: CLAUDE.md §3, dual-antenna heading is first-class |
-| limits | section 5 | LIVE (target) | spec §9 lists speed limits as LIVE |
+| hard envelopes | section 5 | LIVE (target) | spec §9 lists speed limits as LIVE |
 
 **This version reads every parameter once at start** (effectively RESTART) and refuses to start on an
-invalid value (the node throws; fail loud, not "fall back to a default"). The LIVE classes above are the
-target: a runtime-change callback that validates, records the change, and only **tightens** a limit while
-a mission is RUNNING is a follow-up (the registry classification stands; the mechanism is not built).
+invalid value (the node throws; fail loud, not "fall back to a default"). The LIVE hard-envelope class
+above is the target: a runtime-change callback that validates, records the change, and only **tightens**
+an envelope while a mission is RUNNING is a follow-up. RPP owns accel/decel/jerk profile parameters.
 A restart mid-mission in OFFBOARD aborts the run (CLAUDE.md section 7), which is why it must come.
 `yaw_test_ratio_max` and the other ratio limits are **not implemented**: `estimator_status` is not on
 DDS at the flashed firmware (`EstimatorHealth.test_ratios_valid` is always false), and no numeric

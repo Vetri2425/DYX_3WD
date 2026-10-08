@@ -39,8 +39,6 @@ DecisionConfig cfg() {
   c.command_max_age_s = 0.2;
   c.limits.max_forward_speed_mps = 1.0F;
   c.limits.max_reverse_speed_mps = 0.3F;
-  c.limits.max_accel_mps2 = 100.0F;  // effectively unramped unless a test narrows it
-  c.limits.max_decel_mps2 = 100.0F;
   return c;
 }
 
@@ -109,11 +107,6 @@ TEST(Limits, ClampsSpeedAndRate) {
 }
 TEST(Limits, ReverseDefaultAllowsBoundedBrakeEnvelope) {
   Limits l;
-  // Isolate the B1 hard reverse envelope. B2 decides whether the normal-path accel/decel shaper
-  // remains; it is deliberately not changed by this patch.
-  l.max_accel_mps2 = 100.0F;
-  l.max_decel_mps2 = 100.0F;
-
   Motion m;
   m.mode = Mode::TrackRate;
   m.yaw_setpoint = NaN;
@@ -137,8 +130,33 @@ TEST(Limits, ReverseDefaultAllowsBoundedBrakeEnvelope) {
     EXPECT_FLOAT_EQ(o.motion.speed_body_x, -0.10F);
   }
 }
+
+TEST(Limits, ProductionPathPassesRppProfileUnshapedInsideHardEnvelopes) {
+  Limits l;
+  LimitState st;
+  Motion m;
+  m.mode = Mode::TrackRate;
+  m.yaw_setpoint = NaN;
+
+  // A tiny dt would have heavily ramped both values in the old normal path.
+  m.speed_body_x = 0.35F;
+  m.yaw_rate_setpoint = 0.40F;
+  auto o = apply_limits(m, 0.001, l, st);
+  EXPECT_FALSE(o.clamped);
+  EXPECT_FLOAT_EQ(o.motion.speed_body_x, 0.35F);
+  EXPECT_FLOAT_EQ(o.motion.yaw_rate_setpoint, 0.40F);
+
+  m.speed_body_x = -0.08F;
+  m.yaw_rate_setpoint = -0.40F;
+  o = apply_limits(m, 0.001, l, st);
+  EXPECT_FALSE(o.clamped);
+  EXPECT_FLOAT_EQ(o.motion.speed_body_x, -0.08F);
+  EXPECT_FLOAT_EQ(o.motion.yaw_rate_setpoint, -0.40F);
+}
+
 TEST(Limits, HeadingModeKeepsNanRateAndIgnoresRateLimits) {
   Limits l = cfg().limits;
+  l.profile_shaping_test_mode = true;
   l.max_yaw_accel_radps2 = 0.1F;
   LimitState st;
   Motion m;
@@ -152,6 +170,7 @@ TEST(Limits, HeadingModeKeepsNanRateAndIgnoresRateLimits) {
 }
 TEST(Limits, AccelerationRampAndStopBypass) {
   Limits l = cfg().limits;
+  l.profile_shaping_test_mode = true;
   l.max_accel_mps2 = 0.2F;
   l.max_decel_mps2 = 0.5F;
   LimitState st;
@@ -180,6 +199,7 @@ TEST(Limits, AccelerationRampAndStopBypass) {
 }
 TEST(Limits, JerkBoundsAccelerationChange) {
   Limits l = cfg().limits;
+  l.profile_shaping_test_mode = true;
   l.max_accel_mps2 = 1.0F;
   l.max_jerk_mps3 = 2.0F;
   LimitState st;
@@ -200,6 +220,7 @@ TEST(Limits, JerkBoundsAccelerationChange) {
 }
 TEST(Limits, YawAccelLimit) {
   Limits l = cfg().limits;
+  l.profile_shaping_test_mode = true;
   l.max_yaw_accel_radps2 = 1.0F;
   LimitState st;
   Motion m;
@@ -412,8 +433,9 @@ TEST(Decision, ClampIsReportedAndAccepted) {
   EXPECT_TRUE(d.clamped);
   EXPECT_FLOAT_EQ(d.out.speed_body_x, 1.0F);
 }
-TEST(Decision, FailToZeroResetsTheRamp) {
+TEST(Decision, FailToZeroResetsTheTestModeShaper) {
   DecisionConfig c = cfg();
+  c.limits.profile_shaping_test_mode = true;
   c.limits.max_accel_mps2 = 0.2F;
   GuardCore g(1, c);
   g.on_command(cmd(1, Mode::TrackRate, 0.35F, NaN, 0.1F), 0.0);

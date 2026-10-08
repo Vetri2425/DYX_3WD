@@ -48,8 +48,6 @@ struct Rig {
     rclcpp::NodeOptions no;
     no.context(ctx);
     no.append_parameter_override("max_reverse_speed_mps", 0.3);
-    no.append_parameter_override("max_accel_mps2", 100.0);  // no ramp unless a test wants one
-    no.append_parameter_override("max_decel_mps2", 100.0);
     for (const auto& p : params)
       no.append_parameter_override(p.get_name(), p.get_parameter_value());
     guard = std::make_shared<MotionGuardNode>(no, [this]() { return now; }, false);
@@ -191,7 +189,7 @@ TEST(MotionGuardNode, RejectsBadParameters) {
   ctx->init(0, nullptr, io);
   rclcpp::NodeOptions no;
   no.context(ctx);
-  no.append_parameter_override("max_accel_mps2", -1.0);
+  no.append_parameter_override("max_yaw_rate_radps", -1.0);
   EXPECT_THROW(MotionGuardNode(no, nullptr, false), std::invalid_argument);
   rclcpp::NodeOptions no2;
   no2.context(ctx);
@@ -223,10 +221,15 @@ TEST(MotionGuardNode, ForwardsAfterSessionAcceptanceWhenAllGatesPass) {
   EXPECT_EQ(r.last_status.reason_code, dyx3_interfaces::msg::MotionSetpointStatus::REASON_SEQUENCE);
   r.run(0.2);
   EXPECT_EQ(r.last_out.mode, MotionSetpoint::MODE_TRACK_RATE);
-  EXPECT_FLOAT_EQ(r.last_out.speed_body_x, 0.3F);
+  EXPECT_FLOAT_EQ(r.last_out.speed_body_x, 0.3F);  // B2: exact RPP speed, no guard ramp
   EXPECT_TRUE(r.last_status.accepted);
   EXPECT_TRUE(r.last_gate.ok);
   EXPECT_FALSE(r.last_estop.asserted);
+
+  // B1 + B2 together: the active-brake command is inside the hard reverse envelope and leaves the
+  // production guard unchanged.
+  r.tick(0.02, true, MotionSetpoint::MODE_TRACK_RATE, -0.08F, NaN, 0.0F);
+  EXPECT_FLOAT_EQ(r.last_out.speed_body_x, -0.08F);
 }
 
 TEST(MotionGuardNode, EachInputLossZeroesWithItsReasonAndRecovers) {
