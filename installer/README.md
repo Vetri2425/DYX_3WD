@@ -67,6 +67,34 @@ real DDS to the FCU, and the supervisor under systemd. See HANDOFF "LOCAL ACTION
 
 ## Phase 11 additions
 
+### Tablet access and token
+
+The optional NetworkManager profile `dyx3-hotspot` uses the detected Wi-Fi device as an access
+point at `10.42.0.1/24`. NetworkManager's `shared` IPv4 mode provides tablet DHCP. The profile
+has no default route and no bridge. A NetworkManager pre-up hook installs firewall DROP rules
+between that Wi-Fi interface and the FCU Ethernet interface in both directions. The Wi-Fi
+hardware and AP support still need a rover bench check. NetworkManager's shared mode can
+forward to other default routes, such as LTE; the FCU link is explicitly blocked.
+
+`/etc/dyx3/hotspot.env` is created once from an empty template (`root:dyx3`, mode `0640`) and
+never overwritten. Set unquoted `DYX3_HOTSPOT_SSID` (1–32 ASCII letters, digits, `.`, `_`, `-`)
+and `DYX3_HOTSPOT_PSK` (8–63 characters from the template's supported ASCII punctuation and
+letters/digits). Leave either blank to disable the access point. The installer skips profile
+creation when no Wi-Fi device is present. It writes the secret only to a root-owned `0600`
+NetworkManager keyfile; it never sends the passphrase in a command argument or log.
+
+Bench check after filling the env file and rerunning the installer or upgrading:
+
+```bash
+nmcli device
+sudo nmcli connection up dyx3-hotspot
+# Connect the tablet to the configured SSID, then from the tablet:
+curl http://10.42.0.1:8000/api/ping
+```
+
+The bench backend's existing `DYX3_BACKEND_HOST=0.0.0.0` in `/etc/dyx3/backend.env` is left
+as configured.
+
 * **Services** (`[services]` in the manifest): `dyx3-platform`, `dyx3-ros` (mission, motion_guard, px4_link, spray, system_gateway via `dyx3_bringup/control_graph.launch.py`),
   `dyx3-rtk`, `dyx3-backend`, `dyx3-recorder`, and **`dyx3-spray-watchdog` as its own unit** (not tied to `dyx3-ros`, so it survives the graph dying).
   `[enabled_services]` lists **all six** since 2026-10-08, when each was verified running on the 3WD rover. An enabled service that fails its environment

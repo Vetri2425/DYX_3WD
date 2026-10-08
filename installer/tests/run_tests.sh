@@ -245,6 +245,20 @@ F
   check "config templates installed" '[ -f "${DYX3_ETC}/platform.env" ] && [ -f "${DYX3_ETC}/mavlink-router.conf" ]'
   check "operator shims installed" '[ -x "${DYX3_BIN}/dyx3-upgrade" ] && [ -x "${DYX3_BIN}/dyx3-health" ] && [ -x "${DYX3_BIN}/dyx3-install" ] && [ -x "${DYX3_BIN}/dyx3-rollback" ] && [ -x "${DYX3_BIN}/dyx3-version" ]'
   check "config templates for ros/backend/ntrip installed" '[ -f "${DYX3_ETC}/ros.env" ] && [ -f "${DYX3_ETC}/backend.env" ] && [ -f "${DYX3_ETC}/ntrip.env" ]'
+  check "hotspot template created with no credentials and mode 0640" '[ -f "${DYX3_ETC}/hotspot.env" ] && [ "$(stat -c %a "${DYX3_ETC}/hotspot.env")" = 640 ] && ! grep -Eq "^DYX3_HOTSPOT_(SSID|PSK)=." "${DYX3_ETC}/hotspot.env"'
+  local hotspot_profile="${DYX3_ROOT}/etc/NetworkManager/system-connections/dyx3-hotspot.nmconnection"
+  check "hotspot has no profile before configuration" '[ ! -e "${hotspot_profile}" ]'
+  printf 'DYX3_HOTSPOT_SSID=TestRover\nDYX3_HOTSPOT_PSK=DummyBenchPass123\n' >"${DYX3_ETC}/hotspot.env"
+  nmcli() { if [ "${1:-}" = "-t" ]; then printf '%s\n' "eth0:ethernet"; else printf '%s\n' "$*" >>"${T}/nmcli_argv"; fi; }
+  install_hotspot_network >"${T}/hotspot_log" 2>&1
+  check "configured hotspot skips cleanly without Wi-Fi hardware" '[ ! -e "${hotspot_profile}" ] && grep -q "no Wi-Fi device" "${T}/hotspot_log"'
+  nmcli() { if [ "${1:-}" = "-t" ]; then printf '%s\n' "wlan0:wifi"; else printf '%s\n' "$*" >>"${T}/nmcli_argv"; fi; }
+  install_hotspot_network >>"${T}/hotspot_log" 2>&1
+  check "hotspot profile created only when configured and Wi-Fi exists" '[ -f "${hotspot_profile}" ] && grep -qx "method=shared" "${hotspot_profile}" && grep -qx "address1=10.42.0.1/24" "${hotspot_profile}" && grep -qx "never-default=true" "${hotspot_profile}" && [ "$(stat -c %a "${hotspot_profile}")" = 600 ]'
+  check "hotspot isolation hook blocks Wi-Fi to FCU both ways" 'grep -q -- "-i \"wlan0\" -o \"${FCU_IFACE}\" -j DROP" "${DYX3_ROOT}/etc/NetworkManager/dispatcher.d/pre-up.d/90-dyx3-hotspot-isolation" && grep -q -- "-i \"${FCU_IFACE}\" -o \"wlan0\" -j DROP" "${DYX3_ROOT}/etc/NetworkManager/dispatcher.d/pre-up.d/90-dyx3-hotspot-isolation"'
+  check "no hotspot credential appears in argv or installer logs" '! grep -q "DummyBenchPass123" "${T}/hotspot_log" "${T}/nmcli_argv" 2>/dev/null'
+  install_config_templates "${DYX3_CURRENT}" >/dev/null 2>&1
+  check "existing hotspot.env is never overwritten" 'grep -q "DummyBenchPass123" "${DYX3_ETC}/hotspot.env"'
   check "versions.json written for the recorder" 'grep -q "\"stack_sha\": \"${A}\"" "${DYX3_ETC}/versions.json" && grep -q firmware_expected_sha "${DYX3_ETC}/versions.json"'
   check "systemd units copied" '[ -f "${DYX3_ROOT}/etc/systemd/system/dyx3-platform.service" ]'
 

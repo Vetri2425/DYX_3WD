@@ -5,6 +5,7 @@
 APT_PACKAGES=(
   build-essential cmake ninja-build meson pkg-config git curl ca-certificates
   gnupg lsb-release python3-pip python3-venv network-manager iproute2 iputils-ping
+  dnsmasq-base iptables
   libssl-dev libasio-dev libtinyxml2-dev nlohmann-json3-dev zstd
 )
 
