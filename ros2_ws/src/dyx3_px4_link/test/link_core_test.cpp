@@ -32,6 +32,31 @@ TEST(Staleness, PerTopicBoundaryAndMaskBits) {
   EXPECT_TRUE(r.session_alive);  // timesync still fresh: the session is up while topics died
   EXPECT_NEAR(r.worst_age_s, 0.25, 1e-9);
 }
+// Rover 2026-10-08 (fw 9ab2ad3162): timesync_status and estimator_status_flags arrive every
+// 1.010 s. With the old 1.0 s limits the session was declared dead and re-established every
+// second (handshake re-armed, link failing to zero). The defaults must ride through that cadence.
+TEST(Staleness, MeasuredOneHzCadenceKeepsSessionAlive) {
+  StalenessMonitor m{StalenessLimits{}};
+  constexpr double kSlowPeriod = 1.010;
+  double next_slow = 0.0;
+  for (int k = 0; k <= 2000; ++k) {  // 20 s at 100 Hz
+    const double t = k * 0.01;
+    if (t >= next_slow) {
+      m.on_sample(kTimesync, t);
+      m.on_sample(kEstimatorFlags, t);
+      next_slow += kSlowPeriod;
+    }
+    m.on_sample(kLocalPosition, t);
+    m.on_sample(kAttitude, t);
+    if (k % 50 == 0) m.on_sample(kVehicleStatus, t);
+    if (k % 20 == 0) m.on_sample(kGps, t);
+    const auto r = m.evaluate(t);
+    ASSERT_TRUE(r.session_alive) << "t=" << t;
+    ASSERT_EQ(r.mask, 0U) << "t=" << t;
+  }
+  EXPECT_EQ(m.session_resets(), 0U);
+}
+
 TEST(Staleness, SilentTopicWhileSessionUpIsDetected) {  // upstream #27388
   StalenessMonitor m{StalenessLimits{}};
   feed_all(m, 0.0);

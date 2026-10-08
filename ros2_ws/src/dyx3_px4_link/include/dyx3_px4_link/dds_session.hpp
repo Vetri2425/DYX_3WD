@@ -20,8 +20,10 @@ enum TopicBit : int {
 
 struct StalenessLimits {
   // DERIVED — NOT FROM V1 SPEC: see the contract table; re-validate at GATE 4 from recorded
-  // periods.
-  std::array<double, kTopicCount> max_age_s{1.0, 0.2, 1.0, 0.2, 1.0, 1.0};
+  // periods. timesync_status and estimator_status_flags measured on the rover at 1.010 s
+  // (fw 9ab2ad3162, 2026-10-08): a 1.0 s limit declared the session dead every second, so
+  // both allow three missed samples.
+  std::array<double, kTopicCount> max_age_s{3.0, 0.2, 1.0, 0.2, 3.0, 1.0};
 };
 
 struct StalenessReport {

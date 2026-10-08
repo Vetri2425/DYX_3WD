@@ -127,12 +127,12 @@ its age exceeds its limit. Bit assignment (frozen with `Px4LinkStatus`):
 
 | Bit | Topic | Limit parameter | Default | Source |
 |---|---|---|---|---|
-| 0 | timesync_status | `stale_timesync_s` | 1.0 | DERIVED — sync runs at ~1 Hz, no firmware figure: re-validate |
-| 1 | vehicle_local_position | `stale_local_position_s` | 0.2 | DERIVED — PX4 publishes at EKF rate, 10 missed |
-| 2 | vehicle_status | `stale_vehicle_status_s` | 1.0 | firmware rate limit is 5 Hz (0.2 s); 5 missed |
-| 3 | vehicle_attitude | `stale_attitude_s` | 0.2 | DERIVED |
-| 4 | estimator_status_flags | `stale_estimator_flags_s` | 1.0 | DERIVED — flags change rarely, firmware republishes slowly |
-| 5 | vehicle_gps_position | `stale_gps_s` | 1.0 | DERIVED — GNSS runs 5–10 Hz |
+| 0 | timesync_status | `stale_timesync_s` | 3.0 | MEASURED on the rover 2026-10-08: period 1.010 s (σ 0.3 ms); 1.0 flapped the session every second → three missed samples |
+| 1 | vehicle_local_position | `stale_local_position_s` | 0.2 | MEASURED 50 Hz (`/fmu/out/vehicle_local_position_v1`); 10 missed |
+| 2 | vehicle_status | `stale_vehicle_status_s` | 1.0 | MEASURED 1.98 Hz (0.506 s, `/fmu/out/vehicle_status_v1`) while idle, not the 5 Hz rate limit; ~2 missed |
+| 3 | vehicle_attitude | `stale_attitude_s` | 0.2 | MEASURED 100 Hz; 20 missed |
+| 4 | estimator_status_flags | `stale_estimator_flags_s` | 3.0 | MEASURED 0.99 Hz (1.010 s); 1.0 flapped every second → three missed. Revisit when the firmware rate rises (timing contract) |
+| 5 | vehicle_gps_position | `stale_gps_s` | 1.0 | MEASURED 5.0 Hz (UM982); 5 missed |
 
 All limits are DERIVED, none comes from the spec or a bag: they are `IDLE_ONLY`, validated
 positive, and must be re-validated at GATE 4 from recorded topic periods
