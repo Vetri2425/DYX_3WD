@@ -25,6 +25,19 @@ struct Lease {
   int off_pwm_us{0};
 };
 
+// Fields that determine the physical destination/value of an OFF command. Lease permissions,
+// sequence, and freshness are deliberately excluded from actuator identity.
+struct ActuatorMapping {
+  int backend{kBackendActuator};
+  int actuator_set_index{1};
+  double off_value{-1.0};
+  int servo_instance{1};
+  int off_pwm_us{0};
+};
+
+ActuatorMapping actuator_mapping(const Lease& lease);
+bool same_actuator_mapping(const ActuatorMapping& a, const ActuatorMapping& b);
+
 // Empty string when valid; otherwise the reason. A lease that cannot safely describe the physical
 // OFF command is invalid.
 std::string validate_lease(const Lease& l);

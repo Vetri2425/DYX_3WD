@@ -6,6 +6,17 @@
 
 namespace dyx3_spray {
 
+ActuatorMapping actuator_mapping(const Lease& lease) {
+  return {lease.backend, lease.actuator_set_index, lease.off_value, lease.servo_instance,
+          lease.off_pwm_us};
+}
+
+bool same_actuator_mapping(const ActuatorMapping& a, const ActuatorMapping& b) {
+  return a.backend == b.backend && a.actuator_set_index == b.actuator_set_index &&
+         a.off_value == b.off_value && a.servo_instance == b.servo_instance &&
+         a.off_pwm_us == b.off_pwm_us;
+}
+
 std::string validate_lease(const Lease& l) {
   if (l.command_seq < 0) return "command_seq must be non-negative";
   if (l.backend != kBackendActuator && l.backend != kBackendServoPwm) {

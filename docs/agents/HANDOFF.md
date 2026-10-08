@@ -613,3 +613,31 @@ changed and no interface version bump is required.
 Checks run for D1: `clang-format --dry-run --Werror` and `git diff --check` pass. Not run: D1
 `px4_link_node_test`, other ROS gtests, or colcon build/test; ROS 2 and `colcon` are unavailable
 on this Mac. D1 has not been pushed and has no CI result yet.
+
+### D1 token-lifetime audit and hardening — local
+
+At exact PX4 SHA `27a7ac92845317b0276776242c504215809b2a0f`, IDs >=1000 are mode-executor identities
+(`Commander::getSourceFromCommand`, `Commander::handleCommandsFromModeExecutors`); MAVLink's
+`MavlinkCommandSender` suppresses normal command forwarding for those IDs and `mavlink_main.cpp`
+suppresses ACK forwarding for targets >=1000. The actuator command itself ignores source identity,
+but using that range would change component ownership. `source_system` is copied to ACK target
+system and is used by `Mavlink::handleAndGetCurrentCommandAck` for target routing, so varying it is
+not a safe independent ID axis. Follow-up commit `ffe623e` uses each component ID 2..999 once,
+advances the durable high-water mark before publishing, continues after process restart, and
+refuses on exhaustion or missing/corrupt/unwritable state. Fresh install seeds the state; an
+installed rover with a missing ledger stays refused. Four allocator tests cover the range boundary,
+oldest-token non-reuse, process restart, and corrupt state. A px4-link node test verifies exhausted
+identity cannot produce a successful watchdog OFF ACK. Native standalone allocator smoke assertions
+passed; node/gtest/colcon execution is unavailable locally. Operational limit: only 998 spray
+transactions per ledger lifetime; after exhaustion, reinitialize only after PX4 and companion are
+reset together and old ACKs are gone.
+
+### D2 — watchdog OFF proof bound to mapping (local, not yet committed)
+
+Watchdog proof identity is `(backend, actuator_set_index, off_value, servo_instance, off_pwm_us)`.
+An identical update keeps proof; a changed mapping clears it immediately, cancels the matching
+in-flight proof sequence, withholds ON authority, and requires an OFF ACK for the new mapping.
+Stale A ACKs cannot satisfy B. Added core tests for A-to-B transition, map change during A OFF,
+each mapping field, identical update, and shutdown fail-closed behavior. Standalone watchdog
+mapping smoke test, `-Werror` source compilation, clang-format dry-run, and `git diff --check` pass;
+ROS/gtest is unavailable locally.

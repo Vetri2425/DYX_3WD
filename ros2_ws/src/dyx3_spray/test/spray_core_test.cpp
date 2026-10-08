@@ -92,6 +92,91 @@ TEST(WatchdogCore, StartsFailClosedAndProvesItCanCloseTheValve) {
   EXPECT_FALSE(w.status(1.02).allow_on);
 }
 
+TEST(WatchdogCore, OffProofIsBoundToTheCurrentMappingAndOldAckCannotProveNewMapping) {
+  WatchdogCore w{WatchdogParams{}};
+  const auto off_a = w.tick(1.0);  // startup fallback mapping A
+  ASSERT_TRUE(off_a.has_value());
+  w.on_ack(off_a->seq, true, 1.01);
+  ASSERT_TRUE(w.status(1.01).off_authority_ready);
+
+  Lease mapping_b = allowing();
+  mapping_b.backend = kBackendServoPwm;
+  mapping_b.servo_instance = 3;
+  mapping_b.off_pwm_us = 1000;
+  w.on_lease(mapping_b, 1.1);
+  EXPECT_FALSE(w.status(1.1).off_authority_ready);
+  EXPECT_FALSE(w.status(1.1).allow_on);
+  w.on_ack(off_a->seq, true, 1.11);  // delayed A ACK is no longer in flight
+  EXPECT_FALSE(w.status(1.11).off_authority_ready);
+
+  const auto off_b = w.tick(1.11);
+  ASSERT_TRUE(off_b.has_value());
+  EXPECT_EQ(off_b->mapping.backend, kBackendServoPwm);
+  EXPECT_EQ(off_b->mapping.servo_instance, 3);
+  EXPECT_EQ(off_b->mapping.off_pwm_us, 1000);
+  EXPECT_NE(off_b->seq, off_a->seq);
+  w.on_ack(off_a->seq, true, 1.12);  // stale A ACK while B is in flight
+  EXPECT_FALSE(w.status(1.12).off_authority_ready);
+  w.on_ack(off_b->seq, true, 1.13);
+  EXPECT_TRUE(w.status(1.13).off_authority_ready);
+}
+
+TEST(WatchdogCore, MappingChangeDuringInflightOffInvalidatesSequenceAndRequiresNewOff) {
+  WatchdogCore w{WatchdogParams{}};
+  const auto off_a = w.tick(1.0);
+  ASSERT_TRUE(off_a.has_value());
+  Lease mapping_b = allowing();
+  mapping_b.off_value = -0.5;
+  w.on_lease(mapping_b, 1.01);
+  EXPECT_FALSE(w.status(1.01).off_authority_ready);
+
+  const auto off_b = w.tick(1.01);
+  ASSERT_TRUE(off_b.has_value());
+  EXPECT_EQ(off_b->mapping.off_value, -0.5);
+  w.on_ack(off_a->seq, true, 1.02);
+  EXPECT_FALSE(w.status(1.02).off_authority_ready);
+  w.on_ack(off_b->seq, true, 1.03);
+  EXPECT_TRUE(w.status(1.03).off_authority_ready);
+}
+
+TEST(WatchdogCore, EveryActuatorMappingFieldInvalidatesOffProof) {
+  const auto verify_change = [](const auto& mutate) {
+    WatchdogCore w{WatchdogParams{}};
+    const auto off_a = w.tick(1.0);
+    if (!off_a) return false;
+    w.on_ack(off_a->seq, true, 1.01);
+    if (!w.status(1.01).off_authority_ready) return false;
+    Lease changed = allowing();
+    mutate(changed);
+    w.on_lease(changed, 1.1);
+    if (w.status(1.1).off_authority_ready || w.status(1.1).allow_on) return false;
+    const auto off_b = w.tick(1.1);
+    return off_b.has_value() &&
+           same_actuator_mapping(actuator_mapping(off_b->mapping), actuator_mapping(changed));
+  };
+
+  EXPECT_TRUE(verify_change([](Lease& l) { l.backend = kBackendServoPwm; }));
+  EXPECT_TRUE(verify_change([](Lease& l) { l.actuator_set_index = 2; }));
+  EXPECT_TRUE(verify_change([](Lease& l) { l.off_value = -0.5; }));
+  EXPECT_TRUE(verify_change([](Lease& l) { l.servo_instance = 2; }));
+  EXPECT_TRUE(verify_change([](Lease& l) { l.off_pwm_us = 1000; }));
+}
+
+TEST(WatchdogCore, IdenticalMappingUpdatePreservesProofAndErrorStaysFailClosed) {
+  WatchdogCore w{WatchdogParams{}};
+  const auto off = w.tick(1.0);
+  ASSERT_TRUE(off.has_value());
+  w.on_ack(off->seq, true, 1.01);
+  ASSERT_TRUE(w.status(1.01).off_authority_ready);
+  w.on_lease(Lease{}, 1.1);  // exactly the fallback mapping
+  EXPECT_TRUE(w.status(1.1).off_authority_ready);
+
+  w.begin_shutdown(1.2);
+  EXPECT_FALSE(w.status(1.2).allow_on);
+  EXPECT_TRUE(w.tick(1.2).has_value());
+  EXPECT_FALSE(w.status(1.2).allow_on);
+}
+
 TEST(WatchdogCore, OffBurstThenBackgroundRate) {
   WatchdogParams p;
   WatchdogCore w{p};
@@ -152,7 +237,10 @@ TEST(WatchdogCore, MalformedLeaseRevokesOnAtOnceAndKeepsTheLastGoodMapping) {
   good.off_pwm_us = 1000;
   w.on_lease(good, 1.0);
   auto first = w.tick(1.0);
-  EXPECT_FALSE(first.has_value());  // allowed: nothing to do
+  ASSERT_TRUE(first.has_value());  // mapping changed from fallback; prove OFF with this mapping
+  EXPECT_EQ(first->mapping.backend, kBackendServoPwm);
+  w.on_ack(first->seq, true, 1.01);
+  ASSERT_TRUE(w.status(1.01).off_authority_ready);
   Lease bad = good;
   bad.off_pwm_us = 5000;
   w.on_lease(bad, 1.1);
@@ -312,6 +400,26 @@ TEST(Controller, DoesNotSprayBeforeOffIsConfirmedAndNeverOnATransitLeg) {
   EXPECT_EQ(r.ons, 0);
   EXPECT_FALSE(r.c->status(r.t).spraying);
   EXPECT_EQ(r.c->fsm().state(), SprayState::OffConfirmed);
+}
+
+TEST(Controller, MappingProofLossDuringOnPendingForcesOffAndRevokesLease) {
+  Rig r;
+  for (double n = 0.0; n < 1.7 && r.c->fsm().state() != SprayState::OffConfirmed; n += 0.007)
+    r.step(n);
+  ASSERT_EQ(r.c->fsm().state(), SprayState::OffConfirmed);
+  r.ack_enabled = false;
+  bool on_pending = false;
+  for (double n = 1.7; n < 2.5 && !on_pending; n += 0.007) {
+    r.step(n);
+    on_pending = r.c->fsm().state() == SprayState::OnPending;
+  }
+  ASSERT_TRUE(on_pending);
+
+  r.c->note_watchdog(true, false, r.t + 0.02);  // D2 mapping change withdrew OFF authority
+  const auto off = r.c->tick(r.t + 0.02);
+  ASSERT_TRUE(off.has_value());
+  EXPECT_FALSE(off->on);
+  EXPECT_FALSE(r.c->lease(r.t + 0.02).allow_on);
 }
 
 TEST(Controller, OpensEarlyByTheLeadSpraysTheMarkAndClosesBeforeTheBoundary) {

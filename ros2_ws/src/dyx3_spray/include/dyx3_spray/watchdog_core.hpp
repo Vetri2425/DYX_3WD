@@ -65,7 +65,9 @@ private:
   uint32_t seq_{0};
   uint32_t inflight_seq_{0};
   double inflight_since_{0.0};
-  bool off_confirmed_{false};
+  std::optional<ActuatorMapping> inflight_mapping_;
+  std::optional<ActuatorMapping> off_confirmed_mapping_;
+  bool mapping_off_required_{false};
   double next_off_s_{0.0};
   double burst_until_s_{0.0};
   bool have_last_cause_{false};

@@ -60,6 +60,19 @@ V1 SPEC:** the prototype compared the full reason text, and the stale text embed
 re-armed the 20 Hz burst on every tick forever; keying on the cause removes that (tested); an OFF whose ack takes longer than 1.0 s is retried; startup is fail-closed
 before any lease; shutdown sends OFF.
 
+### Watchdog OFF proof follows actuator mapping (D2)
+
+`off_authority_ready` means that the current mapping's OFF command received a successful, matching
+`SprayActuatorAck`. Mapping identity is `(backend, actuator_set_index, off_value, servo_instance,
+off_pwm_us)`, the complete set of fields carried by the lease that can affect the commanded
+destination/value. Lease permission and sequence are not part of physical identity; the lease does
+not carry an ON value. An identical mapping update preserves proof. A changed mapping immediately
+clears proof, invalidates any old mapping OFF in flight, makes `allow_on` false, and schedules an
+OFF with the new mapping. Only the new OFF sequence can restore readiness; late ACKs for the prior
+sequence are ignored. The existing px4_link single-inflight serialization and watchdog-OFF queue
+priority ensure a queued controller ON cannot overtake the required OFF. An already dispatched
+transaction completes or times out first, after which the new mapping OFF is sent.
+
 ## 5. Distance-aware decision (continuous mode)
 
 Nozzle position = pose + body-frame offsets (forward, lateral right). The path model carries `cumulative_s` and MARK
