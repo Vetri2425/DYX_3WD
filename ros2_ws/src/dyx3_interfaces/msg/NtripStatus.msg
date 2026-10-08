@@ -25,8 +25,12 @@ uint32 reconnect_count
 float32 connected_for_s
 # Short reason of the last failure ("caster rejected: HTTP/1.1 401", "timeout"); never contains credentials.
 string last_error
-# RTCM chunks forwarded to dyx3_px4_link and chunks dropped because no consumer was ready.
-uint64 chunks_forwarded
+# Raw NTRIP response-body bytes received, including invalid RTCM and partial frames.
+uint64 source_bytes_received
+# CRC-valid complete RTCM frames parsed from the source.
+uint64 valid_rtcm_frames
+# RTCM chunks successfully published toward px4_link. This does not prove link acceptance.
+uint64 chunks_handed_off
 # GGA back-feeds sent to the caster.
 uint64 gga_sent
 # FIX transitions seen (RtkStatus.fix_type changes) and the current fix, for the recorder's evidence trail.

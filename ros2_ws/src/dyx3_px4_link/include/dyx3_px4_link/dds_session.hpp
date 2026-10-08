@@ -44,6 +44,14 @@ public:
   // Counts session resets (alive -> dead -> alive); a reset is reported once by consume_reset().
   StalenessReport evaluate(double now_s);
 
+  // Read-only immediate readiness for callbacks between 100 Hz status cycles.
+  bool all_fresh(double now_s) const {
+    for (int i = 0; i < kTopicCount; ++i) {
+      if (!seen_[i] || now_s - last_[i] > limits_.max_age_s[i]) return false;
+    }
+    return true;
+  }
+
   uint32_t session_resets() const { return resets_; }
 
   // True exactly once after each completed alive->dead->alive transition (handshake re-arm).

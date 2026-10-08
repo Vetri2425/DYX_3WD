@@ -202,6 +202,8 @@ private:
   rclcpp::Publisher<dyx3_interfaces::msg::UlogChunk>::SharedPtr pub_chunk_;
   rclcpp::Subscription<dyx3_interfaces::msg::MotionSetpoint>::SharedPtr sub_cmd_;
   rclcpp::Subscription<dyx3_interfaces::msg::RtcmData>::SharedPtr sub_rtcm_;
+  uint64_t rtcm_chunks_accepted_{0};
+  uint64_t rtcm_chunks_dropped_{0};
   rclcpp::Subscription<dyx3_interfaces::msg::SprayActuatorCommand>::SharedPtr sub_spray_;
   rclcpp::Publisher<dyx3_interfaces::msg::SprayActuatorAck>::SharedPtr pub_spray_ack_;
   rclcpp::Service<ArmSrv>::SharedPtr srv_arm_;

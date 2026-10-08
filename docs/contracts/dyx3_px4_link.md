@@ -57,6 +57,9 @@ flashed firmware. `EstimatorHealth.test_ratios_valid` is therefore always false 
 | `/dyx3/ulog_chunk` | UlogChunk | on sample | after the ack was sent |
 | subscribes `/dyx3/motion_guard/command` | MotionSetpoint | | the only command source |
 | subscribes `/dyx3/rtcm` | RtcmData | | forwarded to `gps_inject_data` |
+
+The RTCM subscription counts each chunk exactly once: `rtcm_chunks_accepted` after `GpsInjectData` publication returns, or `rtcm_chunks_dropped` when session/handshake/topic readiness or chunk size fails. These px4_link-process lifetime counters do not assert DDS delivery, PX4 handling, or receiver receipt.
+The RTCM callback checks current per-topic freshness at callback time, rather than relying on the previous 100 Hz status cycle, so a session or topic that went stale between cycles is refused.
 | service `/dyx3/px4_link/arm` | ArmDisarm | | arm needs a healthy link; disarm is always allowed |
 | service `/dyx3/px4_link/set_offboard` | SetOffboard | | heartbeat first, then the mode command |
 

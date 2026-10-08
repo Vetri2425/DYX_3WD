@@ -231,9 +231,10 @@ Px4LinkNode::Px4LinkNode(const rclcpp::NodeOptions& options, ClockFn clock, bool
       [this](dyx3_interfaces::msg::RtcmData::ConstSharedPtr m) {
         // RTCM is not motion, but writing it through a format that is not proven would corrupt the
         // receiver feed: refuse until the handshake passed. Oversize is rejected, never truncated.
-        if (!last_link_ok_ || m->data.empty() || m->data.size() > 300) {
+        if (!link_healthy_now() || m->data.empty() || m->data.size() > 300) {
+          ++rtcm_chunks_dropped_;
           RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
-                               "RTCM chunk dropped (link_ok=%d, size=%zu)", last_link_ok_,
+                               "RTCM chunk dropped (link_ok=%d, size=%zu)", link_healthy_now(),
                                m->data.size());
           return;
         }
@@ -243,7 +244,14 @@ Px4LinkNode::Px4LinkNode(const rclcpp::NodeOptions& options, ClockFn clock, bool
         g.len = static_cast<uint16_t>(m->data.size());
         g.flags = m->flags;
         std::copy(m->data.begin(), m->data.end(), g.data.begin());
-        pub_gps_inject_->publish(g);
+        try {
+          pub_gps_inject_->publish(g);
+          ++rtcm_chunks_accepted_;
+        } catch (const std::exception& e) {
+          ++rtcm_chunks_dropped_;
+          RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 5000,
+                                "RTCM injection publication failed: %s", e.what());
+        }
       });
 
   pub_spray_ack_ = create_publisher<dyx3_interfaces::msg::SprayActuatorAck>(
@@ -315,8 +323,7 @@ Px4LinkNode::Px4LinkNode(const rclcpp::NodeOptions& options, ClockFn clock, bool
 // arrived since the last cycle); session and topic freshness come from the last cycle (< 1 period
 // old).
 bool Px4LinkNode::link_healthy_now() const {
-  return handshake_->state() == HandshakeState::Ok && last_rep_.session_alive &&
-         last_rep_.mask == 0U;
+  return handshake_->state() == HandshakeState::Ok && mon_->all_fresh(clock_());
 }
 
 void Px4LinkNode::declare_and_validate_params() {
@@ -901,6 +908,8 @@ void Px4LinkNode::publish_status(double now_s, const StalenessReport& rep, const
   s.spray_identities_remaining = spray_ack_tokens_->remaining();
   s.spray_identities_exhausted = spray_ack_tokens_->exhausted();
   s.spray_unmatched_ack_count = spray_late_ack_count_;
+  s.rtcm_chunks_accepted = rtcm_chunks_accepted_;
+  s.rtcm_chunks_dropped = rtcm_chunks_dropped_;
   pub_status_->publish(s);
 }
 

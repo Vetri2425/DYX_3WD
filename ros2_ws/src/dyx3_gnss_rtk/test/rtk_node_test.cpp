@@ -155,7 +155,9 @@ TEST(RtkNode, FramesBecomeChunksWithFlags) {
   r.node->publish_ntrip_status(r.now);
   r.pump();
   EXPECT_EQ(r.ntrip.frames_total, 2U);
-  EXPECT_EQ(r.ntrip.chunks_forwarded, 4U);
+  EXPECT_EQ(r.ntrip.chunks_handed_off, 4U);
+  EXPECT_EQ(r.ntrip.source_bytes_received, 0U);  // direct test injection bypassed NTRIP
+  EXPECT_EQ(r.ntrip.valid_rtcm_frames, 0U);
 }
 
 TEST(RtkNode, OversizeFrameIsNeverTruncated) {
@@ -178,4 +180,5 @@ TEST(RtkNode, FixTransitionsAreCounted) {
   r.pump();
   EXPECT_EQ(r.ntrip.fix_transitions, 1U);
   EXPECT_EQ(r.ntrip.fix_type, 6);
+  EXPECT_EQ(r.ntrip.chunks_handed_off, 0U);
 }

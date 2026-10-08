@@ -54,3 +54,8 @@ uint32 spray_identities_remaining
 # Also true when allocator state is unavailable/corrupt; no new proof can be sent.
 bool spray_identities_exhausted
 uint64 spray_unmatched_ack_count
+
+# RTCM chunks accepted for GpsInjectData publication, and refused before publication.
+# These are px4_link-process lifetime counters, not proof of PX4 or receiver consumption.
+uint64 rtcm_chunks_accepted
+uint64 rtcm_chunks_dropped

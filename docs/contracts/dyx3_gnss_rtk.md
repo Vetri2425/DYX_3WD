@@ -27,6 +27,8 @@ protocol behaviour into its own service, plus the structure the prototype lacked
 | out | `/dyx3/ntrip_status` | NtripStatus | 1 Hz; link state, age, rate, counters, FIX transitions |
 | in | `/dyx3/gnss_report` | GnssReport | raw FCU GNSS (`px4_link`): fix type, accuracy, satellites, HDOP, position |
 
+`NtripStatus.source_bytes_received` counts raw caster response-body bytes, even when RTCM is invalid. `valid_rtcm_frames` counts CRC-valid parser output. `frames_total` and `bytes_total` retain the valid-frame and valid-frame-byte meanings. `chunks_handed_off` increments only after `/dyx3/rtcm` publication returns; it does not mean the PX4 link accepted a chunk. `Px4LinkStatus.rtcm_chunks_accepted` and `rtcm_chunks_dropped` are separately owned by px4_link. None of these counters prove receiver consumption or RTK FIX.
+
 ## 3. RTCM framing and chunking
 
 * **Frame extraction** (carried verbatim in behaviour): scan for the `0xD3` preamble; 10-bit length from the 2-byte

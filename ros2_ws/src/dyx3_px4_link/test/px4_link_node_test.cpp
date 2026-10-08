@@ -607,6 +607,9 @@ TEST(Px4LinkNode, RtcmForwardedOnlyWhenLinkHealthyAndNeverTruncated) {
   r.p_rtcm->publish(d);
   r.pump(100);
   EXPECT_TRUE(r.inject.empty());
+  r.run(0.1);
+  EXPECT_EQ(r.status.rtcm_chunks_dropped, 1U);
+  EXPECT_EQ(r.status.rtcm_chunks_accepted, 0U);
   r.fcu_answers_handshake = true;
   r.bring_up();
   r.run(0.1);
@@ -616,10 +619,15 @@ TEST(Px4LinkNode, RtcmForwardedOnlyWhenLinkHealthyAndNeverTruncated) {
   EXPECT_EQ(r.inject[0].len, 120);
   EXPECT_EQ(r.inject[0].flags, 1);
   EXPECT_EQ(r.inject[0].data[119], 0xD3);
+  r.run(0.1);
+  EXPECT_EQ(r.status.rtcm_chunks_accepted, 1U);
   d.data.assign(301, 0x01);
   r.p_rtcm->publish(d);
   r.pump(100);
   EXPECT_EQ(r.inject.size(), 1U);  // oversize rejected, not truncated
+  r.run(0.1);
+  EXPECT_EQ(r.status.rtcm_chunks_dropped, 2U);
+  EXPECT_EQ(r.status.rtcm_chunks_accepted + r.status.rtcm_chunks_dropped, 3U);
 }
 
 TEST(Px4LinkNode, SprayActuatorCommandsBecomeVehicleCommandsAndFcuAcksAreMapped) {

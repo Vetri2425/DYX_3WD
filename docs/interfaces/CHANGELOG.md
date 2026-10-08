@@ -1,5 +1,10 @@
 # Interface changelog
 
+## 0.12.0 — 2026-10-08 (Cloud Review E1 RTCM stage accounting)
+
+- **BREAKING** `NtripStatus.chunks_forwarded` was removed because it counted before publication. New `source_bytes_received`, `valid_rtcm_frames`, and `chunks_handed_off` identify source, parser, and successful ROS publication separately. Existing `frames_total` and `bytes_total` remain valid-frame counts and valid-frame bytes.
+- `Px4LinkStatus` appends `rtcm_chunks_accepted` and `rtcm_chunks_dropped`, counting callback outcomes before `GpsInjectData` publication. Acceptance does not prove DDS, PX4, or receiver receipt. Rebuild all interface consumers together before deployment.
+
 ## 0.1.0 — 2026-10-07
 
 - Initial frozen `dyx3_interfaces` surface: canonical motion command/status, vehicle and

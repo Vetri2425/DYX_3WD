@@ -49,7 +49,7 @@ private:
   CorrectionHealth health_;
   FixMonitor fix_monitor_;
   Chunker chunker_;
-  uint64_t chunks_forwarded_{0};
+  uint64_t chunks_handed_off_{0};
   bool have_report_{false};
   double report_t_{0.0};
   dyx3_interfaces::msg::GnssReport report_;

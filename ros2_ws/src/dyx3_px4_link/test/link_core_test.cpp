@@ -47,6 +47,13 @@ TEST(Staleness, SilentTopicWhileSessionUpIsDetected) {  // upstream #27388
   EXPECT_TRUE(r.session_alive);
   EXPECT_EQ(r.mask, 1U << kLocalPosition);
 }
+TEST(Staleness, ImmediateReadinessExpiresBetweenStatusCycles) {
+  StalenessMonitor m{StalenessLimits{}};
+  EXPECT_FALSE(m.all_fresh(0.0));
+  feed_all(m, 0.0);
+  EXPECT_TRUE(m.all_fresh(0.1));
+  EXPECT_FALSE(m.all_fresh(0.25));  // local position and attitude exceeded 0.2 s
+}
 TEST(Staleness, SessionResetIsCountedOnceAndConsumedOnce) {
   StalenessMonitor m{StalenessLimits{}};
   feed_all(m, 0.0);

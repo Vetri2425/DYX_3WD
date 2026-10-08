@@ -180,6 +180,8 @@ TEST(Px4LinkAbi, DefaultsAreUnhealthyAndConstantsAreFrozen) {
   EXPECT_EQ(l.spray_identities_remaining, 0U);
   EXPECT_FALSE(l.spray_identities_exhausted);
   EXPECT_EQ(l.spray_unmatched_ack_count, 0U);
+  EXPECT_EQ(l.rtcm_chunks_accepted, 0U);
+  EXPECT_EQ(l.rtcm_chunks_dropped, 0U);
 
   const dyx3_interfaces::msg::GnssReport g{};
   EXPECT_FALSE(g.valid);
@@ -191,6 +193,9 @@ TEST(Px4LinkAbi, DefaultsAreUnhealthyAndConstantsAreFrozen) {
   EXPECT_FALSE(n.streaming);
   EXPECT_EQ(n.state, dyx3_interfaces::msg::NtripStatus::STATE_STARTING);
   EXPECT_EQ(n.frames_total, 0U);
+  EXPECT_EQ(n.source_bytes_received, 0U);
+  EXPECT_EQ(n.valid_rtcm_frames, 0U);
+  EXPECT_EQ(n.chunks_handed_off, 0U);
   EXPECT_TRUE(n.last_error.empty());
   EXPECT_EQ(dyx3_interfaces::msg::NtripStatus::STATE_STREAMING, 2);
   const dyx3_interfaces::msg::SprayActuatorCommand sc{};  // default = OFF from the controller

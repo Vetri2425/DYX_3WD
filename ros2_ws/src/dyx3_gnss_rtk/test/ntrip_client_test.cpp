@@ -199,6 +199,8 @@ TEST(NtripClient, StreamsFramesFromAnIcyCasterWithTheExpectedRequest) {
   const auto snap = c.snapshot();
   EXPECT_EQ(snap.state, NtripState::Streaming);
   EXPECT_TRUE(snap.connected);
+  EXPECT_EQ(snap.bytes, s.payload.size());
+  EXPECT_EQ(snap.frames, 2U);
   c.stop();
   EXPECT_EQ(c.snapshot().state, NtripState::Stopped);
 }
@@ -299,7 +301,10 @@ TEST(NtripClient, BadCrcFramesAreCountedAndNeverDelivered) {
       [] { return std::nullopt; });
   c.start();
   ASSERT_TRUE(wait_for([&] { return delivered.load() >= 1; }));
+  ASSERT_TRUE(wait_for([&] { return c.snapshot().frames >= 1; }));
   EXPECT_EQ(delivered.load(), 1);
+  EXPECT_EQ(c.snapshot().bytes, s.payload.size());
+  EXPECT_EQ(c.snapshot().frames, 1U);
   EXPECT_GE(c.snapshot().crc_failures, 1U);
   c.stop();
 }

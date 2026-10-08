@@ -134,7 +134,6 @@ void RtkNode::on_frame(const std::vector<uint8_t>& frame) {
     std::lock_guard<std::mutex> lk(m_);
     health_.on_frame(clock_(), frame.size());
     chunks = chunker_.split(frame);
-    chunks_forwarded_ += chunks.size();
   }
   for (const auto& c : chunks) {
     dyx3_interfaces::msg::RtcmData m;
@@ -142,6 +141,8 @@ void RtkNode::on_frame(const std::vector<uint8_t>& frame) {
     m.flags = c.flags;
     m.data = c.data;
     pub_rtcm_->publish(m);
+    std::lock_guard<std::mutex> lk(m_);
+    ++chunks_handed_off_;
   }
 }
 
@@ -240,7 +241,9 @@ void RtkNode::publish_ntrip_status(double now_s) {
     n.connected_for_s = static_cast<float>(health_.connected_for_s(now_s));
     n.last_error = configured_ ? snap.last_error : config_error_;
     if (!configured_) n.state = dyx3_interfaces::msg::NtripStatus::STATE_ERROR;
-    n.chunks_forwarded = chunks_forwarded_;
+    n.source_bytes_received = snap.bytes;
+    n.valid_rtcm_frames = snap.frames;
+    n.chunks_handed_off = chunks_handed_off_;
     n.gga_sent = snap.gga_sent;
     n.fix_transitions = fix_monitor_.transitions();
     n.fix_type = fix_monitor_.fix_type();
