@@ -10,6 +10,10 @@
 # /opt/dyx3/current is a symlink to one release; switching is a single atomic rename.
 
 DYX3_REPO_URL_DEFAULT="https://github.com/Vetri2425/DYX_3WD.git"
+
+# Prebuilt artifacts (install_prebuilt): every caller of upgrade_to gets them through this file.
+# shellcheck source=artifacts.sh
+. "${INSTALLER_DIR}/lib/artifacts.sh"
 DYX3_KEEP_RELEASES="${DYX3_KEEP_RELEASES:-5}"
 
 _repo_url() {
@@ -59,6 +63,10 @@ build_release() {
     log "release ${sha:0:10} already built"
     return 0
   fi
+  if [ -f "${rel}/.prebuilt" ]; then
+    log "release ${sha:0:10} installed from CI artifacts; nothing to build"
+    return 0
+  fi
   log "extracting ${sha:0:10}"
   # Built IN PLACE (no relocation): colcon embeds absolute paths. The release only becomes
   # eligible once `.complete` is written, after the build and verification both succeed.
@@ -80,7 +88,7 @@ build_release() {
   # A failed build must never reach `.complete`: die here, leaving an incomplete (ignored) dir.
   run bash -c "set +u; . '${ROS_SETUP}'; . '${pm}/install/setup.bash'; set -u; cd '${rel}/ros2_ws' && \
     MAKEFLAGS='-j${DYX3_BUILD_JOBS}' nice -n 10 colcon build \
-      --parallel-workers 1 --packages-select ${packages} --cmake-args -DCMAKE_BUILD_TYPE=Release" ||
+      --parallel-workers ${DYX3_COLCON_WORKERS:-1} --packages-select ${packages} --cmake-args -DCMAKE_BUILD_TYPE=Release" ||
     die "colcon build failed for ${sha:0:10}"
 
   build_backend_venv "${rel}"
@@ -155,6 +163,11 @@ upgrade_to() {
     return 0
   fi
 
+  # Prebuilt first (proposal 2026-10-08): the same build, done once by green CI, digest-verified.
+  if ! install_prebuilt "${sha}"; then
+    [ "${DYX3_ARTIFACTS}" = "prebuilt" ] && die "no valid prebuilt artifacts for ${sha:0:10} (DYX3_ARTIFACTS=prebuilt)"
+    log "building ${sha:0:10} on this machine (DYX3_ARTIFACTS=${DYX3_ARTIFACTS})"
+  fi
   build_px4_msgs || die "px4_msgs build failed"
   build_release "${sha}" || die "release build failed"
 
@@ -233,8 +246,12 @@ build_backend_venv() {
 # write_versions_file <release-dir>: /etc/dyx3/versions.json — the provenance the recorder copies into every run.
 # Machine-written at every switch/rollback, so it always describes what is CURRENT.
 write_versions_file() {
-  local rel="$1" stack pm msgs
+  local rel="$1" stack pm msgs origin
   stack="$(basename "$(readlink -f "${rel}")")"
+  origin="built on this machine"
+  if [ -f "${rel}/artifacts.env" ]; then
+    origin="prebuilt $(sed -n 's/^ARTIFACT_CI_RUN=//p' "${rel}/artifacts.env" | head -n1)"
+  fi
   load_pin firmware
   pm="$(px4_msgs_dir)"
   msgs="$(cat "${pm}/px4_msgs.sha256" 2>/dev/null || echo unknown)"
@@ -243,8 +260,8 @@ write_versions_file() {
     return 0
   fi
   install -d "${DYX3_ETC}"
-  printf '{\n  "schema": 1,\n  "stack_sha": "%s",\n  "firmware_expected_sha": "%s",\n  "px4_msgs_msg_set_sha256": "%s",\n  "firmware_running": "unavailable: no FCU read path in this stack yet",\n  "installed_utc": "%s"\n}\n' \
-    "${stack}" "${FIRMWARE_SHA}" "${msgs}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"${DYX3_ETC}/versions.json.tmp"
+  printf '{\n  "schema": 1,\n  "stack_sha": "%s",\n  "firmware_expected_sha": "%s",\n  "px4_msgs_msg_set_sha256": "%s",\n  "firmware_running": "unavailable: no FCU read path in this stack yet",\n  "build_origin": "%s",\n  "installed_utc": "%s"\n}\n' \
+    "${stack}" "${FIRMWARE_SHA}" "${msgs}" "${origin}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"${DYX3_ETC}/versions.json.tmp"
   chmod 0644 "${DYX3_ETC}/versions.json.tmp"
   mv "${DYX3_ETC}/versions.json.tmp" "${DYX3_ETC}/versions.json"
 }

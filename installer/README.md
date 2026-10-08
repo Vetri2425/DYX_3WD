@@ -14,6 +14,28 @@
 | `installer/version.sh` (`dyx3-version`) | 11 | `key=value` lines: stack SHA, previous release, **pinned** firmware SHA, `px4_msgs` message-set sha256, profile. The running FCU's own identity is reported as `unavailable` (no FCU read path yet; architecture 3.8's overlay hash is OPEN). |
 | `dyx3-param get\|set\|save` | not built | needs `dyx3_rpp`'s parameter authority (P5) |
 
+## Prebuilt release artifacts (no compiling on the rover)
+
+Green CI on `master` (and `claude/cloud-phases` while it is the deploy branch) builds the release on arm64
+(`ros:humble-ros-base`, the Jetson's Ubuntu 22.04 + Humble userland) with the same `build_px4_msgs` /
+`build_release`, and publishes GitHub Release `rover-<sha>`: `release-<sha>.tar.zst`,
+`px4_msgs-<firmware-sha>.tar.zst`, `artifacts.env` (provenance), `SHA256SUMS`. Last 20 kept.
+
+`dyx3-install` / `dyx3-upgrade` try it first: download → every file checked against `SHA256SUMS` → OS/arch/
+ROS/firmware-pin/stack-SHA match → members must stay under their `opt/dyx3/...` prefix → extract → the usual
+verify / `.complete` / switch / health. `versions.json` records `build_origin` (the CI run, or "built on this
+machine").
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DYX3_ARTIFACTS` | `auto` | `auto`: prebuilt, else build here · `prebuilt`: fail without a valid artifact · `source`: always build here |
+| `DYX3_ARTIFACT_DIR` | — | take the files from a directory (USB stick, no WAN) instead of downloading |
+| `DYX3_COLCON_WORKERS` | `1` | packages built in parallel when building here (CI uses `nproc`) |
+
+Upgrade after the CI run for that commit is green; before that there is no artifact and `auto` builds here.
+Integrity today is SHA-256 over GitHub TLS (human decision 2026-10-08); signing is a pre-delivery item
+(proposal §7).
+
 ## Pins (one place each)
 
 `installer/pins/{microxrce_agent,mavlink_router,firmware}.pin`. Changing `FIRMWARE_SHA` makes the next

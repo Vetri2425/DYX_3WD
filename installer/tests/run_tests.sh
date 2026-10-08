@@ -312,9 +312,87 @@ F
   check "health reports the data volume" 'grep -q "^PASS  disk" "${T}/hx"'
 }
 
+# ---------------------------------------------------------------- prebuilt artifacts
+prebuilt() {
+  if ! tar --zstd -cf /dev/null --files-from /dev/null 2>/dev/null; then
+    ok "prebuilt artifact tests skipped (tar has no zstd here)"
+    return 0
+  fi
+  export INSTALLER_DIR="${REPO}/installer" DYX3_ROOT="${T}/pb" DYX3_ALLOW_ANY_OS=1 ROS_DISTRO_NAME=humble
+  # shellcheck disable=SC1091
+  . "${INSTALLER_DIR}/lib/common.sh"
+  for l in os_check dependencies ros_install permissions network_install systemd_install health_check release; do
+    # shellcheck disable=SC1090
+    . "${INSTALLER_DIR}/lib/${l}.sh"
+  done
+  set +e
+  load_pin firmware
+  local sha=1111111111111111111111111111111111111111 art="${T}/art" stage="${T}/stage"
+  # What CI would publish: a release tree and a px4_msgs tree under opt/dyx3, plus provenance + digests.
+  mkdir -p "${stage}/opt/dyx3/releases/${sha}/ros2_ws/install" "${stage}/opt/dyx3/releases/${sha}/bin" \
+    "${stage}/opt/dyx3/px4_msgs/${FIRMWARE_SHA}/install" "${art}"
+  : >"${stage}/opt/dyx3/releases/${sha}/ros2_ws/install/setup.bash"
+  printf '#!/bin/sh\n' >"${stage}/opt/dyx3/releases/${sha}/bin/dyx3-platform"
+  chmod +x "${stage}/opt/dyx3/releases/${sha}/bin/dyx3-platform"
+  : >"${stage}/opt/dyx3/px4_msgs/${FIRMWARE_SHA}/install/setup.bash"
+  : >"${stage}/opt/dyx3/px4_msgs/${FIRMWARE_SHA}/.complete"
+  echo abc >"${stage}/opt/dyx3/px4_msgs/${FIRMWARE_SHA}/px4_msgs.sha256"
+  tar -C "${stage}" --zstd -cf "${art}/release-${sha}.tar.zst" "opt/dyx3/releases/${sha}"
+  tar -C "${stage}" --zstd -cf "${art}/px4_msgs-${FIRMWARE_SHA}.tar.zst" "opt/dyx3/px4_msgs/${FIRMWARE_SHA}"
+  printf 'ARTIFACT_STACK_SHA=%s\nARTIFACT_FIRMWARE_SHA=%s\nARTIFACT_ROS_DISTRO=humble\nARTIFACT_CI_RUN=https://ci/run/1\n' \
+    "${sha}" "${FIRMWARE_SHA}" >"${art}/artifacts.env"
+  (cd "${art}" && sha256sum artifacts.env "release-${sha}.tar.zst" "px4_msgs-${FIRMWARE_SHA}.tar.zst" >SHA256SUMS)
+  local rel="${DYX3_ROOT}/opt/dyx3/releases/${sha}" pm="${DYX3_ROOT}/opt/dyx3/px4_msgs/${FIRMWARE_SHA}"
+  mkdir -p "${DYX3_VAR_LIB}/state" "${DYX3_RELEASES}"
+
+  (DYX3_ARTIFACTS=source DYX3_ARTIFACT_DIR="${art}" install_prebuilt "${sha}") >/dev/null 2>&1
+  rc=$?
+  check "prebuilt: DYX3_ARTIFACTS=source never uses artifacts" '[ "${rc}" -ne 0 ] && [ ! -e "${rel}" ]'
+
+  # tampered release archive: refused before anything is extracted
+  cp -r "${art}" "${T}/art_bad"
+  printf 'x' >>"${T}/art_bad/release-${sha}.tar.zst"
+  (DYX3_ARTIFACT_DIR="${T}/art_bad" install_prebuilt "${sha}") >"${T}/pb_bad" 2>&1
+  rc=$?
+  check "prebuilt: a digest mismatch is refused and extracts nothing" '[ "${rc}" -ne 0 ] && grep -q "sha256 mismatch" "${T}/pb_bad" && [ ! -e "${rel}" ] && [ ! -e "${pm}" ]'
+
+  # artifact for another firmware pin: refused
+  cp -r "${art}" "${T}/art_fw"
+  sed -i.bak "s/^ARTIFACT_FIRMWARE_SHA=.*/ARTIFACT_FIRMWARE_SHA=0000000000/" "${T}/art_fw/artifacts.env"
+  (cd "${T}/art_fw" && sha256sum artifacts.env "release-${sha}.tar.zst" "px4_msgs-${FIRMWARE_SHA}.tar.zst" >SHA256SUMS)
+  (DYX3_ARTIFACT_DIR="${T}/art_fw" install_prebuilt "${sha}") >"${T}/pb_fw" 2>&1
+  rc=$?
+  check "prebuilt: an artifact for another firmware pin is refused" '[ "${rc}" -ne 0 ] && grep -q "firmware pin" "${T}/pb_fw" && [ ! -e "${rel}" ]'
+
+  # an archive member outside its prefix: refused
+  mkdir -p "${T}/evil/etc" && : >"${T}/evil/etc/passwd-dyx3-test"
+  cp -r "${art}" "${T}/art_evil"
+  tar -C "${T}/evil" --zstd -cf "${T}/art_evil/release-${sha}.tar.zst" etc
+  (cd "${T}/art_evil" && sha256sum artifacts.env "release-${sha}.tar.zst" "px4_msgs-${FIRMWARE_SHA}.tar.zst" >SHA256SUMS)
+  (DYX3_ARTIFACT_DIR="${T}/art_evil" install_prebuilt "${sha}") >"${T}/pb_evil" 2>&1
+  rc=$?
+  check "prebuilt: an archive member outside its prefix is refused" '[ "${rc}" -ne 0 ] && grep -q "outside" "${T}/pb_evil" && [ ! -e "${DYX3_ROOT}/etc/passwd-dyx3-test" ]'
+
+  # missing artifacts: auto falls back (rc 1), nothing left behind
+  mkdir -p "${T}/art_empty"
+  (DYX3_ARTIFACT_DIR="${T}/art_empty" install_prebuilt "${sha}") >/dev/null 2>&1
+  rc=$?
+  check "prebuilt: missing artifacts return 1 (caller builds) and leave nothing" '[ "${rc}" -ne 0 ] && [ ! -e "${rel}" ] && [ -z "$(ls -A "${DYX3_VAR_LIB}/state")" ]'
+
+  # the good set (offline directory): release + px4_msgs installed, marked prebuilt, provenance kept
+  (DYX3_ARTIFACT_DIR="${art}" install_prebuilt "${sha}") >"${T}/pb_ok" 2>&1
+  rc=$?
+  check "prebuilt: a valid offline artifact set installs" '[ "${rc}" -eq 0 ] && [ -f "${rel}/ros2_ws/install/setup.bash" ] && [ -f "${pm}/.complete" ]'
+  check "prebuilt: release marked prebuilt, not complete, provenance kept" '[ -f "${rel}/.prebuilt" ] && [ ! -f "${rel}/.complete" ] && grep -q "ARTIFACT_CI_RUN=https://ci/run/1" "${rel}/artifacts.env"'
+  check "prebuilt: build_release skips a prebuilt release" '(build_release "${sha}" 2>&1 | grep -q "nothing to build")'
+  check "prebuilt: the extracted release passes static verification" '(health_release_only "${rel}" 0 >/dev/null 2>&1)'
+  check "prebuilt: download state cleaned up" '[ ! -e "${DYX3_VAR_LIB}/state/artifacts-${sha}" ]'
+}
+
 sup
 (libs)
 (lifecycle)
+(prebuilt)
 pass="$(grep -c '^ok' "${RESULTS}")"
 fail="$(grep -c '^bad' "${RESULTS}")"
 [ -n "${SHOW_LOGS:-}" ] && tail -n +1 "${T}"/up_* 2>/dev/null

@@ -195,7 +195,7 @@ jobs:
         run: |
           pip install shellcheck-py==0.10.0.1
           shellcheck --version
-          shellcheck -x installer/*.sh installer/lib/*.sh installer/tests/*.sh deployment/scripts/*.sh
+          shellcheck -x installer/*.sh installer/lib/*.sh installer/ci/*.sh installer/tests/*.sh deployment/scripts/*.sh
 
       - name: installer tests
         run: bash installer/tests/run_tests.sh
@@ -303,3 +303,83 @@ jobs:
           done < <(git ls-files -z)
 
           exit "$fail"
+
+  # ---------------------------------------------------------------- rover release artifacts
+  # Proposal docs/architecture/proposals/2026-10-08_prebuilt-release-artifacts.md (ACCEPTED): the rover
+  # installs what green CI built instead of compiling for ~40 min. Built only from deploy branches and only
+  # after every check above passed. Same installer functions, same /opt/dyx3 paths as on the rover.
+  rover_artifacts:
+    name: rover artifacts (arm64 build)
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/claude/cloud-phases')
+    needs: [interface_freeze, ros2_build_test, native_geometry_tests, clang_format, backend_checks, installer_checks, tools_tests, legacy_quarantine, repo_hygiene]
+    runs-on: ubuntu-24.04-arm
+    container:
+      image: ros:humble-ros-base
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: build tools
+        shell: bash
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends git zstd python3-venv python3-pip
+          git config --global --add safe.directory '*'
+
+      # Same key as ros2_build_test: the px4_msgs that passed the tests is the one shipped.
+      - name: px4_msgs cache
+        uses: actions/cache@v4
+        with:
+          path: /opt/dyx3/px4_msgs
+          key: px4_msgs-${{ runner.arch }}-${{ hashFiles('installer/pins/firmware.pin', 'installer/lib/ros_install.sh') }}
+
+      - name: build release + package
+        shell: bash
+        run: bash installer/ci/build_rover_artifacts.sh "$GITHUB_WORKSPACE/rover-artifacts"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rover-artifacts
+          path: rover-artifacts/
+          retention-days: 3
+
+  rover_publish:
+    name: publish rover release
+    needs: [rover_artifacts]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      KEEP: "20"
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: rover-artifacts
+          path: rover-artifacts
+
+      - name: verify digests
+        run: cd rover-artifacts && sha256sum --check --strict SHA256SUMS
+
+      - name: publish rover-${{ github.sha }}
+        run: |
+          set -euo pipefail
+          tag="rover-${GITHUB_SHA}"
+          notes="Rover install artifacts for ${GITHUB_SHA} (${GITHUB_REF_NAME}). Built by ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}. Installed by dyx3-install / dyx3-upgrade; verify against SHA256SUMS."
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" rover-artifacts/* --clobber
+          else
+            gh release create "$tag" rover-artifacts/* --target "$GITHUB_SHA" --prerelease \
+              --title "rover ${GITHUB_SHA:0:10} (${GITHUB_REF_NAME})" --notes "$notes"
+          fi
+
+      # Human decision 2026-10-08: keep the last 20 rover releases.
+      - name: prune old rover releases
+        run: |
+          set -euo pipefail
+          gh release list --limit 200 --json tagName,createdAt \
+            -q '[.[] | select(.tagName | startswith("rover-"))] | sort_by(.createdAt) | reverse | .[(env.KEEP|tonumber):] | .[].tagName' |
+            while read -r t; do
+              echo "pruning $t"
+              gh release delete "$t" --yes --cleanup-tag
+            done

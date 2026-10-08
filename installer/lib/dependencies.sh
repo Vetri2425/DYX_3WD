@@ -5,7 +5,7 @@
 APT_PACKAGES=(
   build-essential cmake ninja-build meson pkg-config git curl ca-certificates
   gnupg lsb-release python3-pip python3-venv network-manager iproute2 iputils-ping
-  libssl-dev libasio-dev libtinyxml2-dev
+  libssl-dev libasio-dev libtinyxml2-dev zstd
 )
 
 install_apt_packages() {
