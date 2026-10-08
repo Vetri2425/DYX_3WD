@@ -1,6 +1,7 @@
 # Proposal — prebuilt, verified release artifacts (no compiling on the rover)
 
-**Status:** PROPOSED (2026-10-08, claude). Human decision required on §6.
+**Status:** ACCEPTED (2026-10-08, human decisions in §6). Implementation starts after the first source-built
+release is verified on the rover; the first published artifacts come from that verified release.
 **Spec:** architecture §12 (install/upgrade), CLAUDE.md "next rover = install only".
 `DERIVED — NOT FROM V1 SPEC` throughout: V1 describes the release layout, not where the binaries come from.
 
@@ -76,10 +77,19 @@ link path of these packages (no CUDA), which is why the CI container is a valid 
 
 Signing beyond TLS + digests (see §6.2); OTA scheduling; the hotspot/LTE network profiles.
 
-## 6. Human decisions
+## 6. Human decisions (decided 2026-10-08)
 
-1. Which branches publish rover artifacts (proposed: `master` and `claude/cloud-phases` while it is the
-   deploy branch).
-2. Integrity: digests over GitHub TLS (proposed for now), or add a signing key on each rover
-   (minisign/cosign) — stronger, but a key to manage.
-3. Retention: keep the last N release artifacts (GitHub storage is free for public repos; proposed N = 20).
+1. **Publishing branches:** `master`. `claude/cloud-phases` also publishes only while it is the deploy
+   branch; after it merges, `master` alone.
+2. **Integrity (now):** SHA-256 digests over GitHub TLS. Protects against corruption and transit
+   tampering; does **not** protect against a compromised GitHub account/token publishing a release
+   (the digests come from the same place).
+3. **Retention:** last **20** release artifact sets.
+
+## 7. Before customer deliveries (recommended, not yet decided)
+
+| Gap left by §6.2 | Closure |
+|---|---|
+| Compromised account/token publishes a bad release | Sign `SHA256SUMS` in CI (minisign); the installer pins the public key on every rover and refuses unsigned or mis-signed artifacts |
+| A bad commit reaches `master` directly | Branch protection on `master` (CI required, no direct push) + 2FA for every writer. Conflicts with today's direct-to-master rule (CLAUDE.md §5): the human picks the switch date |
+| No WAN at site / GitHub unavailable | Offline `DYX3_ARTIFACT_DIR` (USB), §2.3; a fleet mirror if the fleet grows |
