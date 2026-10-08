@@ -73,9 +73,40 @@ private:
   double recv_s_{0.0};
 };
 
+// ---- mission / RPP ownership (review C1, human decision 2026-10-08)
+// ------------------------------------------------------------- Autonomous spray is allowed only
+// while the mission is RUNNING and RPP is fresh, reports the same mission and is in a state that
+// may lay paint. STOPPING (CORNER_STOP lays the last ~2 cm of the leg) and PIVOTING (its own gate
+// below) stay allowed; IDLE, LOADED, COMPLETE, ERROR and any unknown value refuse.
+// Values mirror dyx3_interfaces/RppStatus.STATE_*.
+enum class RppState : uint8_t {
+  Idle = 0,
+  Tracking = 1,
+  Stopping = 2,
+  Pivoting = 3,
+  Creeping = 4,
+  Complete = 5,
+  Error = 6,
+  Loaded = 7,
+};
+
+struct OwnershipInputs {
+  bool mission_running{false};
+  uint32_t mission_id{0};
+  bool rpp_known{false};
+  double rpp_age_s{0.0};
+  double rpp_timeout_s{0.5};
+  uint8_t rpp_state{0};
+  uint32_t rpp_mission_id{0};
+};
+
+// Order: mission not running, rpp stale, rpp mission mismatch, rpp not marking.
+GateResult ownership_status(const OwnershipInputs& in);
+
 // ---- the stack
 // -------------------------------------------------------------------------------------------------
 struct GateInputs {
+  GateResult ownership{false, "mission not running"};  // result of ownership_status()
   bool armed{false};
   bool offboard{false};
   bool path_loaded{false};
@@ -88,8 +119,8 @@ struct GateInputs {
   GateResult rtk;  // result of RtkGate::evaluate()
 };
 
-// Order: E-stop, disarmed, not OFFBOARD, path not loaded, pose stale, velocity stale, RTK, awaiting
-// tracking, pivoting.
+// Order: E-stop, mission/RPP ownership, disarmed, not OFFBOARD, path not loaded, pose stale,
+// velocity stale, RTK, awaiting tracking, pivoting.
 GateResult auto_safety_status(const GateInputs& in);
 
 }  // namespace dyx3_spray

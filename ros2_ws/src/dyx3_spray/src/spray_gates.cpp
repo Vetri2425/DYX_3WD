@@ -123,8 +123,25 @@ bool PivotGate::active(bool off_during_pivot, double timeout_s, double now_s) {
   return pivoting_;
 }
 
+GateResult ownership_status(const OwnershipInputs& in) {
+  if (!in.mission_running) return {false, "mission not running"};
+  if (!in.rpp_known || !(in.rpp_age_s <= std::max(0.0, in.rpp_timeout_s)))
+    return {false, "rpp stale"};
+  if (in.rpp_mission_id != in.mission_id) return {false, "rpp mission mismatch"};
+  switch (static_cast<RppState>(in.rpp_state)) {
+    case RppState::Tracking:
+    case RppState::Stopping:
+    case RppState::Pivoting:
+    case RppState::Creeping:
+      return {true, ""};
+    default:
+      return {false, "rpp not marking"};
+  }
+}
+
 GateResult auto_safety_status(const GateInputs& in) {
   if (!in.estop_clear) return {false, "emergency stop asserted or unknown"};
+  if (!in.ownership.ok) return in.ownership;
   if (!in.armed) return {false, "disarmed"};
   if (in.require_offboard && !in.offboard) return {false, "not OFFBOARD"};
   if (!in.path_loaded) return {false, "path not loaded"};

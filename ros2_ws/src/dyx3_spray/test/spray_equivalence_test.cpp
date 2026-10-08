@@ -237,6 +237,7 @@ TEST(SprayEquivalence, AllVectors) {
         const double now = num(in[1]);
         if (in[5] != "-") piv.note_state(in[5] == "1", now);
         GateInputs gi;
+        gi.ownership = {true, ""};  // production gate (C1), the prototype has none
         gi.armed = gi.offboard = gi.path_loaded = gi.pose_fresh = gi.velocity_fresh =
             gi.tracking_seen = true;
         gi.estop_clear = true;
@@ -254,6 +255,7 @@ TEST(SprayEquivalence, AllVectors) {
       const auto in = split(line.substr(0, arrow));
       const auto out = split(line.substr(arrow + 4));
       GateInputs gi;
+      gi.ownership = {true, ""};  // production gate (C1), the prototype has none
       gi.require_offboard = flag(in[1]);
       gi.armed = flag(in[2]);
       gi.offboard = flag(in[3]);

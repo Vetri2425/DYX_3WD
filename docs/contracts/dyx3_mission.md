@@ -44,6 +44,12 @@ auto-pause on gate loss; READY exists to require an RPP acknowledgement before a
 `Transition{seq, from, to, event, reason, detail, stamp_ns}`; the last 256 are retained, each goes to `/rosout`, and the full state is republished as `MissionState` on every
 transition and at 10 Hz (DERIVED rate). Illegal events are logged as refused transitions.
 
+### READY acknowledgement and action cancel (review H4/H3, fix plan A2/A3, 2026-10-08)
+* Only `RppStatus` LOADED, TRACKING, STOPPING, PIVOTING or CREEPING of this mission acknowledges READY. ERROR is evaluated
+  first (READY -> ERROR, `REASON_INTERNAL_ERROR`); COMPLETE in READY is neither an ack nor a completion.
+* `ExecuteMission` cancel aborts the mission inside the cancel callback (REASON_OPERATOR); the goal is not CANCELING yet
+  there, so the timer finalises it once it is: result code CANCELED, `RESULT_ABORTED`.
+
 ## 5. Inputs
 `SafetyGateStatus` (guard-owned aggregate, 10 Hz; stale > 0.5 s or never seen ⇒ **not ok**), `RppStatus`, `VehicleState` (position for the point journal).
 Mission never reads RTK/estimator/E-stop directly — one owner per gate (the guard).

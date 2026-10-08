@@ -44,3 +44,4 @@
   off_pwm_us,
   on_pwm_us,
   spray_enabled,
+  rpp_timeout_s,

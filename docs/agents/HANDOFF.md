@@ -525,3 +525,28 @@ Open (human): RTK_FLOAT acceptance (the prototype hard-codes minimum fix 6; the 
 the CONDITIONED run, which fuses a short unpainted lead into the mark, so it can be true where the planner's flag is false); SCHED_FIFO priority / CPU affinity; the point hold / handshake / progress publication (port, drop,
 or move to the mission layer); survivors of the mutation check that need scenarios I could not construct (run-boundary turns 45-62 degrees, precise-stop reverse after an overshoot, a corner released straight into tracking).
 LOCAL ACTION: run the orchestrator test on real bag poses; `tools/gate4/gen_orchestrator_vectors.py --check` (Humble container); bench the pivot and brake commands (GATE 1).
+
+## 2026-10-08 — Claude (cloud, branch `ccr-9531e512-2ndub7`) — review fix plan Phase A (A1, A2, A3) + frozen decisions
+
+Plan: `docs/reviews/2026-10-08_cloud_review_verification_and_fix_plan.md`. **Section 5 of that file records the six human decisions frozen today** (A1 spray ownership, B1 reverse cap 0.10 m/s, B2 RPP sole profile owner, C2 heading gate moves into spray, E3 explicit `PLAINTEXT | TLS` per NTRIP profile, E4 plan location). Read it before B–G.
+Docs: the production RTK plan is now in the repo, verbatim, at `docs/plans/2026-10-08_production_rtk_plan.md` (E4 input; header records the E3 security decision).
+
+### A1 · C1 spray mission/RPP ownership — `dyx3_spray`
+* New `ownership_status()` gate (pure, `spray_gates`), second after E-stop: mission RUNNING, `RppStatus` fresh (`rpp_timeout_s`), same `mission_id`, state TRACKING/STOPPING/PIVOTING/CREEPING. Reasons `mission not running`, `rpp stale`, `rpp mission mismatch`, `rpp not marking`. `GateInputs.ownership` defaults fail-closed.
+* `tracking_seen_` is no longer a permanent latch: set only by TRACKING of the RUNNING mission, cleared on non-RUNNING, mission id change, path load. `note_rpp(state, mission_id, t)` and `set_mission(running, id)` replace the bool API.
+* `safety_allows_on` (reassert path) also requires ownership; manual bench spray stays exempt.
+* New parameter `rpp_timeout_s` 0.5 IDLE_ONLY: a "Production additions" section in `parameter_registry.md` (not part of the 173), generator expect 45 -> 46, tables regenerated.
+* **DERIVED — NOT FROM V1 SPEC:** CREEPING is an allowed state (endpoint creep is still on the leg; geometry decides MARK). Equivalence tests set `ownership = ok` because the prototype has no such gate.
+* Tests: gate unit test (every state, boundary age 0.5 vs 0.51, mismatch, defaults fail closed); 4 controller tests (pause/abort/complete/error -> OFF in one tick with ack; RPP ERROR/COMPLETE/LOADED/IDLE; RPP silent 0.48 s still ON, 0.52 s OFF; STOPPING keeps the mark and a resume needs fresh TRACKING; another mission's TRACKING is not evidence); 1 node test over 6 cases (PauseMission, AbortMission, COMPLETED, mission ERROR, RppStatus ERROR, RPP killed) each asserting OFF command, OFF ack, lease revoked.
+
+### A2 · H4 READY acknowledgement, A3 · H3 action cancel — `dyx3_mission`
+* READY is acknowledged only by LOADED/TRACKING/STOPPING/PIVOTING/CREEPING; ERROR is evaluated first (READY -> ERROR); COMPLETE in READY is ignored.
+* Cancel still aborts in the callback; `on_timer` finalises the goal once it is CANCELING (result CANCELED, `RESULT_ABORTED`).
+* Tests: the cancel test now also asserts the action result; new `RppErrorInReadyIsAnErrorNotAnAcknowledgement`, `RppCompleteInReadyIsNotAnAcknowledgement`.
+
+### What I ran / could not run
+* RAN (no ROS in this container): `dyx3_spray_core` built natively with g++ `-Wall -Wextra -Wpedantic -Werror` against googletest 1.14; `spray_core_test` 28/28, `spray_gates_test` 9/9, `spray_defect_test` 6/6, `spray_equivalence_test` 1/1 (all vector files). `tools/gen_param_tables.py --check` ok. clang-format 18 applied to changed files.
+* NOT RUN: `spray_node_test`, `mission_node_test` and the mission node build (need ROS 2 / rclcpp_action) — **CI must prove them**; check the CI run of this push. Nothing ran on a Jetson or a rover.
+
+### Next (waiting for the human's go — limited credit)
+Phase B (B1 reverse cap 0.10, B2 remove guard accel/decel/jerk from the normal path, B3 code part), then D (D1 serialised spray ACKs: High, mandatory before field use), C, E, F per the plan. Not started.

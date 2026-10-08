@@ -82,12 +82,10 @@ SprayNode::SprayNode(const rclcpp::NodeOptions& options, ClockFn clock, bool cre
       });
   sub_rpp_ = create_subscription<dyx3_interfaces::msg::RppStatus>(
       "/dyx3/rpp/status", rel1, [this](dyx3_interfaces::msg::RppStatus::ConstSharedPtr m) {
-        using S = dyx3_interfaces::msg::RppStatus;
-        // Tracking evidence (B5): TRACKING only (fail closed: it delays, never advances, the first
-        // mark). Pivot gate: PIVOTING only (CORNER_ALIGN), never STOPPING (CORNER_STOP still lays
-        // the last 2 cm of the leg).
-        const bool tracking = m->state == S::STATE_TRACKING;
-        ctl_->note_rpp(tracking, m->state == S::STATE_PIVOTING, clock_());
+        // Tracking evidence (B5): TRACKING of the RUNNING mission only (fail closed: it delays,
+        // never advances, the first mark). Pivot gate: PIVOTING only (CORNER_ALIGN), never STOPPING
+        // (CORNER_STOP still lays the last 2 cm of the leg). Ownership gate (C1): see spray_gates.
+        ctl_->note_rpp(m->state, m->mission_id, clock_());
       });
   sub_mission_ = create_subscription<dyx3_interfaces::msg::MissionState>(
       "/dyx3/mission/state", rel1,
@@ -265,7 +263,7 @@ void SprayNode::publish_status(double now_s) {
 
 void SprayNode::on_mission_state(const dyx3_interfaces::msg::MissionState& m) {
   mission_running_ = m.state == dyx3_interfaces::msg::MissionState::STATE_RUNNING;
-  ctl_->set_mission_running(mission_running_);
+  ctl_->set_mission(mission_running_, m.mission_id);
   if (m.path_artifact_sha256 == loaded_sha_) return;
   load_artifact(m.path_artifact_sha256);
 }

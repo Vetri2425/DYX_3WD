@@ -45,3 +45,4 @@
   {"off_pwm_us", Kind::Int, ParamClass::IdleOnly, 0.0, "", 0.0, 2200.0, false, false, {}},
   {"on_pwm_us", Kind::Int, ParamClass::IdleOnly, 1800.0, "", 0.0, 2200.0, false, false, {}},
   {"spray_enabled", Kind::Bool, ParamClass::IdleOnly, 1, "", -HUGE_VAL, HUGE_VAL, false, false, {}},
+  {"rpp_timeout_s", Kind::Float, ParamClass::IdleOnly, 0.5, "", 0.0, HUGE_VAL, true, false, {}},

@@ -21,6 +21,7 @@ GateInputs all_good() {
       g.estop_clear = true;
   g.require_offboard = true;
   g.rtk = {true, ""};
+  g.ownership = {true, ""};
   return g;
 }
 }  // namespace
@@ -92,6 +93,7 @@ TEST(GateStack, EveryGateFailsOnItsOwnAndTheFirstFailureWinsInOrder) {
   };
   const Case cases[] = {
       {[](GateInputs& g) { g.estop_clear = false; }, "emergency stop asserted or unknown"},
+      {[](GateInputs& g) { g.ownership = {false, "rpp stale"}; }, "rpp stale"},
       {[](GateInputs& g) { g.armed = false; }, "disarmed"},
       {[](GateInputs& g) { g.offboard = false; }, "not OFFBOARD"},
       {[](GateInputs& g) { g.path_loaded = false; }, "path not loaded"},
@@ -112,6 +114,7 @@ TEST(GateStack, EveryGateFailsOnItsOwnAndTheFirstFailureWinsInOrder) {
   GateInputs g;
   g.require_offboard = true;
   const char* order[] = {"emergency stop asserted or unknown",
+                         "mission not running",
                          "disarmed",
                          "not OFFBOARD",
                          "path not loaded",
@@ -124,21 +127,23 @@ TEST(GateStack, EveryGateFailsOnItsOwnAndTheFirstFailureWinsInOrder) {
   g.pivoting = true;
   EXPECT_EQ(auto_safety_status(g).reason, order[0]);
   g.estop_clear = true;
-  EXPECT_EQ(auto_safety_status(g).reason, order[1]);
-  g.armed = true;
+  EXPECT_EQ(auto_safety_status(g).reason, order[1]);  // the default ownership is fail-closed
+  g.ownership = {true, ""};
   EXPECT_EQ(auto_safety_status(g).reason, order[2]);
-  g.offboard = true;
+  g.armed = true;
   EXPECT_EQ(auto_safety_status(g).reason, order[3]);
-  g.path_loaded = true;
+  g.offboard = true;
   EXPECT_EQ(auto_safety_status(g).reason, order[4]);
-  g.pose_fresh = true;
+  g.path_loaded = true;
   EXPECT_EQ(auto_safety_status(g).reason, order[5]);
-  g.velocity_fresh = true;
+  g.pose_fresh = true;
   EXPECT_EQ(auto_safety_status(g).reason, order[6]);
-  g.rtk = {true, ""};
+  g.velocity_fresh = true;
   EXPECT_EQ(auto_safety_status(g).reason, order[7]);
-  g.tracking_seen = true;
+  g.rtk = {true, ""};
   EXPECT_EQ(auto_safety_status(g).reason, order[8]);
+  g.tracking_seen = true;
+  EXPECT_EQ(auto_safety_status(g).reason, order[9]);
 }
 
 TEST(GateStack, OffboardNotRequiredWhenSwitchedOff) {
@@ -146,4 +151,39 @@ TEST(GateStack, OffboardNotRequiredWhenSwitchedOff) {
   g.offboard = false;
   g.require_offboard = false;
   EXPECT_TRUE(auto_safety_status(g).ok);
+}
+
+TEST(Ownership, OnlyARunningMissionWithFreshMarkingRppMayPaint) {
+  OwnershipInputs o;
+  o.mission_running = true;
+  o.mission_id = 7;
+  o.rpp_known = true;
+  o.rpp_age_s = 0.1;
+  o.rpp_timeout_s = 0.5;
+  o.rpp_mission_id = 7;
+  using S = RppState;
+  for (S s : {S::Tracking, S::Stopping, S::Pivoting, S::Creeping}) {
+    o.rpp_state = static_cast<uint8_t>(s);
+    EXPECT_TRUE(ownership_status(o).ok) << int(o.rpp_state);
+  }
+  for (uint8_t s : {uint8_t(0), uint8_t(5), uint8_t(6), uint8_t(7), uint8_t(8), uint8_t(255)}) {
+    o.rpp_state = s;
+    EXPECT_EQ(ownership_status(o).reason, "rpp not marking") << int(s);
+  }
+  o.rpp_state = static_cast<uint8_t>(S::Tracking);
+  OwnershipInputs b = o;
+  b.mission_running = false;
+  EXPECT_EQ(ownership_status(b).reason, "mission not running");
+  b = o;
+  b.rpp_known = false;
+  EXPECT_EQ(ownership_status(b).reason, "rpp stale");
+  b = o;
+  b.rpp_age_s = 0.5;  // the bound itself is still fresh
+  EXPECT_TRUE(ownership_status(b).ok);
+  b.rpp_age_s = 0.51;
+  EXPECT_EQ(ownership_status(b).reason, "rpp stale");
+  b = o;
+  b.rpp_mission_id = 6;
+  EXPECT_EQ(ownership_status(b).reason, "rpp mission mismatch");
+  EXPECT_FALSE(ownership_status(OwnershipInputs{}).ok);  // defaults fail closed
 }

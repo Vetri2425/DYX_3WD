@@ -244,6 +244,9 @@ struct Rig {
   bool ack_enabled{true};
   bool tracking{true};
   bool pivot{false};
+  bool rpp_alive{true};
+  bool mission_running{true};
+  std::optional<RppState> rpp_override;  // publish this state instead of tracking/pivot
 
   explicit Rig(bool tracking0 = true) {
     tracking = tracking0;
@@ -268,7 +271,15 @@ struct Rig {
     r.fix_type = 6;
     r.h_acc_m = 0.02;
     c->note_rtk(r, t);
-    c->note_rpp(tracking, pivot, t);
+    c->set_mission(mission_running, 1);
+    if (rpp_alive) {
+      // not tracking: an RPP state that may paint but is not TRACKING ("awaiting tracking")
+      const RppState st = rpp_override ? *rpp_override
+                          : pivot      ? RppState::Pivoting
+                          : tracking   ? RppState::Tracking
+                                       : RppState::Stopping;
+      c->note_rpp(static_cast<uint8_t>(st), 1, t);
+    }
     c->note_estop(estop, t);
     c->note_watchdog(true, true, t);
   }
@@ -389,7 +400,7 @@ TEST(Controller, DisarmedOrWatchdogLostOrDisabledBlocksSprayAndTheLease) {
   w.t += 1.2;  // the watchdog heartbeat is not refreshed (note_watchdog only runs in world())
   w.c->note_vehicle(VehicleSnapshot{true, true, true, true, true, 4.0, 0.0, 0.0, 0.35, 0.0}, w.t);
   w.c->note_rtk(RtkSnapshot{6, 0.02}, w.t);
-  w.c->note_rpp(true, false, w.t);
+  w.c->note_rpp(static_cast<uint8_t>(RppState::Tracking), 1, w.t);
   w.c->note_estop(false, w.t);
   w.run_cmd(w.c->tick(w.t));
   EXPECT_FALSE(w.c->lease(w.t).allow_on);
@@ -471,4 +482,79 @@ TEST(Controller, WireValuesFollowTheBackendAndNeverExceedOnValue) {
   const ActuatorWire on = r.c->wire_for(true);
   EXPECT_EQ(on.value, 1.0);
   EXPECT_EQ(on.actuator_set_index, 1);
+}
+
+// Review C1 / fix plan A1: the valve follows the mission and RPP, not a permanent latch.
+TEST(Controller, MissionOrRppLeavingAMarkingStateClosesTheValveAtOnce) {
+  struct Case {
+    const char* name;
+    void (*apply)(Rig&);
+    const char* reason;
+  };
+  const Case cases[] = {
+      {"mission paused/aborted/completed/error", [](Rig& r) { r.mission_running = false; },
+       "mission not running"},
+      {"rpp ERROR", [](Rig& r) { r.rpp_override = RppState::Error; }, "rpp not marking"},
+      {"rpp COMPLETE", [](Rig& r) { r.rpp_override = RppState::Complete; }, "rpp not marking"},
+      {"rpp LOADED", [](Rig& r) { r.rpp_override = RppState::Loaded; }, "rpp not marking"},
+      {"rpp IDLE", [](Rig& r) { r.rpp_override = RppState::Idle; }, "rpp not marking"},
+  };
+  for (const auto& k : cases) {
+    Rig r;
+    double n = 0.0;
+    for (; n < 4.0; n += 0.007) r.step(n);
+    ASSERT_TRUE(r.c->status(r.t).spraying) << k.name;
+    const int offs = r.offs;
+    k.apply(r);
+    r.step(n);
+    EXPECT_FALSE(r.c->lease(r.t).allow_on) << k.name;
+    EXPECT_FALSE(r.c->status(r.t).spraying) << k.name;  // OFF commanded and acked in one tick
+    EXPECT_GT(r.offs, offs) << k.name;
+    EXPECT_EQ(r.c->status(r.t).safety_reason, k.reason) << k.name;
+  }
+}
+
+TEST(Controller, RppSilenceBeyondItsTimeoutClosesTheValve) {
+  Rig r;
+  double n = 0.0;
+  for (; n < 4.0; n += 0.007) r.step(n);
+  ASSERT_TRUE(r.c->status(r.t).spraying);
+  r.rpp_alive = false;                              // RPP process killed: no more RppStatus
+  for (int i = 0; i < 24; ++i) r.step(n += 0.007);  // 0.48 s: still within rpp_timeout_s 0.5
+  EXPECT_TRUE(r.c->status(r.t).spraying);
+  for (int i = 0; i < 2; ++i) r.step(n += 0.007);
+  EXPECT_FALSE(r.c->status(r.t).spraying);
+  EXPECT_FALSE(r.c->lease(r.t).allow_on);
+  EXPECT_EQ(r.c->status(r.t).safety_reason, "rpp stale");
+}
+
+TEST(Controller, StoppingKeepsTheMarkAndResumeNeedsFreshTracking) {
+  Rig r;
+  double n = 0.0;
+  for (; n < 4.0; n += 0.007) r.step(n);
+  ASSERT_TRUE(r.c->status(r.t).spraying);
+  r.rpp_override = RppState::Stopping;  // corner stop lays the last ~2 cm of the leg
+  for (int i = 0; i < 5; ++i) r.step(n += 0.004);
+  EXPECT_TRUE(r.c->status(r.t).spraying);
+  // pause, then resume while RPP is still STOPPING: the old tracking evidence is gone
+  r.mission_running = false;
+  r.step(n);
+  ASSERT_FALSE(r.c->status(r.t).spraying);
+  r.mission_running = true;
+  for (int i = 0; i < 10; ++i) r.step(n += 0.007);
+  EXPECT_FALSE(r.c->status(r.t).spraying);
+  EXPECT_EQ(r.c->status(r.t).safety_reason, "awaiting tracking");
+  r.rpp_override.reset();  // TRACKING again
+  for (int i = 0; i < 10; ++i) r.step(n += 0.007);
+  EXPECT_TRUE(r.c->status(r.t).spraying);
+}
+
+TEST(Controller, TrackingOfAnotherMissionIsNotEvidence) {
+  Rig r(/*tracking0=*/false);
+  double n = 0.0;
+  for (; n < 1.0; n += 0.007) r.step(n);
+  r.c->note_rpp(static_cast<uint8_t>(RppState::Tracking), 2, r.t);  // stale RPP of mission 2
+  for (; n < 4.0; n += 0.007) r.step(n);  // RPP of mission 1 never TRACKING
+  EXPECT_FALSE(r.c->status(r.t).spraying);
+  EXPECT_EQ(r.c->status(r.t).safety_reason, "awaiting tracking");
 }

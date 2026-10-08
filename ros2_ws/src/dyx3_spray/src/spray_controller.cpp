@@ -40,9 +40,35 @@ void SprayController::note_rtk(const RtkSnapshot& r, double now_s) {
   rtk_recv_s_ = now_s;
 }
 
-void SprayController::note_rpp(bool tracking, bool pivoting, double now_s) {
-  if (tracking) tracking_seen_ = true;
-  pivot_gate_.note_state(pivoting, now_s);
+void SprayController::note_rpp(uint8_t state, uint32_t mission_id, double now_s) {
+  rpp_known_ = true;
+  rpp_state_ = state;
+  rpp_mission_id_ = mission_id;
+  rpp_recv_s_ = now_s;
+  // Tracking evidence (B5) counts only for the mission that is RUNNING now (review C1): it was a
+  // permanent latch, cleared only on path load.
+  if (static_cast<RppState>(state) == RppState::Tracking && mission_running_ &&
+      mission_id == mission_id_)
+    tracking_seen_ = true;
+  pivot_gate_.note_state(static_cast<RppState>(state) == RppState::Pivoting, now_s);
+}
+
+void SprayController::set_mission(bool running, uint32_t mission_id) {
+  if (!running || mission_id != mission_id_) tracking_seen_ = false;
+  mission_running_ = running;
+  mission_id_ = mission_id;
+}
+
+GateResult SprayController::ownership(double now_s) const {
+  OwnershipInputs o;
+  o.mission_running = mission_running_;
+  o.mission_id = mission_id_;
+  o.rpp_known = rpp_known_;
+  o.rpp_age_s = now_s - rpp_recv_s_;
+  o.rpp_timeout_s = p_->num(P::rpp_timeout_s);
+  o.rpp_state = rpp_state_;
+  o.rpp_mission_id = rpp_mission_id_;
+  return ownership_status(o);
 }
 
 void SprayController::note_estop(bool asserted, double now_s) {
@@ -101,6 +127,7 @@ bool SprayController::safety_allows_on(double now_s) const {
   if (!watchdog_ok(nullptr, now_s)) return false;
   if (manual_active_)
     return true;  // bench: armed is sufficient, OFFBOARD is an auto-spray constraint
+  if (!ownership(now_s).ok) return false;
   if (p_->flag(P::require_offboard) && !veh_.offboard) return false;
   return true;
 }
@@ -219,6 +246,7 @@ std::optional<SprayCommand> SprayController::tick(double now_s) {
   const GateResult rtk = rtk_gate_.evaluate(rc, rtk_.fix_type, rtk_.h_acc_m, rtk_age, now_s);
 
   GateInputs gi;
+  gi.ownership = ownership(now_s);
   gi.armed = vehicle_fresh(now_s) && veh_.armed;
   gi.offboard = vehicle_fresh(now_s) && veh_.offboard;
   gi.require_offboard = p_->flag(P::require_offboard);

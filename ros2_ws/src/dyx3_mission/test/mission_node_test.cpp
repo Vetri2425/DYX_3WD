@@ -326,10 +326,43 @@ TEST_F(MissionNodeTest, ActionGoalIsRejectedWhenTheGateIsNotOkAndCancelAborts) {
   ASSERT_TRUE(spin_until([&] { return gf.wait_for(0s) == std::future_status::ready; }));
   auto gh = gf.get();
   ASSERT_TRUE(gh != nullptr);
+  auto rf = action_->async_get_result(gh);
   auto cf = action_->async_cancel_goal(gh);
   ASSERT_TRUE(spin_until([&] { return cf.wait_for(0s) == std::future_status::ready; }));
   EXPECT_TRUE(wait_state(di::msg::MissionState::STATE_ABORTED));
   EXPECT_EQ(last_state_.reason_code, di::msg::MissionState::REASON_OPERATOR);
+  // H3: the goal is finalised as CANCELED (not left hanging, not reported as an abort)
+  ASSERT_TRUE(spin_until([&] { return rf.wait_for(0s) == std::future_status::ready; }));
+  const auto wr = rf.get();
+  EXPECT_EQ(wr.code, rclcpp_action::ResultCode::CANCELED);
+  ASSERT_TRUE(wr.result != nullptr);
+  EXPECT_EQ(wr.result->result_code, Exec::Result::RESULT_ABORTED);
+}
+
+// Review H4 / fix plan A2: RPP ERROR in READY is an error, not an acknowledgement; COMPLETE in
+// READY is neither.
+TEST_F(MissionNodeTest, RppErrorInReadyIsAnErrorNotAnAcknowledgement) {
+  start_ready();
+  for (int i = 0; i < 4; ++i) {
+    rpp(di::msg::RppStatus::STATE_ERROR, 1);
+    hold_gate(true, 0, 30ms);
+  }
+  EXPECT_TRUE(wait_state(di::msg::MissionState::STATE_ERROR));
+  EXPECT_EQ(last_state_.reason_code, di::msg::MissionState::REASON_INTERNAL_ERROR);
+}
+
+TEST_F(MissionNodeTest, RppCompleteInReadyIsNotAnAcknowledgement) {
+  start_ready();
+  for (int i = 0; i < 4; ++i) {
+    rpp(di::msg::RppStatus::STATE_COMPLETE, 1);
+    hold_gate(true, 0, 30ms);
+  }
+  EXPECT_EQ(state(), di::msg::MissionState::STATE_READY);
+  for (int i = 0; i < 4; ++i) {
+    rpp(di::msg::RppStatus::STATE_LOADED, 1);
+    hold_gate(true, 0, 30ms);
+  }
+  EXPECT_TRUE(wait_state(di::msg::MissionState::STATE_RUNNING));
 }
 
 int main(int argc, char** argv) {

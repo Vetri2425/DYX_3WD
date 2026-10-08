@@ -37,7 +37,7 @@ POSITIVE = {  # used as divisors / periods: zero would be a division by zero or 
     "min_lookahead_dist", "max_lookahead_dist",
     # spray
     "rated_marking_speed_mps", "pose_timeout_s", "velocity_timeout_s", "gps_fix_timeout_s", "reassert_hz",
-    "spray_watchdog_timeout_s", "manual_override_timeout_s",
+    "spray_watchdog_timeout_s", "manual_override_timeout_s", "rpp_timeout_s",
 }
 ALLOWED = {
     "tracking_profile": ["auto", "segment", "smooth"],
@@ -55,7 +55,7 @@ INT_RANGE = {  # name -> (lo, hi)
 PACKAGES = {
     "dyx3_rpp": {"expect": 119, "exclude": {}},
     "dyx3_spray": {
-        "expect": 45,
+        "expect": 46,  # 45 carried + rpp_timeout_s (production addition, 2026-10-08)
         "exclude": {
             "command_service": "MAVROS service name: the valve is driven through dyx3_px4_link",
             "use_distance_aware_spray": "the legacy /spray/active path is not carried; distance-aware is the only path",

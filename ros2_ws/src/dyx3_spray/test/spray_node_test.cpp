@@ -62,6 +62,8 @@ struct Rig {
   bool armed{true};
   bool estop{false};
   bool publish_mission{true};
+  uint8_t mission_state{dyx3_interfaces::msg::MissionState::STATE_RUNNING};
+  int rpp_state{dyx3_interfaces::msg::RppStatus::STATE_TRACKING};  // -1: RPP is dead (silent)
   std::string mission_sha;
   double north{0.0};
   double speed{0.35};
@@ -179,12 +181,14 @@ struct Rig {
     r.corrections_fresh = true;
     r.horizontal_accuracy_m = 0.02F;
     p_rtk->publish(r);
-    dyx3_interfaces::msg::RppStatus p;
-    p.state = dyx3_interfaces::msg::RppStatus::STATE_TRACKING;
-    p_rpp->publish(p);
+    if (rpp_state >= 0) {
+      dyx3_interfaces::msg::RppStatus p;
+      p.state = static_cast<uint8_t>(rpp_state);
+      p_rpp->publish(p);
+    }
     if (publish_mission) {
       dyx3_interfaces::msg::MissionState m;
-      m.state = dyx3_interfaces::msg::MissionState::STATE_RUNNING;
+      m.state = mission_state;
       m.path_artifact_sha256 = mission_sha;
       p_mission->publish(m);
     }
@@ -336,6 +340,43 @@ TEST(SprayNode, EmergencyStopClosesTheValveAndRevokesTheLease) {
   EXPECT_FALSE(r.status.spraying);
   EXPECT_FALSE(r.lease.allow_on);
   EXPECT_FALSE(r.cmds.back().on);
+}
+
+// Review C1 / fix plan A1: pause, abort, completion, mission error, RPP error and RPP death all
+// close a valve that is ON (OFF command sent and acknowledged), and revoke the lease.
+TEST(SprayNode, MissionOrRppLeavingTheRunClosesTheValve) {
+  using M = dyx3_interfaces::msg::MissionState;
+  using S = dyx3_interfaces::msg::RppStatus;
+  struct Case {
+    const char* name;
+    int mission;
+    int rpp;
+  };
+  const Case cases[] = {
+      {"PauseMission", M::STATE_PAUSED, S::STATE_TRACKING},
+      {"AbortMission", M::STATE_ABORTED, S::STATE_TRACKING},
+      {"mission COMPLETED", M::STATE_COMPLETED, S::STATE_COMPLETE},
+      {"mission ERROR", M::STATE_ERROR, S::STATE_TRACKING},
+      {"RppStatus ERROR", M::STATE_RUNNING, S::STATE_ERROR},
+      {"RPP process killed", M::STATE_RUNNING, -1},
+  };
+  for (const auto& k : cases) {
+    Rig r;
+    r.settle();
+    for (r.north = 0.0; r.north < 4.0; r.north += 0.007) r.cycle();
+    ASSERT_TRUE(r.status.spraying) << k.name;
+    ASSERT_TRUE(r.lease.allow_on) << k.name;
+    const int offs = r.count(false, SprayActuatorCommand::SOURCE_CONTROLLER);
+    const size_t acked = r.acked;
+    r.mission_state = static_cast<uint8_t>(k.mission);
+    r.rpp_state = k.rpp;
+    r.run(0.6);  // > rpp_timeout_s 0.5 for the silent case
+    EXPECT_FALSE(r.status.spraying) << k.name;
+    EXPECT_FALSE(r.lease.allow_on) << k.name;
+    EXPECT_GT(r.count(false, SprayActuatorCommand::SOURCE_CONTROLLER), offs) << k.name;
+    EXPECT_GT(r.acked, acked) << k.name;
+    EXPECT_FALSE(r.cmds.back().on) << k.name;
+  }
 }
 
 TEST(SprayNode, UnknownPathMeansPathNotLoaded) {

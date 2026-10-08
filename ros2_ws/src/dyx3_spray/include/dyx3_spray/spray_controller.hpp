@@ -76,10 +76,12 @@ public:
   void load_path(std::shared_ptr<const PathModel> model);  // nullptr clears
   void note_vehicle(const VehicleSnapshot& v, double now_s);
   void note_rtk(const RtkSnapshot& r, double now_s);
-  void note_rpp(bool tracking, bool pivoting, double now_s);
+  // state: RppStatus.state (RppState values); mission_id: RppStatus.mission_id.
+  void note_rpp(uint8_t state, uint32_t mission_id, double now_s);
   void note_estop(bool asserted, double now_s);
   void note_watchdog(bool alive, bool off_authority_ready, double now_s);
-  void set_mission_running(bool running) { mission_running_ = running; }
+  // MissionState: any non-RUNNING state or a different mission id clears the tracking evidence.
+  void set_mission(bool running, uint32_t mission_id);
 
   ManualResult set_manual(bool on, double now_s);
 
@@ -101,6 +103,7 @@ private:
   bool watchdog_ok(std::string* reason, double now_s) const;
   bool safety_allows_on(double now_s) const;
   std::pair<bool, std::string> fsm_safety_ok(double now_s) const;
+  GateResult ownership(double now_s) const;
   bool vehicle_fresh(double now_s) const;
   bool pose_fresh(double now_s) const;
   bool velocity_fresh(double now_s) const;
@@ -138,6 +141,11 @@ private:
   bool wd_ready_{false};
   double wd_recv_s_{0.0};
   bool mission_running_{false};
+  uint32_t mission_id_{0};
+  bool rpp_known_{false};
+  uint8_t rpp_state_{0};
+  uint32_t rpp_mission_id_{0};
+  double rpp_recv_s_{0.0};
 
   bool manual_active_{false};
   double manual_deadline_s_{0.0};

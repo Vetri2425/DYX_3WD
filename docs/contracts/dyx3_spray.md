@@ -122,6 +122,17 @@ the field missions from the backend (`/var/lib/dyx3/missions/*.dyx3path`) and ru
 
 ## 7. Gates (first failing wins; the reason string is published)
 
+**Mission / RPP ownership (review C1, fix plan A1, human decision 2026-10-08), second in the order after E-stop.** Autonomous spray
+may operate only while `MissionState` is RUNNING, `RppStatus` is fresh (`rpp_timeout_s`, 0.5 s, IDLE_ONLY, DERIVED: the stack's
+0.5 s freshness convention = 25 missed ticks at 50 Hz; re-validate from Jetson jitter), reports the same `mission_id`, and is in
+TRACKING, STOPPING (corner stop lays the last ~2 cm of the leg), PIVOTING (then the pivot gate below decides) or CREEPING
+(DERIVED — NOT FROM V1 SPEC: endpoint creep is still on the leg; the geometry decides whether it is MARK). IDLE, LOADED,
+COMPLETE, ERROR and unknown values refuse. Reasons: `mission not running`, `rpp stale`, `rpp mission mismatch`,
+`rpp not marking`. Any refusal goes through the normal OFF path: OFF command at once (no debounce: the FSM reads the safety
+verdict directly) and the lease's `allow_on` drops. The tracking evidence (B5) is no longer a permanent latch: it is set only by
+TRACKING of the RUNNING mission and cleared by any non-RUNNING mission state, a mission id change, or a path load, so a resume
+needs fresh TRACKING. Manual (bench) spray is exempt, as before (armed + watchdog suffice).
+
 disarmed; not OFFBOARD (`require_offboard`); path not loaded; pose stale (`pose_timeout_s`); velocity stale
 (`velocity_timeout_s`); RTK gate (below); awaiting tracking (B5: no `RppStatus` TRACKING since the path loaded, so a rover parked
 on a spray-flagged vertex 0 cannot open the valve); pivoting in place (`RppStatus.state == PIVOTING`, CORNER_ALIGN only — never
@@ -162,7 +173,7 @@ and `/dyx3/spray/actuator_command` (source = watchdog).
 
 ## 9. Parameters
 
-45 carried parameters (`docs/tuning/parameter_registry.md`, classes as proposed there; defaults verbatim from the prototype and
+45 carried parameters + 1 production addition (`rpp_timeout_s`, see section 7) (`docs/tuning/parameter_registry.md`, classes as proposed there; defaults verbatim from the prototype and
 **re-validated at GATE 5**). Two are `TBD — human` in the registry and are treated as follows until decided: `spray_enabled`
 default true, **IDLE_ONLY**. The actuator value range is validated structurally (`off_value`, `on_value` in [-1, 1]; `min_flow_value`
 within [off, on]); no tuning value is invented. Watchdog constants (`lease_timeout_s` 0.35, `off_retry_hz` 2, `off_burst_hz` 20,

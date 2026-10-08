@@ -219,3 +219,11 @@ Owner: the package in the `Owner` column is the single owner (CLAUDE.md "one dec
 | `off_pwm_us` | int | `0` | PX4_DXP/src/spray_controller_node.py:1018 | **IDLE_ONLY** | actuator electrical/hardware mapping; changing mid-line is a visible paint defect | dyx3_spray |
 | `on_pwm_us` | int | `1800` | PX4_DXP/src/spray_controller_node.py:1019 | **IDLE_ONLY** | actuator electrical/hardware mapping; changing mid-line is a visible paint defect | dyx3_spray |
 | `spray_enabled` | bool | `True` | PX4_DXP/src/spray_controller_node.py:1025 | **TBD — human** | master enable: turning it OFF must always work (but via the stop path, not a parameter); turning it ON mid-run is not safe — human to confirm the semantics | dyx3_spray |
+
+## Production additions (not in the prototype, not part of the 173)
+
+Parameters the production stack adds. They are not counted above. Each has a recorded decision.
+
+| name | type | default | source | class | rationale | owner |
+|---|---|---|---|---|---|---|
+| `rpp_timeout_s` | float | `0.5` | DERIVED — human decision 2026-10-08 (review C1 / fix plan A1): matches the stack's 0.5 s freshness convention, 25 missed ticks at 50 Hz; re-validate from Jetson jitter data | **IDLE_ONLY** | spray refuses (valve OFF) when `RppStatus` is older than this; relaxing it while a run is active must not be possible | dyx3_spray |

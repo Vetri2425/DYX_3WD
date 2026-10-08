@@ -133,7 +133,9 @@ MissionNode::MissionNode(const rclcpp::NodeOptions& options)
                           : rclcpp_action::GoalResponse::REJECT;
       },
       [this](const std::shared_ptr<GoalHandle>) {
-        // Cancel == AbortMission with REASON_OPERATOR.
+        // Cancel == AbortMission with REASON_OPERATOR. The goal is not CANCELING yet inside this
+        // callback (finishing here would report abort, not canceled): on_timer finalises it
+        // (review H3 / fix plan A3).
         fsm_.abort(kReasonOperator, now_ns());
         publish_points(journal_ ? journal_->finish() : std::vector<PointEvent>{});
         publish_state();
@@ -228,20 +230,27 @@ void MissionNode::evaluate_gate() {
 void MissionNode::on_rpp(const RppStatus& m) {
   if (m.mission_id != fsm_.mission_id()) return;  // only the current mission's RPP status counts
   run_.run_index = m.run_index;
-  if (fsm_.state() == State::kReady && m.state != RppStatus::STATE_IDLE) {
+  // Review H4 / fix plan A2: ERROR and COMPLETE are evaluated before the READY acknowledgement;
+  // only a state that shows RPP holds this mission's path acknowledges it.
+  const bool rpp_holds_path =
+      m.state == RppStatus::STATE_LOADED || m.state == RppStatus::STATE_TRACKING ||
+      m.state == RppStatus::STATE_STOPPING || m.state == RppStatus::STATE_PIVOTING ||
+      m.state == RppStatus::STATE_CREEPING;
+  if (m.state == RppStatus::STATE_ERROR) {
+    if (fsm_.rpp_error(now_ns()).transitioned) {
+      ready_since_ns_.reset();
+      publish_points(journal_ ? journal_->finish() : std::vector<PointEvent>{});
+      finish_goal_if_terminal();
+      publish_state();
+    }
+  } else if (fsm_.state() == State::kReady && rpp_holds_path) {
     std::uint8_t why = 0;
     const bool ok = gate_ok(&why);
     fsm_.rpp_ack(ok, why, now_ns());
     ready_since_ns_.reset();
     publish_state();
-  } else if (m.state == RppStatus::STATE_COMPLETE) {
+  } else if (m.state == RppStatus::STATE_COMPLETE && fsm_.state() != State::kReady) {
     if (fsm_.rpp_complete(now_ns()).transitioned) {
-      publish_points(journal_ ? journal_->finish() : std::vector<PointEvent>{});
-      finish_goal_if_terminal();
-      publish_state();
-    }
-  } else if (m.state == RppStatus::STATE_ERROR) {
-    if (fsm_.rpp_error(now_ns()).transitioned) {
       publish_points(journal_ ? journal_->finish() : std::vector<PointEvent>{});
       finish_goal_if_terminal();
       publish_state();
@@ -258,6 +267,7 @@ void MissionNode::on_vehicle(const dyx3_interfaces::msg::VehicleState& m) {
 
 void MissionNode::on_timer() {
   evaluate_gate();
+  if (goal_ && goal_->is_active() && goal_->is_canceling()) finish_goal_if_terminal();
   if (fsm_.state() == State::kReady && rpp_ack_timeout_s_ > 0.0 && ready_since_ns_) {
     if (static_cast<double>(now_ns() - *ready_since_ns_) * 1e-9 >= rpp_ack_timeout_s_) {
       fsm_.rpp_error(now_ns());  // ERROR(INTERNAL): RPP never acknowledged the artifact
