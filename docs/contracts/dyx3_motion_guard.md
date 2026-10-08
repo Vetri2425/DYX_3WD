@@ -81,7 +81,7 @@ Applied after every gate passed, to the forwarded command, never to STOP:
 | Limit | Parameter | Default | Source |
 |---|---|---|---|
 | forward speed | `max_forward_speed_mps` | 1.0 | prototype `max_linear_vel` default. Field runs 0.35; the guard's envelope is a human decision. Re-validate at GATE 4 |
-| reverse speed | `max_reverse_speed_mps` | **0.0** | **no source.** Reverse is used by the prototype's brake/precise-stop; with 0 a reverse command is clamped to 0 (reported `LIMIT_CLAMPED`). Human to set |
+| reverse speed | `max_reverse_speed_mps` | **0.10** | **DERIVED — human decision 2026-10-08 (review H6 / fix plan B1).** RPP's active brake is capped at 0.08 m/s and terminal creep is 0.10 m/s, so 0.10 m/s is the initial hard reverse envelope. It is not field-tuned; re-validate reverse/brake behaviour at GATE 1. |
 | yaw rate | `max_yaw_rate_radps` | 0.45 | prototype `max_yaw_rate_body` default. Re-validate at GATE 4 |
 | acceleration | `max_accel_mps2` | 0.20 | prototype `max_linear_accel` default |
 | deceleration | `max_decel_mps2` | 0.50 | prototype `max_linear_decel` default |
@@ -95,6 +95,9 @@ uses the acceleration limit, toward zero the deceleration limit, a sign change g
 heading-tracking case. A limit that cannot be honoured is a clamp, not a refusal. `PIVOT` requires speed 0 by contract, so it
 bypasses the speed ramp (the deceleration limit is not applied to `PIVOT` or `STOP`; RPP owns the stop
 profile). The limiter state is reset to zero by every fail-to-zero.
+
+**B1 scope:** the 0.10 m/s change is only the hard reverse envelope. The existing normal-path
+acceleration/deceleration/jerk shaping is unchanged here and is decided separately in B2.
 
 ## 6. Parameters
 

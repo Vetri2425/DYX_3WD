@@ -550,3 +550,14 @@ Docs: the production RTK plan is now in the repo, verbatim, at `docs/plans/2026-
 
 ### Next (waiting for the human's go — limited credit)
 Phase B (B1 reverse cap 0.10, B2 remove guard accel/decel/jerk from the normal path, B3 code part), then D (D1 serialised spray ACKs: High, mandatory before field use), C, E, F per the plan. Not started.
+
+## B1 — motion guard reverse cap 0.10 m/s (cloud session, branch `claude/cloud-phases`)
+
+Applied the supplied `B1_reverse_guard_cap_0p10.patch` on 780bb29: `max_reverse_speed_mps` default 0.0 -> 0.10
+(`limits.hpp`, `motion_guard_node.cpp`), the limits test now covers -0.08 passing and -0.5 clamped to -0.10, contract table updated.
+B2 (accel/decel/jerk shaping) and B3 are NOT implemented. The patch needed `git apply --recount` (its test-hunk line counts were off; content unchanged).
+
+Ran: `guard_core_test` compiled standalone with g++ -Wall -Wextra -Wpedantic against gtest 1.14 — 24/24 pass.
+Could not run: `motion_guard_node_test` and the colcon workspace (no ROS 2 in this container); CI is the check for those.
+DERIVED: 0.10 m/s is an initial bench value, not field-tuned; re-validate at GATE 1. The older HANDOFF line "reverse limit 0 (no source)" is superseded.
+Note: with the accel/decel shaper still active (B2), a -0.08 brake from standstill is ramped by max_accel 0.20 m/s2, so the envelope is no longer the limiting factor.

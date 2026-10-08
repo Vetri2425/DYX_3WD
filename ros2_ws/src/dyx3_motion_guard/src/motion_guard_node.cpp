@@ -177,7 +177,7 @@ void MotionGuardNode::declare_and_validate_params() {
   gate_cfg_.require_gnss_yaw_fusion = declare_parameter<bool>("require_gnss_yaw_fusion", true);
   const double nan = std::numeric_limits<double>::quiet_NaN();
   limits_.max_forward_speed_mps = static_cast<float>(d("max_forward_speed_mps", 1.0));
-  limits_.max_reverse_speed_mps = static_cast<float>(d("max_reverse_speed_mps", 0.0));
+  limits_.max_reverse_speed_mps = static_cast<float>(d("max_reverse_speed_mps", 0.10));
   limits_.max_yaw_rate_radps = static_cast<float>(d("max_yaw_rate_radps", 0.45));
   limits_.max_accel_mps2 = static_cast<float>(d("max_accel_mps2", 0.20));
   limits_.max_decel_mps2 = static_cast<float>(d("max_decel_mps2", 0.50));

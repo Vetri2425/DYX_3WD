@@ -107,17 +107,35 @@ TEST(Limits, ClampsSpeedAndRate) {
   EXPECT_FLOAT_EQ(o.motion.yaw_rate_setpoint, -0.45F);
   EXPECT_GE(o.motion.speed_body_x, -0.3F);
 }
-TEST(Limits, ReverseDefaultsToNotPermitted) {
-  Limits l;  // library default: no source for a reverse limit
-  LimitState st;
+TEST(Limits, ReverseDefaultAllowsBoundedBrakeEnvelope) {
+  Limits l;
+  // Isolate the B1 hard reverse envelope. B2 decides whether the normal-path accel/decel shaper
+  // remains; it is deliberately not changed by this patch.
+  l.max_accel_mps2 = 100.0F;
+  l.max_decel_mps2 = 100.0F;
+
   Motion m;
   m.mode = Mode::TrackRate;
-  m.speed_body_x = -0.2F;
   m.yaw_setpoint = NaN;
   m.yaw_rate_setpoint = 0.0F;
-  const auto o = apply_limits(m, 0.02, l, st);
-  EXPECT_TRUE(o.clamped);
-  EXPECT_EQ(o.motion.speed_body_x, 0.0F);
+
+  // RPP's active brake is capped at 0.08 m/s: the 0.10 m/s hard envelope must not clip it.
+  {
+    LimitState st;
+    m.speed_body_x = -0.08F;
+    const auto o = apply_limits(m, 0.02, l, st);
+    EXPECT_FALSE(o.clamped);
+    EXPECT_FLOAT_EQ(o.motion.speed_body_x, -0.08F);
+  }
+
+  // A larger reverse request is bounded by the production hard envelope.
+  {
+    LimitState st;
+    m.speed_body_x = -0.5F;
+    const auto o = apply_limits(m, 0.02, l, st);
+    EXPECT_TRUE(o.clamped);
+    EXPECT_FLOAT_EQ(o.motion.speed_body_x, -0.10F);
+  }
 }
 TEST(Limits, HeadingModeKeepsNanRateAndIgnoresRateLimits) {
   Limits l = cfg().limits;

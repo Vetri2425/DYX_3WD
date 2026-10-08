@@ -9,10 +9,11 @@
 namespace dyx3_motion_guard {
 
 struct Limits {
-  // Carried from the prototype's RPP defaults and flagged for GATE 4 re-validation, except the
-  // reverse speed, which has NO source and defaults to "reverse not permitted".
+  // Carried from the prototype's RPP defaults and flagged for GATE 4 re-validation. Reverse is a
+  // DERIVED production hard envelope: 0.10 m/s passes the RPP active-brake cap (0.08 m/s) while
+  // bounding larger reverse requests. It is an initial bench value, not a field-tuned final value.
   float max_forward_speed_mps{1.0F};
-  float max_reverse_speed_mps{0.0F};
+  float max_reverse_speed_mps{0.10F};
   float max_yaw_rate_radps{0.45F};
   float max_accel_mps2{0.20F};
   float max_decel_mps2{0.50F};
