@@ -256,7 +256,8 @@ TEST(SprayEquivalence, AllVectors) {
       const auto in = split(line.substr(0, arrow));
       const auto out = split(line.substr(arrow + 4));
       GateInputs gi;
-      gi.ownership = {true, ""};  // production gate (C1), the prototype has none
+      gi.ownership = {true, ""};         // production gate (C1), the prototype has none
+      gi.heading_evidence = {true, ""};  // isolate the legacy safety-vector gate under test
       gi.require_offboard = flag(in[1]);
       gi.armed = flag(in[2]);
       gi.offboard = flag(in[3]);
