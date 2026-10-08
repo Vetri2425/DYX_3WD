@@ -53,61 +53,70 @@ human decision.
 
 ---
 
-## 3b. Current status — 2026-09-05
+## 3b. Current status — 2026-10-08 (end of first rover bring-up day)
 
-**Milestone 1 complete. Skeleton only: no control logic, no firmware patches.**
+**The stack runs on the 3WD rover.** Control graph and Cloud Review fixes (phases A–F) are implemented on
+branch **`claude/cloud-phases`** (not yet merged to `master`), CI green, deployed to the rover from CI-built
+artifacts, and survive a full power cycle. **Nothing has driven yet**: no calibration, no motion, no field RTK.
 
 | | |
 |---|---|
-| This repo | `Vetri2425/DYX_3WD` — public, branch `master`, **CI green (6/6)** |
-| Firmware repo | `Vetri2425/PX4-Autopilot-3WD-Prod` — public, branch `dyx-3wd-production`, base PX4 **v1.17.0 == `d6f12ad1c4`**, first build green, pristine + CI only |
-| Artifact archive | `3WD_PROD/PX4-Firmware/3WD/<short-sha>-<slug>/` |
-| Hardware | still CubeOrange+ / MAVROS in the field. **Nothing here has run on a rover.** |
+| This repo | `Vetri2425/DYX_3WD`, deploy branch `claude/cloud-phases` (head `84518cd` + docs); `master` is behind |
+| Firmware | `Vetri2425/PX4-Autopilot-3WD-Prod` `dyx-3wd-production`, **flashed `9ab2ad3162`** (v1.17.0 + our patches; RoboClaw hang fix). Installer pin `27a7ac9284` = same `msg/` set |
+| Rover hardware | Holybro Pixhawk Jetson Baseboard: Pixhawk 6X + Jetson Orin Nano 8 GB, UM982 on TELEM1, RoboClaw on GPS2, spray on FMU PWM OUT 1, 8S LiFePO4 24 Ah |
+| Rover release | `/opt/dyx3/current` → `84518cd`, `build_origin` = CI prebuilt; all six services **enabled at boot**, health OK |
+| Artifact archive | firmware: `3WD_PROD/PX4-Firmware/3WD/<short-sha>-<slug>/`; stack: GitHub Releases `rover-<sha>` (last 20) |
 
-**Green CI proves:** all 12 packages configure and build (including `dyx3_interfaces`
-with rosidl and the lone `ament_python` package), `dyx3_geometry` builds and tests with
-no ROS installation, the quarantine and hygiene gates work.
-**Green CI does not prove:** any behaviour. There is none yet.
+**Proven on the rover 2026-10-08:** power cycle → all six services up with 0 restarts; uXRCE-DDS session on
+domain 42, 68 `/fmu` topics, odometry 100 Hz; `px4_link` stable (no session flaps); QGC over the network
+(TCP 5760: heartbeat, 915/915 params in 1.1 s); NTRIP → `/dyx3/rtcm` 6.4 msg/s → `/fmu/in/gps_inject_data` →
+PX4 "rate RTCM injection 5.77 Hz", CRC OK (indoors: no fix, expected); upgrade from CI artifacts in **20 s**
+(was 40 min compiling on the Jetson).
+**Not proven:** calibration, any motion, RTK fix outdoors, spray valve, accuracy, Jetson timing under load.
 
 ### What exists
 
-- The V1 specification and `docs/Firmware/F-tasks.md`.
-- 12 package skeletons with module file stubs — **empty namespaces, no targets**.
-- Backend with a `/api/ping` endpoint and one test. Path engine directory is empty.
-- 5 systemd units, installer skeleton, production manifest. **All non-functional stubs.**
+- 12 implemented packages, backend + Python path engine, see `README.md` and `docs/agents/CLOUD_REVIEW_STATUS.md`.
+- Installer that installs **prebuilt, digest-verified CI artifacts** (`installer/lib/artifacts.sh`, proposal
+  `2026-10-08_prebuilt-release-artifacts.md`, ACCEPTED), falls back to building on the Jetson, supports offline USB.
+- PX4 parameter baseline for this rover: `config/px4/3wd_6x_carry_from_proto.params` (prototype values carried,
+  ports remapped, prototype hacks excluded); prototype reference `config/px4/proto_ref_01.params`.
 
 ### What is decided and must not be silently re-litigated
 
-- Base pin `v1.17.0`, identical to the 4WD repo. Any divergence between vehicles must be
-  our patches, never the base.
-- Firmware patches are **real commits**, never `cp`-overlays. The new build already proves
-  this works: the `.px4` records `git_identity = f3de5d1`, our commit — old fork builds all
-  recorded base hash `54f0455f` regardless of content, which is why `ver_sw` could never
-  identify a build.
-- Transport and command interface migrate **together**. DDS while still publishing an XY
-  velocity vector keeps the structural tracking floor and buys nothing.
-- Gates are **acceptance gates, not start gates**: build anything at any time; accept
-  nothing without its number.
+- Base pin `v1.17.0`; firmware patches are real commits, never `cp`-overlays.
+- Jetson↔PX4 = Ethernet + uXRCE-DDS only. MAVLink on Ethernet (`MAV_2_CONFIG 1000`) is a **live parameter for
+  QGC only** (firmware default 0); QGC connects to the Jetson's `mavlink-router` on **TCP 5760**.
+- DDS: `ROS_DOMAIN_ID=42` + `ROS_LOCALHOST_ONLY=1` on the Jetson, **and** PX4 `UXRCE_DDS_DOM_ID=42`,
+  `UXRCE_DDS_PTCFG=1` (localhost participant). All four must match or `/fmu` is invisible or leaks to the LAN.
+- Stack releases come from green CI artifacts (`master`, and `claude/cloud-phases` while it is the deploy branch);
+  integrity = SHA-256 over GitHub TLS for now; signing + branch protection before customer deliveries.
+- Transport and command interface migrate together; gates are acceptance gates, not start gates.
 
 ### Immediate next steps
 
-1. **Milestone 2** — freeze `dyx3_interfaces`, starting with `MotionSetpoint`.
-2. Classify all 174 parameters (120 RPP + 54 spray) as LIVE / IDLE_ONLY / RESTART.
-3. **F1.1** in `docs/Firmware/F-tasks.md` — RoboClaw drivetrain patches as semantic diffs
-   against their v1.16.2 ancestors.
-4. Stage 0.1 — quantify the arc-tracking payoff analytically from existing bags **before**
-   committing further. It is days of desk work that validates or reshapes the programme.
+1. **OPEN, safety-relevant: PX4 Ethernet TX stall.** Twice on 2026-10-08 PX4 kept answering ping but stopped
+   sending anything it originates (DDS, MAVLink, ARP) until an FCU reboot — both times right after the XRCE agent
+   was restarted (dyx3-platform restart/upgrade). Reproduce with USB attached, then fix in firmware
+   (STM32H7 Ethernet/NuttX, upstream #26160-like) and/or a PX4-side link watchdog. Until fixed, any agent
+   restart may need an FCU power cycle. See HANDOFF 2026-10-08.
+2. Calibration on the rover: gyro, **simple (level-only) accelerometer** (`PREFLIGHT_CALIBRATION` param5=4 —
+   QGC does not expose it), level horizon. No magnetometer.
+3. RoboClaw motion test (wheels off the ground), then outdoor RTK fix with the Emlid "office" base.
+4. Merge `claude/cloud-phases` → `master` (human review), then the pending list: timing proposal + `dds_topics.yaml`,
+   production cleanup of unused A/B params, RTK USB-primary/DDS-fallback, hotspot profile (backend still binds
+   0.0.0.0 on the bench).
 
 ### Known risks carried into this repo
 
-- **Upstream #27514** (`risk:safety-critical`): PX4 applies a stale setpoint for ~900 ms
-  after an external process dies — 31 cm at 0.35 m/s. Our fail-to-zero is not optional.
+- **PX4 Ethernet TX stall** (above) — the rover fails to zero (px4_link, 0.2 s) but does not recover by itself.
+- **Upstream #27514** (`risk:safety-critical`): PX4 applies a stale setpoint for ~900 ms after an external
+  process dies. Our fail-to-zero is not optional.
 - **Upstream #27497**: rover differential does not turn in Mission Mode on v1.17 stable.
-  Blocks the F4 gate as written.
-- **Upstream #27388**: `uxrce_dds_client` silently stops publishing; only an FC reboot
-  recovers it. Detect per-topic staleness, not just session liveness.
-- `clang-format` is **unpinned** in CI. Local 23.1.0 and Ubuntu's apt version agree today;
-  a runner image bump can fail the job on untouched code. Pin it before real C++ lands.
+- **Upstream #27388**: `uxrce_dds_client` silently stops publishing; PR #27422 (time-budgeted receive drain) is a
+  candidate to port — our loop differs (one `uxr_run_session_timeout(0)` per cycle). Detect per-topic staleness.
+- `px4_link` staleness limits must come from **measured** periods (timesync and estimator flags are 1 Hz on this
+  firmware; 1.0 s limits flapped the link every second — fixed in `3ecd5c5`).
 
 ---
 
@@ -273,6 +282,11 @@ architecture document — do not invent IP addresses.
 
 Firmware lives in `Vetri2425/PX4-Autopilot-3WD-Prod` (base v1.17.0 == `d6f12ad1c4`). Never edit
 firmware from this repository. Never `cp`-overlay firmware files — patches are real commits.
+
+**This rover (2026-10-08):** Jetson `ssh dyx-3wd` (found by MAC, office LAN 192.168.1.x), eth `10.41.10.1/24`,
+PX4 `10.41.10.2`, agent `:8888`, QGC → Jetson TCP `5760`, backend `:8000`. Field config in `/etc/dyx3/*.env`
+(never in git; `ntrip.env` holds the caster credentials, root:dyx3 0640). Do not open QGC's **MAVLink Console**
+on this rover until the Ethernet TX stall is understood.
 
 ⛔ **PX4 must not auto-configure the GNSS receiver** (hard requirement, 2026-10-07). The UM982's
 production configuration lives in its own persistent memory; PX4 only consumes data and injects

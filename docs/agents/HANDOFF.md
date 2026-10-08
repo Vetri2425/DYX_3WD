@@ -864,3 +864,71 @@ unverified hardware behaviour, newly discovered regression. Open and blocking pa
 valve-close path), H12 gate default, H13 debounce lead, GATE 1 bench, Jetson timing, field validation.
 Local ROS 2: `./tools/dev/ros2_humble.sh build-test`. A proposal for the human-owned `CLAUDE.md` status text is in
 `docs/architecture/proposals/2026-10-08_claude-status-correction.md`. Documentation-only change; no code touched.
+
+---
+
+## 2026-10-08 — Claude — first rover bring-up: FCU params, firmware fix, installer, deploy, RTCM path
+
+Deploy branch `claude/cloud-phases`; this session's commits: `0ab0402`, `a186f54`, `f7f5a07`, `eed1946`,
+`42c065b`, `4bb213a`, `3ecd5c5`, `19d3566`, `2edc844`, `84518cd` (+ this docs commit). Firmware repo: `9ab2ad3162`.
+**Not merged to `master`.** Hardware: Holybro Pixhawk Jetson Baseboard (Pixhawk 6X + Orin Nano), office LAN.
+
+**FCU (Pixhawk 6X)**
+- Prototype Cube Orange+ params (`config/px4/proto_ref_01.params`, PX4 v1.16.2) carried to the 6X:
+  `config/px4/3wd_6x_carry_from_proto.params` (only values differing from the prod defaults; no calibration;
+  excluded prototype hacks CBRK_SUPPLY_CHK, COM_ARM_SDCARD 0, COM_OF_LOSS_T/COM_OBC_LOSS_T 30, UAVCAN, UXRCE_DDS_CFG 0).
+  Backup of the 6X before: `config/px4/6x_before_carry.params`. Ports as on the prototype: UM982 TELEM1 230400
+  (MAV_0_CONFIG 0), RoboClaw GPS2 115200, spray PWM_AUX_FUNC1 301 (FMU PWM OUT 1).
+- Human inputs: 8S LiFePO4 (BAT1_N_CELLS 8, V_EMPTY 2.75, V_CHARGED 3.40), 24 Ah; IMU now 55 mm **behind** the
+  antenna → EKF2_IMU_POS_X -0.055 (antenna X 0, Z -0.4 unchanged); track 0.47, wheel radius 0.1498, yaw offset 180.
+- Live params added today: UXRCE_DDS_DOM_ID 42, **UXRCE_DDS_PTCFG 1**, MAV_2_CONFIG 1000 (QGC over Ethernet).
+- **Firmware `9ab2ad3162` fix(roboclaw)**: Run() called the mixer before the UART was open → select() on fd 0 with an
+  uninitialised timeout → wq:hp_default hung forever (PWM out, battery dead). Reproduced on an unconnected port.
+  Fixed: fd -1, 11 ms timeout at construction, UART before mixer, own serial work queue, 1 s handshake retry,
+  no err(), 115200 fallback. CI-built, archived, flashed; RoboClaw connects, wheel_encoders publish.
+
+**Jetson / installer** (first real run of the installer)
+- Measured: on-Jetson install 40 min 31 s (px4_msgs 16 min 49 s at -j2, stack 22 min 48 s, packages one at a time).
+  → **Prebuilt artifacts** (`42c065b`, proposal ACCEPTED: master publishes, SHA-256 now, keep 20): CI job
+  `rover_artifacts` + `rover_publish`, installer `lib/artifacts.sh`. Upgrade now **20–22 s**, zero compilers;
+  CI and rover px4_msgs message-set hash identical (`8ae57326…`), same rclcpp build.
+- Bugs fixed: bench FCU profile dropped the default route (`0ab0402`); router UDP Server on 10.41.10.1 never sees
+  PX4's broadcast (`a186f54`, see OPEN below); launchers lacked `bin/dyx3-env.sh` + rcl could not create its log dir
+  under the root-owned HOME (`4bb213a`); px4_link stale limits below the measured 1.010 s timesync /
+  estimator-flags period → session flap every second (`3ecd5c5`, `2edc844`); health check ran before restarted
+  services were up and probed the wrong backend address (`84518cd`).
+- All six services verified, then enabled in the manifest (`19d3566`). **Power-cycle test passed**: all six up,
+  0 restarts, DDS 68 topics / odometry 100 Hz, 0 session flaps, NTRIP reconnects once DNS is up, backend 200.
+
+**RTCM path (indoors)**: Emlid caster (profile "office", credentials only in `/etc/dyx3/ntrip.env`) → gnss_rtk →
+`/dyx3/rtcm` 6.36 msg/s → px4_link → `/fmu/in/gps_inject_data` 6.35 msg/s → PX4 "rate RTCM injection 5.77 Hz",
+rtcm_crc_failed False. fix_type 0 / 3 sats = indoors. Earlier the base was offline (mountpoint absent from the
+sourcetable, caster sends 0 bytes) — our client detects that as a stream timeout and reconnects.
+
+**Rover-local state (not in git, deliberate)**: `/etc/dyx3/ros.env` (domain 42, localhost-only),
+`/etc/dyx3/ntrip.env`, `/etc/dyx3/backend.env` **bench bind 0.0.0.0** (no hotspot 10.42.0.1 yet),
+`/etc/dyx3/mavlink-router.conf` **hand-set to `Mode=Server Address=0.0.0.0 Port=14550`** (UNVERIFIED, see OPEN).
+Legacy removed: old `mavlink-router.service` disabled, NM `eth-baseboard` autoconnect off. Still to delete:
+`~flash/dyx3_deps_stage*.sh`, `~/px4_ws`, `~/dyx3_venv` (ad-hoc 2026-10-07 setup).
+
+**OPEN — for the next session**
+1. **PX4 Ethernet TX stall (safety-relevant).** Twice PX4 answered ping but sent nothing it originates (no DDS, no
+   MAVLink, no ARP; MAVLink still counted 2 KB/s "tx"), recovered only by an FCU reboot. Both times right after the
+   XRCE agent restarted (dyx3-platform restart / repeated restarts). A ping *from* PX4 never left the board. The first
+   time 5 `netinit` monitor threads existed (one per MAVLink-shell NSH session) and USB was unplugged mid-shell; the
+   second time neither applied. Hypothesis: STM32H7 Ethernet TX path wedges on the reconnect burst (upstream
+   #26160-like). Next: with USB attached, restart the agent in a loop while sniffing; repeat with MAV_2_CONFIG 0;
+   inspect NuttX net/driver state when stalled. Fix in firmware and/or add a PX4-side TX watchdog.
+2. **mavlink-router mode is unresolved.** Client mode (template `a186f54`) works until the router restarts: PX4 keeps
+   its old ephemeral partner port → QGC dead until FCU reboot. Server on 0.0.0.0:14550 (rover, hand-set) should
+   survive restarts via PX4's broadcast but was not verified (the TX stall hit during the test). Verify, then fix the
+   template; TCP 5760 stays the GCS path.
+3. Calibration (gyro, simple accel `PREFLIGHT_CALIBRATION` param5=4, level horizon) — rover is too big for 6-side.
+4. Motion test (wheels up), outdoor RTK fix, then the pending list (merge → master, timing proposal, A/B cleanup,
+   RTK USB-primary/DDS-fallback, hotspot profile + restore backend bind).
+5. Installer test "dry-run mentions: useradd" is not hermetic (fails where the dyx3 user exists).
+
+**DERIVED — NOT FROM V1 SPEC**: stale limits 3.0 s for timesync/estimator flags (three measured periods);
+health settle 30 s; artifact layout/naming; bench backend bind 0.0.0.0; DDS localhost-only via PTCFG 1.
+**Not run**: motion, calibration, spray valve, outdoor RTK, timing under load, fresh-rover install from artifacts
+(this rover reused its px4_msgs; the download path is covered by staged tests only).
