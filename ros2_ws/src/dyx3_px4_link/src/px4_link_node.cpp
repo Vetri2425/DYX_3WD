@@ -24,8 +24,6 @@ constexpr uint32_t kCmdDoSetServo = 183;     // VEHICLE_CMD_DO_SET_SERVO
 constexpr uint32_t kCmdDoSetActuator = 187;  // VEHICLE_CMD_DO_SET_ACTUATOR
 constexpr size_t kMaxSprayTransactions = 16;
 constexpr double kSprayTransactionTimeoutS = 5.0;
-constexpr uint16_t kFirstSprayAckToken = 2;
-constexpr uint16_t kModeExecutorComponentStart = 1000;
 
 struct UsedTopic {
   const char* request_name;  // BASE topic name: the firmware matches the uORB name, no _vN suffix
@@ -71,6 +69,7 @@ Px4LinkNode::Px4LinkNode(const rclcpp::NodeOptions& options, ClockFn clock, bool
   mon_ = std::make_unique<StalenessMonitor>(p_.stale);
   gate_ = std::make_unique<CommandGate>(p_.command_max_age_s);
   offboard_ = std::make_unique<OffboardSession>(p_.offboard);
+  spray_ack_tokens_ = std::make_unique<SprayAckTokens>(p_.spray_ack_token_state_path);
   build_handshake();
 
   const auto reliable1 = rclcpp::QoS(1).reliable();
@@ -345,6 +344,8 @@ void Px4LinkNode::declare_and_validate_params() {
   p_.arm_confirm_timeout_s = declare_checked<double>(*this, "arm_confirm_timeout_s", 2.0);
   require(p_.arm_confirm_timeout_s > 0.0, "arm_confirm_timeout_s must be > 0");
   p_.ulog_streaming_enabled = declare_checked<bool>(*this, "ulog_streaming_enabled", true);
+  p_.spray_ack_token_state_path = declare_checked<std::string>(*this, "spray_ack_token_state_path",
+                                                               p_.spray_ack_token_state_path);
   p_.msg_definitions_dir = declare_checked<std::string>(*this, "msg_definitions_dir", "");
   if (p_.msg_definitions_dir.empty()) {
     p_.msg_definitions_dir = ament_index_cpp::get_package_share_directory("px4_msgs") + "/msg";
@@ -571,15 +572,17 @@ void Px4LinkNode::dispatch_next_spray_transaction() {
 
   SprayPending request = std::move(spray_queue_.front());
   spray_queue_.pop_front();
-  if (next_spray_ack_token_ < kFirstSprayAckToken ||
-      next_spray_ack_token_ >= kModeExecutorComponentStart)
-    next_spray_ack_token_ = kFirstSprayAckToken;
-  request.ack_token = next_spray_ack_token_;
+  const auto token = spray_ack_tokens_->reserve();
+  if (!token) {
+    publish_spray_ack(request.seq, request.source, false,
+                      dyx3_interfaces::msg::SprayActuatorAck::RESULT_LINK_REFUSED);
+    RCLCPP_ERROR(get_logger(),
+                 "spray ACK identity exhausted or state unavailable; refusing actuator command");
+    return;
+  }
+  request.ack_token = *token;
   request.vehicle_command.source_component = request.ack_token;
   request.vehicle_command.timestamp = stamp_us();
-  ++next_spray_ack_token_;
-  if (next_spray_ack_token_ >= kModeExecutorComponentStart)
-    next_spray_ack_token_ = kFirstSprayAckToken;
   request.sent_s = clock_();
   spray_inflight_ = std::move(request);
   pub_cmd_->publish(spray_inflight_->vehicle_command);

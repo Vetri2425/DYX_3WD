@@ -19,6 +19,7 @@ add_library(dyx3_px4_link_core STATIC
   src/msg_version_handshake.cpp
   src/offboard_heartbeat.cpp
   src/vehicle_state_assembler.cpp)
+target_sources(dyx3_px4_link_core PRIVATE src/spray_ack_tokens.cpp)
 target_include_directories(dyx3_px4_link_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
@@ -45,6 +46,8 @@ if(BUILD_TESTING)
     target_link_libraries(${t} dyx3_px4_link_core)
     target_compile_definitions(${t} PRIVATE DYX3_FIXTURES="${FIXTURES}")
   endforeach()
+  ament_add_gtest(spray_ack_tokens_test test/spray_ack_tokens_test.cpp)
+  target_link_libraries(spray_ack_tokens_test dyx3_px4_link_core)
   # Real-time DDS fault injection: tens of seconds, above the 60 s ament default.
   ament_add_gtest(px4_link_node_test test/px4_link_node_test.cpp TIMEOUT 300)
   target_link_libraries(px4_link_node_test dyx3_px4_link_node_lib)

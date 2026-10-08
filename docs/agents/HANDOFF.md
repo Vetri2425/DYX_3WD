@@ -598,7 +598,12 @@ IDs without modifying firmware.
 D1 is implemented locally in `dyx3_px4_link`: only one spray `VehicleCommand` is sent at a time;
 the queue is bounded, newest-wins per source, and watchdog OFF purges queued ON and takes priority.
 Each dispatched request gets a source-component transaction token from 2 through 999 (1000+ is
-reserved for PX4 mode executors). Final ACKs require command plus matching target-component;
+reserved for PX4 mode executors). The next token is durably advanced before publish in
+`/var/lib/dyx3/state/px4_link_spray_ack_next`; tokens never wrap. Missing/corrupt/unwritable state
+or exhaustion refuses the request, including watchdog OFF, with a failed ACK. Preserve this state
+across companion restarts and upgrades; the installer seeds it only for a first install. A missing
+file on an installed rover stays fail closed. Reset it to 2 only after PX4 has also reset and prior
+ACKs are gone. Final ACKs require command plus matching target-component;
 timeouts and queue/link failures publish false acknowledgements, and late/unmatched ACKs are
 discarded and counted. Added regression coverage for token matching, serialized/reassert-flood
 behavior, watchdog OFF priority, OFF/OFF overlap, and a late ACK after timeout. Updated the PX4

@@ -250,8 +250,21 @@ front of the queue. If all queue capacity is occupied by watchdog OFF requests, 
 refused rather than displacing them. Link loss fails the in-flight request and all queued requests.
 
 Each dispatched logical transaction receives a `VehicleCommand.source_component` token
-(the companion's ordinary component ID is 1; spray tokens advance from 2 to 999 and then wrap; 1000+
-is reserved for PX4 mode executors).
+(the companion's ordinary component ID is 1; spray tokens advance from 2 through 999 and never
+wrap; 1000+ identifies PX4 mode executors). The next token is durably recorded at
+`/var/lib/dyx3/state/px4_link_spray_ack_next` before its command is published. The first-install
+installer seeds this file at 2; it is preserved across companion process restarts and application
+upgrades. A missing, malformed, or
+unwritable state file, or exhaustion after token 999, fails the request closed; a watchdog OFF is
+not reported successful unless PX4 acknowledged the emitted OFF command. Do not delete or roll
+back this state while PX4 may retain ACKs from prior spray commands. After a full vehicle reset, an
+operator may reinitialize it to 2 only after PX4 is also reset and its prior ACK stream is gone.
+
+The pinned firmware reserves component IDs at or above 1000 for mode executors: Commander
+classifies them as `ModeExecutor`, and normal MAVLink command sending suppresses their ACK
+forwarding. `source_system` cannot safely be varied for additional token space: the ACK copies it
+into `target_system`, which the MAVLink ACK router uses. Therefore token exhaustion fails closed;
+there is no wrap or probabilistic reuse.
 ACK matching requires both `command` and `VehicleCommandAck.target_component` to match the
 in-flight transaction. The pinned firmware at
 `27a7ac92845317b0276776242c504215809b2a0f` copies `VehicleCommand.source_component` into
@@ -260,10 +273,10 @@ accepted there, while command 183 reaches the unsupported-command response throu
 helper. `IN_PROGRESS` is not final. An unmatched final spray ACK, including a late ACK after the
 five-second transaction timeout, is discarded and increments the link's late/unmatched counter;
 it cannot acknowledge a newer request with the same command ID. The timeout fails the request
-with result 255 and allows the next queued request to proceed. Tokens are unique over the 998-value
-component-token cycle; command ID plus token are both required for a match.
+with result 255 and allows the next queued request to proceed. The 998 component IDs are allocated
+at most once per durable ledger; command ID plus token are both required for a match.
 
-The queue and token are owned by `dyx3_px4_link`. Neither spray producer infers FCU completion
+The queue and token allocator are owned by `dyx3_px4_link`. Neither spray producer infers FCU completion
 from publication; controller and watchdog state advance only from their matching
 `SprayActuatorAck` sequence/source.
 

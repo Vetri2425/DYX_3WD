@@ -24,6 +24,7 @@
 #include "dyx3_px4_link/msg_version_handshake.hpp"
 #include "dyx3_px4_link/offboard_heartbeat.hpp"
 #include "dyx3_px4_link/rover_setpoint_writer.hpp"
+#include "dyx3_px4_link/spray_ack_tokens.hpp"
 #include "dyx3_px4_link/vehicle_state_assembler.hpp"
 #include "px4_msgs/msg/estimator_status_flags.hpp"
 #include "px4_msgs/msg/gps_inject_data.hpp"
@@ -59,6 +60,7 @@ struct LinkParams {
   double arm_confirm_timeout_s{2.0};
   bool ulog_streaming_enabled{true};
   std::string msg_definitions_dir;  // empty: <share of px4_msgs>/msg
+  std::string spray_ack_token_state_path{"/var/lib/dyx3/state/px4_link_spray_ack_next"};
 };
 
 class Px4LinkNode : public rclcpp::Node {
@@ -150,7 +152,7 @@ private:
   };
   std::deque<SprayPending> spray_queue_;
   std::optional<SprayPending> spray_inflight_;
-  uint16_t next_spray_ack_token_{2};
+  std::unique_ptr<SprayAckTokens> spray_ack_tokens_;
   uint64_t spray_late_ack_count_{0};
 
   // /fmu publishers

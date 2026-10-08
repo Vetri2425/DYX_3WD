@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -54,6 +55,11 @@ void init_ctx(const std::shared_ptr<rclcpp::Context>& ctx) {
 }
 
 struct Rig {
+  static std::string unique_token_path() {
+    static std::atomic<unsigned> serial{0};
+    return "/tmp/dyx3_px4_link_test_tokens_" + std::to_string(getpid()) + "_" +
+           std::to_string(serial.fetch_add(1));
+  }
   std::shared_ptr<rclcpp::Context> ctx;
   double now{100.0};
   std::shared_ptr<Px4LinkNode> link;
@@ -99,13 +105,20 @@ struct Rig {
   bool alive{true}, lp_alive{true};
   uint8_t nav_state{0}, arming_state{1};
 
-  explicit Rig(const rclcpp::ParameterValue* extra = nullptr, const std::string& defs = "") {
+  explicit Rig(const rclcpp::ParameterValue* extra = nullptr, const std::string& defs = "",
+               const std::string& token_path = "") {
     ctx = std::make_shared<rclcpp::Context>();
     init_ctx(ctx);
     rclcpp::NodeOptions no;
     no.context(ctx);
     const std::string dir = defs.empty() ? std::string(DYX3_FIXTURES) + "/msgdefs" : defs;
     no.append_parameter_override("msg_definitions_dir", dir);
+    const std::string ack_state = token_path.empty() ? unique_token_path() : token_path;
+    if (token_path.empty()) {
+      std::ofstream state(ack_state);
+      state << "2\n";
+    }
+    no.append_parameter_override("spray_ack_token_state_path", ack_state);
     if (extra != nullptr) {
     }
     link = std::make_shared<Px4LinkNode>(no, [this]() { return now; }, false);
@@ -679,6 +692,37 @@ TEST(Px4LinkNode, SprayActuatorCommandsBecomeVehicleCommandsAndFcuAcksAreMapped)
   ASSERT_EQ(r.spray_acks.size(), 2U);
   EXPECT_EQ(r.spray_acks[1].seq, 42U);
   EXPECT_FALSE(r.spray_acks[1].success);
+}
+
+TEST(Px4LinkNode, ExhaustedIdentityCannotConfirmWatchdogOff) {
+  const std::string path = Rig::unique_token_path();
+  {
+    std::ofstream state(path);
+    state << "1000\n";
+  }
+  Rig r(nullptr, "", path);
+  r.bring_up();
+  r.run(0.2);
+  r.clear();
+
+  dyx3_interfaces::msg::SprayActuatorCommand off;
+  off.seq = 991;
+  off.source = dyx3_interfaces::msg::SprayActuatorCommand::SOURCE_WATCHDOG;
+  off.backend = dyx3_interfaces::msg::SprayActuatorCommand::BACKEND_ACTUATOR;
+  off.on = false;
+  off.actuator_set_index = 1;
+  off.value = 0.0F;
+  r.p_spray->publish(off);
+  r.pump(150);
+
+  EXPECT_TRUE(std::none_of(r.cmds.begin(), r.cmds.end(),
+                           [](const auto& c) { return c.command == 187 || c.command == 183; }));
+  ASSERT_EQ(r.spray_acks.size(), 1U);
+  EXPECT_EQ(r.spray_acks.front().seq, off.seq);
+  EXPECT_FALSE(r.spray_acks.front().success);
+  EXPECT_EQ(r.spray_acks.front().result,
+            dyx3_interfaces::msg::SprayActuatorAck::RESULT_LINK_REFUSED);
+  unlink(path.c_str());
 }
 
 TEST(Px4LinkNode, SprayTransactionsSerializeAndWatchdogOffPreemptsQueuedOn) {

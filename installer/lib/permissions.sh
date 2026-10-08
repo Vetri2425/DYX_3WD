@@ -24,6 +24,20 @@ create_directories() {
   for d in missions runs bags reports state; do
     install_dir 0750 "${DYX3_USER}" "${DYX3_GROUP}" "${DYX3_VAR_LIB}/${d}"
   done
+  local token_state="${DYX3_VAR_LIB}/state/px4_link_spray_ack_next"
+  if [ ! -e "${token_state}" ]; then
+    if [ -L "${DYX3_CURRENT}" ]; then
+      warn "spray ACK token state is missing on an installed rover; it will fail closed until PX4 and the companion are reset together"
+    elif [ "${DYX3_DRY_RUN:-0}" = "1" ]; then
+      log "would initialize spray ACK token state for a first install"
+    else
+      local token_tmp="${token_state}.tmp.$$"
+      printf '2\n' >"${token_tmp}"
+      chown "${DYX3_USER}:${DYX3_GROUP}" "${token_tmp}"
+      chmod 0600 "${token_tmp}"
+      mv "${token_tmp}" "${token_state}"
+    fi
+  fi
   install_dir 0750 "${DYX3_USER}" "${DYX3_GROUP}" "${DYX3_VAR_LOG}"
 }
 
