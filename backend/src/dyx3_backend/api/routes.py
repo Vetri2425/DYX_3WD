@@ -185,8 +185,17 @@ def _mission_error(exc: MissionError) -> JSONResponse:
 
 @router.post("/missions/plan")
 async def ingest_app_plan(request: Request, _: Identity = Operator) -> JSONResponse:
+    limit = request.app.state.settings.upload_max_bytes
+    content_length = request.headers.get("content-length")
+    if content_length is not None and content_length.isdecimal() and int(content_length) > limit:
+        return _mission_error(MissionError(413, "too_large", f"upload exceeds {limit} bytes"))
+    data = bytearray()
+    async for chunk in request.stream():
+        if len(chunk) > limit - len(data):
+            return _mission_error(MissionError(413, "too_large", f"upload exceeds {limit} bytes"))
+        data.extend(chunk)
     try:
-        body = await request.json()
+        body = json.loads(data)
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         return _mission_error(MissionError(400, "INVALID_PAYLOAD", f"invalid JSON: {exc}"))
     try:

@@ -131,6 +131,27 @@ def test_point_limit_and_auth_and_bad_json(rig):
     assert response.status_code == 400 and response.json()["code"] == "INVALID_PAYLOAD"
 
 
+def test_plan_body_limit_uses_content_length_before_json_parsing(tmp_path):
+    settings = Settings(data_dir=str(tmp_path), upload_max_bytes=80)
+    api, _, _ = create_api(settings, tokens=token_store(), gateway=FakeGateway())
+    client = TestClient(api)
+    response = client.post("/api/missions/plan", headers=H("oper-tok"), content=b"{" + b" " * 80)
+    assert response.status_code == 413 and response.json()["code"] == "too_large"
+    assert not Path(settings.missions_dir).exists()
+
+
+def test_plan_body_limit_bounds_stream_without_content_length(tmp_path):
+    settings = Settings(data_dir=str(tmp_path), upload_max_bytes=80)
+    api, _, _ = create_api(settings, tokens=token_store(), gateway=FakeGateway())
+    client = TestClient(api)
+    request = client.build_request("POST", "/api/missions/plan", headers=H("oper-tok"),
+                                   content=iter([b"{" + b" " * 40, b" " * 40]))
+    assert "content-length" not in request.headers
+    response = client.send(request)
+    assert response.status_code == 413 and response.json()["code"] == "too_large"
+    assert not Path(settings.missions_dir).exists()
+
+
 def test_route_never_imports_path_engine(rig, monkeypatch):
     client, _ = rig
     original = __import__
