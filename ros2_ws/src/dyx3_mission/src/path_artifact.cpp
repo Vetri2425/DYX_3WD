@@ -5,7 +5,10 @@
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
+#include <iomanip>
 #include <iterator>
+#include <limits>
+#include <locale>
 #include <sstream>
 
 #include "dyx3_mission/sha256.hpp"
@@ -122,6 +125,110 @@ ArtifactResult load_artifact(const std::string& dir, const std::string& sha256) 
   if (!in) return fail("cannot open artifact " + sha256 + " in " + dir);
   const std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
   return parse_artifact(bytes, sha256);
+}
+
+std::string serialize_conditioned_artifact(const std::string& source_sha256,
+                                           const std::string& conditioner_config,
+                                           const std::vector<ConditionedRunArtifact>& runs) {
+  if (!is_lower_hex64(source_sha256) ||
+      conditioner_config.find_first_of("\r\n") != std::string::npos)
+    return {};
+  std::ostringstream out;
+  out.imbue(std::locale::classic());
+  out << "DYX3COND 1\nsource " << source_sha256 << "\nconfig " << conditioner_config << "\nruns "
+      << runs.size() << '\n'
+      << std::setprecision(std::numeric_limits<double>::max_digits10);
+  for (const auto& run : runs) {
+    if (run.points.empty() || run.points.size() != run.flags.size() ||
+        run.points.size() != run.must_hit.size() || run.profile > 1)
+      return {};
+    out << "run " << static_cast<unsigned>(run.profile) << ' ' << run.points.size() << '\n';
+    for (std::size_t i = 0; i < run.points.size(); ++i) {
+      if (!std::isfinite(run.points[i].north_m) || !std::isfinite(run.points[i].east_m) ||
+          run.flags[i] > 1 || run.must_hit[i] > 1)
+        return {};
+      out << run.points[i].north_m << ' ' << run.points[i].east_m << ' '
+          << static_cast<unsigned>(run.flags[i]) << ' ' << static_cast<unsigned>(run.must_hit[i])
+          << '\n';
+    }
+    out << "endrun\n";
+  }
+  out << "end " << runs.size() << '\n';
+  return out.str();
+}
+
+ConditionedResult parse_conditioned_artifact(const std::string& bytes,
+                                             const std::string& expected_sha256) {
+  ConditionedResult r;
+  const auto fail_cond = [&r](const std::string& msg) {
+    r.error = msg;
+    return r;
+  };
+  const std::string digest = sha256_hex(bytes);
+  if (!expected_sha256.empty() && digest != expected_sha256)
+    return fail_cond("conditioned sha256 mismatch");
+  if (bytes.empty() || bytes.back() != '\n' || bytes.find('\r') != std::string::npos)
+    return fail_cond("malformed conditioned artifact newline");
+  for (unsigned char c : bytes) {
+    if (c > 0x7e || (c < 0x20 && c != '\n'))
+      return fail_cond("conditioned artifact contains non-ASCII or control bytes");
+  }
+  std::istringstream in(bytes);
+  std::string line;
+  if (!std::getline(in, line) || line != "DYX3COND 1")
+    return fail_cond("bad conditioned magic/version");
+  if (!std::getline(in, line) || line.rfind("source ", 0) != 0)
+    return fail_cond("missing source sha");
+  r.artifact.source_sha256 = line.substr(7);
+  if (!is_lower_hex64(r.artifact.source_sha256)) return fail_cond("invalid source sha");
+  if (!std::getline(in, line) || line.rfind("config ", 0) != 0 || line.size() <= 7)
+    return fail_cond("missing conditioner config");
+  r.artifact.conditioner_config = line.substr(7);
+  if (!std::getline(in, line) || line.rfind("runs ", 0) != 0)
+    return fail_cond("missing runs count");
+  unsigned long count = 0;
+  if (!parse_uint(line.substr(5), count) || count == 0 || count > 100000)
+    return fail_cond("invalid runs count");
+  for (unsigned long ri = 0; ri < count; ++ri) {
+    if (!std::getline(in, line)) return fail_cond("truncated run");
+    const auto head = split(line, ' ');
+    unsigned long profile = 0, n = 0;
+    if (head.size() != 3 || head[0] != "run" || !parse_uint(head[1], profile) || profile > 1 ||
+        !parse_uint(head[2], n) || n == 0 || n > 10000000)
+      return fail_cond("malformed run header");
+    ConditionedRunArtifact run;
+    run.profile = static_cast<std::uint8_t>(profile);
+    for (unsigned long pi = 0; pi < n; ++pi) {
+      if (!std::getline(in, line)) return fail_cond("truncated run points");
+      const auto fields = split(line, ' ');
+      double north = 0.0, east = 0.0;
+      unsigned long flag = 0, must = 0;
+      if (fields.size() != 4 || !parse_double(fields[0], north) || !parse_double(fields[1], east) ||
+          !parse_uint(fields[2], flag) || flag > 1 || !parse_uint(fields[3], must) || must > 1)
+        return fail_cond("malformed conditioned point");
+      run.points.push_back({north, east});
+      run.flags.push_back(static_cast<std::uint8_t>(flag));
+      run.must_hit.push_back(static_cast<std::uint8_t>(must));
+    }
+    if (!std::getline(in, line) || line != "endrun") return fail_cond("missing endrun");
+    r.artifact.runs.push_back(std::move(run));
+  }
+  if (!std::getline(in, line) || line != "end " + std::to_string(count) || std::getline(in, line))
+    return fail_cond("bad conditioned end marker or trailing data");
+  if (serialize_conditioned_artifact(r.artifact.source_sha256, r.artifact.conditioner_config,
+                                     r.artifact.runs) != bytes)
+    return fail_cond("conditioned artifact is not canonical");
+  r.artifact.sha256 = digest;
+  r.ok = true;
+  return r;
+}
+
+ConditionedResult load_conditioned_artifact(const std::string& dir, const std::string& sha256) {
+  if (!is_lower_hex64(sha256)) return {false, "invalid conditioned sha", {}};
+  std::ifstream in(dir + "/" + sha256 + ".dyx3cond", std::ios::binary);
+  if (!in) return {false, "cannot open conditioned artifact", {}};
+  const std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  return parse_conditioned_artifact(bytes, sha256);
 }
 
 }  // namespace dyx3_mission

@@ -21,6 +21,7 @@ Scan scan(const PathModel& m, const std::vector<int>& indices, bool use_gate, do
   Scan r;
   for (int i : indices) {
     const double a_n = m.north[i], a_e = m.east[i];
+    if (m.run_ids.size() == m.size() && m.run_ids[i] != m.run_ids[i + 1]) continue;
     const double b_n = m.north[i + 1], b_e = m.east[i + 1];
     const double d_n = b_n - a_n, d_e = b_e - a_e;
     const double seg_len_sq = d_n * d_n + d_e * d_e;
@@ -75,18 +76,36 @@ const char* to_string(LeadEvent e) {
 
 bool build_path_model(const std::vector<double>& north, const std::vector<double>& east,
                       const std::vector<bool>& flags, PathModel* out) {
+  return build_path_model(north, east, flags, {}, out);
+}
+
+bool build_path_model(const std::vector<double>& north, const std::vector<double>& east,
+                      const std::vector<bool>& flags, const std::vector<uint32_t>& run_ids,
+                      PathModel* out) {
   if (north.size() != east.size() || north.size() != flags.size()) return false;
+  if (!run_ids.empty() && run_ids.size() != north.size()) return false;
   PathModel m;
   m.north = north;
   m.east = east;
   m.flags = flags;
+  m.run_ids = run_ids;
   double total = 0.0;
   m.cumulative_s.reserve(north.size());
   for (size_t i = 0; i < north.size(); ++i) {
-    if (i > 0) total += std::hypot(north[i] - north[i - 1], east[i] - east[i - 1]);
+    if (i > 0 && (run_ids.empty() || run_ids[i] == run_ids[i - 1]))
+      total += std::hypot(north[i] - north[i - 1], east[i] - east[i - 1]);
     m.cumulative_s.push_back(total);
   }
   for (size_t i = 1; i < flags.size(); ++i) {
+    if (!run_ids.empty() && run_ids[i] != run_ids[i - 1]) {
+      // Run seams do not create a projection segment, but the boundary station remains meaningful
+      // when the conditioner split exactly at a MARK/TRANSIT transition.
+      if (flags[i - 1] != flags[i]) {
+        m.boundaries.push_back(Boundary{m.cumulative_s[i], flags[i] ? BoundaryKind::TransitToMark
+                                                                    : BoundaryKind::MarkToTransit});
+      }
+      continue;
+    }
     if (flags[i - 1] == flags[i]) continue;
     m.boundaries.push_back(Boundary{
         m.cumulative_s[i], flags[i] ? BoundaryKind::TransitToMark : BoundaryKind::MarkToTransit});

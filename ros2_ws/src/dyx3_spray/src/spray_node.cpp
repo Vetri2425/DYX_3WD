@@ -82,6 +82,11 @@ SprayNode::SprayNode(const rclcpp::NodeOptions& options, ClockFn clock, bool cre
       });
   sub_rpp_ = create_subscription<dyx3_interfaces::msg::RppStatus>(
       "/dyx3/rpp/status", rel1, [this](dyx3_interfaces::msg::RppStatus::ConstSharedPtr m) {
+        rpp_mission_id_ = m->mission_id;
+        rpp_conditioned_sha_ = m->conditioned_execution_sha256;
+        if (mission_running_ && mission_id_ == m->mission_id && rpp_mission_id_ == mission_id_ &&
+            !rpp_conditioned_sha_.empty() && loaded_sha_ != rpp_conditioned_sha_)
+          load_artifact(rpp_conditioned_sha_, mission_source_sha_);
         // Tracking evidence (B5): TRACKING of the RUNNING mission only (fail closed: it delays,
         // never advances, the first mark). Pivot gate: PIVOTING only (CORNER_ALIGN), never STOPPING
         // (CORNER_STOP still lays the last 2 cm of the leg). Ownership gate (C1): see spray_gates.
@@ -263,43 +268,66 @@ void SprayNode::publish_status(double now_s) {
 
 void SprayNode::on_mission_state(const dyx3_interfaces::msg::MissionState& m) {
   mission_running_ = m.state == dyx3_interfaces::msg::MissionState::STATE_RUNNING;
+  mission_id_ = m.mission_id;
   ctl_->set_mission(mission_running_, m.mission_id);
-  if (m.path_artifact_sha256 == loaded_sha_) return;
-  load_artifact(m.path_artifact_sha256);
+  mission_source_sha_ = m.path_artifact_sha256;
+  if (m.path_artifact_sha256.empty()) {
+    loaded_sha_.clear();
+    ctl_->load_path(nullptr);
+    return;
+  }
+  if (rpp_mission_id_ != mission_id_ || rpp_conditioned_sha_.empty()) {
+    loaded_sha_.clear();
+    ctl_->load_path(nullptr);
+    return;
+  }
+  if (rpp_conditioned_sha_ != loaded_sha_) load_artifact(rpp_conditioned_sha_, mission_source_sha_);
 }
 
-// The spray flags come from the SAME content-addressed artifact the mission and RPP load, never
-// from a second copy.
-void SprayNode::load_artifact(const std::string& sha) {
+// Geometry and flags come only from the RPP-produced conditioned artifact. Source SHA binding is
+// checked before creating the PathModel; the original mission file is never a fallback.
+void SprayNode::load_artifact(const std::string& sha, const std::string& source_sha) {
   loaded_sha_ = sha;
   if (sha.empty()) {
     ctl_->load_path(nullptr);
     RCLCPP_INFO(get_logger(), "spray path cleared");
     return;
   }
-  const auto r = dyx3_mission::load_artifact(artifact_dir_, sha);
+  const auto r = dyx3_mission::load_conditioned_artifact(artifact_dir_, sha);
   if (!r.ok) {
+    loaded_sha_.clear();
     ctl_->load_path(nullptr);  // "path not loaded" gate: spray stays OFF
     RCLCPP_ERROR(get_logger(), "spray path %s rejected: %s", sha.c_str(), r.error.c_str());
     return;
   }
+  if (r.artifact.source_sha256 != source_sha) {
+    loaded_sha_.clear();
+    ctl_->load_path(nullptr);
+    RCLCPP_ERROR(get_logger(), "conditioned path %s belongs to a different source artifact",
+                 sha.c_str());
+    return;
+  }
   std::vector<double> n, e;
   std::vector<bool> f;
-  for (const auto& p : r.artifact.points) {
-    n.push_back(p.north_m);
-    e.push_back(p.east_m);
-    f.push_back(p.spray());  // bit-test: a spray-OFF must-hit vertex encodes as 2
+  std::vector<uint32_t> run_ids;
+  for (size_t ri = 0; ri < r.artifact.runs.size(); ++ri) {
+    const auto& run = r.artifact.runs[ri];
+    for (size_t i = 0; i < run.points.size(); ++i) {
+      n.push_back(run.points[i].north_m);
+      e.push_back(run.points[i].east_m);
+      f.push_back(run.flags[i] != 0);
+      run_ids.push_back(static_cast<uint32_t>(ri));
+    }
   }
   auto model = std::make_shared<PathModel>();
-  if (!build_path_model(n, e, f, model.get())) {
+  if (!build_path_model(n, e, f, run_ids, model.get())) {
     ctl_->load_path(nullptr);
     RCLCPP_ERROR(get_logger(), "spray path %s: inconsistent geometry", sha.c_str());
     return;
   }
   const size_t boundaries = model->boundaries.size();
   ctl_->load_path(std::move(model));
-  RCLCPP_INFO(get_logger(), "spray path loaded: %zu points, %zu boundaries",
-              r.artifact.points.size(), boundaries);
+  RCLCPP_INFO(get_logger(), "spray path loaded: %zu points, %zu boundaries", n.size(), boundaries);
 }
 
 void SprayNode::step(double now_s) {

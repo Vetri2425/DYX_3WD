@@ -64,6 +64,7 @@ private:
   bool load_failed_{false};
   uint32_t mission_id_{0};
   std::string sha_;
+  std::string conditioned_sha_;
   int64_t retry_load_at_ns_{0};
   uint32_t pending_mission_id_{0};
   std::string pending_sha_;

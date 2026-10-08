@@ -44,4 +44,32 @@ ArtifactResult parse_artifact(const std::string& bytes, const std::string& expec
 /// Read `<dir>/<sha256>.dyx3path` and verify it hashes to its own name.
 ArtifactResult load_artifact(const std::string& dir, const std::string& sha256);
 
+struct ConditionedRunArtifact {
+  struct Point {
+    double north_m{0.0};
+    double east_m{0.0};
+  };
+  std::vector<Point> points;
+  std::vector<std::uint8_t> flags;
+  std::vector<std::uint8_t> must_hit;
+  std::uint8_t profile{0};
+};
+struct ConditionedArtifact {
+  std::string sha256;
+  std::string source_sha256;
+  std::string conditioner_config;
+  std::vector<ConditionedRunArtifact> runs;
+};
+struct ConditionedResult {
+  bool ok{false};
+  std::string error;
+  ConditionedArtifact artifact;
+};
+std::string serialize_conditioned_artifact(const std::string& source_sha256,
+                                           const std::string& conditioner_config,
+                                           const std::vector<ConditionedRunArtifact>& runs);
+ConditionedResult parse_conditioned_artifact(const std::string& bytes,
+                                             const std::string& expected_sha256 = "");
+ConditionedResult load_conditioned_artifact(const std::string& dir, const std::string& sha256);
+
 }  // namespace dyx3_mission

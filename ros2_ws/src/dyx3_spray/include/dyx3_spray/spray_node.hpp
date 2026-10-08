@@ -46,7 +46,7 @@ private:
   void publish_lease(double now_s);
   void publish_status(double now_s);
   void on_mission_state(const dyx3_interfaces::msg::MissionState& m);
-  void load_artifact(const std::string& sha);
+  void load_artifact(const std::string& sha, const std::string& source_sha);
   rclcpp::Time ros_now() { return get_clock()->now(); }
 
   ClockFn clock_;
@@ -55,6 +55,10 @@ private:
   double tick_hz_{50.0};
   std::string artifact_dir_;
   std::string loaded_sha_;
+  std::string mission_source_sha_;
+  std::string rpp_conditioned_sha_;
+  uint32_t rpp_mission_id_{0};
+  uint32_t mission_id_{0};
   bool mission_running_{false};
   double next_reassert_s_{0.0};
   double last_status_pub_s_{-1e18};

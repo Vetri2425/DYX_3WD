@@ -68,11 +68,11 @@ station at speed <= `terminal_off_speed_mps` (the OFF lead is ~1 mm at creep spe
 crossed). Cross-track gate with hysteresis (trip at the wide level, clear at the tight one, and stay off at least
 `xtrack_gate_min_off_s`); it is **load-bearing** and must not be loosened.
 
-**Geometry source.** The path model is built from the content-addressed artifact named by `MissionState.path_artifact_sha256`,
-read with the same reader `dyx3_mission` uses (`dyx3_mission_core`, exported), so the spray flags and the geometry RPP drives
-come from one file. It is the planned polyline, **not** RPP's conditioned path (`path_conditioner` is not built yet): when it is,
-the boundary stations may need to be re-derived from the conditioned geometry (open question). An unknown or unreadable
-artifact means "path not loaded" and spray stays OFF.
+**Geometry source (C1).** RPP conditions the source `DYX3PATH` once and writes a content-addressed `DYX3COND 1` artifact. It
+contains source SHA256, conditioner config, and exact ordered conditioned runs/points/flags. RPP publishes its SHA256 on
+`RppStatus`; spray loads that artifact only when its source SHA matches the mission's `path_artifact_sha256`. The spray model
+uses those coordinates, flags, and run boundaries directly. It never conditions independently and never falls back to raw
+mission geometry. Missing, malformed, mismatched, or stale geometry leaves the path unloaded and autonomous spray OFF.
 
 **Debounce latency (carried, part of the boundary budget).** `debounce_samples` (3) means the debounced desire follows the raw one
 only after 3 identical ticks, so every valve edge is delayed by up to 3 ticks: **2.1 cm at 0.35 m/s and 50 Hz**, on the CLOSE as

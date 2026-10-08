@@ -3,10 +3,16 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <limits>
+#include <locale>
+#include <sstream>
 #include <stdexcept>
 
 #include "dyx3_mission/path_artifact.hpp"
+#include "dyx3_mission/sha256.hpp"
 
 namespace dyx3_rpp {
 namespace {
@@ -204,6 +210,7 @@ void RppNode::unload_mission() {
   load_failed_ = false;
   mission_id_ = 0;
   sha_.clear();
+  conditioned_sha_.clear();
   RCLCPP_INFO(get_logger(), "rpp path cleared");
 }
 
@@ -227,6 +234,73 @@ void RppNode::load_mission(uint32_t mission_id, const std::string& sha) {
   if (runs.empty()) {
     RCLCPP_ERROR(get_logger(), "rpp path %s: conditioning produced no usable run", sha.c_str());
     return;
+  }
+  std::vector<dyx3_mission::ConditionedRunArtifact> artifact_runs;
+  artifact_runs.reserve(runs.size());
+  for (const auto& run : runs) {
+    dyx3_mission::ConditionedRunArtifact a;
+    a.profile = static_cast<uint8_t>(run.profile);
+    for (size_t i = 0; i < run.pts.size(); ++i) {
+      a.points.push_back({run.pts[i].n, run.pts[i].e});
+      a.flags.push_back(i < run.flags.size() ? run.flags[i] : 0);
+      a.must_hit.push_back(i < run.must_hit.size() ? run.must_hit[i] : 0);
+    }
+    artifact_runs.push_back(std::move(a));
+  }
+  const ConditionParams cp = condition_params();
+  std::ostringstream config;
+  config.imbue(std::locale::classic());
+  config << std::setprecision(std::numeric_limits<double>::max_digits10)
+         << "tracking_profile=" << cp.tracking_profile
+         << ";segment_corner_threshold_deg=" << cp.segment_corner_threshold_deg
+         << ";connector_absorb_m=" << cp.connector_absorb_m
+         << ";connector_min_corner_deg=" << cp.connector_min_corner_deg
+         << ";transit_merge_max_len_m=" << cp.transit_merge_max_len_m
+         << ";segment_simplify_max_offset_m=" << cp.segment_simplify_max_offset_m
+         << ";corner_smooth_radius_m=" << cp.corner_smooth_radius_m
+         << ";corner_smooth_arc_pts=" << cp.corner_smooth_arc_pts
+         << ";path_resample_spacing_m=" << cp.path_resample_spacing_m
+         << ";close_loop_threshold_m=" << cp.close_loop_threshold_m
+         << ";close_loop_min_len_m=" << cp.close_loop_min_len_m;
+  const std::string conditioned_bytes =
+      dyx3_mission::serialize_conditioned_artifact(sha, config.str(), artifact_runs);
+  if (conditioned_bytes.empty()) {
+    RCLCPP_ERROR(get_logger(), "conditioned artifact serialization failed");
+    return;
+  }
+  conditioned_sha_ = dyx3_mission::sha256_hex(conditioned_bytes);
+  std::error_code dir_ec;
+  std::filesystem::create_directories(artifact_dir_, dir_ec);
+  if (dir_ec) {
+    conditioned_sha_.clear();
+    RCLCPP_ERROR(get_logger(), "cannot create artifact directory: %s", dir_ec.message().c_str());
+    return;
+  }
+  const auto conditioned_path =
+      std::filesystem::path(artifact_dir_) / (conditioned_sha_ + ".dyx3cond");
+  bool valid_existing = false;
+  if (std::filesystem::exists(conditioned_path)) {
+    const auto existing = dyx3_mission::load_conditioned_artifact(artifact_dir_, conditioned_sha_);
+    valid_existing = existing.ok && existing.artifact.source_sha256 == sha;
+  }
+  if (!valid_existing) {
+    const auto temp_path = conditioned_path.string() + ".tmp";
+    std::ofstream out(temp_path, std::ios::binary | std::ios::trunc);
+    out.write(conditioned_bytes.data(), static_cast<std::streamsize>(conditioned_bytes.size()));
+    out.close();
+    if (!out) {
+      conditioned_sha_.clear();
+      RCLCPP_ERROR(get_logger(), "cannot store conditioned artifact");
+      return;
+    }
+    std::error_code ec;
+    std::filesystem::rename(temp_path, conditioned_path, ec);
+    if (ec) {
+      std::filesystem::remove(temp_path);
+      conditioned_sha_.clear();
+      RCLCPP_ERROR(get_logger(), "cannot publish conditioned artifact: %s", ec.message().c_str());
+      return;
+    }
   }
   const size_t n_runs = runs.size();
   core_.install_mission(std::move(runs));
@@ -321,6 +395,7 @@ void RppNode::publish_status(uint8_t state, const TickOutput* out, const MotionC
   s.stamp = ros_now();
   s.state = state;
   s.mission_id = (loaded_ || load_failed_) ? mission_id_ : 0U;
+  s.conditioned_execution_sha256 = loaded_ ? conditioned_sha_ : std::string();
   s.run_index = loaded_ ? static_cast<uint32_t>(core_.run_index()) : 0U;
   s.commanded_speed_mps = finite_or_zero(cmd.speed_body_x);
   s.commanded_yaw_rate_radps = finite_or_zero(cmd.yaw_rate_setpoint);

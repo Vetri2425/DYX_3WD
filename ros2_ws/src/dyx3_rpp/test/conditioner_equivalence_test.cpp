@@ -12,6 +12,8 @@
 #include <string>
 #include <vector>
 
+#include "dyx3_mission/path_artifact.hpp"
+#include "dyx3_mission/sha256.hpp"
 #include "dyx3_rpp/path_conditioner.hpp"
 
 using namespace dyx3_rpp;
@@ -101,6 +103,41 @@ void expect_runs(Reader& rd, const std::vector<PointRun>& runs, const std::strin
 }
 
 }  // namespace
+
+TEST(ConditionedExecutionArtifact, RoundTripsTheExactRppRunGeometryAndFlags) {
+  const std::vector<RawPoint> raw{{0.0, 0.0, 0}, {1.0, 0.0, 0}, {2.0, 0.0, 1}, {3.0, 0.0, 1}};
+  ConditionParams params{"segment", 45.0, 0.2, 20.0, 2.0, 0.01, 0.5, 6, 0.08, 0.15, 1.0};
+  const auto conditioned = condition_path(raw, params);
+  ASSERT_FALSE(conditioned.empty());
+  std::vector<dyx3_mission::ConditionedRunArtifact> artifact_runs;
+  for (const auto& run : conditioned) {
+    dyx3_mission::ConditionedRunArtifact encoded;
+    encoded.profile = static_cast<uint8_t>(run.profile);
+    for (size_t i = 0; i < run.pts.size(); ++i) {
+      encoded.points.push_back({run.pts[i].n, run.pts[i].e});
+      encoded.flags.push_back(run.flags[i]);
+      encoded.must_hit.push_back(run.must_hit[i]);
+    }
+    artifact_runs.push_back(std::move(encoded));
+  }
+  const std::string source_sha(64, 'c');
+  const auto bytes =
+      dyx3_mission::serialize_conditioned_artifact(source_sha, "profile=segment", artifact_runs);
+  const auto parsed =
+      dyx3_mission::parse_conditioned_artifact(bytes, dyx3_mission::sha256_hex(bytes));
+  ASSERT_TRUE(parsed.ok) << parsed.error;
+  EXPECT_EQ(parsed.artifact.source_sha256, source_sha);
+  ASSERT_EQ(parsed.artifact.runs.size(), conditioned.size());
+  for (size_t r = 0; r < conditioned.size(); ++r) {
+    ASSERT_EQ(parsed.artifact.runs[r].points.size(), conditioned[r].pts.size());
+    EXPECT_EQ(parsed.artifact.runs[r].flags, conditioned[r].flags);
+    EXPECT_EQ(parsed.artifact.runs[r].must_hit, conditioned[r].must_hit);
+    for (size_t i = 0; i < conditioned[r].pts.size(); ++i) {
+      EXPECT_EQ(parsed.artifact.runs[r].points[i].north_m, conditioned[r].pts[i].n);
+      EXPECT_EQ(parsed.artifact.runs[r].points[i].east_m, conditioned[r].pts[i].e);
+    }
+  }
+}
 
 TEST(ConditionerEquivalence, AllVectors) {
   Reader rd;

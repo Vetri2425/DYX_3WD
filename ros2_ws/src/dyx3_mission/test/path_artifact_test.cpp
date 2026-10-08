@@ -130,3 +130,27 @@ TEST(PathArtifact, RefusesWhatTheWriterWouldRefuse) {
   // hash mismatch
   EXPECT_FALSE(parse_artifact(good, std::string(64, '0')).ok);
 }
+
+TEST(ConditionedArtifact, DeterministicHashSourceIdentityAndStrictFailures) {
+  ConditionedRunArtifact run;
+  run.profile = 1;
+  run.points = {{1.25, -2.5}, {3.0, 4.0}};
+  run.flags = {0, 1};
+  run.must_hit = {1, 0};
+  const std::string source(64, 'a');
+  const std::vector<ConditionedRunArtifact> runs{run};
+  const std::string one = serialize_conditioned_artifact(source, "spacing=0.25", runs);
+  const std::string two = serialize_conditioned_artifact(source, "spacing=0.25", runs);
+  ASSERT_FALSE(one.empty());
+  EXPECT_EQ(one, two);
+  const std::string hash = sha256_hex(one);
+  const auto parsed = parse_conditioned_artifact(one, hash);
+  ASSERT_TRUE(parsed.ok) << parsed.error;
+  EXPECT_EQ(parsed.artifact.source_sha256, source);
+  ASSERT_EQ(parsed.artifact.runs.size(), 1U);
+  EXPECT_EQ(parsed.artifact.runs[0].points[1].north_m, 3.0);
+  EXPECT_EQ(parsed.artifact.runs[0].flags[1], 1);
+  EXPECT_NE(sha256_hex(serialize_conditioned_artifact(source, "spacing=0.5", runs)), hash);
+  EXPECT_FALSE(parse_conditioned_artifact(one, std::string(64, 'b')).ok);
+  EXPECT_FALSE(parse_conditioned_artifact(one + "junk\n").ok);
+}

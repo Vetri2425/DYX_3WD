@@ -24,7 +24,8 @@ struct Boundary {
 
 struct PathModel {
   std::vector<double> north, east;
-  std::vector<bool> flags;  // true = MARK
+  std::vector<bool> flags;        // true = MARK
+  std::vector<uint32_t> run_ids;  // conditioned RPP run ownership; cross-run links are invalid
   std::vector<double> cumulative_s;
   std::vector<Boundary> boundaries;
   bool empty() const { return north.empty(); }
@@ -36,6 +37,9 @@ struct PathModel {
 // model) when sizes differ.
 bool build_path_model(const std::vector<double>& north, const std::vector<double>& east,
                       const std::vector<bool>& flags, PathModel* out);
+bool build_path_model(const std::vector<double>& north, const std::vector<double>& east,
+                      const std::vector<bool>& flags, const std::vector<uint32_t>& run_ids,
+                      PathModel* out);
 
 struct Projection {
   int segment_index{0};

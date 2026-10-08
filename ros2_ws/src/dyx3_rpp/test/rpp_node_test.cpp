@@ -12,6 +12,7 @@
 #include <fstream>
 #include <vector>
 
+#include "dyx3_mission/path_artifact.hpp"
 #include "dyx3_mission/sha256.hpp"
 
 using namespace dyx3_rpp;
@@ -207,6 +208,11 @@ TEST(RppNode, LoadsTheArtifactByIdAndAcknowledgesWithStop) {
   r.run(0.5);
   EXPECT_EQ(r.status.state, RppStatus::STATE_LOADED);
   EXPECT_EQ(r.status.mission_id, 7U);  // the acknowledgement dyx3_mission waits for
+  ASSERT_FALSE(r.status.conditioned_execution_sha256.empty());
+  const auto conditioned =
+      dyx3_mission::load_conditioned_artifact(r.dir, r.status.conditioned_execution_sha256);
+  ASSERT_TRUE(conditioned.ok) << conditioned.error;
+  EXPECT_EQ(conditioned.artifact.source_sha256, r.sha);
   ASSERT_GT(r.motion.size(), 10U);
   for (size_t i = 0; i < r.motion.size(); ++i) {
     EXPECT_EQ(r.motion[i].mode, MotionSetpoint::MODE_STOP) << i;

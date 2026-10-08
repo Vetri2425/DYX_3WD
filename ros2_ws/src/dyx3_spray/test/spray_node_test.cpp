@@ -13,6 +13,7 @@
 #include <fstream>
 #include <thread>
 
+#include "dyx3_mission/path_artifact.hpp"
 #include "dyx3_mission/sha256.hpp"
 #include "dyx3_spray/safety_watchdog_node.hpp"
 
@@ -36,11 +37,28 @@ std::string write_artifact(const std::string& dir) {
   return sha;
 }
 
+std::string write_conditioned_artifact(const std::string& dir, const std::string& source_sha,
+                                       bool wrong_source = false) {
+  dyx3_mission::ConditionedRunArtifact run;
+  run.profile = 0;
+  for (int i = 0; i <= 10; ++i) {
+    run.points.push_back({static_cast<double>(i), 0.0});
+    run.flags.push_back(i >= 2 && i <= 8 ? 1 : 0);
+    run.must_hit.push_back(0);
+  }
+  const std::string bytes = dyx3_mission::serialize_conditioned_artifact(
+      wrong_source ? std::string(64, 'b') : source_sha, "tracking_profile=segment", {run});
+  const std::string sha = dyx3_mission::sha256_hex(bytes);
+  std::ofstream(dir + "/" + sha + ".dyx3cond", std::ios::binary) << bytes;
+  return sha;
+}
+
 struct Rig {
   std::shared_ptr<rclcpp::Context> ctx;
   double now{200.0};
   std::string dir;
   std::string sha;
+  std::string conditioned_sha;
   std::shared_ptr<SprayNode> spray;
   std::shared_ptr<SafetyWatchdogNode> wd;
   std::shared_ptr<rclcpp::Node> world;
@@ -69,7 +87,8 @@ struct Rig {
   double speed{0.35};
   size_t acked{0};
 
-  explicit Rig(bool with_artifact = true, const std::vector<rclcpp::Parameter>& spray_params = {}) {
+  explicit Rig(bool with_artifact = true, const std::vector<rclcpp::Parameter>& spray_params = {},
+               bool wrong_conditioned_source = false) {
     ctx = std::make_shared<rclcpp::Context>();
     rclcpp::InitOptions io;
     io.set_domain_id(120 + (getpid() % 100));
@@ -79,6 +98,8 @@ struct Rig {
             std::to_string(reinterpret_cast<uintptr_t>(this))))
               .string();
     sha = with_artifact ? write_artifact(dir) : std::string(64, 'f');
+    conditioned_sha = with_artifact ? write_conditioned_artifact(dir, sha, wrong_conditioned_source)
+                                    : std::string();
     mission_sha = sha;
     rclcpp::NodeOptions so;
     so.context(ctx);
@@ -184,6 +205,7 @@ struct Rig {
     if (rpp_state >= 0) {
       dyx3_interfaces::msg::RppStatus p;
       p.state = static_cast<uint8_t>(rpp_state);
+      p.conditioned_execution_sha256 = conditioned_sha;
       p_rpp->publish(p);
     }
     if (publish_mission) {
@@ -381,6 +403,15 @@ TEST(SprayNode, MissionOrRppLeavingTheRunClosesTheValve) {
 
 TEST(SprayNode, UnknownPathMeansPathNotLoaded) {
   Rig r(/*with_artifact=*/false);
+  r.settle();
+  r.north = 3.0;
+  r.run(0.5);
+  EXPECT_FALSE(r.status.spraying);
+  EXPECT_EQ(r.status.safety_reason, "path not loaded");
+}
+
+TEST(SprayNode, ConditionedArtifactWithWrongSourceShaIsRefused) {
+  Rig r(/*with_artifact=*/true, {}, /*wrong_conditioned_source=*/true);
   r.settle();
   r.north = 3.0;
   r.run(0.5);

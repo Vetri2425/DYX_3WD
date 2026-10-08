@@ -46,3 +46,7 @@ uint8 handoff
 # Why RPP refused to drive on the RTK gate: 0 ok, 1 unavailable, 2 stale, 3 fix below minimum,
 # 4 not a rover fix, 5 accuracy unknown, 6 accuracy too large, 7 recovering (hold after a drop).
 uint8 rtk_reason
+
+# SHA256 id of the immutable conditioned execution geometry published by RPP.
+# Empty unless the artifact belongs to the active mission and verified source hash.
+string conditioned_execution_sha256

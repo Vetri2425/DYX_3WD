@@ -561,3 +561,11 @@ Ran: `guard_core_test` compiled standalone with g++ -Wall -Wextra -Wpedantic aga
 Could not run: `motion_guard_node_test` and the colcon workspace (no ROS 2 in this container); CI is the check for those.
 DERIVED: 0.10 m/s is an initial bench value, not field-tuned; re-validate at GATE 1. The older HANDOFF line "reverse limit 0 (no source)" is superseded.
 Note: with the accel/decel shaper still active (B2), a -0.08 brake from standstill is ramped by max_accel 0.20 m/s2, so the envelope is no longer the limiting factor.
+
+## 2026-10-08 — Phase C1 implementation (local validation)
+
+RPP now writes immutable content-addressed `DYX3COND 1` artifacts from the exact in-memory conditioned runs it installs, including source artifact SHA256, conditioner config, run profile/boundaries, points, spray flags, and must-hit flags. `RppStatus.conditioned_execution_sha256` (interfaces 0.9.0) advertises the current mission's artifact. Spray loads only that artifact and verifies both its content hash and source SHA against `MissionState`; its `PathModel` preserves run boundaries and cannot bridge runs. Failure to load or verify leaves the model cleared; there is no raw-path fallback.
+
+Archived fixture comparison with shipped conditioner defaults: `square_2x2` max nearest same-kind boundary station delta raw vs conditioned = `2.13e-14 m`; `mission_straight_5m` = `0.10 m` (one matching boundary each). This is planned-artifact geometry, not replay/field evidence.
+
+Checks available locally: parameter table generator OK (RPP 120, spray 46); backend tests 529 passed, 44 skipped; native conditioned-artifact / spray projection harness passed; mission artifact source compiled with `-Werror`; spray projection source compiled with `-Werror`; clang-format dry-run and `git diff --check` clean. `colcon`, ROS 2, and GoogleTest are unavailable on this Mac, so RPP/spray node tests, C++ gtest suites, full `colcon build/test`, and formal RPP conditioner/orchestrator equivalence suites were not run. C2 has not started pending C1 review/commit.

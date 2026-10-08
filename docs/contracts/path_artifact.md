@@ -1,4 +1,4 @@
-# Contract — path artifact (`DYX3PATH 1`)
+# Contract — path artifacts (`DYX3PATH 1`, `DYX3COND 1`)
 
 Implementation: `backend/src/dyx3_backend/mission/path_artifact.py`. Tests: `backend/tests/test_path_artifact.py`.
 Spec §7.2: *"a versioned, content-hashed path artifact carried into the run manifest."*
@@ -20,8 +20,20 @@ points <N>
 end <N>
 ```
 `flags`: bit0 = spray ON, bit1 = **must-hit** (source CAD/survey vertex, never simplified away). Bit-test, never `> 0.5` (spray-OFF must-hit = `2`).
-`north_m`, `east_m`: local NED metres relative to the mission origin recorded in `meta.origin_ne_m`. The artifact holds the **planned polyline only**;
-`dyx3_rpp::path_conditioner` splits/conditions it at install (one place for geometry decisions).
+`north_m`, `east_m`: local NED metres relative to the mission origin recorded in `meta.origin_ne_m`. `DYX3PATH` holds the planned polyline.
+At mission install, RPP is the sole owner of `dyx3_rpp::path_conditioner` and writes the resulting immutable `DYX3COND 1` artifact.
+
+## Conditioned execution artifact (`DYX3COND 1`)
+
+Stored as `<sha256>.dyx3cond` in the same artifact directory. The SHA256 is over the complete deterministic file bytes. The file records the
+original `DYX3PATH` source SHA256, every geometry-affecting conditioner parameter, and ordered runs. Each run stores its RPP profile and each
+conditioned point's NED coordinates, spray flag, and must-hit flag. `RppStatus.conditioned_execution_sha256` names the artifact for its mission.
+Spray verifies both the file hash and its `source` against `MissionState.path_artifact_sha256`, then builds the projection model directly from the
+conditioned coordinates and flags. Run IDs prevent projection from inventing a segment between runs. Spray never conditions the raw path and has no
+raw-geometry fallback. Missing, malformed, stale, wrong-source, or hash-mismatched files clear the path model and keep autonomous spray OFF.
+
+Determinism: canonical decimal values use `max_digits10`, stable field and run ordering, no timestamps, and a final LF. Changing conditioner config
+or generated geometry changes the content hash. RPP drives the in-memory runs used to produce the artifact; the artifact stores those same values.
 
 ## Determinism rules (tested)
 No timestamps, no host paths, no wall-clock timings (`planning_time_s`, `filepath` are stripped), canonical JSON, canonical float text (a reader rejects

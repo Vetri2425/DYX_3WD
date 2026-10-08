@@ -17,7 +17,8 @@
 
 * **Load by id.** On a `MissionState` in LOADING / READY / RUNNING / PAUSED with a non-empty hash, the node reads `<artifact_dir>/<sha>.dyx3path`
   with the same reader `dyx3_mission` uses (the hash is verified), turns the points into runs with `condition_path` (the proven port of `_path_cb`),
-  installs them in `RppCore` and reports `STATE_LOADED` with `mission_id`. A **new mission id** loads again even for the same file: a run starts from scratch.
+  and installs those exact runs in `RppCore`. It writes an immutable `DYX3COND 1` artifact from the installed runs and publishes its content hash in
+  `RppStatus.conditioned_execution_sha256`. Spray uses that artifact for projection. A **new mission id** loads again even for the same source file.
   A missing or corrupt file, or a path that conditions to nothing, is `STATE_ERROR` (STOP) and is retried once a second.
 * **Not RUNNING** (loaded and waiting, or paused): STOP every tick, `STATE_LOADED`. On the RUNNING to not-RUNNING edge the core forgets its motion
   memory (`pause()`: speed memory, hard-curvature latch, stop confirmation) so a resume ramps from rest. A mission is never resumed by RPP on its own: that is `dyx3_mission`'s FSM.
@@ -29,8 +30,8 @@
 * **State reporting** (`RppStatus.state`): TRACKING only while actually tracking (tick state TRACKING or APPROACH) — `dyx3_spray` reads TRACKING as the
   "mission has started" evidence and PIVOTING as the pivot gate, so STOPPING (brake, corner stop, a gate refusal), CREEPING (precise stop) and COMPLETE must never be
   reported as TRACKING; LOADED while waiting; ERROR when the artifact is bad or an unported feature is enabled; COMPLETE when the core finished.
-  Also reported: the prototype's tick/segment codes, the RTK refusal reason, `spray_request` (see the interface comment: a heading verdict on the conditioned run,
-  not the valve boundary), the loop jitter and overrun count (`LoopTimer`).
+  Also reported: the prototype's tick/segment codes, the RTK refusal reason, conditioned artifact hash, `spray_request` (legacy diagnostic only; not actuator
+  authority), the loop jitter and overrun count (`LoopTimer`).
 * **Unported feature** (`point_hold_enabled`): STOP, `STATE_ERROR`, `handoff = 1`. It refuses to drive rather than drive without the overlay.
 
 ## 3. Parameters

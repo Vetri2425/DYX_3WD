@@ -75,3 +75,8 @@
 
 - `Px4LinkStatus.handshake_ok`: the comment said a mismatch is "permanent for the process lifetime"; the implementation re-runs the handshake when the
   session resets. Comment corrected; no field or constant changed.
+
+## 0.9.0 — 2026-10-08 (Phase C1 conditioned execution geometry)
+
+- `RppStatus`: appended `conditioned_execution_sha256`, naming the immutable content-addressed `DYX3COND 1` geometry artifact produced by RPP from the
+  original mission artifact and its active conditioner configuration. Consumers must verify the source SHA against `MissionState.path_artifact_sha256`.
