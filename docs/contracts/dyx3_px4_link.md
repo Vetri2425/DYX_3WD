@@ -223,6 +223,9 @@ logging on the tick is rate-limited and happens outside it. `mlockall` is reques
 (failure is logged, not fatal in a container). Loop lateness over 1.5 periods increments
 `loop_overrun_count`; the fault is reported but does **not** stop the vehicle by itself — a
 late tick is still a fresh setpoint, and the staleness checks above are what bound the harm.
+The lifetime counter is never cleared. `FAULT_LOOP_OVERRUN` remains visible for one second from
+the most recent actual late tick and then clears if no higher-priority fault exists. Invalid or
+backward steady-clock ticks are ignored so they cannot advance the loop baseline or health state.
 
 ## 12. Parameters
 

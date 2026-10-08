@@ -738,3 +738,9 @@ contract and production-additions registry now classify these values as RESTART;
 limits require an atomic validated runtime path. A node regression test covers refusal,
 unchanged hard limits, ordinary pass-through, and RTK gate failure to STOP. ROS node tests
 remain unavailable locally.
+
+F4 records `last_overrun_s_` separately from `last_step_s_`, so the one-second diagnostic
+warning expires after the last actual late tick while the lifetime overrun counter remains.
+Nonfinite/backward injected times are ignored. A fake-FCU node test covers normal ticks,
+recent and repeated overruns, recovery, counter retention, and invalid time. ROS/colcon remains
+unavailable locally; the existing Phase D ACK tests are unchanged and await CI execution.

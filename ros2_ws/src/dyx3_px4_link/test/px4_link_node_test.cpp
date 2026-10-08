@@ -384,6 +384,40 @@ TEST(Px4LinkNode, HandshakeCompletesAndRequestsUseBaseTopicNames) {
   EXPECT_EQ(r.status.stale_topics_mask, 0U);
 }
 
+TEST(Px4LinkNode, LoopOverrunWarningExpiresFromLastActualOverrun) {
+  Rig r;
+  r.bring_up();
+  auto tick_with_command = [&](double dt) {
+    r.guard(2, 0.3F, NaN, 0.1F);
+    r.tick(dt);
+  };
+  for (int i = 0; i < 20; ++i) tick_with_command(0.01);
+  EXPECT_EQ(r.status.loop_overrun_count, 0U);
+  EXPECT_EQ(r.status.fault, dyx3_interfaces::msg::Px4LinkStatus::FAULT_NONE);
+
+  tick_with_command(0.11);  // > 1.5 of the 100 Hz period, but inside topic freshness bounds
+  EXPECT_EQ(r.status.loop_overrun_count, 1U);
+  EXPECT_EQ(r.status.fault, dyx3_interfaces::msg::Px4LinkStatus::FAULT_LOOP_OVERRUN);
+  for (int i = 0; i < 50; ++i) tick_with_command(0.01);
+  EXPECT_EQ(r.status.loop_overrun_count, 1U);
+  EXPECT_EQ(r.status.fault, dyx3_interfaces::msg::Px4LinkStatus::FAULT_LOOP_OVERRUN);
+  for (int i = 0; i < 60; ++i) tick_with_command(0.01);
+  EXPECT_EQ(r.status.loop_overrun_count, 1U);  // lifetime diagnostic is retained
+  EXPECT_EQ(r.status.fault, dyx3_interfaces::msg::Px4LinkStatus::FAULT_NONE);
+
+  tick_with_command(0.11);
+  EXPECT_EQ(r.status.loop_overrun_count, 2U);
+  EXPECT_EQ(r.status.fault, dyx3_interfaces::msg::Px4LinkStatus::FAULT_LOOP_OVERRUN);
+  const auto count = r.status.loop_overrun_count;
+  r.link->step(std::numeric_limits<double>::quiet_NaN());
+  r.link->step(r.now - 0.5);
+  r.pump();
+  EXPECT_EQ(r.status.loop_overrun_count, count);
+  tick_with_command(0.01);
+  EXPECT_EQ(r.status.loop_overrun_count, count);
+  EXPECT_EQ(r.status.fault, dyx3_interfaces::msg::Px4LinkStatus::FAULT_LOOP_OVERRUN);
+}
+
 TEST(Px4LinkNode, NoSetpointsBeforeHandshakeAndNoneWithoutOffboardEnable) {
   Rig r;
   r.fcu_answers_handshake = false;

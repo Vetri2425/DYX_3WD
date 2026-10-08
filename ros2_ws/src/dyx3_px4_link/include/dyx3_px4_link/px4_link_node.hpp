@@ -140,6 +140,7 @@ private:
   std::string last_logged_reason_;
 
   double last_step_s_{-1.0};
+  double last_overrun_s_{-1.0};
   uint64_t overruns_{0};
   double last_status_pub_s_{-1e18}, last_state_pub_s_{-1e18}, last_health_pub_s_{-1e18};
   bool ulog_started_{false};

@@ -719,9 +719,15 @@ void Px4LinkNode::start_ulog_if_due(double /*now_s*/, bool link_ok) {
 }
 
 void Px4LinkNode::step(double now_s) {
+  if (!std::isfinite(now_s) || now_s < 0.0 || (last_step_s_ >= 0.0 && now_s < last_step_s_)) {
+    return;
+  }
   // Loop overrun evidence: a tick later than 1.5 periods. Reported, not acted on (contract s.11).
   const double period = 1.0 / p_.publish_rate_hz;
-  if (last_step_s_ >= 0.0 && now_s - last_step_s_ > 1.5 * period) ++overruns_;
+  if (last_step_s_ >= 0.0 && now_s - last_step_s_ > 1.5 * period) {
+    ++overruns_;
+    last_overrun_s_ = now_s;
+  }
   last_step_s_ = now_s;
 
   last_rep_ = mon_->evaluate(now_s);
@@ -891,7 +897,7 @@ void Px4LinkNode::publish_status(double now_s, const StalenessReport& rep, const
   } else if (g.reason == Reason::CommandStale || g.reason == Reason::NoCommand ||
              g.reason == Reason::CommandInvalid || g.reason == Reason::SequenceReset) {
     fault = dyx3_interfaces::msg::Px4LinkStatus::FAULT_COMMAND_STALE;
-  } else if (overruns_ != 0U && (now_s - last_step_s_) < 1.0) {
+  } else if (last_overrun_s_ >= 0.0 && now_s - last_overrun_s_ < 1.0) {
     fault = dyx3_interfaces::msg::Px4LinkStatus::FAULT_LOOP_OVERRUN;
   }
   s.fault = fault;
