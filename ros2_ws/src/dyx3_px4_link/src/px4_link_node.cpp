@@ -720,6 +720,9 @@ void Px4LinkNode::start_ulog_if_due(double /*now_s*/, bool link_ok) {
 
 void Px4LinkNode::step(double now_s) {
   if (!std::isfinite(now_s) || now_s < 0.0 || (last_step_s_ >= 0.0 && now_s < last_step_s_)) {
+    // An unusable clock cannot age anything, so no timing or gate state is touched. Fail to zero:
+    // keep the setpoint heartbeat alive with an explicit STOP rather than omitting the tick.
+    publish_setpoint_set(stop_setpoint(), stamp_us());
     return;
   }
   // Loop overrun evidence: a tick later than 1.5 periods. Reported, not acted on (contract s.11).

@@ -409,9 +409,16 @@ TEST(Px4LinkNode, LoopOverrunWarningExpiresFromLastActualOverrun) {
   EXPECT_EQ(r.status.loop_overrun_count, 2U);
   EXPECT_EQ(r.status.fault, dyx3_interfaces::msg::Px4LinkStatus::FAULT_LOOP_OVERRUN);
   const auto count = r.status.loop_overrun_count;
+  const size_t speed_before = r.speed.size();
+  // An unusable clock fails to zero: one explicit STOP setpoint per bad tick, not silence.
   r.link->step(std::numeric_limits<double>::quiet_NaN());
+  r.pump(100);
+  ASSERT_EQ(r.speed.size(), speed_before + 1);
+  EXPECT_EQ(r.speed.back().speed_body_x, 0.0F);
   r.link->step(r.now - 0.5);
-  r.pump();
+  r.pump(100);
+  ASSERT_EQ(r.speed.size(), speed_before + 2);
+  EXPECT_EQ(r.speed.back().speed_body_x, 0.0F);
   EXPECT_EQ(r.status.loop_overrun_count, count);
   tick_with_command(0.01);
   EXPECT_EQ(r.status.loop_overrun_count, count);
