@@ -1,13 +1,17 @@
 # /etc/dyx3/mavlink-router.conf — service plane only. Created once; never overwritten.
 #
-# PX4 side: UDP server on the FCU-facing address. PX4 only talks to it when MAV_2_CONFIG
-# is enabled on the FCU (proposal 2026-10-07: default is 0, so this router is idle).
-# QGC side: TCP server on 5760 (reached over the hotspot).
+# PX4 side: UDP CLIENT to the FCU's fixed address. PX4 only talks when MAV_2_CONFIG is enabled
+# on the FCU (proposal 2026-10-07: default is 0, so this router is idle). Until a partner talks
+# to it, PX4 only BROADCASTS to 10.41.10.255; a server socket bound to 10.41.10.1 never sees
+# broadcasts, so a Server endpoint here never connects (verified on the rover 2026-10-08).
+# As a client the router sends the first GCS message to 10.41.10.2:14550 and PX4 answers it.
+# QGC side: TCP server on 5760 (reached over the hotspot / site LAN). Use TCP: a UDP-only GCS
+# never sends first after a PX4 reboot, and a UDP push would hard-code the GCS address.
 [General]
 TcpServerPort=5760
 ReportStats=false
 
 [UdpEndpoint px4]
-Mode=Server
-Address=10.41.10.1
+Mode=Normal
+Address=10.41.10.2
 Port=14550
