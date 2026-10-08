@@ -237,7 +237,8 @@ TEST(SprayEquivalence, AllVectors) {
         const double now = num(in[1]);
         if (in[5] != "-") piv.note_state(in[5] == "1", now);
         GateInputs gi;
-        gi.ownership = {true, ""};  // production gate (C1), the prototype has none
+        gi.ownership = {true, ""};         // production gate (C1), the prototype has none
+        gi.heading_evidence = {true, ""};  // isolate the legacy safety-vector gate under test
         gi.armed = gi.offboard = gi.path_loaded = gi.pose_fresh = gi.velocity_fresh =
             gi.tracking_seen = true;
         gi.estop_clear = true;

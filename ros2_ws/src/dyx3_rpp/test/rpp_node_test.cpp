@@ -225,7 +225,10 @@ TEST(RppNode, LoadsTheArtifactByIdAndAcknowledgesWithStop) {
 TEST(RppNode, PublishesFreshHeadingAndProgressEvidenceOnlyForActiveTracking) {
   Rig r;
   r.mission_state = MissionState::STATE_RUNNING;
-  r.run(0.5);
+  // Let the fake vehicle follow RPP's commands. A stationary vehicle can leave the node in a
+  // legitimate STOPPING/PIVOTING transition, making an instantaneous state assertion flaky.
+  r.auto_drive = true;
+  for (int i = 0; i < 100 && r.status.state != RppStatus::STATE_TRACKING; ++i) r.run(0.02);
   ASSERT_EQ(r.status.state, RppStatus::STATE_TRACKING);
   EXPECT_TRUE(r.status.heading_evidence_valid);
   EXPECT_TRUE(std::isfinite(r.status.heading_error_rad));
