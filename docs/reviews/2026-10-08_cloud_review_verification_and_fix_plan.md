@@ -119,3 +119,16 @@ Phases are ordered by risk to paint and to the rover. Each item lists the change
 4. C2: AND-gate `spray_request` into spray, or move the heading gate into spray.
 5. E3: plaintext allowed by default per profile, or TLS required.
 6. Where `plan.md` (production RTK) lives, so E4 can start.
+
+## 5. Human decisions — FROZEN 2026-10-08
+
+The human accepted the corrections in section 1 (H3 finalises after the goal enters canceling; NTRIP TLS cannot be mandatory; C2 is High but **mandatory before field use**, since a false "OFF proven" is safety-significant) and froze:
+
+1. **A1 spray ownership.** Spray may operate only while the mission is RUNNING, `RppStatus` is fresh (`rpp_timeout_s` = 0.5 s, IDLE_ONLY, DERIVED initial value: the stack's 0.5 s freshness convention, 25 missed ticks at 50 Hz; re-validate from Jetson jitter), RPP is in an allowed state, and the existing geometry/safety gates pass. STOPPING stays allowed while the mission is RUNNING and the geometry still says MARK. Never in IDLE, LOADED, ERROR, COMPLETE or any non-RUNNING mission. Any mission stop/abort/error/completion or RPP silence/error → immediate spray OFF.
+2. **B1 reverse cap** `max_reverse_speed_mps` = **0.10 m/s** as the initial bounded value (not a field-tuned number: active brake cap 0.08, segment endpoint creep 0.10, precise-stop creep 0.05). Tests: −0.08 passes unchanged, −0.5 is clamped to −0.10. GATE 1 decides the production value.
+3. **B2** Remove the guard's accel/decel/jerk shaping from the normal command path. RPP is the sole normal speed-profile owner; the guard applies absolute hard envelopes only (max forward, max reverse, max yaw rate). Accel/decel/jerk may remain only as diagnostics or an optional fault detector, never a second ramp.
+4. **C2** The heading spray gate moves into `dyx3_spray` (after C1/H9 shared conditioned geometry). Spray owns `spray_heading_cut`, the entry-heading hold and valve gating; RPP publishes heading error / tracking state as evidence. `spray_request` becomes diagnostic/deprecated, then is removed.
+5. **E3 NTRIP security** is explicit per profile: `security = PLAINTEXT | TLS`, required for a new profile. PLAINTEXT is supported (port-2101 casters) with a visible warning in UI/status. TLS verifies certificates by default and never silently downgrades. Security is never inferred from the port.
+6. **E4 plan** is committed as `docs/plans/2026-10-08_production_rtk_plan.md`.
+
+Order A → B → C → D → E → F → G is confirmed.
