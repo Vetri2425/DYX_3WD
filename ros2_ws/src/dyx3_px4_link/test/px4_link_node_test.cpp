@@ -228,7 +228,12 @@ struct Rig {
           fcu->count_subscribers("/fmu/out/vehicle_status_v1") > 0 &&
           fcu->count_subscribers("/fmu/out/message_format_response") > 0 &&
           cli_off->service_is_ready() && cli_arm->service_is_ready() &&
-          link->count_publishers("/dyx3/vehicle_state") > 0) {
+          link->count_publishers("/dyx3/vehicle_state") > 0 &&
+          // spray path: command in, VehicleCommand out, FCU ack in, spray ack out
+          fcu->count_subscribers("/dyx3/spray/actuator_command") > 0 &&
+          link->count_subscribers("/fmu/in/vehicle_command") > 0 &&
+          fcu->count_subscribers("/fmu/out/vehicle_command_ack") > 0 &&
+          link->count_subscribers("/dyx3/spray/actuator_ack") > 0) {
         return;
       }
     }
@@ -301,6 +306,19 @@ struct Rig {
   void pump(int ms = 30) {
     const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
     while (std::chrono::steady_clock::now() < end) exec->spin_some(2ms);
+  }
+  // Spin until `done` holds or the wall-clock deadline passes. For positive expectations
+  // ("this message arrives"): DDS delivery latency on a loaded CI runner exceeds any fixed
+  // pump. The link clock (`now`) does not advance here, so no link timeout can fire while
+  // waiting; the deadline only bounds a genuinely missing message.
+  template <typename Done>
+  bool pump_until(Done done, int timeout_ms = 3000) {
+    const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (std::chrono::steady_clock::now() < end) {
+      exec->spin_some(2ms);
+      if (done()) return true;
+    }
+    return done();
   }
   // Advance link-time by dt and run one cycle with the fake FCU alive, then deliver.
   void tick(double dt = 0.01, bool publish = true) {
@@ -978,7 +996,7 @@ TEST(Px4LinkNode, WatchdogOffRetiresTheControllerOnHeartbeatItDisplaced) {
   controller.actuator_set_index = 1;
   controller.value = 1.0F;
   r.p_spray->publish(controller);
-  r.pump(50);
+  ASSERT_TRUE(r.pump_until([&] { return !r.cmds.empty(); }));
   ASSERT_EQ(r.cmds.size(), 1U);
   px4_msgs::msg::VehicleCommandAck ack;
   ack.command = 187;
@@ -986,24 +1004,24 @@ TEST(Px4LinkNode, WatchdogOffRetiresTheControllerOnHeartbeatItDisplaced) {
   ack.target_component = r.cmds.back().source_component;
   ack.result = px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_ACCEPTED;
   r.p_ack->publish(ack);
-  r.pump(50);
+  ASSERT_TRUE(r.pump_until([&] { return r.spray_acks.size() >= 1; }));  // ON confirmed
   Cmd watchdog = controller;
   watchdog.seq = 20;
   watchdog.source = Cmd::SOURCE_WATCHDOG;
   watchdog.on = false;
   watchdog.value = -1.0F;
   r.p_spray->publish(watchdog);
-  r.pump(50);
+  ASSERT_TRUE(r.pump_until([&] { return r.cmds.size() >= 2; }));
   ASSERT_EQ(r.cmds.size(), 2U);
   ack.target_component = r.cmds.back().source_component;
   r.p_ack->publish(ack);
-  r.pump(50);
+  ASSERT_TRUE(r.pump_until([&] { return r.spray_acks.size() >= 2; }));  // OFF confirmed
   r.p_spray->publish(controller);  // stale heartbeat from the displaced ON epoch
-  r.pump(50);
+  r.pump(100);                     // negative check: nothing may be sent
   EXPECT_EQ(r.cmds.size(), 2U);
   controller.seq = 11;  // a new controller verdict after safety recovery
   r.p_spray->publish(controller);
-  r.pump(50);
+  ASSERT_TRUE(r.pump_until([&] { return r.cmds.size() >= 3; }));
   ASSERT_EQ(r.cmds.size(), 3U);
   EXPECT_EQ(r.link->spray_identities_used(), 3U);
 }
@@ -1300,7 +1318,9 @@ TEST(Px4LinkNode, WatchdogOffWinsQueuedControllerOffAndOldAckCannotConfirmIt) {
     r.p_spray->publish(m);
     r.pump(40);
   };
+  auto is_187 = [](const auto& c) { return c.command == 187; };
   publish_off(20, Cmd::SOURCE_CONTROLLER);
+  ASSERT_TRUE(r.pump_until([&] { return std::any_of(r.cmds.begin(), r.cmds.end(), is_187); }));
   auto first =
       std::find_if(r.cmds.rbegin(), r.cmds.rend(), [](const auto& c) { return c.command == 187; });
   ASSERT_NE(first, r.cmds.rend());
@@ -1308,6 +1328,8 @@ TEST(Px4LinkNode, WatchdogOffWinsQueuedControllerOffAndOldAckCannotConfirmIt) {
   publish_off(21, Cmd::SOURCE_CONTROLLER);
   publish_off(22, Cmd::SOURCE_WATCHDOG);
   publish_off(23, Cmd::SOURCE_WATCHDOG);  // newest watchdog OFF replaces queued watchdog OFF
+  ASSERT_TRUE(r.pump_until([&] { return r.spray_acks.size() >= 2; }));
+  r.pump(50);  // negative check: no further ack while seq 20 is still in flight
   ASSERT_EQ(r.spray_acks.size(), 2U);
   EXPECT_EQ(r.spray_acks[0].seq, 21U);
   EXPECT_EQ(r.spray_acks[1].seq, 22U);
@@ -1320,20 +1342,23 @@ TEST(Px4LinkNode, WatchdogOffWinsQueuedControllerOffAndOldAckCannotConfirmIt) {
   ack.target_component = first_token;
   ack.result = px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_ACCEPTED;
   r.p_ack->publish(ack);
-  r.pump(50);
-  auto watchdog = std::find_if(r.cmds.rbegin(), r.cmds.rend(), [&](const auto& c) {
+  auto is_watchdog_cmd = [&](const auto& c) {
     return c.command == 187 && c.source_component != first_token;
-  });
+  };
+  ASSERT_TRUE(r.pump_until([&] {
+    return r.spray_acks.size() >= 3 && std::any_of(r.cmds.begin(), r.cmds.end(), is_watchdog_cmd);
+  }));
+  auto watchdog = std::find_if(r.cmds.rbegin(), r.cmds.rend(), is_watchdog_cmd);
   ASSERT_NE(watchdog, r.cmds.rend());
   EXPECT_EQ(watchdog->source_component, 3U);
   r.p_ack->publish(ack);  // duplicate controller OFF response
-  r.pump(30);
+  r.pump(100);            // negative check: a stale ack confirms nothing
   ASSERT_EQ(r.spray_acks.size(), 3U);
   EXPECT_NE(r.spray_acks.back().source, Cmd::SOURCE_WATCHDOG);
 
   ack.target_component = watchdog->source_component;
   r.p_ack->publish(ack);
-  r.pump(50);
+  ASSERT_TRUE(r.pump_until([&] { return r.spray_acks.size() >= 4; }));
   ASSERT_EQ(r.spray_acks.size(), 4U);
   EXPECT_EQ(r.spray_acks.back().seq, 23U);
   EXPECT_EQ(r.spray_acks.back().source, Cmd::SOURCE_WATCHDOG);
