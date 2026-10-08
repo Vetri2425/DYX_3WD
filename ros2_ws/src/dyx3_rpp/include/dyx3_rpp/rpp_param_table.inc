@@ -119,3 +119,4 @@
   {"kappa_hard_enter", Kind::Float, ParamClass::Live, 0.25, "", 0.0, HUGE_VAL, false, false, {}},
   {"kappa_hard_exit", Kind::Float, ParamClass::Live, 0.15, "", 0.0, HUGE_VAL, false, false, {}},
   {"preview_curvature_distance_m", Kind::Float, ParamClass::Live, 0.0, "", 0.0, HUGE_VAL, false, false, {}},
+  {"segment_command_mode", Kind::String, ParamClass::IdleOnly, 0, "heading", -HUGE_VAL, HUGE_VAL, false, true, {"heading", "rate"}},

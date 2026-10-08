@@ -380,6 +380,13 @@ TEST(RppCommand, EveryKindMapsToAContractConformingCommand) {
   EXPECT_FLOAT_EQ(c.speed_body_x, 0.3F);
   EXPECT_FLOAT_EQ(c.yaw_setpoint, 0.1F);
   EXPECT_TRUE(std::isnan(c.yaw_rate_setpoint));
+  // B3: the explicit segment rate selector uses the rate RppCore already computed from
+  // segment_yaw_rate_gain * theta_e.
+  c = command_from_tick(o, true, 0.45, true);
+  EXPECT_EQ(c.mode, MotionMode::TrackRate);
+  EXPECT_FLOAT_EQ(c.speed_body_x, 0.3F);
+  EXPECT_TRUE(std::isnan(c.yaw_setpoint));
+  EXPECT_FLOAT_EQ(c.yaw_rate_setpoint, 0.2F);
   c = command_from_tick(o, false, 0.45);
   EXPECT_EQ(c.mode, MotionMode::TrackRate);
   EXPECT_FLOAT_EQ(c.yaw_rate_setpoint, 0.2F);

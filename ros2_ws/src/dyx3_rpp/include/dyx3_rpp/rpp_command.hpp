@@ -7,12 +7,14 @@
 //   STOP   -> MODE_STOP
 //   TRACK  -> smooth run: MODE_TRACK_RATE  (speed = |v|, yaw rate = the feed-forward + feedback
 //   rate)
-//             segment run: MODE_TRACK_HEADING (speed = |v|, heading = the bearing to the aim point)
+//             segment run: MODE_TRACK_HEADING by default, or MODE_TRACK_RATE when the explicit
+//             GATE 4 selector requests rate control
 //   BRAKE  -> signed speed along the nose with the nose heading held (never a 180 degree spot turn)
 //   PIVOT  -> MODE_PIVOT, rate toward the exit heading
 //   CREEP  -> MODE_CREEP, signed speed, no turn
-// DERIVED — NOT FROM V1 SPEC: the segment profile maps to TRACK_HEADING (the contract allows
-// TRACK_RATE with segment_yaw_rate_gain * theta_e as well). Open question for the human / GATE 4.
+// DERIVED — NOT FROM V1 SPEC: segment_command_mode is an IDLE_ONLY A/B selector. "heading" is the
+// behavior-compatible default; "rate" uses the rate already computed by RppCore from
+// segment_yaw_rate_gain * theta_e and clamped by max_yaw_rate_body.
 #pragma once
 
 #include "dyx3_rpp/motion_output.hpp"
@@ -21,6 +23,7 @@
 namespace dyx3_rpp {
 
 // max_yaw_rate is max_yaw_rate_body (> 0). A non-finite result becomes STOP (fail to zero).
-MotionCommand command_from_tick(const TickOutput& o, bool profile_segment, double max_yaw_rate);
+MotionCommand command_from_tick(const TickOutput& o, bool profile_segment, double max_yaw_rate,
+                                bool segment_rate_command = false);
 
 }  // namespace dyx3_rpp

@@ -118,3 +118,4 @@
   kappa_hard_enter,
   kappa_hard_exit,
   preview_curvature_distance_m,
+  segment_command_mode,

@@ -265,7 +265,9 @@ void RppNode::step(int64_t now_ns) {
   }
 
   const TickOutput& out = core_.tick(now_ns);
-  cmd = command_from_tick(out, core_.profile_segment(), params_.num(P::max_yaw_rate_body));
+  const bool segment_rate_command = params_.str(P::segment_command_mode) == "rate";
+  cmd = command_from_tick(out, core_.profile_segment(), params_.num(P::max_yaw_rate_body),
+                          segment_rate_command);
 
   uint8_t state = RppStatus::STATE_STOPPING;
   if (out.handoff != Handoff::None) {

@@ -41,8 +41,8 @@ std::map<std::string, Row> registry() {
 
 TEST(RppParams, TableMatchesTheRegistry) {
   const auto reg = registry();
-  ASSERT_EQ(reg.size(), 119U);
-  ASSERT_EQ(kParamCount, 119U);
+  ASSERT_EQ(reg.size(), 120U);
+  ASSERT_EQ(kParamCount, 120U);
   const auto* d = descriptors();
   for (size_t i = 0; i < kParamCount; ++i) {
     const auto it = reg.find(d[i].name);
@@ -71,6 +71,7 @@ TEST(RppParams, EveryDefaultIsValidAndRelationsHold) {
   EXPECT_TRUE(p.check_relations().ok);
   EXPECT_DOUBLE_EQ(p.num(P::max_linear_vel), 1.0);
   EXPECT_EQ(p.str(P::tracking_profile), "auto");
+  EXPECT_EQ(p.str(P::segment_command_mode), "heading");
   EXPECT_TRUE(p.flag(P::require_rtk_fix));
   EXPECT_EQ(p.integer(P::preview_curvature_n), 4);
 }
@@ -86,6 +87,12 @@ TEST(RppParams, ClassRulesAreEnforced) {
   EXPECT_FALSE(r.ok);
   EXPECT_NE(r.reason.find("IDLE_ONLY"), std::string::npos);
   EXPECT_TRUE(p.flag(P::require_rtk_fix));  // not applied, not deferred
+  const auto mode_running = p.set({"segment_command_mode", 0.0, "rate"}, running);
+  EXPECT_FALSE(mode_running.ok);
+  EXPECT_NE(mode_running.reason.find("IDLE_ONLY"), std::string::npos);
+  EXPECT_EQ(p.str(P::segment_command_mode), "heading");
+  EXPECT_TRUE(p.set({"segment_command_mode", 0.0, "rate"}, idle).ok);
+  EXPECT_EQ(p.str(P::segment_command_mode), "rate");
   EXPECT_TRUE(p.set({"require_rtk_fix", 0.0, ""}, idle).ok);
   EXPECT_FALSE(p.flag(P::require_rtk_fix));
   const auto rs = p.set({"path_frame_id", 0.0, "other"}, idle);  // RESTART never at runtime
@@ -111,10 +118,14 @@ TEST(RppParams, StructuralValidation) {
   EXPECT_FALSE(p.set({"tracking_profile", 0.0, "bogus"}, c).ok);
   EXPECT_FALSE(p.set({"tracking_profile", 0.0, ""}, c).ok);
   EXPECT_TRUE(p.set({"tracking_profile", 0.0, "segment"}, c).ok);
+  EXPECT_FALSE(p.set({"segment_command_mode", 0.0, "bogus"}, c).ok);
+  EXPECT_FALSE(p.set({"segment_command_mode", 0.0, ""}, c).ok);
+  EXPECT_TRUE(p.set({"segment_command_mode", 0.0, "rate"}, c).ok);
   EXPECT_FALSE(p.set({"precise_stop_mode", 0.0, "x"}, c).ok);
   EXPECT_TRUE(p.set({"pose_latency_bias_s", -0.05, ""}, c).ok);  // the one signed parameter
   EXPECT_FALSE(p.set({"require_rtk_fix", 2.0, ""}, c).ok);
   EXPECT_EQ(p.str(P::tracking_profile), "segment");
+  EXPECT_EQ(p.str(P::segment_command_mode), "rate");
 }
 
 TEST(RppParams, RelationsAreCheckedAndBatchesAreAtomic) {

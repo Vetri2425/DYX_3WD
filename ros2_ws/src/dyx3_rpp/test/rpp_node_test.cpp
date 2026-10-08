@@ -262,6 +262,23 @@ TEST(RppNode, DrivesTheWholeMissionMarksTheLineAndCompletes) {
   EXPECT_NEAR(r.east, 0.0, 0.03);
 }
 
+TEST(RppNode, SegmentRateCommandModePublishesTrackRate) {
+  Rig r({rclcpp::Parameter("segment_command_mode", "rate")});
+  r.mission_state = MissionState::STATE_RUNNING;
+  bool saw_rate = false;
+  for (int i = 0; i < 100; ++i) {
+    r.cycle();
+    const auto& m = r.motion.back();
+    if (m.mode == MotionSetpoint::MODE_TRACK_RATE && m.speed_body_x > 0.0F) {
+      saw_rate = true;
+      EXPECT_TRUE(std::isnan(m.yaw_setpoint));
+      EXPECT_TRUE(std::isfinite(m.yaw_rate_setpoint));
+      break;
+    }
+  }
+  EXPECT_TRUE(saw_rate);
+}
+
 TEST(RppNode, AStalePoseStops) {
   Rig r;
   r.mission_state = MissionState::STATE_RUNNING;

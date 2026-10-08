@@ -5,7 +5,7 @@
     tools/gen_param_tables.py --check    # fail if a committed table is stale
 
 The registry (name, type, prototype default, PROPOSED class) is the single source; the generated tables are
-committed so the C++ build needs no Python. One table per owning package (`dyx3_rpp`: 119, `dyx3_spray`: the
+committed so the C++ build needs no Python. One table per owning package (`dyx3_rpp`: 119 carried + production additions, `dyx3_spray`: the
 registry's 54 minus the rows that belong to features not ported, each excluded with a reason below).
 
 Validation bounds are STRUCTURAL (finite; non-negative; strictly positive where the value is a divisor;
@@ -41,6 +41,7 @@ POSITIVE = {  # used as divisors / periods: zero would be a division by zero or 
 }
 ALLOWED = {
     "tracking_profile": ["auto", "segment", "smooth"],
+    "segment_command_mode": ["heading", "rate"],
     "precise_stop_mode": ["feedforward", "servo"],
     "point_execution_mode": ["auto", "manual"],
     "path_frame_id": None,  # any non-empty string
@@ -53,7 +54,7 @@ INT_RANGE = {  # name -> (lo, hi)
 }
 
 PACKAGES = {
-    "dyx3_rpp": {"expect": 119, "exclude": {}},
+    "dyx3_rpp": {"expect": 120, "exclude": {}},  # 119 carried + segment_command_mode (production addition)
     "dyx3_spray": {
         "expect": 46,  # 45 carried + rpp_timeout_s (production addition, 2026-10-08)
         "exclude": {

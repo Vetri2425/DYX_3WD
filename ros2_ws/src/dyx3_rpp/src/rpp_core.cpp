@@ -1295,7 +1295,11 @@ void RppCore::control_segment(double pos_n, double pos_e, double yaw_ned, double
     speed = stop_latch_filter(speed, latch_ref, now_ns);
     last_speed_cmd_ = speed;
 
-    double yaw_rate_body = use_ff_yaw_rate ? yaw_gain * theta_e : 0.0;
+    // B3: when segment_command_mode=rate, RPP owns the heading-error -> yaw-rate law even if the
+    // legacy feed-forward toggle is off. Default command mode remains heading, so landing B3 does
+    // not change the shipped steering behavior.
+    const bool segment_rate_command = params_.str(P::segment_command_mode) == "rate";
+    double yaw_rate_body = (use_ff_yaw_rate || segment_rate_command) ? yaw_gain * theta_e : 0.0;
     if (max_yr > 0.0) yaw_rate_body = clampd(yaw_rate_body, -max_yr, max_yr);
 
     const double unit_n = dn / l_actual;

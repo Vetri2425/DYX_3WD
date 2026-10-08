@@ -15,7 +15,7 @@ Consequences that shaped the controller: pivots were commanded as a small vector
 | Legacy situation | `MotionSetpoint.mode` | speed_body_x | yaw_setpoint | yaw_rate_setpoint |
 |---|---|---|---|---|
 | any `_publish_zero` (IDLE/STALE/RTK_WAIT/JUMP_SKIP/DONE) | `STOP` | 0 | NaN | 0 |
-| straight / segment tracking | `TRACK_HEADING` (bearing to lookahead) **or** `TRACK_RATE` (`segment_yaw_rate_gain·θe`) | `+|v|` | ψ / NaN | NaN / ω |
+| straight / segment tracking | `TRACK_HEADING` by default, or `TRACK_RATE` when `segment_command_mode=rate` (`segment_yaw_rate_gain·θe`, clamped by `max_yaw_rate_body`) | `+|v|` | ψ / NaN | NaN / ω |
 | smooth/arc tracking | `TRACK_RATE` (`κ·v`, + optional FB) — **recovers the floor** | `+|v|` | NaN | ω |
 | corner / run-alignment pivot | `PIVOT` | 0 | NaN | explicit rate toward the exit heading |
 | terminal approach (`segment_endpoint_approach_speed` 0.03 m/s) | `CREEP` | `+v` (small) | NaN | ω |
@@ -23,6 +23,12 @@ Consequences that shaped the controller: pivots were commanded as a small vector
 
 Frames/signs: NED, yaw 0 = North, clockwise-positive, rad and rad/s (`docs/contracts/frames.md`). **No ENU conversion anywhere.** `valid = false` ⇒ STOP.
 The legacy yaw rate is already closed on the pose (pure-pursuit κ·v or P on θe), so `TRACK_RATE` is meaningful without extra feedback.
+
+### Segment steering A/B selector (B3)
+`segment_command_mode` is **IDLE_ONLY** and defaults to `heading`, so landing B3 does not change the
+shipped segment steering behavior. `rate` makes RPP publish the segment rate it already computes as
+`segment_yaw_rate_gain * theta_e`, clamped to `max_yaw_rate_body`. GATE 4 must compare both modes on
+the rover before the default is changed.
 
 ## 3. Reverse
 The prototype emits anti-parallel vectors **on purpose** (I1 brake; `precise_stop` with a negative residual; endpoint precise-stop along the segment with `sign < 0`). Under the explicit

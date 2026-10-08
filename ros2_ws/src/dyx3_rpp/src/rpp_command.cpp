@@ -4,7 +4,8 @@
 
 namespace dyx3_rpp {
 
-MotionCommand command_from_tick(const TickOutput& o, bool profile_segment, double max_yaw_rate) {
+MotionCommand command_from_tick(const TickOutput& o, bool profile_segment, double max_yaw_rate,
+                                bool segment_rate_command) {
   MotionCommand c;
   switch (o.cmd) {
     case CmdKind::Stop:
@@ -13,7 +14,8 @@ MotionCommand command_from_tick(const TickOutput& o, bool profile_segment, doubl
     case CmdKind::Track: {
       const double speed = std::hypot(o.v_n, o.v_e);
       if (profile_segment) {
-        c = make_track_heading(speed, o.track_heading_ned);
+        c = segment_rate_command ? make_track_rate(speed, o.yaw_rate, max_yaw_rate)
+                                 : make_track_heading(speed, o.track_heading_ned);
       } else {
         c = make_track_rate(speed, o.yaw_rate, max_yaw_rate);
       }
