@@ -24,12 +24,14 @@ bool write_all(int fd, const char* data, size_t size) {
 }
 }  // namespace
 
-SprayAckTokens::SprayAckTokens(std::string state_path) : state_path_(std::move(state_path)) {}
+SprayAckTokens::SprayAckTokens(std::string state_path) : state_path_(std::move(state_path)) {
+  failed_ = state_path_.empty() || !load();
+}
 
 bool SprayAckTokens::load() {
   const int fd = ::open(state_path_.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
   if (fd < 0) return false;
-  char contents[16]{};
+  char contents[32]{};
   const ssize_t n = ::read(fd, contents, sizeof(contents));
   char extra{};
   const ssize_t extra_n = ::read(fd, &extra, 1);
@@ -38,21 +40,28 @@ bool SprayAckTokens::load() {
     return false;
   std::string_view text(contents, static_cast<size_t>(n));
   if (!text.empty() && text.back() == '\n') text.remove_suffix(1);
-  unsigned value = 0;
+  const bool versioned = text.substr(0, 3) == "v2 ";
+  if (versioned) text.remove_prefix(3);
+  uint32_t value = 0;
   const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value);
-  if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size() || value < kFirst ||
-      value > static_cast<unsigned>(kLast) + 1U)
-    return false;
-  next_ = static_cast<uint16_t>(value);
+  if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size()) return false;
+  // The old ledger is a high-water component ID for system 1. Preserve every previously
+  // allocated pair when upgrading; 1000 means the first pair on system 2 is next.
+  if (!versioned) {
+    if (value < kFirst || value > static_cast<uint32_t>(kLast) + 1U) return false;
+    value -= kFirst;
+  }
+  if (value > kCapacity) return false;
+  next_ = value;
   return true;
 }
 
-bool SprayAckTokens::persist(uint16_t next) {
+bool SprayAckTokens::persist(uint32_t next) {
   const std::string temporary = state_path_ + ".tmp";
   const int fd = ::open(temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
                         S_IRUSR | S_IWUSR);
   if (fd < 0) return false;
-  const std::string contents = std::to_string(next) + "\n";
+  const std::string contents = "v2 " + std::to_string(next) + "\n";
   const bool written = write_all(fd, contents.data(), contents.size()) && ::fsync(fd) == 0;
   const int close_result = ::close(fd);
   if (!written || close_result != 0 || ::rename(temporary.c_str(), state_path_.c_str()) != 0) {
@@ -68,24 +77,18 @@ bool SprayAckTokens::persist(uint16_t next) {
   return synced;
 }
 
-std::optional<uint16_t> SprayAckTokens::reserve() {
+std::optional<SprayAckTokens::Identity> SprayAckTokens::reserve() {
   if (failed_) return std::nullopt;
-  if (!initialized_) {
-    initialized_ = true;
-    if (state_path_.empty() || !load()) {
-      failed_ = true;
-      return std::nullopt;
-    }
-  }
-  if (next_ > kLast) return std::nullopt;
-  const uint16_t token = next_;
-  const uint16_t advanced = static_cast<uint16_t>(token + 1U);
+  if (next_ == kCapacity) return std::nullopt;
+  const uint32_t index = next_;
+  const uint32_t advanced = index + 1U;
   if (!persist(advanced)) {
     failed_ = true;
     return std::nullopt;
   }
   next_ = advanced;
-  return token;
+  return Identity{static_cast<uint8_t>(index / (kLast - kFirst + 1U) + 1U),
+                  static_cast<uint16_t>(index % (kLast - kFirst + 1U) + kFirst)};
 }
 
 }  // namespace dyx3_px4_link

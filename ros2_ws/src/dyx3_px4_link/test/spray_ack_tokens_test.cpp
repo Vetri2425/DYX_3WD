@@ -6,7 +6,6 @@
 #include <atomic>
 #include <fstream>
 #include <string>
-#include <vector>
 
 namespace {
 std::string temp_state_path() {
@@ -21,51 +20,64 @@ void write_state(const std::string& path, const std::string& value) {
 }
 }  // namespace
 
-TEST(SprayAckTokens, ReservesEveryIdentityOnceThenFailsClosedAtBoundary) {
+TEST(SprayAckTokens, PairOrderingAndBoundaryFailClosed) {
   const std::string path = temp_state_path();
-  write_state(path, "2\n");
+  write_state(path, "2\n");  // legacy first-install ledger
   dyx3_px4_link::SprayAckTokens tokens(path);
-  std::vector<uint16_t> allocated;
-  while (const auto token = tokens.reserve()) allocated.push_back(*token);
-
-  ASSERT_EQ(allocated.size(), 998U);
-  EXPECT_EQ(allocated.front(), 2U);
-  EXPECT_EQ(allocated.back(), 999U);
-  EXPECT_FALSE(tokens.reserve());
+  const auto first = tokens.reserve();
+  ASSERT_TRUE(first);
+  EXPECT_EQ(first->system, 1U);
+  EXPECT_EQ(first->component, 2U);
+  write_state(path, "v2 254488\n");
+  dyx3_px4_link::SprayAckTokens boundary(path);
+  const auto penultimate = boundary.reserve();
+  const auto last = boundary.reserve();
+  ASSERT_TRUE(penultimate);
+  ASSERT_TRUE(last);
+  EXPECT_EQ(penultimate->system, 255U);
+  EXPECT_EQ(penultimate->component, 998U);
+  EXPECT_EQ(last->system, 255U);
+  EXPECT_EQ(last->component, 999U);
+  EXPECT_EQ(boundary.used(), dyx3_px4_link::SprayAckTokens::kCapacity);
+  EXPECT_EQ(boundary.remaining(), 0U);
+  EXPECT_TRUE(boundary.exhausted());
+  EXPECT_FALSE(boundary.reserve());
   unlink(path.c_str());
 }
 
-TEST(SprayAckTokens, OldestTokenCannotBeReusedAfterBoundary) {
+TEST(SprayAckTokens, LegacyHighWaterAndProcessRestartNeverReuseAPair) {
   const std::string path = temp_state_path();
-  write_state(path, "2\n");
-  dyx3_px4_link::SprayAckTokens tokens(path);
-  std::vector<uint16_t> allocated;
-  while (const auto token = tokens.reserve()) allocated.push_back(*token);
-
-  const uint16_t delayed_oldest_ack_target_component = allocated.front();
-  EXPECT_EQ(delayed_oldest_ack_target_component, 2U);
-  EXPECT_FALSE(tokens.reserve());  // It cannot become a current transaction's correlation ID.
-  unlink(path.c_str());
-}
-
-TEST(SprayAckTokens, DurableHighWaterMarkSurvivesProcessRestart) {
-  const std::string path = temp_state_path();
-  write_state(path, "2\n");
+  write_state(path, "999\n");
   {
-    dyx3_px4_link::SprayAckTokens first_process(path);
-    EXPECT_EQ(first_process.reserve(), 2U);
-    EXPECT_EQ(first_process.reserve(), 3U);
+    dyx3_px4_link::SprayAckTokens first(path);
+    const auto pair = first.reserve();
+    ASSERT_TRUE(pair);
+    EXPECT_EQ(pair->system, 1U);
+    EXPECT_EQ(pair->component, 999U);
   }
-  dyx3_px4_link::SprayAckTokens restarted_process(path);
-  EXPECT_EQ(restarted_process.reserve(), 4U);
+  dyx3_px4_link::SprayAckTokens restarted(path);
+  const auto pair = restarted.reserve();
+  ASSERT_TRUE(pair);
+  EXPECT_EQ(pair->system, 2U);
+  EXPECT_EQ(pair->component, 2U);
   unlink(path.c_str());
 }
 
-TEST(SprayAckTokens, CorruptStateFailsClosed) {
+TEST(SprayAckTokens, MissingOrCorruptStateFailsClosed) {
   const std::string path = temp_state_path();
-  write_state(path, "2\n999\n");
-  dyx3_px4_link::SprayAckTokens tokens(path);
-  EXPECT_FALSE(tokens.reserve());
+  dyx3_px4_link::SprayAckTokens missing(path);
+  EXPECT_FALSE(missing.reserve());
+  write_state(path, "v2 254491\n");
+  dyx3_px4_link::SprayAckTokens corrupt(path);
+  EXPECT_FALSE(corrupt.reserve());
   unlink(path.c_str());
 }
-}  // namespace
+
+TEST(SprayAckTokens, ExhaustedStateSurvivesRestart) {
+  const std::string path = temp_state_path();
+  write_state(path, "v2 254490\n");
+  dyx3_px4_link::SprayAckTokens tokens(path);
+  EXPECT_FALSE(tokens.reserve());
+  EXPECT_TRUE(tokens.exhausted());
+  unlink(path.c_str());
+}

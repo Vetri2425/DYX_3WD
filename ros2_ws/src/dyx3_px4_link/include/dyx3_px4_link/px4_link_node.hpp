@@ -78,6 +78,9 @@ public:
   const CommandGate& gate() const { return *gate_; }
   const LinkParams& params() const { return p_; }
   uint64_t spray_late_ack_count() const { return spray_late_ack_count_; }
+  uint32_t spray_identities_used() const { return spray_ack_tokens_->used(); }
+  uint32_t spray_identities_remaining() const { return spray_ack_tokens_->remaining(); }
+  bool spray_identities_exhausted() const { return spray_ack_tokens_->exhausted(); }
 
 private:
   using ArmSrv = dyx3_interfaces::srv::ArmDisarm;
@@ -154,13 +157,19 @@ private:
     uint8_t servo_instance;
     uint16_t pwm_us;
     uint16_t ack_token{0};
+    uint8_t ack_system{0};
     double sent_s;
   };
   static bool same_spray_transaction(const SprayPending& a, const SprayPending& b);
   std::deque<SprayPending> spray_queue_;
   std::optional<SprayPending> spray_inflight_;
-  // Last positively acknowledged logical request per producer. Periodic exact reasserts
-  // are already satisfied and must not consume another durable PX4 ACK token.
+  // Last dispatched logical epoch per producer, including a timed-out epoch. Exact reasserts
+  // retain its identity even when prior ACKs are delayed or missing.
+  std::unordered_map<uint8_t, SprayPending> spray_epochs_;
+  // A watchdog OFF retires the controller ON it displaced. Late heartbeats of that ON
+  // must not reopen the valve after OFF has been acknowledged.
+  std::optional<SprayPending> spray_barred_on_;
+  // Last positively acknowledged epoch per producer.
   std::unordered_map<uint8_t, SprayPending> spray_confirmed_;
   std::unique_ptr<SprayAckTokens> spray_ack_tokens_;
   uint64_t spray_late_ack_count_{0};

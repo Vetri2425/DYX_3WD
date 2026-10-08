@@ -197,6 +197,59 @@ TEST(WatchdogCore, OffBurstThenBackgroundRate) {
   EXPECT_NEAR(sent_after, 4, 1);   // 2 Hz for 2 s
 }
 
+TEST(WatchdogCore, TenThousandPhysicalOffSendsKeepOneLogicalEpoch) {
+  WatchdogCore w{WatchdogParams{}};
+  uint32_t epoch = 0;
+  int burst = 0;
+  for (int i = 0; i < 10000; ++i) {
+    const double t = i < 30 ? 1.0 + i * 0.051 : 2.55 + (i - 30) * 0.501;
+    const auto wire = w.tick(t);
+    ASSERT_TRUE(wire) << i;
+    if (i == 0) epoch = wire->seq;
+    EXPECT_EQ(wire->seq, epoch);
+    if (i < 30) ++burst;
+    w.on_ack(wire->seq, true, t);
+  }
+  EXPECT_EQ(burst, 30);
+  EXPECT_TRUE(w.status(5000.0).off_authority_ready);
+}
+
+TEST(WatchdogCore, OffCadenceContinuesWhileAckIsMissing) {
+  WatchdogCore w{WatchdogParams{}};
+  int burst = 0;
+  int background = 0;
+  uint32_t epoch = 0;
+  for (int i = 0; i < 350; ++i) {
+    const double t = 1.0 + i * 0.01;
+    if (const auto wire = w.tick(t)) {
+      if (epoch == 0) epoch = wire->seq;
+      EXPECT_EQ(wire->seq, epoch);
+      (t < 2.5 ? burst : background)++;
+    }
+  }
+  EXPECT_NEAR(burst, 30, 3);
+  EXPECT_NEAR(background, 4, 1);
+  EXPECT_FALSE(w.status(4.5).off_authority_ready);
+}
+
+TEST(WatchdogCore, LaterOffPeriodGetsNewIdentity) {
+  WatchdogCore w{WatchdogParams{}};
+  const auto first = w.tick(1.0);
+  ASSERT_TRUE(first);
+  w.on_ack(first->seq, true, 1.01);
+  w.on_lease(allowing(), 2.0);
+  EXPECT_FALSE(w.tick(2.0));
+  EXPECT_TRUE(w.status(2.0).allow_on);
+  const auto later = w.tick(2.4);  // lease stale: a new OFF-required period
+  ASSERT_TRUE(later);
+  EXPECT_NE(later->seq, first->seq);
+  w.on_ack(first->seq, true, 2.41);
+  EXPECT_TRUE(w.status(2.41).off_inflight);
+  EXPECT_FALSE(w.status(2.41).off_authority_ready);
+  w.on_ack(later->seq, true, 2.42);
+  EXPECT_TRUE(w.status(2.42).off_authority_ready);
+}
+
 TEST(WatchdogCore, AFreshAllowingLeaseSilencesOffAndAStaleOneResumesIt) {
   WatchdogCore w{WatchdogParams{}};
   auto c = w.tick(1.0);
@@ -251,14 +304,16 @@ TEST(WatchdogCore, MalformedLeaseRevokesOnAtOnceAndKeepsTheLastGoodMapping) {
   EXPECT_EQ(c->mapping.off_pwm_us, 1000);  // the last VALID mapping, never the malformed one
 }
 
-TEST(WatchdogCore, AnAckThatNeverArrivesIsAFailureAndTheNextOffGoesOutAtOnce) {
+TEST(WatchdogCore, MissingAckNeverProvesOffAndPhysicalRetriesKeepEpoch) {
   WatchdogCore w{WatchdogParams{}};
   const auto c = w.tick(1.0);
   ASSERT_TRUE(c.has_value());
-  EXPECT_FALSE(w.tick(1.9).has_value());  // still within the 1.0 s ack window
+  const auto repeated = w.tick(1.9);  // physical reassert continues while proof is pending
+  ASSERT_TRUE(repeated);
+  EXPECT_EQ(repeated->seq, c->seq);
   const auto retry = w.tick(2.05);
   ASSERT_TRUE(retry.has_value());
-  EXPECT_NE(retry->seq, c->seq);
+  EXPECT_EQ(retry->seq, c->seq);  // same physical OFF mapping, same logical epoch
   EXPECT_FALSE(w.status(2.05).off_authority_ready);
 }
 
@@ -553,15 +608,13 @@ TEST(Controller, StaleCorrectionsCutValveAndRecoveryDoesNotBypassOtherGates) {
 
   // Fresh RTK and valid heading still do not spray on a TRANSIT section of the conditioned path.
   r.t += 0.02;
-  r.north = 0.5;
-  r.world(r.north, true);
+  r.world(0.5, true);
   r.run_cmd(r.c->tick(r.t));
   EXPECT_FALSE(r.c->status(r.t).geometry_desired);
   EXPECT_FALSE(r.c->status(r.t).spraying);
 
   // Restoring RPP evidence does not bypass mission ownership either.
   r.t += 0.02;
-  r.north = n;
   r.world(n, true);
   r.c->set_mission(false, 1);
   r.run_cmd(r.c->tick(r.t));

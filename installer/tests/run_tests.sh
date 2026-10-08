@@ -205,12 +205,18 @@ F
   check "versions.json written for the recorder" 'grep -q "\"stack_sha\": \"${A}\"" "${DYX3_ETC}/versions.json" && grep -q firmware_expected_sha "${DYX3_ETC}/versions.json"'
   check "units copied, only platform marked enabled in manifest" '[ -f "${DYX3_ROOT}/etc/systemd/system/dyx3-platform.service" ]'
 
+  # This ledger belongs to the PX4 correlation epoch, not a software release.
+  printf 'v2 12345\n' >"${DYX3_VAR_LIB}/state/px4_link_spray_ack_next"
+  (create_directories >/dev/null 2>&1)
+  check "reinstall preserves spray correlation ledger" '[ "$(cat "${DYX3_VAR_LIB}/state/px4_link_spray_ack_next")" = "v2 12345" ]'
+
   echo "EDITED=1" >>"${DYX3_ETC}/platform.env"
   (upgrade_to "${B}") >"${T}/up_b" 2>&1
   rc=$?
   check "upgrade to B (rc=0)" '[ "${rc}" -eq 0 ]'
   check "current -> B, previous recorded as A" '[ "$(basename "$(readlink -f "${DYX3_CURRENT}")")" = "${B}" ] && [ "$(cat "${DYX3_VAR_LIB}/state/previous_release")" = "${A}" ]'
   check "upgrade never overwrites edited /etc config" 'grep -q "EDITED=1" "${DYX3_ETC}/platform.env"'
+  check "upgrade preserves spray correlation ledger" '[ "$(cat "${DYX3_VAR_LIB}/state/px4_link_spray_ack_next")" = "v2 12345" ]'
 
   (upgrade_to "${C}") >"${T}/up_c" 2>&1
   rc=$?

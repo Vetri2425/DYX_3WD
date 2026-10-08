@@ -47,3 +47,10 @@ bool timesync_valid
 int64 timesync_offset_us
 # TimesyncStatus.round_trip_time (microseconds) of the newest sample.
 uint32 timesync_round_trip_us
+
+# Spray ACK correlation-pair allocator, durable across companion restarts.
+uint32 spray_identities_used
+uint32 spray_identities_remaining
+# Also true when allocator state is unavailable/corrupt; no new proof can be sent.
+bool spray_identities_exhausted
+uint64 spray_unmatched_ack_count

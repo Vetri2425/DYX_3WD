@@ -240,7 +240,7 @@ re-arm after reset), a fake-PX4 fault-injection harness. **Not provable off-targ
 transport, the real timesync, jitter on the Jetson, the stop distance after a killed process, the
 actual `COM_OF_LOSS_T` behaviour. Those are GATE 4 / F5 on the bench.
 
-## 14. Spray command/ACK transactions (D1)
+## 14. Spray command/ACK transactions (D1 and Phase D)
 
 Spray valve commands are serialized: at most one spray `VehicleCommand` is in flight, with a
 bounded queue of 16 total in-flight/queued requests. While queued, the newest request from each
@@ -249,51 +249,67 @@ source replaces that source's older queued request; a replaced request receives 
 front of the queue. If all queue capacity is occupied by watchdog OFF requests, a new request is
 refused rather than displacing them. Link loss fails the in-flight request and all queued requests.
 
-Each dispatched logical proof transaction receives a `VehicleCommand.source_component` token
-(the companion's ordinary component ID is 1; spray tokens advance from 2 through 999 and never
-wrap; 1000+ identifies PX4 mode executors). The next token is durably recorded at
-`/var/lib/dyx3/state/px4_link_spray_ack_next` before its command is published. The first-install
-installer seeds this file at 2; it is preserved across companion process restarts and application
-upgrades. A missing, malformed, or
-unwritable state file, or exhaustion after token 999, fails the request closed; a watchdog OFF is
-not reported successful unless PX4 acknowledged the emitted OFF command. Do not delete or roll
-back this state while PX4 may retain ACKs from prior spray commands. After a full vehicle reset, an
-operator may reinitialize it to 2 only after PX4 is also reset and its prior ACK stream is gone.
+Each dispatched logical proof epoch receives a durable `(VehicleCommand.source_system,
+VehicleCommand.source_component)` identity. The allocator uses source systems 1..255 and component
+IDs 2..999, in that order, for 254,490 nonreused pairs per PX4/companion correlation epoch.
+System 0 is excluded because MAVLink uses it for broadcast/unspecified targeting. Component 1 is
+reserved for the companion's ordinary command identity; 1000+ has PX4 mode-executor semantics.
+The ordered-pair high-water mark is persisted at
+`/var/lib/dyx3/state/px4_link_spray_ack_next` before any corresponding VehicleCommand is
+published. New writes use `v2 <next-index>`; the old numeric component ledger 2..1000 is read as
+the corresponding system-1 high-water mark, preserving every previously allocated pair. The
+first-install installer seeds the legacy-compatible value 2 only if the file does not exist.
+Process restart and upgrade preserve the ledger. Missing, corrupt, unwritable, or exhausted state
+fails closed, including watchdog OFF proof. Diagnostics expose identities used, remaining,
+exhausted, and unmatched ACK count.
 
-The link identifies an exact request by `(source, seq, on, backend, actuator_set_index, value,
-servo_instance, pwm_us)` and the translated PX4 command ID, target fields, and all seven command
-parameters (NaNs compare equal). Identical requests are coalesced while queued or in flight. After
-an ACCEPTED ACK, an exact repeated request from that source is suppressed until that source sends
-a different request. Therefore the spray node's same-sequence 2 Hz ON heartbeat consumes only the
-token allocated for its initial dispatch. A new sequence, source, intent, mapping, or physical value
-is a distinct request and receives its own token. Failed or timed-out requests are not cached as
-confirmed; a later retry is a new proof attempt and receives a fresh token so a delayed ACK from the
-failed attempt cannot satisfy it. Process restart clears the in-memory duplicate cache but does not
-reset the durable token allocator.
+An exact logical request is keyed by producer source, sequence, ON/OFF intent, complete ROS
+mapping, physical value/PWM, and translated PX4 command/parameters (NaNs compare equal).
+Every physical reassert of that same request publishes another VehicleCommand with its original
+pair. Its timestamp may change; its actuator command and correlation pair do not. An ACKed
+reassert is still sent. A retry after a timeout of the same logical request keeps the pair:
+a delayed ACK from any identical transmission safely proves that same request. A distinct
+sequence, mapping, intent, or physical value creates a new pair. A watchdog OFF period keeps one
+sequence across its 20 Hz burst and 2 Hz reasserts; it starts a new sequence when OFF was no
+longer required and becomes required again, or when the physical mapping changes. D2 still
+withdraws readiness immediately on mapping change.
 
-The pinned firmware reserves component IDs at or above 1000 for mode executors: Commander
-classifies them as `ModeExecutor`, and normal MAVLink command sending suppresses their ACK
-forwarding. `source_system` cannot safely be varied for additional token space: the ACK copies it
-into `target_system`, which the MAVLink ACK router uses. Therefore token exhaustion fails closed;
-there is no wrap or probabilistic reuse.
-ACK matching requires both `command` and `VehicleCommandAck.target_component` to match the
-in-flight transaction. The pinned firmware at
-`27a7ac92845317b0276776242c504215809b2a0f` copies `VehicleCommand.source_component` into
-`VehicleCommandAck.target_component` in `Commander::answer_command`; command 187 is explicitly
-accepted there, while command 183 reaches the unsupported-command response through that same
-helper. `IN_PROGRESS` is not final. An unmatched final spray ACK, including a late ACK after the
-five-second transaction timeout, is discarded and increments the link's late/unmatched counter;
-it cannot acknowledge a newer request with the same command ID. The timeout fails the request
-with result 255 and allows the next queued request to proceed. The 998 component IDs are allocated
-at most once per durable ledger; command ID plus token are both required for a match. Identical
-confirmed reasserts do not consume IDs, but genuine requests and retry attempts still have the finite
-998-proof lifetime. No verified protocol reset boundary exists in the companion graph; reuse remains
-allowed only after an operator has reset both PX4 and the companion and confirmed the old ACK stream
-is gone. Otherwise exhaustion stays fail closed, including for watchdog OFF proof.
-The watchdog currently advances its sequence for each OFF retry, so each retry is a distinct proof
-transaction under this identity rule. A prolonged watchdog retry period can therefore consume the
-finite pool; this availability limit is recorded for a separate design decision and is not hidden by
-reusing an earlier OFF token.
+ACK matching requires command ID **and both** ACK target system and target component. The pinned
+firmware (`27a7ac92845317b0276776242c504215809b2a0f`) echoes command source system/component
+in `Commander::answer_command`; command 187 gets an immediate ACCEPTED answer there, and 183 an
+immediate UNSUPPORTED answer. Each physical transmission can produce a terminal ACK. Extra or
+late ACKs for an old pair cannot prove a newer epoch because pairs are never reused. `IN_PROGRESS`
+is not terminal. This is idempotent retry semantics: an earlier accepted ACK for the exact same
+physical request may prove that request; it cannot prove changed mapping or intent.
+When watchdog OFF displaces a controller ON, the link retires that specific controller ON
+heartbeat: a late duplicate of it cannot reopen the valve after the OFF proof. A genuinely new
+controller verdict has a new logical identity.
+
+The exact firmware's actuator-set consumer uses command ID, actuator parameters and set index;
+it does not inspect source system or component. Command 183 has no physical handler in the pinned
+firmware and Commander reports UNSUPPORTED. Commander filters by *target* system/component; its
+source-component special cases concern mode executors and unrelated mode commands. The uXRCE
+input publishes the command fields unchanged. MAVLink does not forward commands marked
+`from_external`; its ACK router can forward an ACK to a seen MAVLink peer according to the echoed
+source system/component, but this does not affect DDS ACK publication or actuator execution.
+The source-system range 1..255 therefore does not change the physical 183/187 command semantics.
+
+The audit searched the entire pinned firmware tree for `vehicle_command` subscriptions,
+183/187 handlers, source/target field reads, and uXRCE/MAVLink routing. The relevant paths are
+`src/modules/uxrce_dds_client/dds_topics.yaml` and `vehicle_command_srv.cpp` (DDS input and ACK
+output), `src/modules/commander/Commander.cpp` (target filter, immediate 183/187 answers,
+source-to-ACK echo, mode-executor path), `src/lib/mixer_module/functions/FunctionActuatorSet.hpp`
+(187 physical value), `src/modules/mavlink/streams/COMMAND_LONG.hpp` and
+`mavlink_command_sender.cpp` (external command forwarding exclusion), and
+`src/modules/mavlink/mavlink_main.cpp` (MAVLink ACK forwarding). Other subscribers handle other
+command IDs; full-tree searches found no second 183/187 actuator handler and no 183/187 branch
+whose physical effect depends on `source_system`. This finding is limited to the pinned SHA.
+
+The allocator has no automatic reset. Reinitialization is permitted only as a controlled joint
+PX4 and companion reset after the previous PX4 instance and DDS/uXRCE ACK stream are gone.
+Neither a companion-only restart nor a software reinstall/upgrade establishes this boundary.
+Without proof of that joint boundary, retain the ledger; never recycle or wrap an identity while
+PX4 may still be alive. Exhaustion rejects actuator requests and cannot fabricate OFF proof.
 
 The queue and token allocator are owned by `dyx3_px4_link`. Neither spray producer infers FCU completion
 from publication; controller and watchdog state advance only from their matching

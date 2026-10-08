@@ -23,11 +23,13 @@ void WatchdogCore::on_lease(const Lease& l, double now_s) {
     // is stale even if it arrives after a command for the new mapping has been dispatched.
     off_confirmed_mapping_.reset();
     inflight_ = false;
+    off_epoch_active_ = false;
     inflight_mapping_.reset();
     mapping_off_required_ = true;
     next_off_s_ = 0.0;
     burst_until_s_ = now_s + std::max(0.0, p_.off_burst_duration_s);
   }
+  if (!mon_.off_reason(now_s).required() && !mapping_off_required_) off_epoch_active_ = false;
 }
 
 void WatchdogCore::on_ack(uint32_t seq, bool success, double /*now_s*/) {
@@ -52,11 +54,9 @@ void WatchdogCore::begin_shutdown(double /*now_s*/) {
 
 std::optional<OffCommand> WatchdogCore::tick(double now_s) {
   if (inflight_ && now_s - inflight_since_ > std::max(0.1, p_.command_ack_timeout_s)) {
-    inflight_ =
-        false;  // an acknowledgement that never arrives is a failure: the next OFF goes out at once
+    inflight_ = false;  // missing proof fails closed; cadence already keeps OFF on the wire
     inflight_mapping_.reset();
     off_confirmed_mapping_.reset();
-    next_off_s_ = 0.0;
   }
   const OffReason r = mon_.off_reason(now_s);
   if (!have_last_cause_ || r.cause != last_cause_) {
@@ -68,12 +68,19 @@ std::optional<OffCommand> WatchdogCore::tick(double now_s) {
     have_last_cause_ = true;
   }
   const bool off_required = r.required() || mapping_off_required_;
-  if (off_required && !inflight_ && now_s >= next_off_s_) {
+  if (!off_required) {
+    off_epoch_active_ = false;
+  }
+  if (off_required && now_s >= next_off_s_) {
+    if (!off_epoch_active_) {
+      off_confirmed_mapping_.reset();
+      inflight_seq_ = ++seq_;
+      off_epoch_active_ = true;
+    }
     const double hz = std::max(0.2, now_s < burst_until_s_ ? p_.off_burst_hz : p_.off_retry_hz);
     next_off_s_ = now_s + 1.0 / hz;
+    if (!inflight_) inflight_since_ = now_s;
     inflight_ = true;
-    inflight_seq_ = ++seq_;
-    inflight_since_ = now_s;
     inflight_mapping_ = actuator_mapping(mapping());
     return OffCommand{inflight_seq_, mapping()};
   }

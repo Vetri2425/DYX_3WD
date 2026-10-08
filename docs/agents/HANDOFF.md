@@ -691,3 +691,23 @@ late-ACK rejection, actuator mapping change, and repeated watchdog OFF suppressi
 suite passes 529 with 44 skipped. ROS 2 and `colcon` are not installed, so the px4-link node gtests,
 remaining D1/D2/D3 ROS gtests, and colcon build/test were not run. The exact firmware tree was at
 the required SHA but contains pre-existing modifications; it was read-only during this work.
+
+### Phase D — nonreused pair identities and physical reasserts (2026-10-08)
+
+This section supersedes the D1 capacity/reassert statements above. The pinned firmware full-tree
+command audit is recorded in `docs/contracts/dyx3_px4_link.md` §14. The physical 183/187 execution
+paths do not use `source_system`; command 187's actuator-set consumer reads only command and
+parameters, while 183 is unsupported. Spray ACKs now match the nonreused ordered pair
+`(source_system, source_component)` and command ID. Systems 1..255 and components 2..999 yield
+254,490 logical identities per controlled PX4/companion correlation epoch. The durable allocator
+migrates the old numeric high-water mark without reusing a pair. It is never automatically reset;
+a companion restart or upgrade preserves it. Reset requires a controlled joint PX4/companion reset
+with the previous DDS/uXRCE ACK stream gone.
+
+Controller ON and watchdog OFF physical reasserts continue to reach PX4 while retaining their
+logical pair. Watchdog uses one sequence through a continuous OFF-required period; a fresh OFF
+period after ON became allowed, or a changed physical mapping, gets a new sequence. ACKs for
+identical retransmissions may prove that same epoch; old pairs cannot prove newer epochs. The
+allocator and unmatched-ACK count are exposed on `Px4LinkStatus` (interface 0.11.0). There is no
+ACK-completed token recycling. The remaining capacity risk is exhaustion of 254,490 distinct
+logical epochs before a proven joint reset; exhaustion fails closed.

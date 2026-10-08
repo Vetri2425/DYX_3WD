@@ -84,3 +84,11 @@
 ## 0.10.0 — 2026-10-08 (Phase C2 spray verdict ownership)
 
 - `RppStatus`: `spray_request` is deprecated diagnostic only; appended `heading_evidence_valid` and `path_travel_m`. Existing `heading_error_rad`, `run_index`, and state provide the exact RPP evidence consumed by spray. No valve authority belongs to RPP.
+
+## 0.11.0 — 2026-10-08 (Phase D spray correlation diagnostics)
+
+- `Px4LinkStatus`: appended durable spray correlation identities used/remaining, exhausted flag,
+  and unmatched ACK count. Existing fields and their meanings are unchanged. Migration: rebuild
+  `dyx3_interfaces` and every subscriber against 0.11.0 before deploying the updated link;
+  preserve `/var/lib/dyx3/state/px4_link_spray_ack_next` across upgrades. The link migrates its
+  legacy numeric high-water mark on its next successful allocation.

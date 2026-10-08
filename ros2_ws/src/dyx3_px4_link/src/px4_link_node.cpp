@@ -478,8 +478,8 @@ void Px4LinkNode::on_spray_command(const dyx3_interfaces::msg::SprayActuatorComm
   c.target_system = 1;
   c.target_component = 1;
   c.source_system = 1;
-  // `source_component` is echoed as VehicleCommandAck.target_component by the pinned firmware.
-  // It is therefore the transaction discriminator for spray ACKs, not the companion identity.
+  // The allocator assigns source_system/component before dispatch; pinned PX4 echoes both into
+  // ACK target_system/component. The default here is overwritten for each spray epoch.
   c.from_external = true;
   uint32_t command;
   if (m.backend == Cmd::BACKEND_SERVO_PWM) {
@@ -522,11 +522,36 @@ void Px4LinkNode::on_spray_command(const dyx3_interfaces::msg::SprayActuatorComm
   request.servo_instance = m.servo_instance;
   request.pwm_us = m.pwm_us;
 
-  // The spray node publishes the same cmd_seq at reassert_hz. Treat an exact match as the same
-  // logical request while pending, or as already proven after an ACCEPTED ACK. The request key
+  if (m.source == Cmd::SOURCE_WATCHDOG && !m.on) {
+    const auto controller = spray_epochs_.find(Cmd::SOURCE_CONTROLLER);
+    if (controller != spray_epochs_.end() && controller->second.on)
+      spray_barred_on_ = controller->second;
+  }
+  if (m.source == Cmd::SOURCE_CONTROLLER && m.on && spray_barred_on_) {
+    if (same_spray_transaction(*spray_barred_on_, request)) return;
+    spray_barred_on_.reset();  // a genuinely new controller ON epoch may follow safety recovery
+  }
+
+  // Once watchdog OFF is waiting for or receiving FCU proof, do not put a stale controller ON
+  // back on the wire. The controller's ON heartbeat is no longer a required reassert then.
+  if (request.on && ((spray_inflight_ && spray_inflight_->source == Cmd::SOURCE_WATCHDOG &&
+                      !spray_inflight_->on) ||
+                     std::any_of(spray_queue_.begin(), spray_queue_.end(), [](const auto& queued) {
+                       return queued.source == Cmd::SOURCE_WATCHDOG && !queued.on;
+                     }))) {
+    return;
+  }
+
+  // The spray node publishes the same cmd_seq at reassert_hz. An exact match is another physical
+  // send of the same logical request. The request key
   // includes producer/sequence/intent plus the full ROS mapping and physical VehicleCommand
   // payload.
-  if (spray_inflight_ && same_spray_transaction(*spray_inflight_, request)) return;
+  if (spray_inflight_ && same_spray_transaction(*spray_inflight_, request)) {
+    auto wire = spray_inflight_->vehicle_command;
+    wire.timestamp = stamp_us();
+    pub_cmd_->publish(wire);
+    return;
+  }
   if (std::any_of(spray_queue_.begin(), spray_queue_.end(), [&](const SprayPending& queued) {
         return same_spray_transaction(queued, request);
       })) {
@@ -534,8 +559,22 @@ void Px4LinkNode::on_spray_command(const dyx3_interfaces::msg::SprayActuatorComm
   }
   const auto confirmed = spray_confirmed_.find(request.source);
   if (confirmed != spray_confirmed_.end()) {
-    if (same_spray_transaction(confirmed->second, request)) return;
+    if (same_spray_transaction(confirmed->second, request)) {
+      auto wire = confirmed->second.vehicle_command;
+      wire.timestamp = stamp_us();
+      pub_cmd_->publish(wire);
+      return;
+    }
     spray_confirmed_.erase(confirmed);
+  }
+  const auto epoch = spray_epochs_.find(request.source);
+  if (epoch != spray_epochs_.end()) {
+    if (same_spray_transaction(epoch->second, request)) {
+      request.ack_token = epoch->second.ack_token;
+      request.ack_system = epoch->second.ack_system;
+    } else {
+      spray_epochs_.erase(epoch);
+    }
   }
 
   const bool watchdog_off = m.source == Cmd::SOURCE_WATCHDOG && !m.on;
@@ -577,6 +616,7 @@ void Px4LinkNode::on_spray_command(const dyx3_interfaces::msg::SprayActuatorComm
 void Px4LinkNode::on_vehicle_command_ack(const px4_msgs::msg::VehicleCommandAck& a) {
   if (a.result == px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_IN_PROGRESS) return;
   if (!spray_inflight_ || spray_inflight_->command != a.command ||
+      spray_inflight_->ack_system != a.target_system ||
       spray_inflight_->ack_token != a.target_component) {
     if (a.command == kCmdDoSetServo || a.command == kCmdDoSetActuator) {
       ++spray_late_ack_count_;
@@ -613,18 +653,25 @@ void Px4LinkNode::dispatch_next_spray_transaction() {
 
   SprayPending request = std::move(spray_queue_.front());
   spray_queue_.pop_front();
-  const auto token = spray_ack_tokens_->reserve();
-  if (!token) {
+  if (request.ack_token == 0) {
+    const auto token = spray_ack_tokens_->reserve();
+    if (token) {
+      request.ack_system = token->system;
+      request.ack_token = token->component;
+    }
+  }
+  if (request.ack_token == 0) {
     publish_spray_ack(request.seq, request.source, false,
                       dyx3_interfaces::msg::SprayActuatorAck::RESULT_LINK_REFUSED);
     RCLCPP_ERROR(get_logger(),
                  "spray ACK identity exhausted or state unavailable; refusing actuator command");
     return;
   }
-  request.ack_token = *token;
+  request.vehicle_command.source_system = request.ack_system;
   request.vehicle_command.source_component = request.ack_token;
   request.vehicle_command.timestamp = stamp_us();
   request.sent_s = clock_();
+  spray_epochs_[request.source] = request;
   spray_inflight_ = std::move(request);
   pub_cmd_->publish(spray_inflight_->vehicle_command);
 }
@@ -850,6 +897,10 @@ void Px4LinkNode::publish_status(double now_s, const StalenessReport& rep, const
   s.timesync_valid = ts_seen_ && rep.session_alive;
   s.timesync_offset_us = s.timesync_valid ? ts_offset_us_ : 0;
   s.timesync_round_trip_us = s.timesync_valid ? ts_rtt_us_ : 0U;
+  s.spray_identities_used = spray_ack_tokens_->used();
+  s.spray_identities_remaining = spray_ack_tokens_->remaining();
+  s.spray_identities_exhausted = spray_ack_tokens_->exhausted();
+  s.spray_unmatched_ack_count = spray_late_ack_count_;
   pub_status_->publish(s);
 }
 

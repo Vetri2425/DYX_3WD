@@ -6,6 +6,9 @@
 // the stale text carries the lease age, so while a lease stayed stale it re-armed the 20 Hz burst
 // on every tick forever. Here the edge is the CAUSE (no lease / invalidated / stale / denied /
 // shutdown): one 20 Hz burst per cause change, then the 2 Hz retry.
+// OFF sequence is a logical epoch identity, not a wire-send counter. It changes only after OFF
+// ceased being required and later resumes, or when the physical OFF mapping changes. Reasserts
+// and retries within one epoch are idempotent and retain the sequence.
 #pragma once
 
 #include <cstdint>
@@ -48,7 +51,8 @@ public:
   explicit WatchdogCore(const WatchdogParams& p);  // throws if the fallback mapping is invalid
 
   void on_lease(const Lease& l, double now_s);
-  // The FCU path answered the OFF with `seq`. Only the in-flight sequence counts.
+  // The FCU path answered the OFF with `seq`. Any terminal ACK for a physical transmission
+  // in the current logical OFF epoch may prove that epoch.
   void on_ack(uint32_t seq, bool success, double now_s);
   void begin_shutdown(double now_s);
   // Returns an OFF to send when one is due. Call at >= 20 Hz.
@@ -63,6 +67,7 @@ private:
   LeaseMonitor mon_;
   bool inflight_{false};
   uint32_t seq_{0};
+  bool off_epoch_active_{false};
   uint32_t inflight_seq_{0};
   double inflight_since_{0.0};
   std::optional<ActuatorMapping> inflight_mapping_;
