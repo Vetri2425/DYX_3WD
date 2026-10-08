@@ -78,6 +78,11 @@ The four IDLE_ONLY values are applied as one validated batch only while the FSM 
 values update their effective caches together. A rejected atomic parameter request leaves both
 ROS values and effective values unchanged. The node runs on a single-threaded executor, so
 parameter application and timer callbacks do not overlap.
+COMPLETED, ABORTED and ERROR remain terminal in this FSM: a new accepted start goes directly
+to LOADING, not IDLE. Thus IDLE_ONLY changes are rejected in all three terminal states. To
+reconfigure after a mission, the operator must first leave the vehicle safely stopped and
+disarmed, then restart the mission node; its initial state is IDLE, where the validated batch
+can be applied before a new mission starts. A new StartMission is not a reconfiguration route.
 
 ## 9. Open questions
 E-stop → ABORTED vs PAUSED; whether `rpp_ack_timeout_s` and an RPP-status staleness auto-pause are wanted (no numeric source); mission-id persistence across reboot (currently per-boot counter).

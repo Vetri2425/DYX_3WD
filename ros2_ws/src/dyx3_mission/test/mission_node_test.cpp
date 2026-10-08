@@ -213,6 +213,67 @@ TEST_F(MissionNodeTest, ActiveMissionRejectsIdleOnlyParameterChanges) {
   EXPECT_EQ(node_->fsm().state(), dyx3_mission::State::kRunning);
 }
 
+TEST_F(MissionNodeTest, PausedMissionRejectsIdleOnlyParameterChanges) {
+  start_running();
+  ASSERT_TRUE(call(pause_, std::make_shared<di::srv::PauseMission::Request>())->accepted);
+  ASSERT_TRUE(wait_state(di::msg::MissionState::STATE_PAUSED));
+  const auto result =
+      node_->set_parameters_atomically({rclcpp::Parameter("state_publish_hz", 50.0),
+                                        rclcpp::Parameter("gate_status_max_age_s", 1.0)});
+  EXPECT_FALSE(result.successful);
+  EXPECT_DOUBLE_EQ(node_->get_parameter("state_publish_hz").as_double(), 10.0);
+  EXPECT_DOUBLE_EQ(node_->get_parameter("gate_status_max_age_s").as_double(), 0.5);
+}
+
+TEST_F(MissionNodeTest, AllTerminalStatesRejectIdleOnlyUpdates) {
+  const auto rejected = [this](dyx3_mission::State terminal) {
+    ASSERT_EQ(node_->fsm().state(), terminal);
+    const auto result =
+        node_->set_parameters_atomically({rclcpp::Parameter("state_publish_hz", 50.0),
+                                          rclcpp::Parameter("point_capture_radius_m", 0.20)});
+    EXPECT_FALSE(result.successful);
+    EXPECT_NE(result.reason.find("IDLE_ONLY"), std::string::npos);
+    EXPECT_DOUBLE_EQ(node_->get_parameter("state_publish_hz").as_double(), 10.0);
+    EXPECT_DOUBLE_EQ(node_->get_parameter("point_capture_radius_m").as_double(), 0.10);
+  };
+  const auto restart = [this]() {
+    exec_.remove_node(node_);
+    node_.reset();
+    rclcpp::NodeOptions o;
+    o.parameter_overrides({{"missions_dir", std::string(DYX3_FIXTURES)}});
+    node_ = std::make_shared<dyx3_mission::MissionNode>(o);
+    exec_.add_node(node_);
+    EXPECT_EQ(node_->fsm().state(), dyx3_mission::State::kIdle);
+  };
+
+  start_running();
+  rpp(di::msg::RppStatus::STATE_COMPLETE, 1);
+  ASSERT_TRUE(wait_state(di::msg::MissionState::STATE_COMPLETED));
+  rejected(dyx3_mission::State::kCompleted);
+  restart();
+
+  start_running();
+  auto abort_req = std::make_shared<di::srv::AbortMission::Request>();
+  abort_req->reason_code = di::srv::AbortMission::Request::REASON_OPERATOR;
+  ASSERT_TRUE(call(abort_, abort_req)->accepted);
+  ASSERT_TRUE(wait_state(di::msg::MissionState::STATE_ABORTED));
+  rejected(dyx3_mission::State::kAborted);
+  restart();
+
+  start_ready();
+  rpp(di::msg::RppStatus::STATE_ERROR, 1);
+  ASSERT_TRUE(wait_state(di::msg::MissionState::STATE_ERROR));
+  rejected(dyx3_mission::State::kError);
+  restart();
+
+  const auto accepted =
+      node_->set_parameters_atomically({rclcpp::Parameter("state_publish_hz", 50.0),
+                                        rclcpp::Parameter("point_capture_radius_m", 0.20)});
+  ASSERT_TRUE(accepted.successful) << accepted.reason;
+  EXPECT_DOUBLE_EQ(node_->get_parameter("state_publish_hz").as_double(), 50.0);
+  EXPECT_DOUBLE_EQ(node_->get_parameter("point_capture_radius_m").as_double(), 0.20);
+}
+
 TEST_F(MissionNodeTest, StartIsRefusedWithoutAFreshSafetyGate) {
   auto req = std::make_shared<di::srv::StartMission::Request>();
   req->path_artifact_sha256 = square_sha();
