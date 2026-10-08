@@ -959,3 +959,32 @@ single-sink authority and interrupted config save. The interface extension is pr
 **Bench answers still needed before using USB or LoRa:** which UM982 COM is connected to USB versus PX4 TELEM1
 (must be different COMs), USB baud, whether that COM emits GGA, and the LoRa radio model and baud. Off-target tests
 do not establish receiver acceptance, RTK FIX, correction latency or field accuracy.
+
+---
+
+## 2026-10-09 — Claude — release prep for the bench, and hand fixes the repo does not carry yet
+
+**Deploy branch `claude/cloud-phases`:** Codex RTK commits, plus `f18d008` (an invalid RTK config or seed starts
+STOPPED with reason CONFIG_INVALID instead of crash-looping) and `cb8ea42` (`StateDirectory=dyx3/rtk`). An upgrade
+runs the *installed* release's installer scripts but the *new* unit files. Without that unit setting, upgrading
+from `84518cd` would leave `/var/lib/dyx3/rtk` missing, and NTRIP → DDS would stop.
+**Firmware `dyx-3wd-production` @ 4393fb07e1:**
+- NuttX TX-ring guard; NuttX now comes from the fork `Vetri2425/NuttX`;
+- XRCE fd closed once;
+- GPS partial RTCM writes completed and counted.
+CI is green and the build is archived. Not flashed. Bench runbook: `3WD_PROD/BENCH_2026-10-09.md`.
+
+**New rule (CLAUDE.md §4): every hardware fix persists in the repo.** These rover-local hand edits from 2026-10-08
+are NOT yet reproducible on a fresh rover. Each one is a bug until the repo carries it:
+1. `/etc/dyx3/ros.env` has `ROS_DOMAIN_ID=42` and `ROS_LOCALHOST_ONLY=1` by hand. The template leaves
+   `ROS_DOMAIN_ID` commented out, so a fresh rover gets domain 0, while PX4 `UXRCE_DDS_DOM_ID` is 42 and `/fmu` is
+   invisible. Fix: the template default, plus a health check that the domain matches the PX4 parameter baseline.
+2. `/etc/dyx3/backend.env` has `DYX3_BACKEND_HOST=0.0.0.0` (bench, no hotspot). Fix: the hotspot profile
+   (Codex task C), then back to `10.42.0.1`.
+3. `/etc/dyx3/mavlink-router.conf` was hand-edited: first to client mode, then server `0.0.0.0:14550` (unverified).
+   Fix: bench re-test, then the template in `deployment/network/mavlink-router.conf.tmpl`.
+4. PX4 parameters (`UXRCE_DDS_DOM_ID 42`, `UXRCE_DDS_PTCFG 1`, `MAV_2_CONFIG 1000`, battery, `EKF2_IMU_POS_X`) are
+   recorded in `config/px4/3wd_6x_carry_from_proto.params`, but nothing applies them. Needs a documented or
+   scripted apply step for the next rover.
+5. NTRIP credentials in `/etc/dyx3/ntrip.env`: correctly kept off Git. The creation procedure must be in
+   installer/README (template exists; the step does not).

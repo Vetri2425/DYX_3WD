@@ -147,6 +147,15 @@ exists to fix.
 `PX4_DXP` because a test's "truth" mirrored the bug. This is why `dyx3_geometry` has no ROS
 dependency — it must be testable against real bag data in seconds.
 
+**Every hardware fix must persist and must reproduce on the next rover** (human rule, 2026-10-09).
+A bug fix or config change found during hardware integration (install, upgrade, bring-up, bench,
+field) is never a temporary hand edit on one rover. It lands in the repo (installer, unit, template,
+PX4 parameter baseline in `config/px4/`, firmware, or a documented install step) so that a fresh
+rover installs into the same working state with no manual steps. If a rover needed a hand fix to
+work, that is a bug until the repo carries it: record it in HANDOFF the same day and fix it in the
+repo, and say so when reporting. Rover-local secrets (NTRIP, WiFi PSK, tokens) stay out of Git, but
+the *procedure* to create them is documented.
+
 **No backup files.** No `.bak`, `.backup`, `.before_*`, `_old`, `_v2`. CI rejects these.
 
 **Never commit:** bags (`*.db3`, `*.mcap`, `*.ulg`), logs, `build/`, `install/`, `log/`,
