@@ -99,6 +99,13 @@ TEST(OrchestratorEquivalence, TickByTickAgainstTheCarriedNode) {
     }
     auto h = split(lines[i++]);
     const std::string scen = h[1];
+    // An optional one-scenario replay makes mutation failures attributable to their fixture.
+    const char* only = std::getenv("DYX3_ORCH_SCENARIO");
+    if (only != nullptr && scen != only) {
+      while (i < lines.size() && lines[i] != "END") ++i;
+      if (i < lines.size()) ++i;
+      continue;
+    }
     const bool align_done = h[2] == "1";
     const int n_params = static_cast<int>(inum(h[3]));
     const int n_runs = static_cast<int>(inum(h[4]));
@@ -287,6 +294,11 @@ TEST(OrchestratorEquivalence, TickByTickAgainstTheCarriedNode) {
   for (auto& kv : st.cmds) std::printf("  cmd %s x%d\n", kv.first.c_str(), kv.second);
   for (auto& kv : st.seg_states) std::printf("  segment state %d x%d\n", kv.first, kv.second);
   EXPECT_EQ(st.failures, 0);
+  if (std::getenv("DYX3_ORCH_SCENARIO") != nullptr) {
+    EXPECT_EQ(st.scenarios, 1);
+    EXPECT_GT(st.ticks, 0);
+    return;
+  }
   EXPECT_GE(st.scenarios, 50);
   EXPECT_GE(st.compared, 9000);
   // the gates and every tracked state must actually have been exercised

@@ -1,7 +1,7 @@
 GATE4ORCH 1
 # control-tick equivalence vectors from the VERBATIM PX4_DXP node (tools/gate4/gen_orchestrator_vectors.py)
 # seed 20261011
-# part 1 of 2; 13166 ticks in all
+# part 1 of 3; 13905 ticks in all
 SCEN smooth_line_0 1 3 1
 PARAM mission_speed 0.3
 PARAM rtk_recover_hold_s 0.2

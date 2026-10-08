@@ -784,3 +784,47 @@ to assert one STOP per bad tick. Review findings F2 "stricter than active" (stat
 **F6 remains OPEN** and is an acceptance item: the carried-reference generator
 (`tools/gate4/gen_orchestrator_vectors.py`) has not been retried in this environment; the four scenarios
 still have no reference outputs or baseline-pass / mutation-fail evidence. Not pushed.
+
+## 2026-10-08 — Codex — Phase F closure (isolated branch)
+
+Started at `8ed46bea153aafa1fb6832c4b6fa635ec0771eb1` in the main repository. All
+corrections are in `/Users/dyx_a1/Vetri/3WD_PROD/DYX_3WD_phase_f_closure` on
+`codex/phase-f-closure`; no push, merge or cherry-pick was performed. The two original
+untracked patch files in the main repository were left untouched.
+
+* F4 `f937e1a`: an invalid injected link clock previously returned before publishing the
+  explicit setpoint. It now publishes the full STOP control set with the independent system
+  clock timestamp, without advancing the valid-time overrun baseline. The fake-FCU test covers
+  NaN, infinity, backward time and normal forwarding recovery. The overrun recovery, watchdog
+  priority and ACK correlation tests passed in the same ROS node suite.
+* F2 `88b642a`: the FSM has no terminal-to-IDLE event; new start goes directly to LOADING.
+  IDLE_ONLY therefore remains strict in PAUSED and all terminal states. The contract describes
+  the operator route: stop/disarm, restart the mission node to IDLE, configure, then start a new
+  mission. Node tests cover atomic rejection in PAUSED/COMPLETED/ABORTED/ERROR and acceptance
+  after restart. The existing timer-frequency and atomicity tests passed.
+* F6: the carried Python controller generated four additional reference episodes. In the
+  isolated equivalence replay, each baseline had zero mismatches; each corresponding temporary
+  RPP mutation failed; production source was restored and each baseline passed again. The
+  55-degree case requires the supported `auto` profile to create two conditioned runs: forced
+  `segment` intentionally keeps a single run. Exact mutations/ticks are in
+  `docs/contracts/rpp_orchestrator.md`. The full equivalence corpus is now 101 scenarios,
+  13,905 ticks, zero mismatches. No production RPP code was changed.
+
+**Verification on this worktree:** ROS Humble arm64 build 12/12 packages; full colcon test
+440 tests, 0 errors/failures, 2 skipped; installer staged-root 80 passed; backend pytest
+529 passed, 44 skipped; carried-reference generator `--check`; ShellCheck on Phase F installer
+and launcher scripts; clang-format on changed C++ files; parameter generator check (117 RPP,
+49 spray); `git diff --check`. ROS used the firmware-pinned `px4_msgs` overlay and an isolated
+`dyx3-codex-phase-f-ws` volume; it did not build Claude's working tree.
+
+**DERIVED — NOT FROM V1 SPEC:** restarting the mission node while the vehicle is stopped and
+disarmed is the operational return to IDLE for runtime reconfiguration; no reset event was
+invented. The four synthetic RPP episode inputs are selected to reach the recorded branch,
+while all expected outputs come from the carried controller.
+
+**Not run:** hardware/Jetson timing, PX4 transport, physical valve closure, real-bag replay,
+or field RTK validation. The full ROS suite skipped the bag cross-track fixture test (no bag
+fixture) and the whole pinned message-hash set test. Other orchestrator mutation survivors
+listed in the contract remain
+open outside the four Phase F scenarios. Claude should independently review and integrate the
+local commits, then decide on the final push.

@@ -232,7 +232,8 @@ def coerce(defaults, name, value):
 
 
 def run_episode(cls, defaults, name, pts, flags, must, params, rng, *, period_ns, max_ticks, faults=None, align_done=True,
-                start_offset=0.0, start_yaw_err=0.0, prepend_single_point_run=False, rover_speed_cap=None, start_frac=0.0, start_speed=0.0):
+                start_offset=0.0, start_yaw_err=0.0, prepend_single_point_run=False, rover_speed_cap=None, start_frac=0.0, start_speed=0.0,
+                start_beyond_m=0.0):
     params = {"xy_goal_tolerance": 0.04, "rtk_recover_hold_s": 0.2, **params}
     from geometry_msgs.msg import PoseStamped, TwistStamped
     from mavros_msgs.msg import GPSRAW
@@ -274,7 +275,8 @@ def run_episode(cls, defaults, name, pts, flags, must, params, rng, *, period_ns
         sx, sy = a.x + (b.x - a.x) * f, a.y + (b.y - a.y) * f
         sh = math.atan2(b.y - a.y, b.x - a.x)
     # start beside the line: offset to the left of the path (negative cross-track), heading slightly off
-    rov = Rover(sx - math.sin(sh) * start_offset, sy + math.cos(sh) * start_offset, wrap(sh + start_yaw_err))
+    rov = Rover(sx + math.cos(sh) * start_beyond_m - math.sin(sh) * start_offset,
+                sy + math.sin(sh) * start_beyond_m + math.cos(sh) * start_offset, wrap(sh + start_yaw_err))
     rov.v = start_speed
     init_pending = start_frac > 0.0 and start_speed > 0.0  # a warm start: the rover is already moving (EV INIT after RTK is accepted)
     rov.cmd_vn, rov.cmd_ve = start_speed * math.cos(sh), start_speed * math.sin(sh)
@@ -679,6 +681,29 @@ def build():
             params["ekf_reset_compensation"] = rng.random() < 0.5
         add(f"rand{i}", shape, flags=flags, must=must, params=params, period_ns=rng.choice([20_000_000, 50_000_000, 50_000_000]), start_frac=rng.choice([0.0, 0.0, 0.3]), start_speed=0.3,
             max_ticks=100, faults=faults, start_offset=rng.uniform(-0.02, 0.02), start_yaw_err=rng.uniform(-0.03, 0.03))
+
+    # Phase F: focused survivors. Append after the original corpus so its seeded inputs stay
+    # byte-identical; expected outputs still come from the carried controller above.
+    add("seg_boundary_55deg_sharp", [(0, 0), (2, 0), (3.15, 1.64), (3.15, 3.6)],
+        flags=[True, True, False, False], params={"tracking_profile": "auto", "mission_speed": 0.45,
+                                                  "corner_smooth_radius_m": 0.0},
+        period_ns=P50, max_ticks=330, start_frac=0.2, start_speed=0.4)
+    add("seg_start_beyond_end", line_pts(3.0, 1.0), params={**SEGMENT, "mission_speed": 0.4,
+                                                              "segment_endpoint_cross_tolerance_m": 0.005},
+        period_ns=P50, max_ticks=100, start_frac=1.0, start_beyond_m=0.07)
+    add("seg_corner_direct_release", SQ, params={**SEGMENT, "mission_speed": 0.4,
+                                                   "segment_stop_dwell_s": 0.0, "segment_align_settle_s": 0.0,
+                                                   "segment_heading_tolerance_deg": 90.0,
+                                                   "segment_pivot_release_max_deg": 90.0,
+                                                   "segment_align_speed_threshold": 0.5,
+                                                   "segment_stop_speed_threshold": 0.5,
+                                                   "segment_stop_yaw_rate_threshold": 2.0},
+        period_ns=P50, max_ticks=220, start_frac=0.2, start_speed=0.4)
+    add("fault_vel_blackout_jump", line_pts(5.0), params={**SMOOTH, "mission_speed": 0.2,
+                                                           "ekf_reset_compensation": True,
+                                                           "ekf_reset_max_absorb_m": 1.0},
+        faults={"vel_scale": (0.6, 1.09, 3.0), "vel_blackout": (1.09, 1.41),
+                "jump": (1.36, (0.06, 0.065))}, **F)
 
     parts, cur, cur_bytes, total = [], [], 0, 0
     for name, pts, flags, must, params, kw in eps:
