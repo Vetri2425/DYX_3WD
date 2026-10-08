@@ -1132,3 +1132,32 @@ unquoted SSID/PSK values to a safe ASCII subset, and uses a pre-up firewall hook
 NetworkManager's shared forwarding off the FCU link. Verify those choices on actual Wi-Fi
 hardware before the field demo. The R1–R4 rules themselves were the human decision, not
 derived here.
+
+## 2026-10-09 — Codex — app-gap follow-up E–G (local branch only)
+
+Rebased `codex/rover-app-gaps` onto `origin/master` at `ad58e72`, then onto the later
+documentation commit `67a7ea6`; E–G remain local.
+Nothing was pushed or deployed. Socket.IO ping interval and timeout now read
+`DYX3_SIO_PING_INTERVAL_S` and `DYX3_SIO_PING_TIMEOUT_S`, defaulting to 5 seconds each;
+the separate 1.5-second tablet heartbeat remains the safety timeout. App mission-plan
+requests reject more than `upload_max_bytes` before JSON parsing, with 413 `too_large`
+for both Content-Length and streamed requests.
+
+The optional hotspot installer now applies `DYX3_WIFI_COUNTRY` at every boot through
+`dyx3-wifi-regdom.service` (template default `IN`), disables Wi-Fi power save in the
+profile, and installs a driver modprobe option only when the detected RTL8822CE module's
+`modinfo` confirms it. The profile pins band, non-DFS channel, and WPA2-PSK. Explicit
+20/40 MHz AP width needs NetworkManager 1.50; older versions use 20 MHz auto, and a
+requested 40 MHz profile is refused. The health check reports `iw reg get` and Wi-Fi
+power save. The README has the two-band, 15-minute range test.
+
+**Verification after rebase:** Ruff and ShellCheck passed; backend pytest **569 passed,
+43 skipped**; staged installer tests in the ROS container **106 passed, 0 failed**
+(prebuilt-artifact subtests skipped because that container's tar lacks zstd); ROS
+`build-test` **12 packages, 459 tests, 0 errors, 0 failures, 2 skipped**.
+
+**DERIVED — re-validate in field Wi-Fi:** both 5-second Socket.IO ping values and the
+NetworkManager 20 MHz auto behavior on versions before 1.50. The Wi-Fi hardware/AP,
+regulatory state, driver option effect, tablet DHCP, and 5/10/15/25 m range remain
+unverified on a rover. No code is half-finished; the rover bench check is the open
+field task.
