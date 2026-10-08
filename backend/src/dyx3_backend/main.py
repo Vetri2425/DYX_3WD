@@ -18,6 +18,7 @@ from contextlib import asynccontextmanager
 import socketio
 from fastapi import FastAPI
 
+from dyx3_backend.api.parse_routes import router as parse_router
 from dyx3_backend.api.routes import router
 from dyx3_backend.auth.tokens import TokenStore
 from dyx3_backend.config.settings import Settings
@@ -77,6 +78,7 @@ def create_api(
     api.state.missions = missions or MissionService(settings)
     api.state.rtk = rtk or RtkClient(settings.rtk_socket, settings.request_timeout_s)
     api.include_router(router)
+    api.include_router(parse_router)
 
     @server.event
     async def connect(sid, _environ, auth):
