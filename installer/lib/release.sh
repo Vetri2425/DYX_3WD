@@ -155,6 +155,10 @@ prune_releases() {
 
 # upgrade_to <git-ref>: stop-free build, verify, switch, restart, health; auto-revert on failure.
 upgrade_to() {
+  # An upgrade from the DDS-only release has no RTK runtime directory yet. The directory is
+  # persistent vehicle state: release switches and rollback never copy or remove its contents.
+  if [ -z "${DYX3_ROOT}" ]; then create_user; fi
+  ensure_rtk_state_directory
   local ref="$1" sha prev=""
   load_pin firmware
   sha="$(resolve_ref "${ref}")" || die "cannot resolve '${ref}'"

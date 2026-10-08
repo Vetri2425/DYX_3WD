@@ -1,5 +1,5 @@
 [Unit]
-Description=DYX 3WD — NTRIP client and RTCM correction delivery
+Description=DYX 3WD — RTK correction source and delivery
 After=dyx3-platform.service
 Wants=dyx3-platform.service
 # Deliberately a SIBLING of the backend, never a child. In PX4_DXP the NTRIP
@@ -11,8 +11,11 @@ Wants=dyx3-platform.service
 Type=exec
 User=dyx3
 Group=dyx3
+SupplementaryGroups=dialout
 EnvironmentFile=-/etc/dyx3/ros.env
 EnvironmentFile=-/etc/dyx3/ntrip.env
+# ntrip.env is read-only first-boot seed material. Runtime RTK state is under
+# /var/lib/dyx3/rtk; keep ReadWritePaths unchanged.
 ExecStart=/opt/dyx3/current/bin/dyx3-rtk
 Restart=always
 RestartSec=5

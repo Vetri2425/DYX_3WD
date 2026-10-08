@@ -138,6 +138,18 @@ libs() {
   # staged real directory creation (no chown)
   (create_directories >/dev/null 2>&1)
   check "staged dirs created" '[ -d "${DYX3_VAR_LIB}/runs" ] && [ -d "${DYX3_PREFIX}/releases" ] && [ -d "${DYX3_ETC}" ]'
+  check "RTK runtime directory has mode 0700" '[ "$(stat -c %a "${DYX3_VAR_LIB}/rtk" 2>/dev/null || stat -f %Lp "${DYX3_VAR_LIB}/rtk")" = 700 ]'
+  # A staged root cannot chown to a dyx3 user that does not exist in CI. Capture the owner
+  # arguments passed to install_dir, and check the on-disk mode separately above.
+  rm -rf "${DYX3_VAR_LIB}/rtk"
+  (
+    install_dir() {
+      printf '%s:%s %s\n' "$2" "$3" "$1" >"${T}/rtk_owner_request"
+      command install -d -m "$1" "$4"
+    }
+    ensure_rtk_state_directory
+  )
+  check "RTK runtime directory requests dyx3:dyx3 ownership" '[ "$(cat "${T}/rtk_owner_request")" = "dyx3:dyx3 0700" ]'
 }
 
 # ---------------------------------------------------------------- release lifecycle
@@ -200,11 +212,13 @@ F
   done
   set +e
   create_directories >/dev/null 2>&1
+  printf 'persist RTK config through releases\n' >"${DYX3_VAR_LIB}/rtk/config.json"
   load_pin firmware
   local pm="${DYX3_PX4_MSGS_DIR}/${FIRMWARE_SHA}"
   mkdir -p "${pm}/install"
   touch "${pm}/install/setup.bash" "${pm}/.complete"
   echo abc123def456 >"${pm}/px4_msgs.sha256"
+  check "RTK runtime state survives setup" 'grep -q "persist RTK config" "${DYX3_VAR_LIB}/rtk/config.json"'
   # Never really build px4_msgs in tests.
   # shellcheck disable=SC2317  # invoked indirectly by upgrade_to
   build_px4_msgs() { :; }
@@ -245,6 +259,7 @@ F
   check "current -> B, previous recorded as A" '[ "$(basename "$(readlink -f "${DYX3_CURRENT}")")" = "${B}" ] && [ "$(cat "${DYX3_VAR_LIB}/state/previous_release")" = "${A}" ]'
   check "upgrade never overwrites edited /etc config" 'grep -q "EDITED=1" "${DYX3_ETC}/platform.env"'
   check "upgrade preserves spray correlation ledger" '[ "$(cat "${DYX3_VAR_LIB}/state/px4_link_spray_ack_next")" = "v2 12345" ]'
+  check "upgrade preserves RTK runtime config" 'grep -q "persist RTK config" "${DYX3_VAR_LIB}/rtk/config.json"'
 
   (upgrade_to "${C}") >"${T}/up_c" 2>&1
   rc=$?
@@ -299,6 +314,7 @@ F
   (rollback_release) >"${T}/rb1" 2>&1
   rc=$?
   check "rollback returns to B (rc=0)" '[ "${rc}" -eq 0 ] && [ "$(basename "$(readlink -f "${DYX3_CURRENT}")")" = "${B}" ]'
+  check "rollback preserves RTK runtime config" 'grep -q "persist RTK config" "${DYX3_VAR_LIB}/rtk/config.json"'
   check "rollback records the release it left as previous" '[ "$(cat "${DYX3_VAR_LIB}/state/previous_release")" = "${D}" ]'
   check "versions.json describes the rolled-back release" 'grep -q "\"stack_sha\": \"${B}\"" "${DYX3_ETC}/versions.json"'
   (rollback_release) >"${T}/rb2" 2>&1

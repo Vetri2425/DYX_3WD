@@ -1,0 +1,8 @@
+# Optional rover-specific udev rules. Leave this template uninstalled until the USB
+# receiver and LoRa radio identities are verified on the bench. The production config
+# uses the standard /dev/serial/by-id/* symlinks, not ttyACM*/ttyUSB* enumeration.
+#
+# If a device needs a group override, copy a rule with its verified VID:PID and
+# serial number into /etc/udev/rules.d/ on that rover. Never use an unqualified
+# tty wildcard, because it may grant the wrong device to dyx3.
+# SUBSYSTEM=="tty", ATTRS{idVendor}=="<VID>", ATTRS{idProduct}=="<PID>", ATTRS{serial}=="<SERIAL>", GROUP="dialout", MODE="0660"

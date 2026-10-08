@@ -932,3 +932,30 @@ Legacy removed: old `mavlink-router.service` disabled, NM `eth-baseboard` autoco
 health settle 30 s; artifact layout/naming; bench backend bind 0.0.0.0; DDS localhost-only via PTCFG 1.
 **Not run**: motion, calibration, spray valve, outdoor RTK, timing under load, fresh-rover install from artifacts
 (this rover reused its px4_msgs; the download path is covered by staged tests only).
+
+---
+
+## 2026-10-08 — Codex — production RTK source, transport and backend control
+
+Branch `codex/rtk-production` starts at the deployed `fbc7165` tree. No rover deploy, push or merge was performed.
+The existing NTRIP → PX4_DDS path remains available. The worker now supports NTRIP or LoRa as source and USB_DIRECT
+or PX4_DDS as the single selected transport, with no automatic failover. The source/transport switch closes the old
+sink before activating the new one and rejects frames from earlier source generations. USB writes accept only complete
+CRC-valid RTCM3 frames; receiver GGA is observed without sending receiver configuration commands.
+
+The first runtime config is stored under `/var/lib/dyx3/rtk/` (`dyx3:dyx3 0700`, config file `0600`) using a
+same-directory temporary file, file fsync, rename and directory fsync. An existing read-only
+`/etc/dyx3/ntrip.env` (`root:dyx3 0640`) is imported once when no runtime config exists, retaining PX4_DDS on
+the deployed rover. A fresh install selects NTRIP + USB_DIRECT, but leaves unknown serial paths, bauds and timing
+unset. The service's `ReadWritePaths` is unchanged. The backend offers authenticated RTK REST controls through the
+worker's versioned local socket; passwords are write-only. The backend shares Unix user `dyx3` with the worker, so
+filesystem permissions alone do not isolate those secrets (see `docs/contracts/dyx3_rtk.md`).
+
+Off-target verification: the RTK package tests, full ROS 2 container build/test, backend pytest, staged installer
+tests, Ruff, ShellCheck and formatting checks passed in this session. Serial tests cover pty unplug/replug,
+single-sink authority and interrupted config save. The interface extension is proposed in
+`docs/architecture/proposals/2026-10-09_rtk_interfaces.md`; no `dyx3_interfaces` or `dyx3_px4_link` files changed.
+
+**Bench answers still needed before using USB or LoRa:** which UM982 COM is connected to USB versus PX4 TELEM1
+(must be different COMs), USB baud, whether that COM emits GGA, and the LoRa radio model and baud. Off-target tests
+do not establish receiver acceptance, RTK FIX, correction latency or field accuracy.

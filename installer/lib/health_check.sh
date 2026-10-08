@@ -79,6 +79,27 @@ _settle() {
 
 _gateway_up() { [ -S "${DYX3_RUN}/gateway.sock" ]; }
 _backend_up() { curl -fsS --max-time 3 "http://$1:$2/api/ping" >/dev/null 2>&1; }
+_rtk_up() {
+  [ -S "${DYX3_RUN}/rtk-control.sock" ] || return 1
+  python3 - "${DYX3_RUN}/rtk-control.sock" <<'PY' >/dev/null 2>&1
+import json
+import socket
+import sys
+
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+    sock.settimeout(3)
+    sock.connect(sys.argv[1])
+    sock.sendall(b'{"v":1,"cmd":"GET_STATUS"}\n')
+    reply = b''
+    while not reply.endswith(b'\n') and len(reply) <= 65536:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        reply += chunk
+    message = json.loads(reply)
+    assert message.get('v') == 1 and message.get('ok') is True
+PY
+}
 
 # _backend_env <KEY>: one value from /etc/dyx3/backend.env (what the service really binds), never executed.
 _backend_env() { sed -n "s/^$1=//p" "${DYX3_ETC}/backend.env" 2>/dev/null | tail -n1; }
@@ -87,6 +108,9 @@ health_extras() {
   local rel="${1:-${DYX3_CURRENT}}" m="${1:-${DYX3_CURRENT}}/installer/manifests/production.manifest"
   if _enabled dyx3-ros "${m}"; then
     if _settle _gateway_up; then _pass "gateway socket present"; else _fail "gateway socket ${DYX3_RUN}/gateway.sock missing (dyx3-ros / system_gateway down?)"; fi
+  fi
+  if _enabled dyx3-rtk "${m}"; then
+    if _settle _rtk_up; then _pass "dyx3-rtk control socket answers GET_STATUS"; else _fail "dyx3-rtk control socket unavailable"; fi
   fi
   if _enabled dyx3-backend "${m}" && have curl; then
     local host port

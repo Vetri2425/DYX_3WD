@@ -45,7 +45,7 @@ Client -> server: `heartbeat` (as above), `estop` `{asserted}` (same rules as RE
 
 ## 5. Not in this package / OPEN
 
-* **NTRIP profile management** (host/mountpoint/user/password): the credentials file is read by `dyx3-rtk` and must stay `root:dyx3 0640`, which the backend user cannot write. How a profile is changed is OPEN.
+* **RTK profile management** (host/mountpoint/user/password): the independent `dyx3-rtk` worker stores runtime profiles in `/var/lib/dyx3/rtk/config.json` (`dyx3:dyx3 0600`). The backend changes them through the local control socket and never returns passwords. `/etc/dyx3/ntrip.env` stays a read-only, first-boot seed (`root:dyx3 0640`). See `dyx3_rtk.md` for the REST and control contracts.
 * **Settings and storage beyond missions/runs**, retention/pruning of artifacts and runs: not designed.
 * **Not ported from the prototype** (decisions needed): the arbiter, joystick/manual-drive gateway and the prototype's emergency-stop plumbing. Manual driving is a motion source and needs its own contract; none is implemented.
 * BLE, report generation (PDF), multi-tablet arbitration.

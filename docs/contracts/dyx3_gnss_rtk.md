@@ -1,6 +1,6 @@
 # dyx3_gnss_rtk — contract
 
-**Status:** draft for review, written before the implementation. **Spec:** V1 §5.3, §5.4.1, §7 (package list), Phase plan 8.
+**Status:** Phase 8 behavior plus the production extension in [dyx3_rtk.md](dyx3_rtk.md). **Spec:** V1 §5.3, §5.4.1, §7 (package list), Phase plan 8.
 **Evidence:** `PX4_DXP/ntrip_rtcm_node.py` (595 lines) and `ntrip_protocol.py`, read-only. Spec §2: *"NTRIP / RTCM
 protocol handling — works. Do not spend risk budget here."* This package is therefore a faithful port of the working
 protocol behaviour into its own service, plus the structure the prototype lacked.
@@ -9,21 +9,21 @@ protocol behaviour into its own service, plus the structure the prototype lacked
 
 * **Nothing here configures the UM982.** The receiver's production configuration lives in its own persistent memory
   (CLAUDE.md §10, `docs/contracts/GNSS_receiver_configuration.md`). This package forwards RTCM bytes and *observes*; it
-  has no code path that writes anything but RTCM to the receiver, and no serial/UART access at all (the corrections
-  travel Jetson → `dyx3_px4_link` → `/fmu/in/gps_inject_data` → the GPS driver).
+  has no code path that writes anything but CRC-valid RTCM to the receiver. The selected path is either USB serial
+  directly to the receiver, or Jetson → `dyx3_px4_link` → `/fmu/in/gps_inject_data` → the GPS driver.
 * **Its own service, never a child of the backend** (the defect §5.3 names: a `server/**` deploy silently dropped the
   rover to FLOAT). It autostarts and reconnects forever; losing corrections is a published, recorded state.
-* **No credentials in argv, logs, status or Git.** The prototype read the password from stdin; here the host, port,
-  mountpoint, user and password come from the environment (`EnvironmentFile=/etc/dyx3/ntrip.env`, `root:dyx3 0640`),
-  and the password is never formatted into any string except the single Authorization header.
+* **No credentials in argv, logs, status or Git.** On first boot only, the worker imports the read-only
+  `/etc/dyx3/ntrip.env` seed (`root:dyx3 0640`) if no runtime config exists. Thereafter the authoritative profiles,
+  including write-only passwords, live in `/var/lib/dyx3/rtk/config.json` (`dyx3:dyx3 0600`).
 * `DYX3_NTRIP_SECURITY=PLAINTEXT|TLS` is mandatory in the existing environment configuration. A missing/unknown value leaves NTRIP unconfigured and surfaces an error; port numbers never select security. `DYX3_NTRIP_CA_FILE` optionally selects a PEM trust anchor for a private caster; otherwise OpenSSL's system trust paths are used. TLS verifies the certificate and DNS hostname or IP identity and never downgrades to plaintext. PLAINTEXT with credentials sets `NtripStatus.plaintext_credentials_warning` and logs a fixed warning without credentials.
-* Only `dyx3_px4_link` touches `/fmu/**`. This package publishes `RtcmData` and never talks to the FCU.
+* Only `dyx3_px4_link` touches `/fmu/**`. This package publishes `RtcmData` only in PX4_DDS mode and never talks to the FCU directly.
 
 ## 2. Interfaces
 
 | Direction | Topic | Type | Notes |
 |---|---|---|---|
-| out | `/dyx3/rtcm` | RtcmData | one message per chunk, <= 300 bytes, flags set as the MAVLink `GPS_RTCM_DATA` sender would |
+| out | `/dyx3/rtcm` | RtcmData | PX4_DDS mode only; one message per chunk, <= 300 bytes, flags set as the MAVLink `GPS_RTCM_DATA` sender would |
 | out | `/dyx3/rtk_status` | RtkStatus | 5 Hz; consumed by `dyx3_motion_guard` (RTK gate) and spray |
 | out | `/dyx3/ntrip_status` | NtripStatus | 1 Hz; link state, age, rate, counters, FIX transitions |
 | in | `/dyx3/gnss_report` | GnssReport | raw FCU GNSS (`px4_link`): fix type, accuracy, satellites, HDOP, position |
@@ -64,8 +64,8 @@ protocol behaviour into its own service, plus the structure the prototype lacked
 
 ## 5. Correction health and `RtkStatus`
 
-* `correction_age_s` = time since the last CRC-valid frame (monotonic clock). `corrections_fresh` = age <=
-  `correction_fresh_s`. **DERIVED — NOT FROM V1 SPEC:** default 10.0 s = the prototype's stream-liveness bound
+* `correction_age_s` = time since the last CRC-valid frame (monotonic clock). `corrections_fresh` requires that age,
+  selected transport delivery age, and GNSS report age to be fresh. **DERIVED — NOT FROM V1 SPEC:** default 10.0 s = the prototype's stream-liveness bound
   (`_STREAM_SOCKET_TIMEOUT_S`); no accuracy-derived limit exists in the evidence. Base stations send epochs at about 1 Hz, so
   10 s is tolerant; **re-validate at GATE 4** against recorded RTK_FIXED retention (tightening it is a one-word change).
 * `correction_rate_hz`: frames per second over a sliding window (`rate_window_s`, DERIVED 10 s). Published, **not gated**:
@@ -82,13 +82,10 @@ protocol behaviour into its own service, plus the structure the prototype lacked
 
 | Name | Default | Class | Source |
 |---|---|---|---|
-| `ntrip_host`, `ntrip_port`, `ntrip_mountpoint`, `ntrip_user` | from environment | RESTART | prototype CLI args; secrets via `EnvironmentFile` |
-| `ntrip_password` | environment only, never a ROS parameter | RESTART | CLAUDE.md §4 |
-| `DYX3_NTRIP_SECURITY` | required `PLAINTEXT` or `TLS` | RESTART | frozen E3 decision; no port inference |
-| `DYX3_NTRIP_CA_FILE` | empty (system trust paths) | RESTART | optional private CA PEM |
-| `connect_timeout_s`, `stream_timeout_s` | 10, 10 | RESTART | prototype constants |
-| `gga_interval_s`, `gga_max_fix_age_s` | 10, 5 | RESTART | prototype constants |
-| `backoff_base_s`, `backoff_max_s` | 5, 60 | RESTART | prototype formula |
+| NTRIP profile fields, including password and explicit security | imported from seed once, then runtime config | transactional | see production RTK contract; password write-only on control socket |
+| `connect_timeout_s`, `stream_timeout_s` | 10, 10 for imported profile | transactional | prototype constants |
+| `gga_interval_s`, `gga_max_fix_age_s` | 10 for imported profile, 5 node parameter | transactional / restart | prototype constants |
+| `backoff_base_s`, `backoff_max_s` | 5, 60 for imported profile | transactional | prototype formula |
 | `correction_fresh_s` | 10 | IDLE_ONLY | DERIVED, see section 5 |
 | `gnss_report_max_age_s` | 1.0 | IDLE_ONLY | DERIVED |
 | `rate_window_s` | 10 | IDLE_ONLY | DERIVED |

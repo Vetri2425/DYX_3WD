@@ -5,13 +5,29 @@
 create_user() {
   if id "${DYX3_USER}" >/dev/null 2>&1; then
     log "user ${DYX3_USER} exists"
-    return 0
+  else
+    log "creating system user ${DYX3_USER}"
+    run useradd --system --home-dir "${DYX3_VAR_LIB}" --shell /usr/sbin/nologin \
+      --user-group "${DYX3_USER}"
   fi
-  log "creating system user ${DYX3_USER}"
-  run useradd --system --home-dir "${DYX3_VAR_LIB}" --shell /usr/sbin/nologin \
-    --user-group "${DYX3_USER}"
-  # dialout: GNSS/maintenance serial devices; no other group is needed for the platform.
+  # Also run on upgrades: an existing dyx3 user may not yet be in dialout.
   run usermod -aG dialout "${DYX3_USER}"
+}
+
+ensure_rtk_state_directory() {
+  local path="${DYX3_VAR_LIB}/rtk"
+  [ ! -L "${path}" ] || die "RTK state directory must not be a symlink"
+  if [ ! -d "${path}" ]; then
+    install_dir 0700 "${DYX3_USER}" "${DYX3_GROUP}" "${path}"
+  else
+    local mode
+    mode="$(stat -c %a "${path}" 2>/dev/null || stat -f %Lp "${path}")"
+    [ "${mode}" = 700 ] || die "RTK state directory must be mode 0700"
+    if [ -z "${DYX3_ROOT}" ]; then
+      [ "$(stat -c %U:%G "${path}")" = "${DYX3_USER}:${DYX3_GROUP}" ] ||
+        die "RTK state directory must be owned by ${DYX3_USER}:${DYX3_GROUP}"
+    fi
+  fi
 }
 
 create_directories() {
@@ -24,6 +40,7 @@ create_directories() {
   for d in missions runs bags reports state; do
     install_dir 0750 "${DYX3_USER}" "${DYX3_GROUP}" "${DYX3_VAR_LIB}/${d}"
   done
+  ensure_rtk_state_directory
   local token_state="${DYX3_VAR_LIB}/state/px4_link_spray_ack_next"
   if [ ! -e "${token_state}" ]; then
     if [ -L "${DYX3_CURRENT}" ]; then
