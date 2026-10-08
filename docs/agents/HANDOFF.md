@@ -828,3 +828,20 @@ fixture) and the whole pinned message-hash set test. Other orchestrator mutation
 listed in the contract remain
 open outside the four Phase F scenarios. Claude should independently review and integrate the
 local commits, then decide on the final push.
+
+### Phase F integration review (2026-10-08, claude) — NOT PUSHED
+
+Integrated codex 88b642a (F2 terminal-state tests/docs) and c1f9f63 (F6) by cherry-pick; codex f937e1a
+(F4) applied as a test+contract-only commit because 4b0e669 already has the identical production line.
+Integrated HEAD: 12/12 packages, 440 tests, 0 failures, 2 skipped (local Humble env, firmware overlay).
+
+F6 independent replay (scratch copy, repo untouched; `DYX3_ORCH_SCENARIO=<name>`; generator `--check` is
+byte-identical so fixtures do come from the carried controller; original episodes unchanged):
+- seg_start_beyond_end: baseline 0 mismatches; "always +1 sign" mutant fails (rpp_core.cpp ~707/714) — REPRODUCED.
+- seg_corner_direct_release: omit `zero_speed_memory` reset (rpp_core.cpp:1159) fails at tick 49 — REPRODUCED.
+- seg_boundary_55deg_sharp: +15 deg on the run-alignment threshold at rpp_core.cpp:115 (and :461) fails
+  (first mismatch tick 123 here vs 113 in the contract; the path_conditioner.cpp:484 threshold is NOT killed).
+- fault_vel_blackout_jump: NOT REPRODUCED. 0.3->0.5 (also 0.05, 0.31, 0.32, 100 s) in `vel_is_fresh`
+  (rpp_core.cpp:189), removing the freshness check on `v_meas` (:768), and the IMU-extrapolation
+  age (:791) all give 0 mismatches. Contract claim "fails at tick 28" needs the exact mutation from codex.
+Until that is resolved the contract row for fault_vel_blackout_jump should not be treated as closed.
