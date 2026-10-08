@@ -225,7 +225,10 @@ logging on the tick is rate-limited and happens outside it. `mlockall` is reques
 late tick is still a fresh setpoint, and the staleness checks above are what bound the harm.
 The lifetime counter is never cleared. `FAULT_LOOP_OVERRUN` remains visible for one second from
 the most recent actual late tick and then clears if no higher-priority fault exists. Invalid or
-backward steady-clock ticks are ignored so they cannot advance the loop baseline or health state.
+backward steady-clock ticks do not advance the loop baseline or health state. They publish an
+explicit STOP control set immediately, using the independent system-clock timestamp; the next
+valid tick resumes the normal gate and overrun accounting. The same applies to nonfinite or
+negative injected timestamps.
 
 ## 12. Parameters
 

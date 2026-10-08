@@ -425,6 +425,45 @@ TEST(Px4LinkNode, LoopOverrunWarningExpiresFromLastActualOverrun) {
   EXPECT_EQ(r.status.fault, dyx3_interfaces::msg::Px4LinkStatus::FAULT_LOOP_OVERRUN);
 }
 
+TEST(Px4LinkNode, InvalidInjectedClockPublishesZeroThenNormalForwardingRecovers) {
+  Rig r;
+  r.bring_up();
+  r.nav_state = 14;
+  bool accepted = false;
+  uint8_t reason = 0;
+  ASSERT_TRUE(r.call_offboard(true, &accepted, &reason));
+  ASSERT_TRUE(accepted);
+  r.guard(2, 0.3F, NaN, 0.1F);
+  r.tick();
+  ASSERT_FALSE(r.speed.empty());
+  ASSERT_FLOAT_EQ(r.speed.back().speed_body_x, 0.3F);
+
+  const auto count = r.status.loop_overrun_count;
+  for (const double invalid : {std::numeric_limits<double>::quiet_NaN(),
+                               std::numeric_limits<double>::infinity(), r.now - 0.5}) {
+    r.clear();
+    r.link->step(invalid);
+    r.pump();
+    ASSERT_EQ(r.ocm.size(), 1U);
+    ASSERT_EQ(r.traj.size(), 1U);
+    ASSERT_EQ(r.speed.size(), 1U);
+    ASSERT_EQ(r.att_sp.size(), 1U);
+    ASSERT_EQ(r.rate.size(), 1U);
+    EXPECT_FLOAT_EQ(r.speed.back().speed_body_x, 0.0F);
+    EXPECT_TRUE(std::isnan(r.att_sp.back().yaw_setpoint));
+    EXPECT_FLOAT_EQ(r.rate.back().yaw_rate_setpoint, 0.0F);
+    EXPECT_TRUE(all_nan3(r.traj.back().velocity));
+    EXPECT_EQ(r.status.loop_overrun_count, count);
+  }
+
+  r.clear();
+  r.guard(2, 0.3F, NaN, 0.1F);
+  r.tick();
+  ASSERT_FALSE(r.speed.empty());
+  EXPECT_FLOAT_EQ(r.speed.back().speed_body_x, 0.3F);
+  EXPECT_EQ(r.status.loop_overrun_count, count);
+}
+
 TEST(Px4LinkNode, NoSetpointsBeforeHandshakeAndNoneWithoutOffboardEnable) {
   Rig r;
   r.fcu_answers_handshake = false;
