@@ -1161,3 +1161,21 @@ NetworkManager 20 MHz auto behavior on versions before 1.50. The Wi-Fi hardware/
 regulatory state, driver option effect, tablet DHCP, and 5/10/15/25 m range remain
 unverified on a rover. No code is half-finished; the rover bench check is the open
 field task.
+
+---
+
+## 2026-10-09 (02:00) — Claude — final pre-bench state
+
+- `codex/rover-app-gaps` E–G reviewed:
+  - E: Socket.IO ping 5/5 s via settings, rejecting values ≤ 0 and non-finite values;
+  - F: hotspot radio settings, with the country from a systemd unit, driver power save only from `modinfo`-listed
+    options, DFS refused, 40 MHz only on NetworkManager ≥ 1.50, dormant until `hotspot.env` is filled in;
+  - G: the `/missions/plan` body bounded by Content-Length and while streaming.
+  Fast-forwarded into **`master` @ `8af2595` = the deploy target** (release `rover-8af2595…`). The Codex branch is kept.
+- Firmware V1 candidate `8279fa4be3` is unchanged. **No more code changes to the rover stack or firmware before the
+  bench.** Later `master` commits are docs only.
+- App: Agy is still working on `agy/prod-transport` (uncommitted `App.tsx`, `ModernHomeUI.tsx`,
+  `ModernSettingsPage.tsx`). Nothing is merged into the app's `main`, and release signing is not implemented. The
+  00:37 APK is DEBUG-signed: watch only.
+- The next session starts from `~/Vetri/3WD_PROD/HANDOFF_PROMPT_2026-10-09.md`, which includes the app review
+  checklist and the ready signing task for Agy.
