@@ -16,6 +16,11 @@ EnvironmentFile=-/etc/dyx3/ros.env
 EnvironmentFile=-/etc/dyx3/ntrip.env
 # ntrip.env is read-only first-boot seed material. Runtime RTK state is under
 # /var/lib/dyx3/rtk; keep ReadWritePaths unchanged.
+# systemd creates /var/lib/dyx3/rtk (dyx3:dyx3 0700) before every start, so the
+# state directory exists even when an older release's installer performs the
+# upgrade (units come from the new release, installer scripts from the old one).
+StateDirectory=dyx3/rtk
+StateDirectoryMode=0700
 ExecStart=/opt/dyx3/current/bin/dyx3-rtk
 Restart=always
 RestartSec=5

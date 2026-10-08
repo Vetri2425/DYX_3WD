@@ -83,6 +83,7 @@ libs() {
     check "service ${s2}: unit and launcher exist" '[ -f "${REPO}/deployment/systemd/${s2}.service" ] && [ -x "${REPO}/deployment/scripts/start-${s2#dyx3-}.sh" ]'
   done
   check "the spray watchdog unit is not tied to dyx3-ros" '! grep -E "^(Requires|BindsTo|PartOf)=.*dyx3-ros" "${REPO}/deployment/systemd/dyx3-spray-watchdog.service"'
+  check "the RTK unit creates its own 0700 state directory" 'grep -qx "StateDirectory=dyx3/rtk" "${REPO}/deployment/systemd/dyx3-rtk.service" && grep -qx "StateDirectoryMode=0700" "${REPO}/deployment/systemd/dyx3-rtk.service"'
   check "no unit or template hard-codes a secret (comments excluded)" '! grep -rEi "^[^#]*(password|token)=." "${REPO}/deployment/systemd" "${REPO}/deployment/network"'
 
   # runtime environment: never guess a ROS domain, never start without the pinned px4_msgs overlay
