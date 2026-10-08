@@ -95,6 +95,17 @@ curl http://10.42.0.1:8000/api/ping
 The bench backend's existing `DYX3_BACKEND_HOST=0.0.0.0` in `/etc/dyx3/backend.env` is left
 as configured.
 
+Create a tablet operator token in the backend's production auth store with:
+
+```bash
+sudo -u dyx3 /opt/dyx3/current/venv/bin/python -m dyx3_backend.auth.tokens create --file /var/lib/dyx3/state/auth.json --name tablet-1 --role operator
+sudo systemctl restart dyx3-backend
+```
+
+The first command prints the token once; record it privately for the tablet. The auth store
+contains only its hash and has mode `0600`. Run this before a mission because the backend loads
+the store at startup and a restart interrupts the tablet connection.
+
 * **Services** (`[services]` in the manifest): `dyx3-platform`, `dyx3-ros` (mission, motion_guard, px4_link, spray, system_gateway via `dyx3_bringup/control_graph.launch.py`),
   `dyx3-rtk`, `dyx3-backend`, `dyx3-recorder`, and **`dyx3-spray-watchdog` as its own unit** (not tied to `dyx3-ros`, so it survives the graph dying).
   `[enabled_services]` lists **all six** since 2026-10-08, when each was verified running on the 3WD rover. An enabled service that fails its environment
