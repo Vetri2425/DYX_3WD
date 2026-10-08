@@ -9,3 +9,7 @@ Minimal pointer file for Codex and other agents. `CLAUDE.md` is authoritative; t
    Do not report ROS tests as unavailable without running it.
 4. Run the relevant build and regression tests before committing.
 5. Never push without the workflow's explicit authorization.
+6. Before implementing any fix, check `docs/agents/CLOUD_REVIEW_STATUS.md` and the package contract in
+   `docs/contracts/`. Classify the problem first: *already fixed* (reproduce a failing test before touching
+   code), *known but deferred* (needs a human decision), *unverified hardware behaviour* (needs a bench —
+   never claim it from CI), or a *new regression/finding* (add it to the status record).

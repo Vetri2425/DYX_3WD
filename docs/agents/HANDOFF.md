@@ -845,3 +845,22 @@ byte-identical so fixtures do come from the carried controller; original episode
   (rpp_core.cpp:189), removing the freshness check on `v_meas` (:768), and the IMU-extrapolation
   age (:791) all give 0 mismatches. Contract claim "fails at tick 28" needs the exact mutation from codex.
 Until that is resolved the contract row for fault_vel_blackout_jump should not be treated as closed.
+
+### Phase F integrated, pushed and CI green; Cloud Review status record (2026-10-08, claude)
+
+Phase F is on `claude/cloud-phases` (push `6b8b4b1..9549679`). **GitHub Actions run `37766642047`, commit
+`9549679`: all 9 jobs succeeded**, including ROS 2 Humble `colcon build + test`: 12 packages, **440 tests,
+0 errors, 0 failures, 2 skipped**. Supersedes the "NOT PUSHED" headings of the two entries above (kept as
+history). F4: one production implementation (`4b0e669`) plus Codex's stronger test (`7795e83`). F2 and F6 from
+Codex (`c3dc01b`, `47796ad`). F6 result: **three mutation-closed scenarios, one baseline-only**
+(`fault_vel_blackout_jump` not reproduced; the velocity-freshness constant is a survivor again).
+
+Correction: the D3 entry above cites `03763c6`; that is a pre-rebase SHA no longer in branch history — the
+commit is `63ec3d3`.
+
+**Read `docs/agents/CLOUD_REVIEW_STATUS.md` before implementing any fix.** It lists every Cloud Review finding with
+commit, verification, limits, contract and what it blocks. Distinguish: already fixed, known but deferred,
+unverified hardware behaviour, newly discovered regression. Open and blocking paint: **C3** (no independent
+valve-close path), H12 gate default, H13 debounce lead, GATE 1 bench, Jetson timing, field validation.
+Local ROS 2: `./tools/dev/ros2_humble.sh build-test`. A proposal for the human-owned `CLAUDE.md` status text is in
+`docs/architecture/proposals/2026-10-08_claude-status-correction.md`. Documentation-only change; no code touched.

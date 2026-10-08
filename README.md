@@ -53,4 +53,19 @@ CI on `ubuntu-24.04-arm` is authoritative — it matches the Jetson's architectu
 
 ## Status
 
-Milestone 1: skeleton. No control logic implemented. No firmware patches applied.
+Software for the full control graph is implemented and tested off-target. **Nothing here has run on a rover**
+(hardware is still CubeOrange+/MAVROS in the field).
+
+| | |
+|---|---|
+| Branch | `claude/cloud-phases` (integrates the Cloud Review fixes, phases A–F); not merged to `master` |
+| CI | run `37766642047` on `9549679`: all 9 jobs green; ROS 2 Humble `colcon`: 12 packages, 440 tests, 0 failures, 2 skipped |
+| Cloud Review | **[`docs/agents/CLOUD_REVIEW_STATUS.md`](docs/agents/CLOUD_REVIEW_STATUS.md)** — per-finding status, evidence and blockers |
+| Local ROS 2 | `./tools/dev/ros2_humble.sh build-test` — [`docs/agents/LOCAL_ROS2_BUILD_ENV.md`](docs/agents/LOCAL_ROS2_BUILD_ENV.md) |
+
+**Not paint-ready.** C3 (the valve has no independent close path if the DDS link dies) is open and needs a
+bench; GATE 1 PX4 bench, Jetson timing, real-bag replay, RTK and field accuracy validation are all open.
+Green CI proves the software builds and the off-target tests pass, not hardware behaviour.
+The production RTK architecture (E4) is a separate plan: `docs/plans/2026-10-08_production_rtk_plan.md`.
+
+Accuracy baseline is sub-2 cm, not sub-cm (see `CLAUDE.md` §2).

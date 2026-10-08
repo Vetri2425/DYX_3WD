@@ -254,8 +254,8 @@ actual `COM_OF_LOSS_T` behaviour. Those are GATE 4 / F5 on the bench.
 Spray valve commands are serialized: at most one spray `VehicleCommand` is in flight, with a
 bounded queue of 16 total in-flight/queued requests. While queued, the newest request from each
 source replaces that source's older queued request; a replaced request receives a failed
-`SprayActuatorAck` (`result=255`). A watchdog OFF removes queued ON requests and is placed at the
-front of the queue. If all queue capacity is occupied by watchdog OFF requests, a new request is
+`SprayActuatorAck` (`result=255`). A watchdog OFF supersedes every queued request from any other source (ON **and** OFF; each receives a
+failed `SprayActuatorAck`, `RESULT_LINK_REFUSED`) and is placed at the front of the queue (commit `6b8b4b1`). If all queue capacity is occupied by watchdog OFF requests, a new request is
 refused rather than displacing them. Link loss fails the in-flight request and all queued requests.
 
 Each dispatched logical proof epoch receives a durable `(VehicleCommand.source_system,
