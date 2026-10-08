@@ -4,6 +4,7 @@
 #include <chrono>
 #include <functional>
 #include <memory>
+#include <vector>
 
 #include "dyx3_interfaces/msg/emergency_stop_state.hpp"
 #include "dyx3_interfaces/msg/estimator_health.hpp"
@@ -45,6 +46,8 @@ public:
 
 private:
   void declare_and_validate_params();
+  rcl_interfaces::msg::SetParametersResult on_parameters(
+      const std::vector<rclcpp::Parameter>& params);
   GateInputs gather(double now_s) const;
   rclcpp::Time ros_now() { return get_clock()->now(); }
 
@@ -73,6 +76,7 @@ private:
   uint64_t last_status_input_seq_{~0ULL};
 
   rclcpp::TimerBase::SharedPtr timer_;
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_cb_;
   rclcpp::Subscription<dyx3_interfaces::msg::MotionSetpoint>::SharedPtr sub_cmd_;
   rclcpp::Subscription<dyx3_interfaces::msg::MissionState>::SharedPtr sub_mission_;
   rclcpp::Subscription<dyx3_interfaces::msg::VehicleState>::SharedPtr sub_vehicle_;

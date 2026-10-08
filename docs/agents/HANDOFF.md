@@ -731,3 +731,10 @@ The production entry point uses `rclcpp::spin` (single-threaded); Humble has no 
 parameter callback. Mission node tests cover atomic batches, timer frequency, effective gate
 freshness, invalid values, and active-mission rejection, but ROS 2/colcon is unavailable on
 this Mac, so these tests require Claude's independent CI review.
+
+F3 rejects every MotionGuard runtime parameter update because the node reads all 15 declared
+values at construction. The hard speed and yaw envelopes retain their current values. The
+contract and production-additions registry now classify these values as RESTART; future LIVE
+limits require an atomic validated runtime path. A node regression test covers refusal,
+unchanged hard limits, ordinary pass-through, and RTK gate failure to STOP. ROS node tests
+remain unavailable locally.

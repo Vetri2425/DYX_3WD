@@ -100,19 +100,20 @@ the old limiter mechanics directly testable; it is not a second production contr
 | Name | Default | Class | Source |
 |---|---|---|---|
 | `publish_rate_hz` | 50 | RESTART | DERIVED (prototype 50 Hz) |
-| `command_max_age_s` | 0.2 | IDLE_ONLY | DERIVED from prototype `input_max_age_s`; re-validate GATE 4 |
-| `session_accept_count` | 3 | IDLE_ONLY | DERIVED — Phase plan leaves the count to this phase |
-| `vehicle_state_max_age_s`, `rtk_status_max_age_s` | 0.5 | IDLE_ONLY | prototype `pose_max_age_s` / `rtk_fix_timeout_s` |
-| `estimator_health_max_age_s`, `operator_link_max_age_s`, `px4_link_max_age_s`, `mission_state_max_age_s` | 0.5 | IDLE_ONLY | DERIVED, same convention |
-| `rtk_min_fix_type` | 6 | IDLE_ONLY | prototype `min_fix_type` |
-| `rtk_max_hrms_m` | 0.10 | IDLE_ONLY | prototype `rtk_max_hrms_m` |
-| `require_gnss_yaw_fusion` | true | IDLE_ONLY | DERIVED: CLAUDE.md §3, dual-antenna heading is first-class |
-| hard envelopes | section 5 | LIVE (target) | spec §9 lists speed limits as LIVE |
+| `command_max_age_s` | 0.2 | RESTART | DERIVED from prototype `input_max_age_s`; re-validate GATE 4 |
+| `session_accept_count` | 3 | RESTART | DERIVED — Phase plan leaves the count to this phase |
+| `vehicle_state_max_age_s`, `rtk_status_max_age_s` | 0.5 | RESTART | prototype `pose_max_age_s` / `rtk_fix_timeout_s` |
+| `estimator_health_max_age_s`, `operator_link_max_age_s`, `px4_link_max_age_s`, `mission_state_max_age_s` | 0.5 | RESTART | DERIVED, same convention |
+| `rtk_min_fix_type` | 6 | RESTART | prototype `min_fix_type` |
+| `rtk_max_hrms_m` | 0.10 | RESTART | prototype `rtk_max_hrms_m` |
+| `require_gnss_yaw_fusion` | true | RESTART | DERIVED: CLAUDE.md §3, dual-antenna heading is first-class |
+| hard envelopes | section 5 | RESTART (LIVE target) | spec §9 lists speed limits as LIVE |
 
-**This version reads every parameter once at start** (effectively RESTART) and refuses to start on an
-invalid value (the node throws; fail loud, not "fall back to a default"). The LIVE hard-envelope class
-above is the target: a runtime-change callback that validates, records the change, and only **tightens**
-an envelope while a mission is RUNNING is a follow-up. RPP owns accel/decel/jerk profile parameters.
+**This version reads every parameter once at start** and rejects every runtime parameter update
+with an explicit startup-only reason. Invalid startup values throw; there is no fallback to a
+default. No MotionGuard parameter is currently LIVE or IDLE_ONLY. A validated runtime path that
+only **tightens** a hard envelope while a mission is RUNNING remains a follow-up. RPP owns
+accel/decel/jerk profile parameters.
 A restart mid-mission in OFFBOARD aborts the run (CLAUDE.md section 7), which is why it must come.
 `yaw_test_ratio_max` and the other ratio limits are **not implemented**: `estimator_status` is not on
 DDS at the flashed firmware (`EstimatorHealth.test_ratios_valid` is always false), and no numeric

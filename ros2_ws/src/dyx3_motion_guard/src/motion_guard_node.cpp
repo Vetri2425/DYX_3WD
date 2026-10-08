@@ -46,6 +46,8 @@ MotionGuardNode::MotionGuardNode(const rclcpp::NodeOptions& options, ClockFn clo
     : rclcpp::Node("motion_guard", options),
       clock_(clock ? std::move(clock) : ClockFn(steady_now_s)) {
   declare_and_validate_params();
+  param_cb_ = add_on_set_parameters_callback(
+      [this](const std::vector<rclcpp::Parameter>& ps) { return on_parameters(ps); });
   DecisionConfig dc;
   dc.command_max_age_s = age_.command;
   dc.gates = gate_cfg_;
@@ -146,6 +148,17 @@ MotionGuardNode::MotionGuardNode(const rclcpp::NodeOptions& options, ClockFn clo
   RCLCPP_INFO(get_logger(),
               "motion_guard up: %.0f Hz, command_max_age %.3f s, session_accept_count %u",
               publish_rate_hz_, age_.command, accept_count_);
+}
+
+rcl_interfaces::msg::SetParametersResult MotionGuardNode::on_parameters(
+    const std::vector<rclcpp::Parameter>& params) {
+  rcl_interfaces::msg::SetParametersResult result;
+  result.successful = params.empty();
+  if (!params.empty()) {
+    result.reason = params.front().get_name() +
+                    " is startup-only in MotionGuard; restart with a validated configuration";
+  }
+  return result;
 }
 
 void MotionGuardNode::declare_and_validate_params() {

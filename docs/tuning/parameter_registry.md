@@ -224,6 +224,15 @@ Owner: the package in the `Owner` column is the single owner (CLAUDE.md "one dec
 
 Parameters the production stack adds. They are not counted above. Each has a recorded decision.
 
+MotionGuard's 15 declared production parameters are all **RESTART** in the current node:
+`publish_rate_hz`, `session_accept_count`, `command_max_age_s`,
+`vehicle_state_max_age_s`, `rtk_status_max_age_s`, `estimator_health_max_age_s`,
+`operator_link_max_age_s`, `px4_link_max_age_s`, `mission_state_max_age_s`,
+`rtk_min_fix_type`, `rtk_max_hrms_m`, `require_gnss_yaw_fusion`,
+`max_forward_speed_mps`, `max_reverse_speed_mps`, and `max_yaw_rate_radps`.
+They are validated at startup and runtime updates are rejected. The three hard envelopes are
+safety-critical; their future LIVE classification depends on a complete validated application path.
+
 | name | type | default | source | class | rationale | owner |
 |---|---|---|---|---|---|---|
 | `rpp_timeout_s` | float | `0.5` | DERIVED — human decision 2026-10-08 (review C1 / fix plan A1): matches the stack's 0.5 s freshness convention, 25 missed ticks at 50 Hz; re-validate from Jetson jitter data | **IDLE_ONLY** | spray refuses (valve OFF) when `RppStatus` is older than this; relaxing it while a run is active must not be possible | dyx3_spray |

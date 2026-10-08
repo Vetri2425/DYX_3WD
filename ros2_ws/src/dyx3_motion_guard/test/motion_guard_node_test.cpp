@@ -198,6 +198,40 @@ TEST(MotionGuardNode, RejectsBadParameters) {
   ctx->shutdown("test done");
 }
 
+TEST(MotionGuardNode, RuntimeParameterChangesCannotMisstateEffectiveLimits) {
+  Rig r;
+  for (const auto& change :
+       {rclcpp::Parameter("max_forward_speed_mps", 0.2),
+        rclcpp::Parameter("max_reverse_speed_mps", 0.01),
+        rclcpp::Parameter("max_yaw_rate_radps", 0.1), rclcpp::Parameter("rtk_max_hrms_m", -1.0),
+        rclcpp::Parameter("command_max_age_s", 2.0), rclcpp::Parameter("publish_rate_hz", 100.0)}) {
+    const auto result = r.guard->set_parameters_atomically({change});
+    EXPECT_FALSE(result.successful) << change.get_name();
+    EXPECT_NE(result.reason.find("startup-only"), std::string::npos);
+  }
+  EXPECT_DOUBLE_EQ(r.guard->get_parameter("max_forward_speed_mps").as_double(), 1.0);
+  EXPECT_DOUBLE_EQ(r.guard->get_parameter("max_reverse_speed_mps").as_double(), 0.3);
+  EXPECT_DOUBLE_EQ(r.guard->get_parameter("max_yaw_rate_radps").as_double(), 0.45);
+  const auto batch =
+      r.guard->set_parameters_atomically({rclcpp::Parameter("max_forward_speed_mps", 0.2),
+                                          rclcpp::Parameter("max_yaw_rate_radps", 0.1)});
+  EXPECT_FALSE(batch.successful);
+
+  r.run(0.2);
+  EXPECT_EQ(r.last_out.mode, MotionSetpoint::MODE_TRACK_RATE);
+  EXPECT_FLOAT_EQ(r.last_out.speed_body_x, 0.3F);
+  r.tick(0.02, true, MotionSetpoint::MODE_TRACK_RATE, -0.08F, NaN, 0.1F);
+  EXPECT_FLOAT_EQ(r.last_out.speed_body_x, -0.08F);
+  r.tick(0.02, true, MotionSetpoint::MODE_TRACK_RATE, 2.0F, NaN, 0.8F);
+  EXPECT_FLOAT_EQ(r.last_out.speed_body_x, 1.0F);
+  EXPECT_FLOAT_EQ(r.last_out.yaw_rate_setpoint, 0.45F);
+  r.rtk_ok = false;
+  r.now += 0.6;
+  r.tick();
+  EXPECT_EQ(r.last_out.mode, MotionSetpoint::MODE_STOP);
+  EXPECT_EQ(r.last_out.speed_body_x, 0.0F);
+}
+
 TEST(MotionGuardNode, PublishesAtFixedRateEvenWhenRppIsSilent) {
   Rig r;
   r.run(0.5, /*with_rpp=*/false);
