@@ -73,8 +73,8 @@ const Json& active_profile(const Json& config) {
 
 }  // namespace
 
-Json RtkConfigStore::initial_from_environment() {
-  Json config = {
+Json RtkConfigStore::defaults() {
+  return {
       {"schema", 1},
       {"revision", 1},
       {"updated_at", ""},
@@ -87,6 +87,10 @@ Json RtkConfigStore::initial_from_environment() {
       {"usb",
        {{"receiver_device", ""}, {"baud", 0}, {"write_timeout_s", 0.0}, {"reopen_delay_s", 0.0}}},
   };
+}
+
+Json RtkConfigStore::initial_from_environment() {
+  Json config = defaults();
   const std::string host = env("DYX3_NTRIP_HOST");
   if (!host.empty()) {
     // Upgrade: the existing live NTRIP -> DDS installation retains its transport.

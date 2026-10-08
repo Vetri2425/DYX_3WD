@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <thread>
 
 #include "dyx3_gnss_rtk/rtcm_parser.hpp"
@@ -219,4 +220,36 @@ TEST(RtkNode, InvalidConfigLeavesDdsActiveAndUsbSwitchStopsDdsPublication) {
   r.pump();
   EXPECT_EQ(r.chunks.size(), 1U);
   EXPECT_EQ(r.node->status_json(r.now)["transport"]["selected"], "USB_DIRECT");
+}
+
+TEST(RtkNodeStartup, InvalidPersistedConfigStartsStoppedInsteadOfCrashing) {
+  char pattern[] = "/tmp/dyx3-node-bad-config-XXXXXX";
+  const std::string dir = ::mkdtemp(pattern);
+  {
+    std::ofstream bad(dir + "/config.json");
+    bad << "{\"schema\": 1, \"source\": \"NTRIP\"";  // truncated write
+  }
+  ::setenv("DYX3_RTK_STATE_DIR", dir.c_str(), 1);
+  auto ctx = std::make_shared<rclcpp::Context>();
+  rclcpp::InitOptions io;
+  io.set_domain_id(150 + (getpid() % 80));
+  ctx->init(0, nullptr, io);
+  rclcpp::NodeOptions no;
+  no.context(ctx);
+  double now = 10.0;
+  std::shared_ptr<RtkNode> node;
+  ASSERT_NO_THROW(node = std::make_shared<RtkNode>(no, [&now]() { return now; }, false, false));
+  const auto status = node->status_json(now);
+  EXPECT_EQ(status["worker_state"], "ERROR");
+  EXPECT_EQ(status["desired_state"], "STOPPED");
+  // The operator can replace the configuration through the control interface.
+  auto config = node->handle_control({{"v", 1}, {"cmd", "GET_CONFIG"}})["data"];
+  config["transport"] = "PX4_DDS";
+  const auto reply = node->handle_control({{"v", 1}, {"cmd", "SET_CONFIG"}, {"config", config}});
+  EXPECT_EQ(reply["data"]["transport"], "PX4_DDS");
+  EXPECT_TRUE(RtkConfigStore(dir).load().has_value());
+  node.reset();
+  ctx->shutdown("test done");
+  ::unsetenv("DYX3_RTK_STATE_DIR");
+  std::filesystem::remove_all(dir);
 }

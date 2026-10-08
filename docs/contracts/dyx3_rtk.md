@@ -75,6 +75,11 @@ that seed once as profile `legacy` and selects `NTRIP + PX4_DDS + RUNNING`. The 
 is authoritative thereafter; the service never writes back to the seed. A missing or invalid
 explicit seed security value is an error, never inferred from port 2101.
 
+An unreadable or invalid `config.json`, or an invalid seed, never crash-loops the service.
+The worker starts with the fresh-install defaults and `desired_state = STOPPED`, injects
+nothing, reports `worker_state = ERROR` with reason `CONFIG_INVALID`, and keeps the control
+socket up. The bad file stays in place until a valid `SET_CONFIG` replaces it.
+
 The installer creates `/var/lib/dyx3/rtk/` as `dyx3:dyx3 0700` if missing and never
 overwrites, deletes or rolls back its contents. Runtime files are `0600`. Save writes a
 temporary file in the same directory, `fsync`s it, renames it over `config.json`, then

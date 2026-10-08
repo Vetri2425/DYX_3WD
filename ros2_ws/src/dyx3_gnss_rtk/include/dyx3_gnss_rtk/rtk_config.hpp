@@ -26,6 +26,8 @@ public:
   // Missing config means first boot. The read-only NTRIP environment is imported once if it
   // contains a configured caster (upgrade -> DDS). Otherwise this is a fresh USB-default install.
   static Json initial_from_environment();
+  // Fresh-install defaults (NTRIP + USB_DIRECT, nothing configured). Reads no environment.
+  static Json defaults();
   std::optional<Json> load() const;
   void save(const Json& config, const std::function<void()>& before_rename = {}) const;
 

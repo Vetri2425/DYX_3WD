@@ -76,15 +76,32 @@ RtkNode::RtkNode(const rclcpp::NodeOptions& options, ClockFn clock, bool create_
         have_link_status_ = true;
       });
 
+  std::string startup_error;
   if (test_config) {
     config_ = *test_config;
+    RtkConfigStore::validate(config_);
   } else {
-    const auto loaded = config_store_.load();
-    config_ = loaded ? *loaded : RtkConfigStore::initial_from_environment();
-    if (!loaded) config_store_.save(config_);
+    // An unreadable or invalid config file or seed must not crash-loop the service: the
+    // control socket has to come up so the operator can replace the configuration. Start
+    // STOPPED (nothing injected) and leave the bad file in place until SET_CONFIG replaces it.
+    try {
+      const auto loaded = config_store_.load();
+      config_ = loaded ? *loaded : RtkConfigStore::initial_from_environment();
+      if (!loaded) config_store_.save(config_);
+    } catch (const ConfigError& e) {
+      startup_error = e.what();  // fixed, secret-free texts only
+    } catch (const std::exception&) {
+      startup_error = "RTK configuration could not be loaded";
+    }
+    if (!startup_error.empty()) {
+      RCLCPP_ERROR(get_logger(), "%s; corrections stopped until the configuration is replaced",
+                   startup_error.c_str());
+      config_ = RtkConfigStore::defaults();
+      config_["desired_state"] = "STOPPED";
+    }
   }
-  RtkConfigStore::validate(config_);
   activate_config();
+  if (!startup_error.empty()) transition(WorkerState::Error, "CONFIG_INVALID", startup_error);
   if (start_client_) {
     control_ = std::make_unique<ControlSocket>(
         env_or("DYX3_RTK_CONTROL_SOCKET", "/run/dyx3/rtk-control.sock"),
