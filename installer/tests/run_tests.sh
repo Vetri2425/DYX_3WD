@@ -146,6 +146,13 @@ lifecycle() {
   mkdir -p "${src}" "${fakebin}"
   cp -r "${REPO}/installer" "${REPO}/deployment" "${src}/"
   rm -rf "${src}/installer/tests"
+  # The lifecycle proves switch / revert / rollback, not the service set: the staged releases enable the platform only
+  # (gateway socket and backend cannot exist in a staged root). The real manifest is checked in libs().
+  awk '/^\[enabled_services\]/ { print; print "dyx3-platform"; skip = 1; next }
+       /^\[/ { skip = 0 }
+       skip && /^dyx3-/ { next }
+       { print }' "${src}/installer/manifests/production.manifest" >"${src}/manifest.tmp"
+  mv "${src}/manifest.tmp" "${src}/installer/manifests/production.manifest"
   mkdir -p "${src}/ros2_ws/src"
   : >"${src}/ros2_ws/src/.keep"
   git -C "${src}" init -q -b main
@@ -184,7 +191,7 @@ F
   : >"${T}/ros_setup.bash"
 
   export PATH="${fakebin}:${PATH}" ROS_SETUP="${T}/ros_setup.bash" DYX3_REPO_URL="file://${src}"
-  export DYX3_ROOT="${T}/lc" INSTALLER_DIR="${REPO}/installer" DYX3_SKIP_SYSTEMD=1 DYX3_SKIP_BACKEND=1
+  export DYX3_ROOT="${T}/lc" INSTALLER_DIR="${REPO}/installer" DYX3_SKIP_SYSTEMD=1 DYX3_SKIP_BACKEND=1 DYX3_HEALTH_SETTLE_S=0
   # shellcheck disable=SC1091
   . "${INSTALLER_DIR}/lib/common.sh"
   for l in os_check dependencies ros_install permissions network_install systemd_install health_check release; do

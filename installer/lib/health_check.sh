@@ -66,14 +66,37 @@ _enabled() { manifest_section enabled_services "${2:-${DYX3_CURRENT}/installer/m
 
 # health_extras: the parts beyond the platform. Each check is gated on the service being ENABLED in the manifest, so an
 # unverified service never turns the health red; disk is always reported.
+# _settle <function> [args...]: poll a check once a second for up to DYX3_HEALTH_SETTLE_S (default 30): health runs
+# right after an upgrade restarted the services, and the gateway socket / backend need seconds to come up (rover 2026-10-08).
+_settle() {
+  local n=0 limit="${DYX3_HEALTH_SETTLE_S:-30}"
+  until "$@"; do
+    n=$((n + 1))
+    [ "${n}" -ge "${limit}" ] && return 1
+    sleep 1
+  done
+}
+
+_gateway_up() { [ -S "${DYX3_RUN}/gateway.sock" ]; }
+_backend_up() { curl -fsS --max-time 3 "http://$1:$2/api/ping" >/dev/null 2>&1; }
+
+# _backend_env <KEY>: one value from /etc/dyx3/backend.env (what the service really binds), never executed.
+_backend_env() { sed -n "s/^$1=//p" "${DYX3_ETC}/backend.env" 2>/dev/null | tail -n1; }
+
 health_extras() {
   local rel="${1:-${DYX3_CURRENT}}" m="${1:-${DYX3_CURRENT}}/installer/manifests/production.manifest"
   if _enabled dyx3-ros "${m}"; then
-    if [ -S "${DYX3_RUN}/gateway.sock" ]; then _pass "gateway socket present"; else _fail "gateway socket ${DYX3_RUN}/gateway.sock missing (dyx3-ros / system_gateway down?)"; fi
+    if _settle _gateway_up; then _pass "gateway socket present"; else _fail "gateway socket ${DYX3_RUN}/gateway.sock missing (dyx3-ros / system_gateway down?)"; fi
   fi
   if _enabled dyx3-backend "${m}" && have curl; then
-    local host="${DYX3_BACKEND_HOST:-10.42.0.1}" port="${DYX3_BACKEND_PORT:-8000}"
-    if curl -fsS --max-time 3 "http://${host}:${port}/api/ping" >/dev/null 2>&1; then _pass "backend answers on ${host}:${port}"; else _fail "backend does not answer on ${host}:${port}"; fi
+    local host port
+    host="${DYX3_BACKEND_HOST:-$(_backend_env DYX3_BACKEND_HOST)}"
+    host="${host:-10.42.0.1}"
+    port="${DYX3_BACKEND_PORT:-$(_backend_env DYX3_BACKEND_PORT)}"
+    port="${port:-8000}"
+    # a wildcard bind is reached on loopback
+    case "${host}" in 0.0.0.0 | "::") host=127.0.0.1 ;; esac
+    if _settle _backend_up "${host}" "${port}"; then _pass "backend answers on ${host}:${port}"; else _fail "backend does not answer on ${host}:${port}"; fi
   fi
   if _enabled dyx3-recorder "${m}" && [ ! -d "${DYX3_VAR_LIB}/runs" ]; then _fail "runs directory ${DYX3_VAR_LIB}/runs missing"; fi
   # disk: report; FAIL only when the data volume is completely full (no threshold is invented here).
