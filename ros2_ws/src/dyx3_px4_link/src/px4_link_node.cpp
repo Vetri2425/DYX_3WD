@@ -588,7 +588,8 @@ void Px4LinkNode::on_spray_command(const dyx3_interfaces::msg::SprayActuatorComm
   // Newest request from each source wins while queued. A dropped request is explicitly failed so
   // its sender cannot mistake queue replacement for an FCU confirmation.
   for (auto it = spray_queue_.begin(); it != spray_queue_.end();) {
-    if ((watchdog_off && it->on) || it->source == m.source) {
+    // Watchdog OFF wins over everything queued from other sources, ON or OFF.
+    if ((watchdog_off && it->source != Cmd::SOURCE_WATCHDOG) || it->source == m.source) {
       publish_spray_ack(it->seq, it->source, false,
                         dyx3_interfaces::msg::SprayActuatorAck::RESULT_LINK_REFUSED);
       it = spray_queue_.erase(it);
