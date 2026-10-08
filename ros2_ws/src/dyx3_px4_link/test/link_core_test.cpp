@@ -84,14 +84,15 @@ TEST(Staleness, SessionResetIsCountedOnceAndConsumedOnce) {
   feed_all(m, 0.0);
   EXPECT_TRUE(m.evaluate(0.1).session_alive);
   EXPECT_FALSE(m.consume_reset());
-  EXPECT_FALSE(m.evaluate(3.0).session_alive);  // everything silent: agent died
+  EXPECT_FALSE(
+      m.evaluate(5.0).session_alive);  // everything silent past the 3.0 s limit: agent died
   EXPECT_EQ(m.session_resets(), 0U);
-  feed_all(m, 3.5);
-  EXPECT_TRUE(m.evaluate(3.5).session_alive);
+  feed_all(m, 5.5);
+  EXPECT_TRUE(m.evaluate(5.5).session_alive);
   EXPECT_EQ(m.session_resets(), 1U);
   EXPECT_TRUE(m.consume_reset());
   EXPECT_FALSE(m.consume_reset());
-  m.evaluate(3.51);
+  m.evaluate(5.51);
   EXPECT_EQ(m.session_resets(), 1U);
 }
 

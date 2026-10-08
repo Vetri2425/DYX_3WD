@@ -609,7 +609,7 @@ TEST(Px4LinkNode, SessionLossThenRecoveryReArmsTheHandshake) {
   r.bring_up();
   r.run(0.3);
   r.alive = false;
-  r.run(1.5);
+  r.run(3.5);  // beyond the 3.0 s session limit (stale_timesync_s / stale_estimator_flags_s)
   EXPECT_FALSE(r.status.session_alive);
   EXPECT_EQ(r.status.fault, dyx3_interfaces::msg::Px4LinkStatus::FAULT_NO_SESSION);
   r.reqs.clear();
@@ -1387,7 +1387,7 @@ TEST(Px4LinkNode, TimesyncEvidenceIsPublishedAsValuesOnlyAndZeroedWhenTheSession
   r.run(0.3);
   EXPECT_EQ(r.status.timesync_offset_us, 4000);
   r.alive = false;
-  r.run(1.5);
+  r.run(3.5);  // beyond the 3.0 s session limit (stale_timesync_s / stale_estimator_flags_s)
   EXPECT_FALSE(r.status.timesync_valid);
   EXPECT_EQ(r.status.timesync_offset_us, 0);  // a stale offset is never presented as current
 }
@@ -1399,7 +1399,7 @@ TEST(Px4LinkNode, EstimatorHealthDefaultsUnhealthyUntilFlagsArrive) {
   EXPECT_TRUE(r.health.flags_valid);
   EXPECT_FALSE(r.health.test_ratios_valid);  // estimator_status is not on DDS
   r.alive = false;
-  r.run(1.5);
+  r.run(3.5);  // beyond the 3.0 s session limit (stale_timesync_s / stale_estimator_flags_s)
   EXPECT_FALSE(r.health.flags_valid);
 }
 
