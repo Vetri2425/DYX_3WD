@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# DYX 3WD — dyx3-ros launcher: the production control graph (mission, motion_guard, px4_link, spray, system_gateway).
+# DYX 3WD — dyx3-ros launcher: the production control graph (mission, motion_guard, px4_link, rpp, spray, system_gateway).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

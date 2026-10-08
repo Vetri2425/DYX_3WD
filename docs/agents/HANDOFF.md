@@ -57,7 +57,7 @@ there is none yet.
 **Next agent should do first**
 1. Push and get CI green. It has never run.
 2. Milestone 2 — freeze `dyx3_interfaces`, starting with `MotionSetpoint`.
-3. Classify all 174 parameters (120 RPP + 54 spray) as LIVE / IDLE_ONLY / RESTART.
+3. Classify the 173 legacy parameters (119 RPP + 54 spray) as LIVE / IDLE_ONLY / RESTART.
 
 **Open questions for the human**
 - `F-tasks.md` Part E, questions 1–6 — in particular whether to reproduce upstream #27497
@@ -744,3 +744,9 @@ warning expires after the last actual late tick while the lifetime overrun count
 Nonfinite/backward injected times are ignored. A fake-FCU node test covers normal ticks,
 recent and repeated overruns, recovery, counter retention, and invalid time. ROS/colcon remains
 unavailable locally; the existing Phase D ACK tests are unchanged and await CI execution.
+
+F5 corrected only the ROS launcher comment after checking the launch graph's six nodes.
+The legacy 173-count is corrected in this handoff's old action list; the registry now
+distinguishes that legacy total from the generated current 117 RPP / 49 spray tables and
+two production-only additions. A proposal requests the corresponding human-owned
+`CLAUDE.md` corrections; that file and the frozen architecture were not edited.

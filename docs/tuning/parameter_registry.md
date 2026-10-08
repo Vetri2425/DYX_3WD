@@ -12,6 +12,10 @@ executable `declare_parameter(` calls in the read-only prototype; comment-only o
 excluded. In production ownership, three heading-verdict parameters have moved from RPP to `dyx3_spray` (Phase C2). In particular, the comment at `PX4_DXP/src/rpp_controller_node.py:679` is not a
 parameter. The historical 120/174 discrepancy is recorded in
 `docs/architecture/proposals/2026-10-07_parameter-count-173.md`.
+The generated current production tables contain **117 RPP + 49 spray = 166** parameters:
+164 carried legacy parameters plus `segment_command_mode` and `rpp_timeout_s`. Three legacy
+heading-verdict parameters are owned by spray; nine legacy spray parameters are excluded with
+reasons in `tools/gen_param_tables.py`. This does not change the 173-row legacy registry.
 
 Current defaults are copied verbatim from the prototype. They are evidence, not approval for
 the NED production control path, and must be re-validated at **GATE 4** (spec §9 / §11): the
