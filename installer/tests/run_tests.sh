@@ -207,6 +207,7 @@ F
   (stop_enabled_services() { printf 'stopped\n' >"${T}/first_stop"; }; \
     FAKE_NO_AGENT="${T}/no_agent" upgrade_to "${A}") >"${T}/up_first_fail" 2>&1
   rc=$?
+  check "build_release installs the launcher helper bin/dyx3-env.sh" 'ls "${DYX3_RELEASES}"/*/bin/dyx3-env.sh >/dev/null 2>&1'
   check "unhealthy first install fails" '[ "${rc}" -ne 0 ] && grep -q "first install" "${T}/up_first_fail"'
   check "failed first install stops new services" '[ -f "${T}/first_stop" ]'
   check "failed first install leaves no current symlink" '[ ! -e "${DYX3_CURRENT}" ] && [ ! -L "${DYX3_CURRENT}" ]'
@@ -334,6 +335,7 @@ prebuilt() {
   : >"${stage}/opt/dyx3/releases/${sha}/ros2_ws/install/setup.bash"
   printf '#!/bin/sh\n' >"${stage}/opt/dyx3/releases/${sha}/bin/dyx3-platform"
   chmod +x "${stage}/opt/dyx3/releases/${sha}/bin/dyx3-platform"
+  : >"${stage}/opt/dyx3/releases/${sha}/bin/dyx3-env.sh"
   : >"${stage}/opt/dyx3/px4_msgs/${FIRMWARE_SHA}/install/setup.bash"
   : >"${stage}/opt/dyx3/px4_msgs/${FIRMWARE_SHA}/.complete"
   echo abc >"${stage}/opt/dyx3/px4_msgs/${FIRMWARE_SHA}/px4_msgs.sha256"

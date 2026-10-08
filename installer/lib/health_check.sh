@@ -22,6 +22,7 @@ health_release() {
   fi
   [ -f "${rel}/ros2_ws/install/setup.bash" ] && _pass "ros2_ws install present" || _fail "ros2_ws/install/setup.bash missing"
   [ -x "${rel}/bin/dyx3-platform" ] && _pass "bin/dyx3-platform executable" || _fail "bin/dyx3-platform missing"
+  [ -f "${rel}/bin/dyx3-env.sh" ] && _pass "bin/dyx3-env.sh present" || _fail "bin/dyx3-env.sh missing (no ROS launcher can start)"
   local pm
   pm="$(px4_msgs_dir)"
   if [ -f "${pm}/.complete" ]; then

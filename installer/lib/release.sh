@@ -101,6 +101,9 @@ build_release() {
     name="$(basename "${s}" .sh)"
     run install -m 0755 "${s}" "${rel}/bin/dyx3-${name#start-}"
   done
+  # Every launcher sources this helper from its own directory (bin/); without it nothing but
+  # dyx3-platform can start (found on the rover 2026-10-08).
+  run install -m 0644 "${rel}/deployment/scripts/dyx3-env.sh" "${rel}/bin/dyx3-env.sh"
 }
 
 # switch_release <sha>: atomically point current at it; remember the previous one.

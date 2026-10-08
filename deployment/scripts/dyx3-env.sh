@@ -40,5 +40,10 @@ dyx3_env_load() {
   done
   export ROS_DOMAIN_ID
   if [ "${DYX3_ROS_LOCALHOST_ONLY:-0}" = "1" ]; then export ROS_LOCALHOST_ONLY=1; fi
+  # The service user's HOME (/var/lib/dyx3) is root-owned by design, so ROS cannot create ~/.ros there
+  # (rcl aborts: "Failed to create log directory"). Point ROS at directories the service owns.
+  export ROS_HOME="${ROS_HOME:-/var/lib/dyx3/state/ros}"
+  export ROS_LOG_DIR="${ROS_LOG_DIR:-/var/log/dyx3/ros}"
+  mkdir -p "${ROS_HOME}" "${ROS_LOG_DIR}" 2>/dev/null || true
   return 0
 }
