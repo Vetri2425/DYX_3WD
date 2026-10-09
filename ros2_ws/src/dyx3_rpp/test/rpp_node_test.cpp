@@ -725,3 +725,19 @@ TEST(RppNode, ATangentRunHandoverNeverPublishesAStopWhileDriving) {
   EXPECT_EQ(r.status.state, RppStatus::STATE_COMPLETE)
       << "run " << r.status.run_index << " n " << r.north << " e " << r.east;
 }
+
+// XR-RPP-005: the status cross-track is right-positive in the precise stop too.
+TEST(RppNode, TheStatusCrossTrackIsRightPositiveInThePreciseStop) {
+  Rig r({rclcpp::Parameter("pivot_to_intercept_enabled", false)});
+  r.north = 5.92;
+  r.east = 0.03;  // right of the northbound line
+  r.mission_state = MissionState::STATE_RUNNING;
+  bool seen = false;
+  for (int i = 0; i < 100 && !seen; ++i) {
+    r.cycle();
+    if (r.status.state != RppStatus::STATE_CREEPING) continue;
+    seen = true;
+    EXPECT_NEAR(r.status.cross_track_right_m, 0.03F, 1e-3F);
+  }
+  EXPECT_TRUE(seen) << "the precise stop never engaged";
+}

@@ -122,6 +122,10 @@ struct TickOutput {
       false};  // the prototype returned without publishing a command (run switch)
   bool debug_valid{false};
   DebugRow debug;
+  // Cross-track for RppStatus.cross_track_right_m: metres, RIGHT of the directed path positive
+  // (frames.md). Equal to debug.cross_track, except in the endpoint precise stop, whose legacy
+  // debug value is left-positive (kept for the equivalence with the prototype; XR-RPP-005).
+  double cross_track_right{std::numeric_limits<double>::quiet_NaN()};
   bool segment_debug_valid{false};
   SegmentDebugRow segment_debug;
   int segment_debug_publishes{0};

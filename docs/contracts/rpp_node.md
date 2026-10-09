@@ -35,7 +35,8 @@
 * **State reporting** (`RppStatus.state`): TRACKING only while actually tracking (tick state TRACKING or APPROACH) — `dyx3_spray` reads TRACKING as the
   "mission has started" evidence and PIVOTING as the pivot gate, so STOPPING (brake, corner stop, a gate refusal), CREEPING (precise stop) and COMPLETE must never be
   reported as TRACKING; LOADED while waiting; ERROR when the artifact is bad or an unported feature is enabled; COMPLETE when the core finished.
-  Also reported: the prototype's tick/segment codes, the RTK refusal reason, conditioned artifact hash, `spray_request` (legacy diagnostic only; not actuator
+  `cross_track_right_m` is right-positive everywhere (`frames.md`), including the endpoint precise stop, whose legacy debug value is left-positive
+  and is negated for the status only (XR-RPP-005; control uses its magnitude). Also reported: the prototype's tick/segment codes, the RTK refusal reason, conditioned artifact hash, `spray_request` (legacy diagnostic only; not actuator
   authority), the loop jitter and overrun count (`LoopTimer`).
 * **Unported feature** (`point_hold_enabled`): STOP, `STATE_ERROR`, `handoff = 1`. It refuses to drive rather than drive without the overlay.
 
@@ -55,7 +56,7 @@ shared with motion_guard, comes from the launch prefix in `dyx3_bringup/launch/c
 
 ## 5. Proof
 
-`rpp_node_test` (in-process, private DDS domain, injected monotonic clock, a kinematic stand-in vehicle): 19 cases — startup validation; load by id and
+`rpp_node_test` (in-process, private DDS domain, injected monotonic clock, a kinematic stand-in vehicle): 20 cases — startup validation; load by id and
 acknowledgement; a missing artifact; a **whole mission driven to COMPLETE** (the line is marked where the planner says, stops on the final point within 6 cm);
 stale pose; RTK drop with the reason; pause and resume from rest; entry pivot; parameter classes; the unported feature; every emitted mode contract-conforming; a final approach 3 cm to the side of the endpoint completes within 10 s
 with at most 2 speed reversals (XR-RPP-001); on an L-shaped mission the first heading after the corner pivot is the exit leg (XR-RPP-007).

@@ -77,3 +77,28 @@ TEST(RppCore, APreciseStopPastItsTimeoutBrakesAndCompletes) {
   for (int i = 0; i < 30 && !r.core->path_done(); ++i) r.step();
   EXPECT_TRUE(r.core->path_done());
 }
+
+// XR-RPP-005: RppStatus.cross_track_right_m is right-positive (frames.md). The precise stop's
+// legacy debug cross-track is left-positive; the status value must not be.
+TEST(RppCore, ThePreciseStopReportsCrossTrackRightPositive) {
+  CoreRig r({north_run(6.0, Profile::Segment, 6.0)});
+  r.n = 5.95;
+  r.e = 0.03;  // RIGHT of a northbound line
+  bool seen = false;
+  for (int i = 0; i < 5; ++i) {
+    const TickOutput& o = r.step();
+    if (!r.core->snapshot().endpoint_stop_active) continue;
+    seen = true;
+    EXPECT_NEAR(o.debug.cross_track, -0.03, 1e-9);  // the prototype's sign, kept for equivalence
+    EXPECT_NEAR(o.cross_track_right, 0.03, 1e-9);
+  }
+  EXPECT_TRUE(seen);
+  // and while tracking it is the geometry's right-positive cross-track
+  CoreRig t({north_run(6.0, Profile::Segment, 6.0)});
+  t.n = 1.0;
+  t.e = 0.03;
+  const TickOutput& o = t.step();
+  EXPECT_FALSE(t.core->snapshot().endpoint_stop_active);
+  EXPECT_NEAR(o.cross_track_right, 0.03, 1e-9);
+  EXPECT_DOUBLE_EQ(o.cross_track_right, o.debug.cross_track);
+}

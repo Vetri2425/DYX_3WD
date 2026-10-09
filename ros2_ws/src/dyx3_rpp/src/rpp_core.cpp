@@ -254,6 +254,7 @@ void RppCore::publish_yaw_rate(double yr) { out_.yaw_rate = yr; }
 
 void RppCore::publish_debug(const DebugRow& row) {
   out_.debug = row;
+  out_.cross_track_right = row.cross_track;
   out_.state = static_cast<StateCode>(row.state);
   out_.debug_valid = true;
 }
@@ -631,7 +632,8 @@ bool RppCore::precise_stop_tick(double pos_n, double pos_e, double yaw_ned, doub
   un /= seg_len;
   ue /= seg_len;
 
-  // residual: + endpoint ahead on the final segment, - overshot
+  // residual: + endpoint ahead on the final segment, - overshot. cross: the prototype's sign,
+  // LEFT of the final segment positive (only |cross| feeds control; the status reports -cross).
   const double dn = b.n - pos_n;
   const double de = b.e - pos_e;
   const double residual = dn * un + de * ue;
@@ -691,6 +693,7 @@ bool RppCore::precise_stop_tick(double pos_n, double pos_e, double yaw_ned, doub
     double hv = 0.0;
     publish_brake(yaw_ned, tel, &hv);
     publish_debug(hold_row(cross, 0.0, dist_to_goal, hv, dist_to_goal, age_ms, false));
+    out_.cross_track_right = -cross;  // XR-RPP-005: `cross` is left-positive
     publish_segment_debug(SegState::CornerStop, std::max(0, static_cast<int>(run_->pts.size()) - 2),
                           std::max(0.0, residual), dist_to_goal, kNaN, kNaN, kNaN, 0.0);
     return true;
@@ -701,6 +704,7 @@ bool RppCore::precise_stop_tick(double pos_n, double pos_e, double yaw_ned, doub
     double hv = 0.0;
     publish_brake(yaw_ned, tel, &hv);
     publish_debug(hold_row(cross, 0.0, dist_to_goal, hv, dist_to_goal, age_ms, false));
+    out_.cross_track_right = -cross;  // XR-RPP-005: `cross` is left-positive
     return true;
   }
 
@@ -739,6 +743,7 @@ bool RppCore::precise_stop_tick(double pos_n, double pos_e, double yaw_ned, doub
       std::copysign(std::hypot(v_n, v_e), v_n * std::cos(yaw_ned) + v_e * std::sin(yaw_ned));
   publish_debug(
       hold_row(cross, 0.0, dist_to_goal, std::hypot(v_n, v_e), dist_to_goal, age_ms, false));
+  out_.cross_track_right = -cross;  // XR-RPP-005: `cross` is left-positive
   publish_segment_debug(SegState::CornerStop, std::max(0, static_cast<int>(run_->pts.size()) - 2),
                         std::max(0.0, residual), dist_to_goal, kNaN, kNaN, kNaN, 0.0);
   return true;
