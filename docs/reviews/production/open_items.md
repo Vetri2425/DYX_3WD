@@ -38,7 +38,7 @@ Review baseline: DYX_3WD `master` `252778e` (firmware `8279fa4be3`).
 |---|---|---|---|---|---|
 | 1 | `dyx3_rpp` | 2026-10-09 | 2026-10-09 | 0 / 1 / 4 / 3 | open |
 | 2 | `dyx3_motion_guard` | 2026-10-09 | 2026-10-09 | 0 / 0 / 3 / 4 | open |
-| 3 | `dyx3_px4_link` | — | — | — | prompt issued |
+| 3 | `dyx3_px4_link` | 2026-10-09 | 2026-10-09 | 0 / 3 / 1 / 3 | open |
 | 4 | `dyx3_interfaces` (+ px4_msgs pin) | — | — | — | prompt issued |
 | 5 | `dyx3_mission` | — | — | — | |
 | 6 | `dyx3_gnss_rtk` | — | — | — | |
@@ -292,6 +292,98 @@ Producer periods used to re-rate MG-001:
 
 ---
 
+## 3. `dyx3_px4_link`
+
+Reviewer verdict: REQUEST CHANGES (1 CRITICAL, 3 HIGH, 3 MEDIUM, 1 LOW). After verification: **0 CRITICAL,
+3 HIGH, 1 MEDIUM, 3 LOW, 1 rejected**.
+- The CRITICAL (PXL-001) is real as an **unmeasured acceptance gate**, not as a code defect: PX4 owns the stop
+  after companion death. It is re-rated HIGH and merged with X-008 / PC-2c.
+- Verification confirmed that PXL-004 sits literally **inside** the 100 Hz writer tick.
+- Verification found one more parameter item the reviewer missed (X-011).
+
+Facts used (code at `8236c65`, firmware `8279fa4be3`, `config/px4/3wd_6x_carry_from_proto.params`):
+- **Offboard loss.** `COM_OBL_RC_ACT` is 7 (Disarm), set in the baseline. `COM_OF_LOSS_T` is **not set**, so the
+  firmware default of 1.0 s applies; the prototype had 30 s, which is good not to have carried over.
+  `RoverDifferential` resets and stops on disarm.
+- **What the heartbeat does.** On `link_ok` = false it is withdrawn, because no trustworthy zero can be published
+  (`offboard_heartbeat.cpp:21-28`). A stale `/fmu/out` topic keeps the heartbeat and sends STOP (gate), which is
+  correct.
+- **`main.cpp:15-17`:** plain `rclcpp::spin`; no STOP on SIGTERM (= X-010).
+- **One tick order** (`px4_link_node.cpp:721-780`): monitor → handshake requests → `service_spray_transactions`
+  (may call `dispatch_next_spray_transaction` → `reserve()`) → gate → **setpoint publish** → status.
+
+| ID | Severity | Status | Area | Where | Item |
+|---|---|---|---|---|---|
+| PXL-002 | **HIGH** | ACCEPTED | Stop | `px4_link_node.cpp:290-296`; `offboard_heartbeat.cpp:5-20` | `SetOffboard(false)` stops the setpoint stream at once, with no STOP first: PX4 keeps the last setpoint until offboard loss (1.0 s), then disarms |
+| PXL-004 | **HIGH** | ACCEPTED (mechanism; magnitude to measure) | Stall | `spray_ack_tokens.cpp:59-92`; `px4_link_node.cpp:658-685,759,772` | Two `fsync`s (file + directory) per new spray transaction, inside the 100 Hz writer tick, before the setpoint publish |
+| PXL-001 | **HIGH** (~~CRITICAL~~) | ACCEPTED ↓ (acceptance gate; merged with X-008, PC-2c) | Stop | `main.cpp:15-17`; firmware `commander_params.c` | No measured stop bound after process, agent, Ethernet or Jetson loss: PX4 offboard-loss (1.0 s default) + disarm is the only path |
+| PXL-003 | MEDIUM (~~HIGH~~) | DOUBT (measure, with X-006) | Stall | `px4_link_node.cpp:721-780`; `main.cpp:16` | One non-RT executor serves the writer plus ULog, RTCM, spray, handshake and services |
+| PXL-005 | LOW (~~MEDIUM~~) | DOUBT (bench) | Correctness | `px4_link_node.cpp:347`; `offboard_heartbeat.cpp:32-44` | 0.5 s prestream before the OFFBOARD request; a rejection goes to terminal `Failed` with no retry |
+| PXL-006 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | State | `vehicle_state_assembler.cpp:13-27` | z, vz, deltas and the reference lat/lon/alt are copied without `isfinite` |
+| PXL-008 | LOW | ACCEPTED | Latency | `px4_link_node.cpp:762-766` | `std::to_string` + string compare every tick (small-string, no heap; trivial) |
+| PXL-007 | — | REJECTED (duplicate) | Tests | — | "Unit tests do not prove physical stop time": this is the X-008 / PXL-001 measurement, not a separate defect |
+
+### PXL-002 — HIGH — disabling offboard drops the stream without a STOP
+- `SetOffboard(false)` calls `offboard_->enable(false)` and replies OK at once (`px4_link_node.cpp:290-296`).
+- On the next tick `step()` returns `Disabled` with `publish_heartbeat` = false (`offboard_heartbeat.cpp:17-20`).
+  The very next writer tick publishes nothing: no STOP, no mode change.
+- PX4 keeps applying the last rover setpoint until `COM_OF_LOSS_T` (1.0 s), then disarms (`COM_OBL_RC_ACT` 7).
+  At 1 m/s that is up to about 1 m on the last command.
+- The service reply means "Jetson stopped sending", not "rover stopped".
+- **Fix:**
+  1. On disable, publish the STOP set for a short window (e.g. 0.2–0.3 s, ≥ 20 ticks) before withdrawing the
+     heartbeat.
+  2. Then send an explicit mode change (Hold) or disarm, per the owner's policy.
+  3. Reply only when `vehicle_status` confirms, or say "requested" in the result.
+- **Test:** disable while commanding 0.5 m/s → zero speed from the next tick; PX4 leaves OFFBOARD within the
+  window.
+
+### PXL-004 — HIGH — `fsync` inside the 100 Hz writer
+- Each new spray transaction (`ack_token == 0`) calls `SprayAckTokens::reserve()` → `persist()`. That opens a temp
+  file, then write + `fsync` + rename + `fsync` of the directory (`spray_ack_tokens.cpp:59-78`).
+- It runs from `dispatch_next_spray_transaction()` (`px4_link_node.cpp:665`), which is called from
+  `service_spray_transactions()` **inside `step()` before the setpoint publish** (lines 759 → 772).
+- Valve commands happen while moving, at every line start and end. eMMC/NVMe `fsync` is typically a few ms, but
+  it is unbounded under I/O load.
+- A persist failure sets `failed_` permanently. Spray is then refused until restart: fail-safe, but it stops
+  marking.
+- **Fix:**
+  - Reserve identities in **blocks** (e.g. persist `next + 64` once, hand out 64 from memory). That keeps the
+    never-reuse guarantee across power loss and leaves one `fsync` per 64 transactions.
+  - Or refill the block from a worker thread.
+  - Never delete the `fsync`.
+- **Test:** inject a 50 ms `persist` delay → the writer's maximum inter-tick gap must stay under 15 ms.
+
+### PXL-001 — HIGH — no measured stop bound after companion loss (acceptance gate)
+- Confirmed: nothing on the Jetson can stop the rover once `px4_link`, the agent, Ethernet or the Jetson is gone.
+  The bound is PX4's: `COM_OF_LOSS_T` (default **1.0 s**, not in the baseline) → `COM_OBL_RC_ACT` 7 (disarm) →
+  `RoverDifferential` stop.
+- Upstream #27514 reports about 900 ms of continued setpoint application after the external process dies.
+- `main.cpp` sends no STOP on SIGTERM either (X-010). A systemd stop while moving falls into the same 1 s path.
+- **Fix:**
+  - set `COM_OF_LOSS_T` explicitly (PC-2c; candidate 0.5 s, it must exceed the worst writer gap);
+  - add the SIGTERM STOP burst (X-010);
+  - HIL-measure every row of the stop matrix: SIGKILL, SIGTERM, agent kill, cable pull, Jetson power-off; wheels
+    up first, then on the ground at mission speed. Record ULog nav state, arming and wheel speed, plus the
+    stopping distance.
+
+### PXL-003 — MEDIUM — DOUBT — shared non-RT executor
+- Confirmed: one `SingleThreadedExecutor` under normal scheduling (X-006) runs the writer timer and every callback.
+- Publishes are reliable with KEEP_LAST depth 1. Fast DDS does not block on a full history for KEEP_LAST, so a
+  multi-ms `publish()` stall is plausible only from the transport and is **unproven**.
+- Measure first: inter-tick gap p50/p99/max with ULog streaming, RTCM over DDS and spray active; agent kill;
+  saturated Ethernet.
+- The structural fix is PC-2 (one RT container, writer on its own callback group/thread).
+
+### PXL-005 / PXL-006 / PXL-008 — LOW
+- **PXL-005.** A rejected OFFBOARD request is a benign refusal (no motion). Confirm the prestream PX4 needs on a
+  cold boot at the bench. Add one retry, or make `Failed` visible to the operator.
+- **PXL-006.** The horizontal pose, velocity and heading are already finite-gated. Gate
+  `global_reference_valid` on finite lat/lon/alt for the gateway and map consumers.
+- **PXL-008.** Compare the enum, not a string; trivial.
+
+---
+
 ## Cross-part items (raised by the part reviews; owned by later parts)
 
 | ID | Owner part | Item | Status |
@@ -305,4 +397,5 @@ Producer periods used to re-rate MG-001:
 | X-007 | `px4_link` | Root cause of RPP-009: no angular-rate subscription | ACCEPTED, HIGH |
 | X-008 | `px4_link` / firmware | Measure the real stop time for three separate events: the guard sends STOP; the guard dies while `px4_link` lives (0.2 s gate); the whole graph dies (PX4 offboard loss: `COM_OF_LOSS_T` is not in the baseline, `COM_OBL_RC_ACT` 7, upstream #27514) | open, measure (from MG review) |
 | X-009 | mission / bringup | Prove that a systemd graph restart or an E-stop clear can never resume a mission without the operator | open, test (from MG review) |
-| X-010 | `px4_link` | On a graph stop every node gets SIGINT together, so only the last hop can guarantee a final STOP: `px4_link` must publish STOP and stop the offboard heartbeat cleanly before exiting | open, in PXL review |
+| X-010 | `px4_link` | On a graph stop every node gets SIGINT together, so only the last hop can guarantee a final STOP: `px4_link` must publish STOP and stop the offboard heartbeat cleanly before exiting | ACCEPTED: confirmed `main.cpp:15-17`; part of PXL-001 |
+| X-011 | PX4 parameter baseline | `COM_RCL_EXCEPT` = 4 (bit 2 = Offboard, firmware `commander_params.c:633-645`): **RC loss triggers no failsafe in OFFBOARD**. Carried from the prototype. The RC kill switch still works while the RC link is alive. Owner decision: keep it (the tablet link and the guard govern autonomy) or clear bit 2 so RC loss stops autonomous runs. Test it with production-readiness #5 | open, owner decision (found in PXL verification) |
