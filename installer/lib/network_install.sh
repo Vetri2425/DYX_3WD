@@ -12,7 +12,9 @@ FCU_JETSON_CIDR="${FCU_JETSON_CIDR:-10.41.10.1/24}"
 # DERIVED — NOT FROM V1 SPEC (HANDOFF 2026-10-07). Production is static-only.
 # On the bench the site router behind the FCU switch is the Jetson's only WAN, so its DHCP
 # default route is kept too; otherwise the release fetch from GitHub fails (seen 2026-10-08).
-FCU_KEEP_DHCP="${FCU_KEEP_DHCP:-0}"
+# The environment wins; otherwise FCU_KEEP_DHCP in /etc/dyx3/network.env (INS-019: a later reinstall or
+# re-apply without the variable used to silently drop the bench WAN); otherwise 0.
+FCU_KEEP_DHCP="${FCU_KEEP_DHCP:-}"
 
 # Per-rover site LAN on the same Ethernet port (/etc/dyx3/network.env, created once, never overwritten).
 # The Jetson baseboard has one Ethernet port behind an internal switch shared with the Pixhawk, so a site
@@ -40,8 +42,10 @@ install_fcu_network() {
     warn "nmcli not found: skipping FCU network profile"
     return 0
   fi
-  local method="manual" never_default="yes"
-  if [ "${FCU_KEEP_DHCP}" = "1" ]; then
+  local method="manual" never_default="yes" keep_dhcp="${FCU_KEEP_DHCP}"
+  [ -n "${keep_dhcp}" ] || keep_dhcp="$(_network_env FCU_KEEP_DHCP)"
+  if [ "${keep_dhcp}" = "1" ]; then
+    warn "FCU_KEEP_DHCP=1: DHCP and its default route stay on the FCU port (bench only)"
     method="auto"
     never_default="no"
   fi

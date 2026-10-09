@@ -288,6 +288,12 @@ libs() {
   printf 'DYX3_LAN_ADDRESS=10.41.10.9/24\n' >"${DYX3_ETC}/network.env"
   net_lan="$(DYX3_DRY_RUN=1 install_fcu_network 2>&1)"
   check "a site LAN address on the FCU subnet is refused" 'printf "%s" "${net_lan}" | grep -q "on the FCU subnet; ignored" && printf "%s" "${net_lan}" | grep -q "ipv4.addresses 10.41.10.1/24 "'
+  # INS-019: the bench setting persists in network.env; the environment still overrides it.
+  printf 'FCU_KEEP_DHCP=1\n' >"${DYX3_ETC}/network.env"
+  net_lan="$(DYX3_DRY_RUN=1 install_fcu_network 2>&1)"
+  check "FCU_KEEP_DHCP=1 in network.env keeps DHCP on later runs" 'printf "%s" "${net_lan}" | grep -q "ipv4.method auto"'
+  net_lan="$(DYX3_DRY_RUN=1 FCU_KEEP_DHCP=0 install_fcu_network 2>&1)"
+  check "FCU_KEEP_DHCP=0 in the environment overrides network.env" 'printf "%s" "${net_lan}" | grep -q "ipv4.method manual"'
   rm -f "${DYX3_ETC}/network.env"
   check "fcu profile (bench): auto, keeps default route" 'printf "%s" "${net_bench}" | grep -q "ipv4.method auto" && printf "%s" "${net_bench}" | grep -q "ipv4.never-default no"'
 

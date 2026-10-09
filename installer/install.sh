@@ -22,7 +22,8 @@ usage: install.sh --production [--ref <git-ref>] [--skip-deps] [--dry-run]
   --ref <ref>    release to install (default: the commit of this checkout)
   --skip-deps    skip apt / XRCE agent / mavlink-router / ROS (already provisioned)
   --dry-run      print what would run
-env: DYX3_BUILD_JOBS (default 1), FCU_IFACE (default enP8p1s0), FCU_KEEP_DHCP=1 (bench only)
+env: DYX3_BUILD_JOBS (default 1), FCU_IFACE (default enP8p1s0),
+     FCU_KEEP_DHCP=1 (bench only; or FCU_KEEP_DHCP=1 in /etc/dyx3/network.env to keep it on later runs)
 USAGE
 }
 
