@@ -455,3 +455,19 @@ TEST(ParamValueText, DoublesAndDoubleArraysRoundTripExactly) {
   EXPECT_EQ(param_value_text(rclcpp::ParameterValue(true)), "true");
   EXPECT_EQ(param_value_text(rclcpp::ParameterValue(std::string("x"))), "x");
 }
+
+// Size + durability defaults: compact (zstd per closed split) and power-cut tolerant (sqlite WAL).
+TEST(RecorderNode, DefaultBagOptionsAreCompactAndResilient) {
+  Rig r;
+  const auto o = r.rec->bag_options();
+  const auto has = [&](const std::string& k, const std::string& v) {
+    for (size_t i = 0; i + 1 < o.size(); ++i)
+      if (o[i] == k && o[i + 1] == v) return true;
+    return false;
+  };
+  EXPECT_TRUE(has("--storage", "sqlite3"));
+  EXPECT_TRUE(has("--storage-preset-profile", "resilient"));
+  EXPECT_TRUE(has("--compression-mode", "file"));
+  EXPECT_TRUE(has("--compression-format", "zstd"));
+  EXPECT_TRUE(has("--max-bag-duration", "300"));
+}

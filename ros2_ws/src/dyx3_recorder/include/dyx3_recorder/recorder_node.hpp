@@ -55,6 +55,12 @@ public:
 private:
   void declare_params();
   std::vector<NodeParams> collect_params() const;
+
+public:
+  // The rosbag2 options appended to bag_command (storage, preset, compression, split).
+  std::vector<std::string> bag_options() const;
+
+private:
   void on_mission(const dyx3_interfaces::msg::MissionState& m);
   void start_run(uint32_t mission_id, uint32_t run_index, const std::string& sha, bool running);
   void mark_running();
@@ -67,7 +73,9 @@ private:
   ParamCollector collector_;
   std::string runs_dir_, versions_file_, config_dir_, vehicle_id_, operator_;
   std::vector<std::string> topics_, param_nodes_, bag_command_;
-  double bag_finalize_timeout_s_{5.0}, param_timeout_s_{2.0}, status_hz_{2.0};
+  std::string bag_storage_, bag_storage_preset_, bag_compression_mode_, bag_compression_format_;
+  int64_t bag_compression_threads_{1}, bag_max_duration_s_{300};
+  double bag_finalize_timeout_s_{10.0}, param_timeout_s_{2.0}, status_hz_{2.0};
   uint64_t min_free_bytes_{0};
 
   mutable std::mutex mu_;

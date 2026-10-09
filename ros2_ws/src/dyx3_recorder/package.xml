@@ -12,6 +12,7 @@
   <depend>dyx3_interfaces</depend>
   <exec_depend>ros2bag</exec_depend>
   <exec_depend>rosbag2_storage_default_plugins</exec_depend>
+  <exec_depend>rosbag2_compression_zstd</exec_depend>
 
   <test_depend>ament_cmake_gtest</test_depend>
 

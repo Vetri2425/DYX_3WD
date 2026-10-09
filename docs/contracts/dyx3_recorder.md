@@ -8,7 +8,7 @@ recorder only observes; it publishes `RecorderStatus` and nothing else, runs as 
 
 ```text
 <runs_dir>/<YYYY-MM-DD_HHMMSS>_mission_<id:04d>[_run<n>]/     (UTC, from the wall clock at start)
-├── rosbag2/                  # produced by a supervised `ros2 bag record` child
+├── rosbag2/                  # produced by a supervised `ros2 bag record` child (sqlite3 WAL, a split every 300 s, closed splits zstd-compressed: *.db3.zstd)
 ├── ulog/stream.ulg          # reassembled from /dyx3/ulog_chunk; ulog/gaps.json lists every missing chunk range
 ├── manifest.json             # run id, mission id/index, path artifact sha256, vehicle, operator, host, start time, FCU timesync at start
 ├── versions.json             # copy of the installer's versions file (stack SHA, px4_msgs SHA, firmware SHA, overlay hash) or {"status":"unavailable",...}
@@ -54,7 +54,13 @@ a reader can resync); a "negative" jump (> 32768) is out-of-order (dropped, coun
 ## 5. Parameters (all RESTART; none affects motion)
 
 `runs_dir` `/var/lib/dyx3/runs` · `versions_file` · `config_dir` · `vehicle_id` `unknown` · `operator` `unknown` · `topics` (list of recorded topics; default = the `/dyx3/**` set) · `param_nodes` (default: every node of `dyx3_bringup/launch/control_graph.launch.py` GRAPH — `dyx3_mission`, `motion_guard`, `px4_link`, `rpp`, `spray`, `system_gateway` — plus the separate services `gnss_rtk`, `spray_watchdog` and `recorder` itself; `recorder_node_test` parses the launch file and fails if a graph node is missing) ·
-`bag_finalize_timeout_s` 5 (DERIVED) · `param_timeout_s` 2 (DERIVED) · `status_hz` 2 (DERIVED) · `min_free_bytes` **0 = no check** (no source for a threshold; **OPEN**: a full disk is detected by the bag
+`bag_storage` `sqlite3` · `bag_storage_preset` `resilient` (REC-021: WAL + `synchronous=NORMAL` instead of an in-memory journal + `synchronous=OFF`) ·
+`bag_compression_mode` `file` · `bag_compression_format` `zstd` · `bag_compression_threads` 1 · `bag_max_duration_s` 300 (split; after a power cut only the
+last split is uncompressed, and it is a valid WAL database). These options are appended to `bag_command` before the topics. Measured in the dev
+container (22 topics at production rates, 60 s, every float field noisy): default sqlite3 153 MB/h, these defaults **60 MB/h** (zstd per message: 108 MB/h).
+The payload alone compresses to ~30 MB/h; the rest is the sqlite row/index overhead. **OPEN (owner):** for < 50 MB/h install
+`ros-humble-rosbag2-storage-mcap` and set `bag_storage: mcap`, `bag_storage_preset: zstd_small`, `bag_compression_mode: none` (chunk compression; not measured here) ·
+`bag_finalize_timeout_s` 10 (DERIVED: the last split is compressed while finalising) · `param_timeout_s` 2 (DERIVED) · `status_hz` 2 (DERIVED) · `min_free_bytes` **0 = no check** (no source for a threshold; **OPEN**: a full disk is detected by the bag
 process dying, not predicted) · `bag_stall_s` **0 = off** (rosbag2's sqlite file does not grow every second; no source).
 **OPEN:** whether to also bag the raw `/fmu/out/**` topics (default: not recorded; the `/dyx3/vehicle_state` fan-out is).
 

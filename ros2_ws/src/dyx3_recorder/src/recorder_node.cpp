@@ -228,7 +228,17 @@ void RecorderNode::declare_params() {
   param_nodes_ = declare_parameter<std::vector<std::string>>("param_nodes", default_param_nodes());
   bag_command_ = declare_parameter<std::vector<std::string>>(
       "bag_command", {"ros2", "bag", "record", "-o", "{dir}"});
-  bag_finalize_timeout_s_ = declare_parameter<double>("bag_finalize_timeout_s", 5.0);
+  // Bag format (owner requirement: runs in MB, not GB; REC-021: survive a power cut). sqlite3 with
+  // the "resilient" preset (WAL + synchronous=NORMAL instead of journal in memory + synchronous=OFF),
+  // zstd FILE compression of each closed split, and a split every bag_max_duration_s so that after a
+  // power cut only the last split is uncompressed (and still a valid WAL database).
+  bag_storage_ = declare_parameter<std::string>("bag_storage", "sqlite3");
+  bag_storage_preset_ = declare_parameter<std::string>("bag_storage_preset", "resilient");
+  bag_compression_mode_ = declare_parameter<std::string>("bag_compression_mode", "file");
+  bag_compression_format_ = declare_parameter<std::string>("bag_compression_format", "zstd");
+  bag_compression_threads_ = declare_parameter<int64_t>("bag_compression_threads", 1);
+  bag_max_duration_s_ = declare_parameter<int64_t>("bag_max_duration_s", 300);
+  bag_finalize_timeout_s_ = declare_parameter<double>("bag_finalize_timeout_s", 10.0);
   param_timeout_s_ = declare_parameter<double>("param_timeout_s", 2.0);
   status_hz_ = declare_parameter<double>("status_hz", 2.0);
   min_free_bytes_ = static_cast<uint64_t>(declare_parameter<int64_t>("min_free_bytes", 0));
@@ -237,8 +247,36 @@ void RecorderNode::declare_params() {
     throw std::invalid_argument(
         "recorder parameter invalid: timeouts and rates must be finite and > 0");
   }
-  if (runs_dir_.empty() || bag_command_.empty())
+  if (runs_dir_.empty() || bag_command_.empty() || bag_storage_.empty())
     throw std::invalid_argument("recorder parameter invalid: empty");
+  if (bag_compression_mode_ != "none" && bag_compression_mode_ != "file" &&
+      bag_compression_mode_ != "message")
+    throw std::invalid_argument("recorder parameter invalid: bag_compression_mode");
+  if (bag_compression_mode_ != "none" && bag_compression_format_.empty())
+    throw std::invalid_argument("recorder parameter invalid: bag_compression_format");
+  if (bag_max_duration_s_ < 0 || bag_compression_threads_ < 0)
+    throw std::invalid_argument("recorder parameter invalid: negative bag setting");
+}
+
+std::vector<std::string> RecorderNode::bag_options() const {
+  std::vector<std::string> o{"--storage", bag_storage_};
+  if (!bag_storage_preset_.empty()) {
+    o.push_back("--storage-preset-profile");
+    o.push_back(bag_storage_preset_);
+  }
+  if (bag_compression_mode_ != "none") {
+    o.insert(o.end(), {"--compression-mode", bag_compression_mode_, "--compression-format",
+                       bag_compression_format_});
+    if (bag_compression_threads_ > 0) {
+      o.push_back("--compression-threads");
+      o.push_back(std::to_string(bag_compression_threads_));
+    }
+  }
+  if (bag_max_duration_s_ > 0) {
+    o.push_back("--max-bag-duration");
+    o.push_back(std::to_string(bag_max_duration_s_));
+  }
+  return o;
 }
 
 std::vector<NodeParams> RecorderNode::collect_params() const {
@@ -375,6 +413,7 @@ void RecorderNode::start_run(uint32_t mission_id, uint32_t run_index, const std:
     for (size_t p; (p = a.find("{dir}")) != std::string::npos;) a.replace(p, 5, dir + "/rosbag2");
     argv.push_back(a);
   }
+  for (const auto& a : bag_options()) argv.push_back(a);
   for (const auto& t : topics_) argv.push_back(t);
 
   {
