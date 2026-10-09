@@ -40,9 +40,9 @@ Review baseline: DYX_3WD `master` `252778e` (firmware `8279fa4be3`).
 | 2 | `dyx3_motion_guard` | 2026-10-09 | 2026-10-09 | 0 / 0 / 3 / 4 | open |
 | 3 | `dyx3_px4_link` | 2026-10-09 | 2026-10-09 | 0 / 3 / 1 / 3 | open |
 | 4 | `dyx3_interfaces` (+ px4_msgs pin) | — | — | — | prompt issued |
-| 5 | `dyx3_mission` | — | — | — | |
-| 6 | `dyx3_gnss_rtk` | — | — | — | |
-| 7 | `dyx3_spray` | — | — | — | |
+| 5 | `dyx3_mission` | 2026-10-09 | 2026-10-09 | 0 / 0 / 3 / 4 | open |
+| 6 | `dyx3_gnss_rtk` | — | — | — | prompt issued |
+| 7 | `dyx3_spray` | — | — | — | prompt issued |
 | 8 | `dyx3_geometry` | — | — | — | |
 | 9 | `dyx3_bringup` + systemd (RT, CPU, restart) | — | — | — | |
 | 10 | `dyx3_system_gateway` | — | — | — | |
@@ -381,6 +381,75 @@ Facts used (code at `8236c65`, firmware `8279fa4be3`, `config/px4/3wd_6x_carry_f
 - **PXL-006.** The horizontal pose, velocity and heading are already finite-gated. Gate
   `global_reference_valid` on finite lat/lon/alt for the gateway and map consumers.
 - **PXL-008.** Compare the enum, not a string; trivial.
+
+---
+
+## 4. `dyx3_mission`
+
+Reviewer verdict: REQUEST CHANGES (0 CRITICAL, 2 HIGH, 4 MEDIUM, 1 LOW). After verification: **0 CRITICAL,
+0 HIGH, 3 MEDIUM, 4 LOW**.
+- Both HIGHs are real behaviours, but they are product-semantics and recovery decisions, not safety defects.
+- No path into RUNNING bypasses the gate; this is confirmed below.
+
+Confirmed good:
+- **The only two ways into RUNNING both check the gate.** They are READY → RUNNING via `rpp_ack(gate_ok)`
+  (`mission_node.cpp:268-273`) and PAUSED → RUNNING via `resume(gate_ok)`.
+- **A recovered gate never resumes a mission.** `evaluate_gate` ignores PAUSED.
+- **The RPP acknowledgement is filtered by `mission_id`** (`:253`). RPP and mission live in one launch graph, so
+  they restart together; a stale acknowledgement from a previous instance cannot arrive.
+- **An RPP artifact-load failure is not a silent wait.** RPP publishes `STATE_ERROR` while `load_failed_`
+  (`rpp_node.cpp:330-333`), and the mission goes to ERROR (`:261-267`).
+- **Mission IDs restart at each boot, but the recorder does not collide.** It names run directories by time +
+  `mission_id` + `unique_run_path` (`recorder_node.cpp:205`). The backend does not key on `mission_id`.
+- **RPP and spray load the path through the same C++ reader** (`dyx3_mission::load_artifact`; spray via
+  `spray_node.cpp:90`). So the C++ consumers cannot disagree about whether an artifact is valid.
+
+| ID | Severity | Status | Area | Where | Item |
+|---|---|---|---|---|---|
+| MS-001 | MEDIUM (~~HIGH~~) | ACCEPTED ↓ (owner decision) | Points | `point_journal.cpp:47-88`; `docs/contracts/dyx3_mission.md:57-61` | `PointResult COMPLETED` means "came within 0.10 m", not "marked" |
+| MS-002 | MEDIUM (~~HIGH~~) | ACCEPTED ↓ (owner decision) | Restart | `mission_node.cpp:379-383`; `mission_fsm.cpp` | Point progress lives in memory only; after a graph restart the mission is IDLE and progress is lost |
+| MS-003 | MEDIUM | ACCEPTED | Fault | `mission_node.cpp:252-300` | No RPP-status freshness check while RUNNING |
+| MS-006 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Fault | `mission_node.cpp:36,293-299` | `rpp_ack_timeout_s` = 0 disables the READY timeout |
+| MS-004 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Stall | `path_artifact.cpp:122-127`; `mission_node.cpp:385-387` | Artifact read and SHA-256 with no size limit, inside the Start service callback |
+| MS-005 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Artifact | `path_artifact.cpp:88-116` | The C++ reader accepts non-canonical metadata and numbers that the Python decoder would refuse |
+| MS-007 | LOW | ACCEPTED | Points | `mission_node.cpp:283-288` | The journal uses `position_valid` but not the sample age |
+
+### MS-001 — MEDIUM — "COMPLETED" is geometric (owner decision)
+- The code matches the contract: a must-hit vertex is COMPLETED when the rover enters 0.10 m and then leaves.
+  The result carries the closest-approach distance.
+- The result does not say the paint valve was open there. It is published to the tablet via the gateway
+  (`gateway_node.cpp:197-199`) as `last_point_result`, so an operator can read it as "marked".
+- **Owner decision:**
+  - (a) keep it geometric and show it as "reached (x cm)" in the app;
+  - (b) add spray evidence (valve ON across the vertex) before COMPLETED.
+- The 0.10 m radius is not the 1 cm quality check. Decide where marking quality is judged: recorder or
+  post-run report.
+
+### MS-002 — MEDIUM — progress lost on restart (owner decision)
+- Confirmed. The journal and FSM are in memory; a restart comes back IDLE. There is no automatic motion (X-009
+  is satisfied at code level: IDLE needs a new Start).
+- What is lost is which points were done, so the operator restarts the whole path or re-plans by hand.
+- **Owner decision:** resume-from-point after a crash (persist the journal and execution id atomically; a
+  continuation mission starts at the first unresolved point, with explicit operator confirmation), or
+  whole-mission restart only.
+- The recorder bag still holds the truth for reconciliation.
+
+### MS-003 — MEDIUM — RPP status silence while RUNNING
+- Confirmed: no receipt time is kept for `RppStatus`.
+- If RPP hangs without dying (a dead RPP takes the graph down), the guard's 0.2 s command age stops the rover,
+  but the mission keeps showing RUNNING with no progress.
+- **Fix:** keep the RPP status receipt time. If it is older than about 0.5 s while RUNNING, PAUSE with a
+  distinct reason. Test: silence RPP status → PAUSED, and no auto-resume.
+
+### MS-006 / MS-004 / MS-005 / MS-007 — LOW
+- **MS-006.** The READY wait can only become endless if RPP is alive but never publishes, since a load failure
+  already ends in ERROR. Set a finite default (the largest real mission's conditioning time + margin, measured
+  with RPP-001) and a distinct reason code.
+- **MS-004.** The mission node is not RT, loading happens before RUNNING, and a stall fails closed (the guard
+  needs a fresh RUNNING). Add a size cap at the backend upload limit.
+- **MS-005.** The SHA covers the bytes and all C++ readers agree. Only align with the Python decoder (shared
+  test vectors).
+- **MS-007.** Telemetry only. Gate on sample age once X-001 (sample time end to end) exists.
 
 ---
 
