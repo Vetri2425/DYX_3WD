@@ -1718,3 +1718,52 @@ untouched, as designed.
 - note upstream #27497: a differential rover doesn't turn in Mission mode on v1.17;
 - note the PX4 rover docs (v1.17): the rover modules are "experimental"; ROS 2 control should prefer the PX4
   ROS 2 Interface (rover setpoint types) over raw Offboard.
+
+## 2026-10-09 (13:45) — Claude — Jetson tablet hotspot live (192.168.3.100, 5 GHz ch 149)
+
+Owner plan:
+- The tablet and ssh use the Jetson hotspot. Office Ethernet is not the field path.
+- A USB internet dongle is the uplink; it is not plugged in yet.
+- Rover addresses: 192.168.3.100 = first 3WD; the next rover gets .101.
+
+**Repo (`installer/lib/network_install.sh`, template, README, 7 new installer tests; 141/0):**
+- `DYX3_HOTSPOT_ADDRESS` is the per-rover CIDR. The FCU subnet is refused; blank means 10.42.0.1/24.
+- `DYX3_HOTSPOT_IFACE`: blank picks the first non-USB Wi-Fi, so a USB dongle is never made the AP.
+- The installer turns the Wi-Fi radio on, and warns when a client Wi-Fi profile is bound to the AP device.
+- **The 5 GHz default channel is 149.** The Jetson's vendor `rtl8822ce` driver is self-managed for regulatory
+  and locked to its world plan (`phy#0 (self-managed) country 00`, chplan 0x7F). These were all tried on the rover
+  and none changes it: `iw reg set IN`, the `rtw_country_code=IN` module parameter (loaded, ignored), and
+  writing `IN` to the proc `country_code`. Under that plan only 5745 MHz (ch 149) is not no-IR, so ch 36 failed
+  with "Failed to start AP functionality". 2.4 GHz ch 1–11 also works.
+
+**Rover-local (not in the repo):**
+- `/etc/dyx3/hotspot.env`: SSID `DYX_3WD`, PSK set by the owner (not recorded here),
+  `DYX3_HOTSPOT_ADDRESS=192.168.3.100/24`, `DYX3_HOTSPOT_IFACE=wlP1p1s0`, band `a`.
+  - Pre-edit copy: `/etc/dyx3/hotspot.env.bak-20261009` (empty credentials).
+- NetworkManager had the Wi-Fi radio off (`WirelessEnabled=false`); the installer step turned it on.
+- The phone uplink profile "Vetri's Moto" was bound to `wlP1p1s0` with autoconnect on. It is now
+  `autoconnect=no`. Rebind it, or a dongle profile, to the dongle interface when the dongle arrives.
+- The hotspot step was run from this branch's script (`/home/flash/hs/`); the next release upgrade re-applies it
+  from the repo.
+- A 2.4 GHz switch was run by mistake at 13:33 (the tool reported it as rejected, but it had already executed)
+  and was reverted to 5 GHz at 13:37 on the owner's instruction.
+
+**Verified:**
+- After a Jetson reboot: `dyx3-hotspot` comes up by itself in AP mode, ch 149 / 20 MHz, at 192.168.3.100/24;
+  dnsmasq DHCP 192.168.3.109–254; power save off.
+- FORWARD DROP between `wlP1p1s0` and `enP8p1s0` in both directions. The tablet has no internet through the
+  rover by design until the dongle uplink exists.
+- Tablet (Tab S10 Lite) got 192.168.3.199.
+- **Antennas were not connected at first:** −85 dBm and 19 % loss at 5 m, both RF paths ~10–16 %, MCS0.
+  The owner fitted both antennas: −50 dBm near the rover, −57 dBm at 5 m indoors, 1/32 loss, VHT 2SS.
+  The ping RTT spikes (≤ 868 ms) at strong signal are the idle tablet's power save, not the radio.
+- `iw` reports txpower 7 dBm, but the driver's real target is 16–17 dBm per path (`target_tx_power`).
+
+**Still to do:**
+- A 15-min stability test with the app streaming.
+- An outdoor line-of-sight walk at 5/10/15/25 m (logger: `/home/flash/wifi_range_log.sh <tablet-ip>`, run as
+  `systemd-run --unit=dyx3-bench-wifirange`).
+- Set `DYX3_BACKEND_HOST=192.168.3.100` in `/etc/dyx3/backend.env` once the app works over the hotspot.
+- Dongle uplink.
+- Drop the office DHCP on `enP8p1s0` once Wi-Fi is the access path.
+- Fit the antennas outside any metal on every rover.

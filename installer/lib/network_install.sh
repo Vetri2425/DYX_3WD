@@ -183,8 +183,13 @@ install_hotspot_network() {
     fi
     return 0
   fi
+  # 5 GHz default is 149, not 36. The Jetson's vendor rtl8822ce driver is self-managed for regulatory
+  # and locked to its world channel plan (alpha2 00, chplan 0x7F). It ignores `iw reg set`, the
+  # rtw_country_code module parameter and the proc country_code. Under that plan only 5745 MHz (149) is
+  # not no-IR, so an AP on 36-48 or 153-165 fails ("Failed to start AP functionality", rover 2026-10-09).
+  # 149 is legal in India (5725-5875 MHz).
   if [ -z "${channel}" ]; then
-    if [ "${band}" = "a" ]; then channel=36; else channel=6; fi
+    if [ "${band}" = "a" ]; then channel=149; else channel=6; fi
   fi
   if [ "${band}" = "a" ]; then
     case "${channel}" in 36 | 40 | 44 | 48 | 149 | 153 | 157 | 161 | 165) ;; *) warn "5 GHz DFS or invalid channel refused; hotspot disabled"; _hotspot_drop_profile "${profile}"; return 0 ;; esac

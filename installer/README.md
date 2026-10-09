@@ -158,8 +158,12 @@ NetworkManager keyfile; it never sends the passphrase in a command argument or l
 Set `DYX3_WIFI_COUNTRY` to the operating country's two-letter code (template: `IN`).
 The installer applies it at boot through `dyx3-wifi-regdom.service`. Set
 `DYX3_WIFI_BAND=a` (5 GHz, default) or `bg` (2.4 GHz), an optional
-`DYX3_WIFI_CHANNEL` (default 36 or 6 respectively), and `DYX3_WIFI_WIDTH=20|40`
-(default 20). Only non-DFS 5 GHz channels 36–48 and 149–165 are accepted.
+`DYX3_WIFI_CHANNEL` (default 149 or 6 respectively), and `DYX3_WIFI_WIDTH=20|40`
+(default 20). Only non-DFS 5 GHz channels 36–48 and 149–165 are accepted. On the Jetson's vendor RTL8822CE driver only
+channel 149 can host an access point at 5 GHz. The driver manages its own regulatory domain and
+stays on its world channel plan (`iw reg get` shows `phy#0 (self-managed) country 00`), where
+36–48 and 153–165 are no-IR. Neither `iw reg set`, the `rtw_country_code` module parameter nor
+the driver's proc `country_code` changes this (rover, 2026-10-09). 2.4 GHz channels 1–11 work.
 NetworkManager before 1.50 uses its safe 20 MHz auto width; 40 MHz is refused
 on those versions. The profile uses WPA2-PSK only and disables Wi-Fi power save.
 If the installed RTL8822CE driver exposes a known power-save option through
