@@ -191,7 +191,8 @@ void RtkConfigStore::validate(const Json& c) {
   need(lora.contains("serial_device") && lora.at("serial_device").is_string(),
        "LoRa device must be a string");
   const std::string lora_path = lora.at("serial_device").get<std::string>();
-  need(lora_path.empty() || stable_serial_path(lora_path), "LoRa requires /dev/serial/by-id path");
+  need(lora_path.empty() || stable_serial_path(lora_path),
+       "LoRa requires a /dev/serial/by-id or by-path path");
   need(lora.contains("baud") && lora.at("baud").is_number_integer() &&
            (lora_path.empty() ? lora.at("baud").get<int>() == 0 ||
                                     supported_serial_baud(lora.at("baud").get<int>())
@@ -205,7 +206,8 @@ void RtkConfigStore::validate(const Json& c) {
   need(usb.contains("receiver_device") && usb.at("receiver_device").is_string(),
        "USB device must be a string");
   const std::string usb_path = usb.at("receiver_device").get<std::string>();
-  need(usb_path.empty() || stable_serial_path(usb_path), "USB requires /dev/serial/by-id path");
+  need(usb_path.empty() || stable_serial_path(usb_path),
+       "USB requires a /dev/serial/by-id or by-path path");
   need(usb_path.empty() || usb_path != lora_path, "LoRa and USB may not use the same port");
   need(usb.contains("baud") && usb.at("baud").is_number_integer() &&
            (usb_path.empty()

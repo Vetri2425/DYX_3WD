@@ -62,7 +62,7 @@ desired_state, source, transport, `ntrip.active_profile_id`, `ntrip.profiles[]`,
 `usb`. Each NTRIP profile contains id, name, host, port, mountpoint, username, write-only
 password, explicit `PLAINTEXT|TLS` security, optional CA file, connect/stream/GGA timing and
 backoff. LoRa has stable by-id device, baud, read timeout and reopen delay. USB has stable
-by-id receiver device, baud, write timeout and reopen delay. An empty device path is allowed
+by-id (or, for adapters without a USB serial number such as the CH340, by-path) receiver device, baud, write timeout and reopen delay. An empty device path is allowed
 so a new installation can boot and show `WAIT_SOURCE` or `WAIT_TRANSPORT` before hardware
 identity, baud and timeouts are entered. Unknown hardware values are stored as zero/unset,
 not guessed. No tty enumeration path or device auto-detection is used.
@@ -109,7 +109,7 @@ Authenticated backend routes are `GET /api/rtk/status`, `GET|PUT /api/rtk/config
 `GET|PUT /api/rtk/transport`, `GET|POST /api/rtk/profiles`,
 `PATCH|DELETE /api/rtk/profiles/{id}`, and `GET /api/rtk/serial-ports`.
 Reads require viewer; writes require operator. Worker unavailability returns 503. The
-serial list is read from `/dev/serial/by-id` and never chooses a device automatically.
+serial list is read from `/dev/serial/by-id` and `/dev/serial/by-path` and never chooses a device automatically.
 There is exactly one `/api/rtk/status` route in the assembled FastAPI app. WebSocket and
 tablet UI changes are separate work.
 

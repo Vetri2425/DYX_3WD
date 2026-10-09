@@ -31,16 +31,28 @@ constexpr std::array<BaudRate, 10> kBauds{{
 
 }  // namespace
 
-bool stable_serial_path(const std::string& path, const std::string& prefix) {
+namespace {
+bool stable_name_under(const std::string& path, const std::string& prefix, bool allow_colon) {
   if (prefix.empty() || prefix.back() != '/' || path.rfind(prefix, 0) != 0 ||
       path.size() <= prefix.size())
     return false;
   const std::string name = path.substr(prefix.size());
   if (name == "." || name == ".." || name.find('/') != std::string::npos) return false;
   for (const unsigned char c : name) {
-    if (!(std::isalnum(c) || c == '_' || c == '-' || c == '.')) return false;
+    if (!(std::isalnum(c) || c == '_' || c == '-' || c == '.' || (allow_colon && c == ':')))
+      return false;
   }
   return true;
+}
+}  // namespace
+
+bool stable_serial_path(const std::string& path, const std::string& prefix) {
+  if (stable_name_under(path, prefix, false)) return true;
+  // A USB-serial bridge without a serial number (the rover's CH340) has no unique by-id name,
+  // so the installer records the physical-port identity under by-path instead. Those names
+  // contain ':' (e.g. platform-3610000.usb-usb-0:2.1:1.0-port0). Accepted only alongside the
+  // production by-id prefix; tests that inject their own prefix keep single-prefix semantics.
+  return prefix == kByIdPrefix && stable_name_under(path, kByPathPrefix, true);
 }
 
 bool supported_serial_baud(int baud) {

@@ -109,6 +109,12 @@ TEST(SerialPort, OnlyStableByIdPathsAndSupportedBauds) {
   EXPECT_FALSE(stable_serial_path("/dev/serial/by-id/../ttyACM0"));
   EXPECT_FALSE(stable_serial_path("/dev/serial/by-id/x/y"));
   EXPECT_TRUE(stable_serial_path("/dev/serial/by-id/usb-Receiver_123"));
+  // Serial-number-less CH340: physical-port identity under by-path (contains ':').
+  EXPECT_TRUE(stable_serial_path("/dev/serial/by-path/platform-3610000.usb-usb-0:2.1:1.0-port0"));
+  EXPECT_FALSE(stable_serial_path("/dev/serial/by-path/../ttyUSB0"));
+  EXPECT_FALSE(stable_serial_path("/dev/serial/by-path/a/b"));
+  EXPECT_FALSE(stable_serial_path("/dev/serial/by-id/usb-0:2.1"));  // ':' only under by-path
+  EXPECT_FALSE(stable_serial_path("/dev/serial/by-path/x", "/tmp/injected/"));
   EXPECT_TRUE(supported_serial_baud(115200));
   EXPECT_FALSE(supported_serial_baud(123456));
 }

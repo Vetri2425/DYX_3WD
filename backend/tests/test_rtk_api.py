@@ -102,3 +102,19 @@ def test_profile_password_is_write_only_across_config_and_profile_routes(tmp_pat
     assert "new-secret" not in result.text
     assert "new-secret" not in client.get("/api/rtk/profiles", headers=h).text
     assert client.get("/api/rtk/serial-ports", headers=h).status_code == 200
+
+
+def test_serial_ports_lists_by_id_and_by_path(tmp_path, monkeypatch):
+    from dyx3_backend.api import routes
+
+    by_id, by_path = tmp_path / "by-id", tmp_path / "by-path"
+    by_id.mkdir()
+    by_path.mkdir()
+    target = tmp_path / "ttyUSB0"
+    target.write_text("")
+    (by_id / "usb-Receiver_1-if00-port0").symlink_to(target)
+    (by_path / "platform-3610000.usb-usb-0:2.1:1.0-port0").symlink_to(target)
+    monkeypatch.setattr(routes, "SERIAL_PORT_DIRS", (by_id, by_path))
+    result = __import__("asyncio").run(routes.rtk_serial_ports(None))
+    paths = [p["path"] for p in result["ports"]]
+    assert paths == [str(by_id / "usb-Receiver_1-if00-port0"), str(by_path / "platform-3610000.usb-usb-0:2.1:1.0-port0")]

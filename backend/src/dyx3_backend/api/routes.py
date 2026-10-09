@@ -390,13 +390,17 @@ async def delete_rtk_profile(profile_id: str, request: Request, _: Identity = Op
     return await _rtk(request, "SET_CONFIG", config=config)
 
 
+SERIAL_PORT_DIRS = (Path("/dev/serial/by-id"), Path("/dev/serial/by-path"))
+
+
 @router.get("/rtk/serial-ports")
 async def rtk_serial_ports(_: Identity = Viewer) -> dict:
-    by_id = Path("/dev/serial/by-id")
-    if not by_id.is_dir():
-        return {"ports": []}
+    # by-path covers adapters without a USB serial number (the rover's CH340). Never auto-selected.
     ports = []
-    for entry in sorted(by_id.iterdir(), key=lambda item: item.name)[:128]:
-        if entry.is_symlink() and entry.name not in (".", ".."):
-            ports.append({"path": str(entry), "present": entry.exists()})
+    for directory in SERIAL_PORT_DIRS:
+        if not directory.is_dir():
+            continue
+        for entry in sorted(directory.iterdir(), key=lambda item: item.name)[:128]:
+            if entry.is_symlink() and entry.name not in (".", ".."):
+                ports.append({"path": str(entry), "present": entry.exists()})
     return {"ports": ports}
