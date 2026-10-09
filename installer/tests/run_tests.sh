@@ -254,6 +254,12 @@ libs() {
     check "install dry-run mentions: ${s}" 'printf "%s" "${out}" | grep -q -- "${s}"'
   done
   check "install without --production is refused" '! "${REPO}/installer/install.sh" >/dev/null 2>&1'
+  if [ "$(id -u)" -ne 0 ]; then
+    out="$(env -u DYX3_ROOT "${REPO}/installer/verify.sh" 2>&1)"
+    check "dyx3-health refuses to run without root" 'printf "%s" "${out}" | grep -q "must run as root"'
+  else
+    ok "dyx3-health root check skipped (tests run as root)"
+  fi
 
   # INS-007: a fresh install stops before any build with the per-rover inputs it lacks and the files to edit.
   check "ros.env template ships the fleet ROS domain 42" 'grep -qx "ROS_DOMAIN_ID=42" "${REPO}/deployment/network/ros.env.tmpl"'

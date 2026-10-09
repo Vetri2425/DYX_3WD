@@ -12,4 +12,7 @@ for lib in os_check ros_install systemd_install health_check usb_serial; do
   . "${INSTALLER_DIR}/lib/${lib}.sh"
 done
 
+# Root only (INS-022): several inputs are root-only (the 0600 hotspot keyfile, root:dyx3 0640 env files), and as
+# another user their checks quietly read nothing.
+require_root
 health_run "$@"
