@@ -177,3 +177,42 @@ async def test_a_gateway_that_stops_reading_times_out_instead_of_blocking_in_dra
     for w in accepted:
         w.close()
     server.close()
+
+
+async def test_accept_then_close_backs_off_instead_of_flapping(sock_path):
+    accepts = []
+
+    async def accept_and_close(reader, writer):
+        accepts.append(asyncio.get_running_loop().time())
+        writer.close()  # like the gateway at max_clients
+
+    server = await asyncio.start_unix_server(accept_and_close, path=sock_path)
+    gw = GatewayClient(sock_path, request_timeout_s=0.5, reconnect_min_s=0.05, reconnect_max_s=0.4)
+    await gw.start()
+    await asyncio.sleep(1.5)
+    await gw.stop()
+    server.close()
+    await server.wait_closed()
+    # Without backoff growth this would be about 1.5 / 0.05 = 30 attempts; with it: 0.05, 0.1, 0.2, 0.4, 0.4, ...
+    assert 3 <= len(accepts) <= 8, accepts
+    assert accepts[-1] - accepts[-2] >= 0.3
+
+
+async def test_backoff_resets_after_the_gateway_has_spoken(sock_path):
+    srv = FakeServer(sock_path)
+    await srv.start()
+    gw = GatewayClient(sock_path, request_timeout_s=0.5, reconnect_min_s=0.05, reconnect_max_s=0.4)
+    await gw.start()
+    assert await wait_until(lambda: gw.connected)
+    await srv.push({"x": 1})  # the gateway speaks: a healthy link, the backoff is back at its minimum
+    assert await wait_until(lambda: gw.snapshot is not None)
+    for w in srv.writers:
+        w.close()
+    srv.writers.clear()
+    t0 = asyncio.get_running_loop().time()
+    assert await wait_until(lambda: not gw.connected, 1.0)
+    assert await wait_until(lambda: gw.connected, 1.0)
+    assert asyncio.get_running_loop().time() - t0 < 0.3  # reconnected after reconnect_min_s, not a grown delay
+    assert (await gw.request("pause_mission"))["ok"]
+    await gw.stop()
+    await srv.stop()

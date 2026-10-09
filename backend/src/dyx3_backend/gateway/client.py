@@ -119,7 +119,9 @@ class GatewayClient:
                 await asyncio.sleep(delay)
                 delay = min(self._rmax, delay * 2)
                 continue
-            delay = self._rmin
+            # The backoff resets only once the gateway has sent a line (XR-GW-002): a peer that accepts and closes at
+            # once (the gateway at max_clients) must not make this client reconnect at 1/reconnect_min_s.
+            heard = False
             self._writer = writer
             await self._fire(self._on_state, True)
             try:
@@ -127,6 +129,9 @@ class GatewayClient:
                     line = await reader.readline()
                     if not line:
                         break
+                    if not heard:
+                        heard = True
+                        delay = self._rmin
                     self._handle(line)
             except (OSError, asyncio.LimitOverrunError, ValueError):
                 log.warning("gateway link error", exc_info=True)
@@ -137,6 +142,8 @@ class GatewayClient:
                 await self._fire(self._on_state, False)
             if not self._stop:
                 await asyncio.sleep(delay)
+                if not heard:
+                    delay = min(self._rmax, delay * 2)
 
     def _handle(self, line: bytes) -> None:
         try:
