@@ -839,6 +839,16 @@ F
   check "idle: a stale socket file with dyx3-ros stopped is idle" '[ -S "${DYX3_GATEWAY_SOCK}" ] && [ "$(idle_rc)" = 0 ]'
   rm -f "${DYX3_GATEWAY_SOCK}"
 
+  # ---- X-013: the deep graph check lists /rpp
+  printf '#!/usr/bin/env bash\n[ "$1 $2" = "node list" ] && cat "%s"\n' "${T}/nodes" >"${fakebin}/ros2"
+  chmod +x "${fakebin}/ros2"
+  printf '%s\n' /dyx3_mission /motion_guard /px4_link /spray /system_gateway >"${T}/nodes"
+  (health_graph "${REPO}") >"${T}/graph_out" 2>&1
+  check "deep health warns when /rpp is not in the graph" 'grep -q "^WARN  node /rpp not visible" "${T}/graph_out"'
+  echo /rpp >>"${T}/nodes"
+  (health_graph "${REPO}") >"${T}/graph_out" 2>&1
+  check "deep health reports /rpp with the other control nodes" 'grep -q "^PASS  node /rpp up" "${T}/graph_out" && [ "$(grep -c "^PASS  node" "${T}/graph_out")" -eq 6 ]'
+
   # ---- INS-005: a service must stay up through the hold with no restart; the gateway must answer
   echo 0 >"${T}/nrestarts"
   : >"${T}/svc_state"

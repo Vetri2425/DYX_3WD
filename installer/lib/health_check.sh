@@ -204,7 +204,8 @@ health_graph() {
   pm="$(px4_msgs_dir)"
   nodes="$(bash -c "set +u; . '${ROS_SETUP}'; . '${pm}/install/setup.bash'; . '${rel}/ros2_ws/install/setup.bash' 2>/dev/null; timeout 15 ros2 node list 2>/dev/null" || true)"
   local n
-  for n in /dyx3_mission /motion_guard /px4_link /spray /system_gateway; do
+  # Every node control_graph.launch.py starts, /rpp included (X-013).
+  for n in /dyx3_mission /motion_guard /px4_link /rpp /spray /system_gateway; do
     if printf '%s\n' "${nodes}" | grep -qx "${n}"; then _pass "node ${n} up"; else _warn "node ${n} not visible"; fi
   done
 }
