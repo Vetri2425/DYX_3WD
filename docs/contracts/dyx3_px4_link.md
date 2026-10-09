@@ -332,6 +332,10 @@ immediate UNSUPPORTED answer. Each physical transmission can produce a terminal 
 late ACKs for an old pair cannot prove a newer epoch because pairs are never reused. `IN_PROGRESS`
 is not terminal. This is idempotent retry semantics: an earlier accepted ACK for the exact same
 physical request may prove that request; it cannot prove changed mapping or intent.
+Because every reassert draws its own ACK, an ACK whose command and pair match a producer's
+confirmed or last dispatched epoch is expected and ignored (XR-GPX-005); only an ACK for a pair no
+current epoch holds increments `spray_unmatched_ack_count`, with a warning throttled to one per
+5 s.
 When watchdog OFF displaces a controller ON, the link retires that specific controller ON
 heartbeat: a late duplicate of it cannot reopen the valve after the OFF proof. A genuinely new
 controller verdict has a new logical identity.

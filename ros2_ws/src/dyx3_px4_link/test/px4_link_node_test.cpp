@@ -948,6 +948,51 @@ TEST(Px4LinkNode, TenThousandIdenticalOnReassertsReuseTheConfirmedLogicalTransac
   unlink(path.c_str());
 }
 
+// XR-GPX-005: ACKs drawn by reasserts of the in-flight or confirmed epoch are expected and are
+// not counted as unmatched; an ACK for an identity no epoch holds still is.
+TEST(Px4LinkNode, AcksOfReassertedSprayCommandsAreExpectedNotUnmatched) {
+  using Cmd = dyx3_interfaces::msg::SprayActuatorCommand;
+  Rig r;
+  r.bring_up();
+  r.run(0.2);
+  r.clear();
+  Cmd on;
+  on.seq = 3;
+  on.source = Cmd::SOURCE_CONTROLLER;
+  on.backend = Cmd::BACKEND_ACTUATOR;
+  on.on = true;
+  on.actuator_set_index = 1;
+  on.value = 1.0F;
+  r.p_spray->publish(on);
+  ASSERT_TRUE(r.pump_until([&] { return r.cmds.size() >= 1U; }));
+  r.p_spray->publish(on);  // reassert while in flight: a second physical send
+  ASSERT_TRUE(r.pump_until([&] { return r.cmds.size() >= 2U; }));
+  px4_msgs::msg::VehicleCommandAck ack;
+  ack.command = 187;
+  ack.target_system = r.cmds.back().source_system;
+  ack.target_component = r.cmds.back().source_component;
+  ack.result = px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_ACCEPTED;
+  r.p_ack->publish(ack);  // answers the first send: completes the transaction
+  ASSERT_TRUE(r.pump_until([&] { return r.spray_acks.size() >= 1U; }));
+  r.p_ack->publish(ack);  // answers the second send
+  r.pump(50);
+  for (int i = 0; i < 5; ++i) {  // reasserts of the confirmed epoch, each answered by the FCU
+    r.p_spray->publish(on);
+    ASSERT_TRUE(r.pump_until([&] { return r.cmds.size() >= static_cast<size_t>(3 + i); }));
+    r.p_ack->publish(ack);
+    r.pump(20);
+  }
+  r.pump(50);
+  EXPECT_EQ(r.spray_acks.size(), 1U);
+  EXPECT_TRUE(r.spray_acks[0].success);
+  EXPECT_EQ(r.link->spray_late_ack_count(), 0U);
+  ack.target_component = static_cast<uint16_t>(ack.target_component + 500);  // nobody's identity
+  r.p_ack->publish(ack);
+  ASSERT_TRUE(r.pump_until([&] { return r.link->spray_late_ack_count() == 1U; }));
+  r.tick(0.11);
+  EXPECT_EQ(r.status.spray_unmatched_ack_count, 1U);
+}
+
 TEST(Px4LinkNode, TenThousandWatchdogOffReassertsUseOnePair) {
   using Cmd = dyx3_interfaces::msg::SprayActuatorCommand;
   Rig r;

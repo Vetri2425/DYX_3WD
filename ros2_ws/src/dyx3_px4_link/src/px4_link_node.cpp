@@ -647,9 +647,19 @@ void Px4LinkNode::on_vehicle_command_ack(const px4_msgs::msg::VehicleCommandAck&
       spray_inflight_->ack_system != a.target_system ||
       spray_inflight_->ack_token != a.target_component) {
     if (a.command == kCmdDoSetServo || a.command == kCmdDoSetActuator) {
+      // Each physical reassert of a confirmed or dispatched epoch draws its own ACK: expected,
+      // not unmatched. Such an ACK proves nothing new (only the in-flight match above completes).
+      const auto known_epoch = [&](const auto& entry) {
+        return entry.second.command == a.command && entry.second.ack_system == a.target_system &&
+               entry.second.ack_token == a.target_component;
+      };
+      if (std::any_of(spray_confirmed_.begin(), spray_confirmed_.end(), known_epoch) ||
+          std::any_of(spray_epochs_.begin(), spray_epochs_.end(), known_epoch)) {
+        return;
+      }
       ++spray_late_ack_count_;
-      RCLCPP_WARN(
-          get_logger(),
+      RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 5000,
           "discarded unmatched spray ACK command=%u target_component=%u (late/unmatched=%llu)",
           static_cast<unsigned>(a.command), static_cast<unsigned>(a.target_component),
           static_cast<unsigned long long>(spray_late_ack_count_));
