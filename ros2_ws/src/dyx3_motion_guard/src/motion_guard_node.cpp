@@ -136,7 +136,10 @@ MotionGuardNode::MotionGuardNode(const rclcpp::NodeOptions& options, ClockFn clo
           RCLCPP_WARN(get_logger(), "emergency stop %s by %s",
                       req->asserted ? "ASSERTED" : "cleared", req->source.c_str());
           // Latched at once: the next decision tick outputs STOP; do not wait for it to be
-          // published.
+          // published. The latch change is also published on /dyx3/safety_gate and
+          // /dyx3/emergency_stop_state now, not at the next 10 Hz slot (MG-007): an assert and a
+          // clear less than 100 ms apart must both be seen by the mission and the spray node.
+          force_safety_pub_ = true;
           step(clock_());
         }
       });
@@ -263,7 +266,8 @@ void MotionGuardNode::step(double now_s) {
   }
   last_reason_ = d.reason;
 
-  if (now_s - last_gate_pub_s_ >= 0.1 - 1e-9) {
+  if (force_safety_pub_ || now_s - last_gate_pub_s_ >= 0.1 - 1e-9) {
+    force_safety_pub_ = false;
     last_gate_pub_s_ = now_s;
     const Reason g = first_failing_safety_gate(gates, gate_cfg_);
     dyx3_interfaces::msg::SafetyGateStatus gs;  // ok=false default

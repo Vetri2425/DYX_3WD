@@ -34,6 +34,8 @@ struct Rig {
   std::vector<rclcpp::SubscriptionBase::SharedPtr> keep;
   MotionSetpoint last_out;
   std::vector<MotionSetpoint> outs;
+  std::vector<dyx3_interfaces::msg::SafetyGateStatus> gates;
+  std::vector<dyx3_interfaces::msg::EmergencyStopState> estops;
   dyx3_interfaces::msg::MotionSetpointStatus last_status;
   dyx3_interfaces::msg::SafetyGateStatus last_gate;
   dyx3_interfaces::msg::EmergencyStopState last_estop;
@@ -83,10 +85,16 @@ struct Rig {
         }));
     keep.push_back(world->create_subscription<dyx3_interfaces::msg::SafetyGateStatus>(
         "/dyx3/safety_gate", r1,
-        [this](dyx3_interfaces::msg::SafetyGateStatus::ConstSharedPtr m) { last_gate = *m; }));
+        [this](dyx3_interfaces::msg::SafetyGateStatus::ConstSharedPtr m) {
+          last_gate = *m;
+          gates.push_back(*m);
+        }));
     keep.push_back(world->create_subscription<dyx3_interfaces::msg::EmergencyStopState>(
         "/dyx3/emergency_stop_state", r1,
-        [this](dyx3_interfaces::msg::EmergencyStopState::ConstSharedPtr m) { last_estop = *m; }));
+        [this](dyx3_interfaces::msg::EmergencyStopState::ConstSharedPtr m) {
+          last_estop = *m;
+          estops.push_back(*m);
+        }));
     cli_estop = world->create_client<dyx3_interfaces::srv::SetEmergencyStop>(
         "/dyx3/motion_guard/set_emergency_stop");
     const auto end = std::chrono::steady_clock::now() + 10s;
@@ -164,6 +172,18 @@ struct Rig {
     m.yaw_rate_setpoint = rate;
     m.valid = valid;
     p_cmd->publish(m);
+  }
+  // Calls the E-stop service and pumps (no guard step, no world traffic) until the reply arrives.
+  // Returns whether the guard accepted the request.
+  bool call_estop(bool asserted, const char* source) {
+    auto req = std::make_shared<dyx3_interfaces::srv::SetEmergencyStop::Request>();
+    req->asserted = asserted;
+    req->source = source;
+    auto fut = cli_estop->async_send_request(req);
+    for (int i = 0; i < 500 && fut.wait_for(0ms) != std::future_status::ready; ++i)
+      exec->spin_some(2ms);
+    if (fut.wait_for(0ms) != std::future_status::ready) return false;
+    return fut.get()->accepted;
   }
   // One cycle: world publishes, deliver, guard decides, deliver outputs.
   void tick(double dt = 0.02, bool with_rpp = true, uint8_t mode = 2, float v = 0.3F,
@@ -335,6 +355,45 @@ TEST(MotionGuardNode, EmergencyStopLatchesUntilExplicitlyCleared) {
   EXPECT_TRUE(clr.get()->accepted);
   r.run(0.3);
   EXPECT_EQ(r.last_out.mode, MotionSetpoint::MODE_TRACK_RATE);
+}
+
+// MG-007: the latch change is published at once, so an assert and a clear less than one 100 ms
+// gate period apart are both visible to the mission and the spray node.
+TEST(MotionGuardNode, EmergencyStopAssertAndClearWithinOneGatePeriodAreBothPublished) {
+  Rig r;
+  r.run(0.3);
+  ASSERT_TRUE(r.last_gate.ok);
+  r.gates.clear();
+  r.estops.clear();
+
+  ASSERT_TRUE(r.call_estop(true, "tablet"));
+  r.pump();
+  ASSERT_FALSE(r.gates.empty()) << "assert must publish the gate state without waiting for 10 Hz";
+  ASSERT_FALSE(r.estops.empty());
+  EXPECT_FALSE(r.gates.back().ok);
+  EXPECT_EQ(r.gates.back().reason_code,
+            dyx3_interfaces::msg::MotionSetpointStatus::REASON_ESTOP);
+  EXPECT_TRUE(r.estops.back().asserted);
+  EXPECT_EQ(r.estops.back().source, "tablet");
+
+  r.now += 0.03;  // 30 ms later: still inside the same 100 ms gate period
+  ASSERT_TRUE(r.call_estop(false, "tablet"));
+  r.pump();
+  ASSERT_GE(r.gates.size(), 2U) << "the clear must be published as well";
+  ASSERT_GE(r.estops.size(), 2U);
+  EXPECT_TRUE(r.gates.back().ok);
+  EXPECT_FALSE(r.estops.back().asserted);
+
+  // Exactly the sequence a consumer must have seen: ESTOP-failing gate first, then ok.
+  bool saw_estop = false, ok_after = false;
+  for (const auto& g : r.gates) {
+    if (!g.ok && g.reason_code == dyx3_interfaces::msg::MotionSetpointStatus::REASON_ESTOP)
+      saw_estop = true;
+    else if (saw_estop && g.ok)
+      ok_after = true;
+  }
+  EXPECT_TRUE(saw_estop);
+  EXPECT_TRUE(ok_after);
 }
 
 TEST(MotionGuardNode, RestartedPublisherIsStoppedUntilItRebuildsASession) {

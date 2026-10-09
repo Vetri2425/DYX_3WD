@@ -70,6 +70,7 @@ private:
   MissionIn mission_;
   double last_step_s_{-1.0};
   double last_gate_pub_s_{-1e18};
+  bool force_safety_pub_{false};  // E-stop latch changed: publish gate + E-stop state this step
   double last_status_pub_s_{-1e18};
   uint64_t out_seq_{0};
   Reason last_reason_{Reason::Ok};
