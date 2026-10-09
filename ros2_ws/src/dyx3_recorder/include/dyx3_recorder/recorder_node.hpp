@@ -30,8 +30,11 @@ using ParamCollector =
 // services (gnss_rtk, spray_watchdog, recorder itself).
 std::vector<std::string> default_param_nodes();
 
-// Default collector: SyncParametersClient per node on a helper node with its own executor.
-std::vector<NodeParams> collect_ros_params(const std::vector<std::string>& nodes, double timeout_s);
+// Default collector: SyncParametersClient per node on a helper node with its own executor. Never
+// throws (REC-018): a node that does not answer, or answers with fewer values than names, is
+// reachable=false with a note (REC-019). `context` null = the global context.
+std::vector<NodeParams> collect_ros_params(const std::vector<std::string>& nodes, double timeout_s,
+                                           rclcpp::Context::SharedPtr context = nullptr);
 
 class RecorderNode : public rclcpp::Node {
 public:
@@ -46,6 +49,7 @@ public:
 
 private:
   void declare_params();
+  std::vector<NodeParams> collect_params() const;
   void on_mission(const dyx3_interfaces::msg::MissionState& m);
   void start_run(uint32_t mission_id, uint32_t run_index, const std::string& sha);
   void stop_run(const std::string& final_state);

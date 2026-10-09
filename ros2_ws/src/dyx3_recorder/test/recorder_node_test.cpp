@@ -334,3 +334,78 @@ TEST(RecorderDefaults, ParamNodesCoverTheWholeLaunchGraph) {
   for (const char* n : {"gnss_rtk", "spray_watchdog", "recorder", "rpp", "system_gateway"})
     EXPECT_TRUE(have.count(n)) << n;
 }
+
+// REC-018 / REC-019: a node that is discovered (its parameter services exist) but never spins makes
+// SyncParametersClient::list_parameters throw on its timeout. The collector must turn that into
+// reachable=false with a note, never an exception, and a missing node is unreachable too.
+TEST(ParamCollector, ANodeThatNeverSpinsIsUnreachableNotACrash) {
+  auto ctx = std::make_shared<rclcpp::Context>();
+  rclcpp::InitOptions io;
+  io.set_domain_id(20 + (getpid() % 100));
+  ctx->init(0, nullptr, io);
+  rclcpp::NodeOptions o;
+  o.context(ctx);
+  auto silent = std::make_shared<rclcpp::Node>("silent_node", o);  // created, never spun
+  std::vector<NodeParams> got;
+  EXPECT_NO_THROW(got = collect_ros_params({"silent_node", "no_such_node"}, 0.5, ctx));
+  ASSERT_EQ(got.size(), 2U);
+  EXPECT_EQ(got[0].node, "silent_node");
+  EXPECT_FALSE(got[0].reachable);
+  EXPECT_TRUE(got[0].params.empty());
+  EXPECT_FALSE(got[0].note.empty());
+  EXPECT_FALSE(got[1].reachable);
+  EXPECT_EQ(got[1].note, "parameter service not available");
+  const std::string j = params_ros_snapshot_json("t", got);
+  EXPECT_NE(j.find("\"note\": "), std::string::npos);
+  silent.reset();
+  ctx->shutdown("done");
+}
+
+TEST(RecorderNode, AThrowingCollectorNeverEscapesTheNode) {
+  auto ctx = std::make_shared<rclcpp::Context>();
+  rclcpp::InitOptions io;
+  io.set_domain_id(20 + (getpid() % 100));
+  ctx->init(0, nullptr, io);
+  const std::string root = (fs::temp_directory_path() / ("dyx3_recthrow_" + std::to_string(getpid()))).string();
+  rclcpp::NodeOptions o;
+  o.context(ctx);
+  o.append_parameter_override("runs_dir", root + "/runs");
+  o.append_parameter_override("versions_file", root + "/versions.json");
+  o.append_parameter_override("config_dir", root + "/config");
+  o.append_parameter_override("bag_command",
+                              std::vector<std::string>{"/bin/sh", "-c", kGoodBag, "{dir}"});
+  double now = 10.0;
+  {
+    auto rec = std::make_shared<RecorderNode>(
+        o, [&now]() { return now; }, []() { return time_t{1788617730}; },
+        [](const std::vector<std::string>&, double) -> std::vector<NodeParams> {
+          throw std::runtime_error("Unable to get result of list parameters service call.");
+        },
+        false);
+    auto world = std::make_shared<rclcpp::Node>("world", o);
+    rclcpp::ExecutorOptions eo;
+    eo.context = ctx;
+    rclcpp::executors::SingleThreadedExecutor ex(eo);
+    ex.add_node(rec);
+    ex.add_node(world);
+    auto pub = world->create_publisher<MissionState>("/dyx3/mission/state", rclcpp::QoS(1).reliable());
+    const auto until = std::chrono::steady_clock::now() + 10s;
+    while (pub->get_subscription_count() == 0 && std::chrono::steady_clock::now() < until)
+      ex.spin_some(5ms);
+    MissionState m;
+    m.state = MissionState::STATE_RUNNING;
+    m.mission_id = 5;
+    pub->publish(m);
+    const auto end = std::chrono::steady_clock::now() + 300ms;
+    while (std::chrono::steady_clock::now() < end) EXPECT_NO_THROW(ex.spin_some(5ms));
+    ASSERT_TRUE(rec->recording());
+    const std::string d = rec->current_run_dir();
+    EXPECT_NO_THROW(rec.reset());  // stop from the destructor collects the end snapshot too
+    const std::string summary = slurp(d + "/summary.json");
+    EXPECT_NE(summary.find("parameter collector failed"), std::string::npos);
+    EXPECT_NE(summary.find("\"provenance_complete\": false"), std::string::npos);
+  }
+  ctx->shutdown("done");
+  std::error_code ec;
+  fs::remove_all(root, ec);
+}

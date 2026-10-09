@@ -53,22 +53,65 @@ std::vector<std::string> default_param_nodes() {
           "rpp",          "spray",    "spray_watchdog", "system_gateway"};
 }
 
-std::vector<NodeParams> collect_ros_params(const std::vector<std::string>& nodes,
-                                           double timeout_s) {
+std::vector<NodeParams> collect_ros_params(const std::vector<std::string>& nodes, double timeout_s,
+                                           rclcpp::Context::SharedPtr context) {
   std::vector<NodeParams> out;
-  auto helper = std::make_shared<rclcpp::Node>("dyx3_recorder_params_" + std::to_string(getpid()));
+  const auto timeout = std::chrono::duration<double>(timeout_s);
+  rclcpp::Node::SharedPtr helper;
+  rclcpp::Executor::SharedPtr exec;
+  try {
+    rclcpp::NodeOptions o;
+    if (context) o.context(context);
+    o.start_parameter_services(false).start_parameter_event_publisher(false);
+    helper = std::make_shared<rclcpp::Node>("dyx3_recorder_params_" + std::to_string(getpid()), o);
+    rclcpp::ExecutorOptions eo;
+    eo.context = helper->get_node_base_interface()->get_context();
+    exec = std::make_shared<rclcpp::executors::SingleThreadedExecutor>(eo);
+  } catch (const std::exception& e) {
+    for (const auto& name : nodes) {
+      NodeParams np;
+      np.node = name;
+      np.reachable = false;
+      np.note = std::string("parameter client could not be created: ") + e.what();
+      out.push_back(np);
+    }
+    return out;
+  }
   for (const auto& name : nodes) {
     NodeParams np;
     np.node = name;
-    rclcpp::SyncParametersClient cli(helper, name);
-    if (!cli.wait_for_service(std::chrono::duration<double>(timeout_s))) {
+    // REC-018: SyncParametersClient::list_parameters throws on a timeout (rclcpp humble), e.g. a
+    // node that is discovered but not spinning. Nothing may escape: this runs at run start, at run
+    // stop and from the destructor.
+    try {
+      rclcpp::SyncParametersClient cli(exec, helper, name);
+      if (!cli.wait_for_service(timeout)) {
+        np.reachable = false;
+        np.note = "parameter service not available";
+      } else {
+        const auto names = cli.list_parameters({}, 10, timeout).names;
+        const auto values = cli.get_parameters(names, timeout);
+        if (values.size() != names.size()) {
+          // REC-019: get_parameters returns an empty vector on a timeout; never record that as a
+          // reachable node without parameters.
+          np.reachable = false;
+          np.note = "get_parameters returned " + std::to_string(values.size()) + " of " +
+                    std::to_string(names.size()) + " values";
+        } else {
+          for (const auto& p : values) {
+            np.params.push_back(
+                ParamEntry{name, p.get_name(), p.get_type_name(), p.value_to_string()});
+          }
+        }
+      }
+    } catch (const std::exception& e) {
       np.reachable = false;
-      out.push_back(np);
-      continue;
-    }
-    const auto names = cli.list_parameters({}, 10, std::chrono::duration<double>(timeout_s)).names;
-    for (const auto& p : cli.get_parameters(names, std::chrono::duration<double>(timeout_s))) {
-      np.params.push_back(ParamEntry{name, p.get_name(), p.get_type_name(), p.value_to_string()});
+      np.params.clear();
+      np.note = std::string("parameter request failed: ") + e.what();
+    } catch (...) {
+      np.reachable = false;
+      np.params.clear();
+      np.note = "parameter request failed: unknown exception";
     }
     out.push_back(np);
   }
@@ -80,7 +123,11 @@ RecorderNode::RecorderNode(const rclcpp::NodeOptions& options, ClockFn clock, Wa
     : rclcpp::Node("recorder", options),
       clock_(clock ? std::move(clock) : ClockFn(steady_now_s)),
       wall_(wall ? std::move(wall) : WallFn(wall_now)),
-      collector_(collector ? std::move(collector) : ParamCollector(collect_ros_params)) {
+      collector_(collector ? std::move(collector)
+                           : ParamCollector([ctx = options.context()](
+                                                const std::vector<std::string>& n, double t) {
+                               return collect_ros_params(n, t, ctx);
+                             })) {
   declare_params();
   cb_mission_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
   cb_ulog_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
@@ -168,6 +215,23 @@ void RecorderNode::declare_params() {
     throw std::invalid_argument("recorder parameter invalid: empty");
 }
 
+std::vector<NodeParams> RecorderNode::collect_params() const {
+  // An injected collector is as untrusted as the default one: nothing escapes into the node.
+  try {
+    return collector_(param_nodes_, param_timeout_s_);
+  } catch (const std::exception& e) {
+    std::vector<NodeParams> out;
+    for (const auto& n : param_nodes_)
+      out.push_back(NodeParams{n, false, {}, std::string("parameter collector failed: ") + e.what()});
+    return out;
+  } catch (...) {
+    std::vector<NodeParams> out;
+    for (const auto& n : param_nodes_)
+      out.push_back(NodeParams{n, false, {}, "parameter collector failed"});
+    return out;
+  }
+}
+
 bool RecorderNode::recording() const {
   std::lock_guard<std::mutex> lk(mu_);
   return lifecycle_.recording();
@@ -248,11 +312,12 @@ void RecorderNode::start_run(uint32_t mission_id, uint32_t run_index, const std:
   const std::string stamp = iso_utc(now);
   std::string start_snapshot;
   {
-    const auto nodes = collector_(param_nodes_, param_timeout_s_);
+    const auto nodes = collect_params();
     start_snapshot = params_ros_snapshot_json(stamp, nodes);
     for (const auto& n : nodes) {
       if (!n.reachable) {
-        summary.notes.push_back("parameters unreachable at start: " + n.node);
+        summary.notes.push_back("parameters unreachable at start: " + n.node +
+                                (n.note.empty() ? "" : " (" + n.note + ")"));
         summary.provenance_complete = false;
       }
     }
@@ -341,7 +406,13 @@ void RecorderNode::stop_run(const std::string& final_state) {
     write_file_atomic(dir + "/ulog/gaps.json", ulog_.gaps_json());
     ulog_.close();
   }
-  const auto nodes = collector_(param_nodes_, param_timeout_s_);
+  const auto nodes = collect_params();
+  for (const auto& n : nodes) {
+    if (!n.reachable) {
+      summary.notes.push_back("parameters unreachable at end: " + n.node +
+                              (n.note.empty() ? "" : " (" + n.note + ")"));
+    }
+  }
   write_file_atomic(
       dir + "/params_ros.json",
       params_ros_file_json(params_start, params_ros_snapshot_json(iso_utc(wall_()), nodes)));
