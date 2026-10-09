@@ -6,6 +6,7 @@
 // recorded-bag evidence is geometry_bag_replay_test.
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 #include "check.hpp"
@@ -191,8 +192,24 @@ void test_project_onto_path_tiny() {
   const std::vector<Point> degenerate = {{1, 1}, {1, 1}, {1, 1}};
   ProjectionHint hd;
   auto d = project_onto_path({0, 0}, PathView(degenerate), hd);
-  (void)d;
+  CHECK(!d.valid);   // GEO-002: no non-degenerate segment => no projection
   CHECK(!hd.valid);  // nothing usable in the window: hint invalidated, next call full-scans
+  // Same with a warm hint, and with more points than the window.
+  const std::vector<Point> same_many(20, Point{2, 3});
+  ProjectionHint hw{5, true};
+  CHECK(!project_onto_path({0, 0}, PathView(same_many), hw).valid);
+  CHECK(!hw.valid);
+  // A degenerate window inside an otherwise normal path is also reported invalid.
+  std::vector<Point> mixed;
+  for (int i = 0; i < 10; ++i) mixed.push_back({static_cast<double>(i), 0.0});
+  for (int i = 0; i < 12; ++i) mixed.push_back({9.0, 0.0});
+  ProjectionHint hm{15, true};
+  CHECK(!project_onto_path({4, 1}, PathView(mixed), hm).valid);
+  CHECK(!hm.valid);
+  ProjectionHint hc;  // next call (cold) full-scans and recovers
+  auto ok = project_onto_path({4.5, 1}, PathView(mixed), hc);
+  CHECK(ok.valid && ok.seg_idx == 4 && hc.valid);
+  CHECK(project_onto_path({4.2, 0.3}, PathView(l_shape()), hc).valid);  // normal path unchanged
 }
 
 void test_path_length_and_cumulative() {
@@ -225,6 +242,30 @@ void test_resample() {
   CHECK(resample(line, 20.0).pts.size() == 2);     // total < spacing: endpoints only
   CHECK(resample(line, 0.0).pts.size() == 2);      // spacing <= 0: unchanged
   CHECK(resample({{1, 1}}, 0.1).pts.size() == 1);  // n < 2: unchanged
+
+  // GEO-005: non-finite spacing, absurd sample counts and non-finite paths are refused (input
+  // returned unchanged), never converted to an out-of-range integer or allocated.
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  const double inf = std::numeric_limits<double>::infinity();
+  for (const double bad_spacing : {nan, inf, -inf, -1.0, 1e-300, 1e-9}) {
+    auto rr = resample(line, bad_spacing);
+    CHECK(rr.pts.size() == 2 && rr.flags.size() == 2);
+    CHECK(rr.pts.front().n == 0.0 && rr.pts.back().n == 10.0);
+  }
+  const std::vector<Point> three_pts = {{0, 0}, {5, 0}, {10, 0}};
+  CHECK(resample(three_pts, nan).pts.size() == 3);  // proves "unchanged", not "endpoints"
+  CHECK(resample(three_pts, 1e-9).pts.size() == 3);
+  CHECK(resample(three_pts, 1e-9).flags.size() == 3);
+  const std::vector<Point> nan_path = {{0, 0}, {nan, 0}, {10, 0}};
+  CHECK(resample(nan_path, 1.0).pts.size() == 3);
+  const std::vector<Point> inf_path = {{0, 0}, {inf, 0}};
+  CHECK(resample(inf_path, 1.0).pts.size() == 2);
+  // Boundary: exactly kResampleMaxSamples is served, one more is refused.
+  const double cap = static_cast<double>(kResampleMaxSamples);
+  const std::vector<Point> at_cap = {{0, 0}, {cap - 1.0, 0}, {cap - 1.0, 0}};
+  CHECK(resample(at_cap, 1.0).pts.size() == kResampleMaxSamples);
+  const std::vector<Point> over_cap = {{0, 0}, {cap, 0}, {cap, 0}};
+  CHECK(resample(over_cap, 1.0).pts.size() == 3);  // would need cap + 1 samples: refused
 
   const std::vector<Point> three = {{0, 0}, {5, 0}, {10, 0}};
   const std::vector<unsigned char> f = {1, 1, 0};

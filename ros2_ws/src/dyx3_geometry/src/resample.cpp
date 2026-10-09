@@ -18,7 +18,7 @@ ResampleResult resample(const std::vector<Point>& pts, double spacing,
     flags.assign(pts.size(), 0);
   }
 
-  if (pts.size() < 2 || spacing <= 0.0) {
+  if (pts.size() < 2 || !std::isfinite(spacing) || spacing <= 0.0) {
     r.pts = pts;
     r.flags = flags;
     return r;
@@ -26,13 +26,26 @@ ResampleResult resample(const std::vector<Point>& pts, double spacing,
 
   const std::vector<double> cum = cumulative_lengths(PathView(pts));
   const double total = cum.back();
+  if (!std::isfinite(total)) {  // NaN/inf coordinates: the sample count below would be undefined
+    r.pts = pts;
+    r.flags = flags;
+    return r;
+  }
   if (total < spacing) {
     r.pts = {pts.front(), pts.back()};
     r.flags = {flags.front(), flags.back()};
     return r;
   }
 
-  const long n_samples = std::max(2L, static_cast<long>(std::ceil(total / spacing)) + 1);
+  // Bound the count in double BEFORE any integer conversion (out-of-range float->int is UB), and
+  // refuse rather than truncate: a silently shortened path would change its geometry.
+  const double n_wanted = std::ceil(total / spacing) + 1.0;
+  if (!(n_wanted <= static_cast<double>(kResampleMaxSamples))) {
+    r.pts = pts;
+    r.flags = flags;
+    return r;
+  }
+  const long n_samples = std::max(2L, static_cast<long>(n_wanted));
   r.pts.reserve(static_cast<std::size_t>(n_samples));
   r.flags.reserve(static_cast<std::size_t>(n_samples));
   std::size_t seg = 0;

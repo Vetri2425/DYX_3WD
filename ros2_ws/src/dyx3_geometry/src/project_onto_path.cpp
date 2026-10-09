@@ -39,6 +39,7 @@ PathProjection project_onto_path(Point pos, PathView path, ProjectionHint& hint)
   Point best_foot = path[static_cast<std::size_t>(lo)];
   double best_d = std::numeric_limits<double>::infinity();
   double best_signed = 0.0;
+  bool scanned = false;  // at least one non-degenerate segment was evaluated
 
   for (int i = lo; i < hi; ++i) {
     const Point a = path[static_cast<std::size_t>(i)];
@@ -49,6 +50,7 @@ PathProjection project_onto_path(Point pos, PathView path, ProjectionHint& hint)
     if (seg_sq < 1e-12) {
       continue;
     }
+    scanned = true;
     const double t_raw = ((pos.n - a.n) * dx + (pos.e - a.e) * dy) / seg_sq;
     const double t = std::max(0.0, std::min(1.0, t_raw));
     const double foot_n = a.n + t * dx;
@@ -65,8 +67,11 @@ PathProjection project_onto_path(Point pos, PathView path, ProjectionHint& hint)
     }
   }
 
-  if (std::isinf(best_d)) {
+  if (!scanned) {
+    // Every scanned segment was zero-length: there is no foot point, so the result is not a
+    // projection. Report it as invalid (the other fields stay the neutral defaults).
     hint.valid = false;
+    out.valid = false;
   } else {
     hint.seg = best_i;
     hint.valid = true;

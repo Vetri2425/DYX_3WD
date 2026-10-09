@@ -15,6 +15,18 @@ struct Point {
 
 /// Non-owning view of a polyline (C++17 has no std::span). Hot-path functions take this and never
 /// allocate.
+///
+/// Lifetime: the view does not own or copy the points. The storage must outlive every use of the
+/// view and must not be resized, reallocated or modified while a call that takes it is running
+/// (a `std::vector` push_back/resize/swap invalidates `pts`). Do not build one from a temporary
+/// that dies before the call returns, and do not keep a `PathView` across a path replacement: the
+/// owner must re-create it (and reset any `ProjectionHint`) when the path changes.
+///
+/// Bounds: `pts` must point to at least `n` valid `Point`s (it may be null only when `n == 0`).
+/// `operator[]` is unchecked, so `i < n` is the caller's responsibility. The library functions
+/// clamp or reject their own indices (e.g. `curvature_at`, `project_onto_segment`) and treat
+/// `n == 0` as an empty path, but they cannot detect a `n` that is larger than the real storage
+/// or a dangling pointer.
 struct PathView {
   const Point* pts = nullptr;
   std::size_t n = 0;

@@ -15,6 +15,13 @@ double menger_curvature(Point a, Point b, Point c);
 /// index) until each is at least that far from the centre vertex. 0 keeps the adjacent-vertex
 /// form, which is NOT safe for anything quantitative on 4-10 cm spacing (3x error measured on
 /// the 2026-07-30 curve bags; stable from ~0.10 m up). Returns 0 for n < 3.
+///
+/// Cost: each neighbour walk is O(baseline_m / spacing) steps (one `hypot` per step), and never
+/// more than the number of vertices on that side of `idx`, so a huge or infinite baseline degrades
+/// to O(n), not to an unbounded loop. The caller MUST bound `baseline_m` (this library does not
+/// clamp it: a cap would silently change the result); at the 0.10-2 m used on 4-10 cm spacing the
+/// walk is at most a few tens of steps. A NaN or non-positive baseline takes the adjacent-vertex
+/// form.
 double curvature_at(PathView path, int idx, double baseline_m = 0.0);
 
 /// Worst |kappa| over `n_previews` look-ahead preview points (ancestor: `_max_preview_curvature`
