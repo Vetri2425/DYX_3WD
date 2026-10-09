@@ -183,6 +183,52 @@ health_dds() {
   if [ "${n:-0}" -gt 0 ]; then _pass "DDS: ${n} /fmu topics visible"; else _warn "DDS: no /fmu topics visible (FCU session not up?)"; fi
 }
 
+# ---- baseline (INS-006): a check that already fails on the running release (a second CH340, an unplugged receiver)
+# must not fail the next release, or every upgrade and every rollback reverts.
+# health_capture <release-dir> <file>: health_run, its PASS/WARN/FAIL lines also saved to <file>.
+health_capture() {
+  local rc=0
+  mkdir -p "$(dirname "$2")"
+  health_run "$1" | tee "$2" || rc=$?
+  return "${rc}"
+}
+
+# _health_fail_keys <file>: the FAIL lines, release SHAs masked, sorted.
+_health_fail_keys() {
+  sed -n 's/^FAIL  //p' "$1" 2>/dev/null | sed -E 's/[0-9a-f]{40}/<sha>/g; s/\b[0-9a-f]{10}\b/<sha>/g' | LC_ALL=C sort -u
+}
+
+# health_verdict <baseline-file> <after-file>: 0 when every FAIL in <after-file> already failed in the baseline.
+# Reports both kinds.
+health_verdict() {
+  local old new l
+  old="$(LC_ALL=C comm -12 <(_health_fail_keys "$1") <(_health_fail_keys "$2"))"
+  new="$(LC_ALL=C comm -13 <(_health_fail_keys "$1") <(_health_fail_keys "$2"))"
+  if [ -n "${old}" ]; then
+    warn "already failing before the switch (a fault of the rover, not of the release):"
+    while IFS= read -r l; do warn "  ${l}"; done <<<"${old}"
+  fi
+  [ -z "${new}" ] && return 0
+  warn "failing only since the switch:"
+  while IFS= read -r l; do warn "  ${l}"; done <<<"${new}"
+  return 1
+}
+
+# health_judge <release-dir> <baseline-file> <after-file>: health of the release now, against the baseline (if any).
+# Sets HEALTH_RESULT to OK, "OK apart from failures present before the switch", or FAILED.
+health_judge() {
+  if health_capture "$1" "$3"; then
+    HEALTH_RESULT=OK
+    return 0
+  fi
+  if [ -s "$2" ] && health_verdict "$2" "$3"; then
+    HEALTH_RESULT="OK apart from failures present before the switch"
+    return 0
+  fi
+  HEALTH_RESULT=FAILED
+  return 1
+}
+
 # health_run [--deep] [release-dir]
 health_run() {
   local deep=0

@@ -7,6 +7,7 @@
 #   ros2_ws/{build,install,log}  colcon products (manifest packages only)
 #   bin/                         dyx3-<service> launchers copied from deployment/scripts
 #   .complete                    written last; a release without it is never switched to
+#   .verified                    built and statically verified; kept when the health gate fails, so a retry reuses it
 # /opt/dyx3/current is a symlink to one release; switching is a single atomic rename.
 
 DYX3_REPO_URL_DEFAULT="https://github.com/Vetri2425/DYX_3WD.git"
@@ -117,7 +118,7 @@ reexec_contract() {
 # build_release <sha>: extract + colcon build + launchers. Idempotent per SHA.
 build_release() {
   local sha="$1" rel="${DYX3_RELEASES}/$1"
-  if [ -f "${rel}/.complete" ]; then
+  if [ -f "${rel}/.complete" ] || [ -f "${rel}/.verified" ]; then
     log "release ${sha:0:10} already built"
     return 0
   fi
@@ -335,11 +336,21 @@ upgrade_to() {
 
   # Verify the built files before writing the marker that makes the release eligible.
   if ! (health_release_only "${DYX3_RELEASES}/${sha}" 0); then
-    run rm -f "${DYX3_RELEASES}/${sha}/.complete"
+    run rm -f "${DYX3_RELEASES}/${sha}/.complete" "${DYX3_RELEASES}/${sha}/.verified"
     die "release ${sha:0:10} failed verification; current is unchanged"
   fi
   run rm -f "${DYX3_RELEASES}/${sha}/.failed"
-  run touch "${DYX3_RELEASES}/${sha}/.complete"
+  # .verified outlives a failed health gate (INS-016): a retry of the same SHA reuses the build instead of an hour of
+  # colcon. .complete (eligible to be switched to) does not.
+  run touch "${DYX3_RELEASES}/${sha}/.verified" "${DYX3_RELEASES}/${sha}/.complete"
+
+  # Baseline of the running release, so an existing fault is not blamed on the new one (INS-006).
+  local base="${DYX3_VAR_LIB}/state/health_baseline" after="${DYX3_VAR_LIB}/state/health_after"
+  rm -f "${base}"
+  if [ -n "${prev}" ]; then
+    log "health baseline: the running release ${prev:0:10}, before the switch"
+    if health_capture "${DYX3_CURRENT}" "${base}"; then log "health baseline: OK"; else warn "health baseline: checks already failing before the switch (they will not cause a revert)"; fi
+  fi
 
   # The build can take an hour: the rover may have started a mission meanwhile.
   require_rover_idle "the switch to ${sha:0:10}"
@@ -352,13 +363,13 @@ upgrade_to() {
   write_versions_file "${DYX3_CURRENT}"
   restart_enabled_services "${DYX3_CURRENT}"
 
-  if health_run "${DYX3_CURRENT}"; then
+  if health_judge "${DYX3_CURRENT}" "${base}" "${after}"; then
     clear_switch_in_progress
     # The access point last, and only once the release is healthy: re-activating it drops every Wi-Fi session,
     # including the ssh session an operator may be watching from (INS-004).
     install_hotspot_network
     prune_releases
-    log "upgrade complete: ${sha:0:10}"
+    log "upgrade complete: ${sha:0:10} (health: ${HEALTH_RESULT})"
     return 0
   fi
   warn "release ${sha:0:10} failed post-switch health verification"
@@ -375,8 +386,10 @@ upgrade_to() {
     install_operator_shims
     write_versions_file "${DYX3_CURRENT}"
     restart_enabled_services "${DYX3_CURRENT}"
+    # Health again after the revert (INS-016): the operator must know where the rover was left.
+    health_judge "${DYX3_CURRENT}" "${base}" "${DYX3_VAR_LIB}/state/health_after_revert" || true
     clear_switch_in_progress
-    die "upgrade to ${sha:0:10} reverted to ${prev:0:10}"
+    die "upgrade to ${sha:0:10} reverted to ${prev:0:10}; health of ${prev:0:10} after the revert: ${HEALTH_RESULT}"
   fi
   stop_enabled_services "${DYX3_RELEASES}/${sha}"
   disable_enabled_services "${DYX3_RELEASES}/${sha}"
@@ -472,6 +485,12 @@ rollback_release() {
     die "previous release ${prev:0:10} is missing or incomplete (pruned?)"
   load_pin firmware
   health_release_only "${DYX3_RELEASES}/${prev}" || die "previous release ${prev:0:10} failed verification; current is unchanged"
+  local base="${DYX3_VAR_LIB}/state/health_baseline" after="${DYX3_VAR_LIB}/state/health_after"
+  rm -f "${base}"
+  if [ -n "${cur}" ]; then
+    log "health baseline: the running release ${cur:0:10}, before the rollback"
+    if health_capture "${DYX3_CURRENT}" "${base}"; then log "health baseline: OK"; else warn "health baseline: checks already failing before the rollback (they will not cause a restore)"; fi
+  fi
   require_rover_idle "rollback to ${prev:0:10}"
 
   log "rollback: ${cur:0:10} -> ${prev:0:10}"
@@ -482,9 +501,9 @@ rollback_release() {
   install_operator_shims
   write_versions_file "${DYX3_CURRENT}"
   restart_enabled_services "${DYX3_CURRENT}"
-  if health_run "${DYX3_CURRENT}"; then
+  if health_judge "${DYX3_CURRENT}" "${base}" "${after}"; then
     clear_switch_in_progress
-    log "rollback complete: ${prev:0:10}"
+    log "rollback complete: ${prev:0:10} (health: ${HEALTH_RESULT})"
     return 0
   fi
   rover_may_restart "restoring ${cur:0:10}" ||
@@ -493,8 +512,10 @@ rollback_release() {
   atomic_symlink "${DYX3_RELEASES}/${cur}" "${DYX3_CURRENT}"
   printf '%s\n' "${prev}" >"${DYX3_VAR_LIB}/state/previous_release"
   install_units "${DYX3_CURRENT}"
+  install_operator_shims
   write_versions_file "${DYX3_CURRENT}"
   restart_enabled_services "${DYX3_CURRENT}"
+  health_judge "${DYX3_CURRENT}" "${base}" "${DYX3_VAR_LIB}/state/health_after_revert" || true
   clear_switch_in_progress
-  die "rollback to ${prev:0:10} was unhealthy; restored ${cur:0:10}"
+  die "rollback to ${prev:0:10} was unhealthy; restored ${cur:0:10}; health of ${cur:0:10} after the restore: ${HEALTH_RESULT}"
 }

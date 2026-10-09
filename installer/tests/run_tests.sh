@@ -62,6 +62,9 @@ gw_state() {
   printf '{"v":1,"id":1,"ok":true,"code":"ok","reason":"","data":{"vehicle_state":{"age_s":0.1,"fresh":%s,"data":{"arming_state":%s}},"mission":{"age_s":0.1,"fresh":%s,"data":{"state":%s}},"gateway":{}}}\n' \
     "$3" "$2" "$5" "$4" >"$1"
 }
+# agent_toggle: stands in for restart_enabled_services. The first call takes the fake XRCE agent down
+# (FAKE_NO_AGENT="${T}/agent_down"), the next brings it back: a fault that starts with the switch and ends with the revert.
+agent_toggle() { if [ -e "${T}/agent_down" ]; then rm -f "${T}/agent_down"; else : >"${T}/agent_down"; fi; }
 idle_rc() {
   rover_idle_check >"${T}/idle_reason" 2>&1
   echo $?
@@ -628,10 +631,14 @@ F
   local D
   D="$(git -C "${src}" rev-parse HEAD)"
   : >"${T}/no_agent"
-  (install_hotspot_network() { touch "${T}/hs_on_fail"; }; FAKE_NO_AGENT="${T}/no_agent" upgrade_to "${D}") >"${T}/up_d" 2>&1
+  rm -f "${T}/agent_down"
+  (install_hotspot_network() { touch "${T}/hs_on_fail"; }; restart_enabled_services() { agent_toggle; }
+    FAKE_NO_AGENT="${T}/agent_down" upgrade_to "${D}") >"${T}/up_d" 2>&1
   rc=$?
   check "unhealthy upgrade fails (rc!=0)" '[ "${rc}" -ne 0 ]'
   check "unhealthy upgrade reverted to B" '[ "$(basename "$(readlink -f "${DYX3_CURRENT}")")" = "${B}" ]'
+  check "the revert is health-checked and the result is in the final message" 'grep -q "health of ${B:0:10} after the revert: OK" "${T}/up_d"'
+  check "a failed health gate keeps the verified build" '[ -f "${DYX3_RELEASES}/${D}/.verified" ] && [ -f "${DYX3_RELEASES}/${D}/ros2_ws/install/setup.bash" ]'
   check "unhealthy upgrade is ineligible and records its failure" '[ ! -f "${DYX3_RELEASES}/${D}/.complete" ] && [ -f "${DYX3_RELEASES}/${D}/.failed" ]'
   check "the access point is not touched by an upgrade that fails health" '[ ! -e "${T}/hs_on_fail" ]'
   check "a failed upgrade leaves no in-progress marker" '[ ! -e "${DYX3_VAR_LIB}/state/upgrade_in_progress" ]'
@@ -651,6 +658,7 @@ F
   (install_hotspot_network() { grep -q "health: OK" "${T}/up_d2" && touch "${T}/hs_after_health"; }; upgrade_to "${D}") >"${T}/up_d2" 2>&1
   rc=$?
   check "healthy retry of D succeeds" '[ "${rc}" -eq 0 ] && [ "$(basename "$(readlink -f "${DYX3_CURRENT}")")" = "${D}" ]'
+  check "the retry reuses the verified build" 'grep -q "${D:0:10} already built" "${T}/up_d2"'
   check "the access point is configured only after the health gate passed" '[ -e "${T}/hs_after_health" ]'
   check "a completed upgrade leaves no in-progress marker" '[ ! -e "${DYX3_VAR_LIB}/state/upgrade_in_progress" ]'
 
@@ -690,9 +698,11 @@ F
   check "versions.json describes the rolled-back release" 'grep -q "\"stack_sha\": \"${B}\"" "${DYX3_ETC}/versions.json"'
   (rollback_release) >"${T}/rb2" 2>&1
   check "a second rollback undoes the first" '[ "$(basename "$(readlink -f "${DYX3_CURRENT}")")" = "${D}" ]'
-  (FAKE_NO_AGENT="${T}/no_agent" rollback_release) >"${T}/rb3" 2>&1
+  rm -f "${T}/agent_down"
+  (restart_enabled_services() { agent_toggle; }; FAKE_NO_AGENT="${T}/agent_down" rollback_release) >"${T}/rb3" 2>&1
   rc=$?
   check "an unhealthy rollback fails (rc!=0)" '[ "${rc}" -ne 0 ]'
+  check "the restore is health-checked and reported" 'grep -q "health of ${D:0:10} after the restore: OK" "${T}/rb3"'
   check "an unhealthy rollback restores the release it started from" '[ "$(basename "$(readlink -f "${DYX3_CURRENT}")")" = "${D}" ] && [ "$(cat "${DYX3_VAR_LIB}/state/previous_release")" = "${B}" ]'
   printf '%s\n' "0000000000000000000000000000000000000000" >"${DYX3_VAR_LIB}/state/previous_release"
   (rollback_release) >"${T}/rb4" 2>&1
@@ -760,16 +770,28 @@ F
   check "the switch is refused when a mission started during the build" '[ "${rc}" -ne 0 ] && grep -q "refusing the switch" "${T}/il_switch" && [ "$(basename "$(readlink -f "${DYX3_CURRENT}")")" = "${B}" ]'
   # Armed right after the switch, then health fails: no revert under a moving rover.
   gw_state "${gwf}" 1 true 0 true
-  (restart_enabled_services() { gw_state "${gwf}" 2 true 0 true; }; FAKE_NO_AGENT="${T}/no_agent" upgrade_to "${F}") >"${T}/il_revert" 2>&1
+  rm -f "${T}/agent_down"
+  (restart_enabled_services() { gw_state "${gwf}" 2 true 0 true; : >"${T}/agent_down"; }
+    FAKE_NO_AGENT="${T}/agent_down" upgrade_to "${F}") >"${T}/il_revert" 2>&1
   rc=$?
   check "a failed upgrade is not reverted under an ARMED rover" '[ "${rc}" -ne 0 ] && grep -q "NOT reverting" "${T}/il_revert" && [ "$(basename "$(readlink -f "${DYX3_CURRENT}")")" = "${F}" ]'
   gw_state "${gwf}" 1 true 0 true
+  rm -f "${T}/agent_down"
   (rollback_release) >"${T}/il_after" 2>&1
   check "once idle, dyx3-rollback returns to the healthy release" '[ "$(basename "$(readlink -f "${DYX3_CURRENT}")")" = "${B}" ]'
   kill "${FAKE_GW_PID}" 2>/dev/null
   wait "${FAKE_GW_PID}" 2>/dev/null
   check "idle: a stale socket file with dyx3-ros stopped is idle" '[ -S "${DYX3_GATEWAY_SOCK}" ] && [ "$(idle_rc)" = 0 ]'
   rm -f "${DYX3_GATEWAY_SOCK}"
+
+  # ---- INS-006: a fault already present before the switch (agent down on B too) does not fail the upgrade
+  (FAKE_NO_AGENT="${T}/no_agent" upgrade_to "${F}") >"${T}/bl_up" 2>&1
+  rc=$?
+  check "baseline: a pre-existing failure does not revert the upgrade" '[ "${rc}" -eq 0 ] && [ "$(basename "$(readlink -f "${DYX3_CURRENT}")")" = "${F}" ] && grep -q "already failing before the switch" "${T}/bl_up" && grep -q "health: OK apart from failures present before the switch" "${T}/bl_up"'
+  check "baseline: it is saved and names the failing check" 'grep -q "^FAIL  nothing listening on udp/8888" "${DYX3_VAR_LIB}/state/health_baseline"'
+  (FAKE_NO_AGENT="${T}/no_agent" rollback_release) >"${T}/bl_rb" 2>&1
+  rc=$?
+  check "baseline: nor the rollback" '[ "${rc}" -eq 0 ] && [ "$(basename "$(readlink -f "${DYX3_CURRENT}")")" = "${B}" ]'
 }
 
 # ---------------------------------------------------------------- INS-002/003: the target's own installer

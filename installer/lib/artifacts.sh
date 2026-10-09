@@ -121,7 +121,7 @@ _artifact_extract() {
 install_prebuilt() {
   local sha="$1" rel="${DYX3_RELEASES}/$1"
   [ "${DYX3_ARTIFACTS}" = "source" ] && return 1
-  [ -f "${rel}/.complete" ] && return 0
+  if [ -f "${rel}/.complete" ] || [ -f "${rel}/.verified" ]; then return 0; fi
   load_pin firmware
   local pm need_msgs=0
   pm="$(px4_msgs_dir)"
@@ -167,7 +167,7 @@ install_prebuilt() {
     warn "release artifact did not install"
     return 1
   }
-  rm -f "${rel}/.complete" "${rel}/.failed"
+  rm -f "${rel}/.complete" "${rel}/.verified" "${rel}/.failed"
   cp "${dir}/artifacts.env" "${rel}/artifacts.env"
   touch "${rel}/.prebuilt"
   rm -rf "${dir}"
