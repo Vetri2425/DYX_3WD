@@ -109,6 +109,28 @@ the old limiter mechanics directly testable; it is not a second production contr
 | `require_gnss_yaw_fusion` | true | RESTART | DERIVED: CLAUDE.md §3, dual-antenna heading is first-class |
 | hard envelopes | section 5 | RESTART (LIVE target) | spec §9 lists speed limits as LIVE |
 
+### 6.1 Rationale of each freshness limit
+
+`command_max_age_s` (0.2 s) covers RPP's own command and is deliberately tight: a silent RPP is the
+loss the guard exists to report, and the decision loop runs at 50 Hz. Every other input is a *status*
+that is compared with a producer period. 0.5 s is a loss detector, not a sample-and-hold budget:
+
+| Parameter | Producer rate | 0.5 s is | Why it is enough |
+|---|---|---|---|
+| `vehicle_state_max_age_s` | 50 Hz (`px4_link`) | 25 periods | the loosest limit. Arming, nav state and estimate validity do not change because the publisher went silent; the silent producer is `px4_link`, whose loss also fails the link gate. May be tightened together with RPP's `pose_max_age_s`. |
+| `estimator_health_max_age_s` | 10 Hz (`px4_link`) | 5 periods | tolerates three consecutive lost samples with margin |
+| `px4_link_max_age_s` | 10 Hz (`px4_link/status`) | 5 periods | same |
+| `operator_link_max_age_s` | 10 Hz (gateway) | 5 periods | the gateway owns the heartbeat-loss timeout and reports `alive=false`; this limit only covers the gateway itself going silent |
+| `mission_state_max_age_s` | 10 Hz (mission) | 5 periods | a silent mission node fails the mission gate; the physical state does not change |
+| `rtk_status_max_age_s` | 5 Hz (`rtk_node`) | 2.5 periods | the tightest ratio. One lost sample (a 0.4 s gap) is tolerated, two are not; do not tighten it below about 0.45 s |
+
+The physical state does not change because a status publisher went silent, so the limit bounds how
+long a *stale but still-valid* status can authorise motion, not how fast a real fault is seen: a real
+fault (RTK lost, arming dropped, link down) is reported by the producer itself in its next message.
+A dead in-graph producer (mission, `px4_link`, gateway) also takes the whole control graph down
+(`on_exit=Shutdown` in `control_graph.launch.py`). A never-heard input fails from the start. The
+boundary is tested on the injected clock (motion at 0.48 s of age, STOP by 0.52 s).
+
 **This version reads every parameter once at start** and rejects every runtime parameter update
 with an explicit startup-only reason. Invalid startup values throw; there is no fallback to a
 default. No MotionGuard parameter is currently LIVE or IDLE_ONLY. A validated runtime path that
