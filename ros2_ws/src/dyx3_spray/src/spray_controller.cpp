@@ -71,7 +71,11 @@ void SprayController::note_rpp(uint8_t state, uint32_t mission_id, uint32_t run_
   pivot_gate_.note_state(static_cast<RppState>(state) == RppState::Pivoting, now_s);
 }
 
-void SprayController::set_mission(bool running, uint32_t mission_id) {
+void SprayController::set_mission(MissionPhase phase, uint32_t mission_id) {
+  const bool running = phase == MissionPhase::Running;
+  mission_known_ = true;
+  mission_phase_ = phase;
+  if (manual_locked()) manual_active_ = false;  // the next tick drives the valve OFF
   if (!running || mission_id != mission_id_) {
     tracking_seen_ = false;
     heading_entry_hold_ = true;
@@ -79,6 +83,19 @@ void SprayController::set_mission(bool running, uint32_t mission_id) {
   }
   mission_running_ = running;
   mission_id_ = mission_id;
+}
+
+bool SprayController::manual_locked() const {
+  if (!mission_known_) return true;
+  switch (mission_phase_) {
+    case MissionPhase::Idle:
+    case MissionPhase::Completed:
+    case MissionPhase::Aborted:
+    case MissionPhase::Error:
+      return false;
+    default:
+      return true;  // LOADING, READY, RUNNING, PAUSED, unknown
+  }
 }
 
 GateResult SprayController::ownership(double now_s) const {
@@ -147,8 +164,8 @@ bool SprayController::safety_allows_on(double now_s) const {
   if (!(estop_known_ && !estop_asserted_ && (now_s - estop_recv_s_) <= kEstopMaxAgeS)) return false;
   if (!(vehicle_fresh(now_s) && veh_.armed)) return false;
   if (!watchdog_ok(nullptr, now_s)) return false;
-  if (manual_active_)
-    return true;  // bench: armed is sufficient, OFFBOARD is an auto-spray constraint
+  if (manual_active_)  // bench: armed is sufficient, OFFBOARD is an auto-spray constraint
+    return !manual_locked();
   if (!ownership(now_s).ok) return false;
   if (p_->flag(P::require_offboard) && !veh_.offboard) return false;
   return true;
@@ -161,7 +178,7 @@ std::pair<bool, std::string> SprayController::fsm_safety_ok(double now_s) const 
   if (!(vehicle_fresh(now_s) && veh_.armed)) return {false, "disarmed"};
   std::string why;
   if (!watchdog_ok(&why, now_s)) return {false, why};
-  if (manual_active_) return {true, ""};
+  if (manual_active_ && !manual_locked()) return {true, ""};
   if (last_decision_) return {last_decision_->safety_ok, last_decision_->safety_reason};
   return {false, "distance-aware safety not yet evaluated"};
 }
@@ -230,6 +247,10 @@ ManualResult SprayController::set_manual(bool on, double now_s) {
     manual_active_ = false;
     return ManualResult::WatchdogNotReady;
   }
+  if (manual_locked()) {
+    manual_active_ = false;
+    return ManualResult::MissionActive;
+  }
   manual_active_ = true;
   manual_deadline_s_ = now_s + std::max(0.5, p_->num(P::manual_override_timeout_s));
   return ManualResult::Ok;
@@ -265,7 +286,8 @@ std::optional<SprayCommand> SprayController::drive_fsm(double now_s) {
 
 std::optional<SprayCommand> SprayController::tick(double now_s) {
   // Manual override: hard expiry, and fail-safes outrank it.
-  if (manual_active_ && (now_s >= manual_deadline_s_ || !safety_allows_on(now_s)))
+  if (manual_active_ &&
+      (now_s >= manual_deadline_s_ || manual_locked() || !safety_allows_on(now_s)))
     manual_active_ = false;
 
   const bool pf = pose_fresh(now_s);

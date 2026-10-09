@@ -165,7 +165,16 @@ COMPLETE, ERROR and unknown values refuse. Reasons: `mission not running`, `rpp 
 `rpp not marking`. Any refusal goes through the normal OFF path: OFF command at once (no debounce: the FSM reads the safety
 verdict directly) and the lease's `allow_on` drops. The tracking evidence (B5) is no longer a permanent latch: it is set only by
 TRACKING of the RUNNING mission and cleared by any non-RUNNING mission state, a mission id change, or a path load, so a resume
-needs fresh TRACKING. Manual (bench) spray is exempt, as before (armed + watchdog suffice).
+needs fresh TRACKING.
+
+**Manual (bench) spray (SP-001; DERIVED — NOT FROM V1 SPEC, the prototype let it override a mission).** `set_manual` checks, in
+order: `spray_enabled`, armed with a fresh vehicle state, the watchdog (heartbeat fresh and `off_authority_ready`), then mission
+ownership: while `MissionState` is LOADING, READY, RUNNING or PAUSED, or any unknown value, or before any `MissionState` has been
+received (fail closed), manual ON is refused (`SetSprayManual` has no code of its own for this: the node answers
+`REASON_DISABLED` and logs a warning). A manual ON that is active when the mission enters one of those states ends at once (the
+lease's `allow_on` drops on the message, the OFF goes out on the next tick). Manual stays available while IDLE, COMPLETED,
+ABORTED or ERROR, where it is exempt from the autonomous gates as before (armed + watchdog suffice) and still expires after
+`manual_override_timeout_s`.
 
 disarmed; not OFFBOARD (`require_offboard`); path not loaded; pose stale (`pose_timeout_s`); velocity stale
 (`velocity_timeout_s`); RTK gate (below); awaiting tracking (B5: no `RppStatus` TRACKING since the path loaded, so a rover parked

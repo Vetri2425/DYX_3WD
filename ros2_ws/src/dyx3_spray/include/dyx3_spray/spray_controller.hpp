@@ -47,7 +47,27 @@ struct ActuatorWire {
   int pwm_us{0};
 };
 
-enum class ManualResult : uint8_t { Ok = 0, Disabled = 1, Disarmed = 2, WatchdogNotReady = 3 };
+// MissionActive: a mission owns the valve (SP-001). The service has no reason code for it; the
+// node answers REASON_DISABLED.
+enum class ManualResult : uint8_t {
+  Ok = 0,
+  Disabled = 1,
+  Disarmed = 2,
+  WatchdogNotReady = 3,
+  MissionActive = 4
+};
+
+// MissionState.state values (dyx3_interfaces/MissionState.STATE_*; spray_node static_asserts them).
+enum class MissionPhase : uint8_t {
+  Idle = 0,
+  Loading = 1,
+  Ready = 2,
+  Running = 3,
+  Paused = 4,
+  Completed = 5,
+  Aborted = 6,
+  Error = 7
+};
 
 struct ControllerStatus {
   SprayState fsm_state{SprayState::OffUnconfirmed};
@@ -86,8 +106,11 @@ public:
   void note_estop(bool asserted, double now_s);
   void note_watchdog(bool alive, bool off_authority_ready, double now_s);
   // MissionState: any non-RUNNING state or a different mission id clears the tracking evidence.
-  void set_mission(bool running, uint32_t mission_id);
+  // LOADING, READY, RUNNING, PAUSED (and any unknown value) lock out manual spray and end an active
+  // manual ON at once (SP-001).
+  void set_mission(MissionPhase phase, uint32_t mission_id);
 
+  // Bench override. Order: disabled, disarmed/stale vehicle, watchdog, then mission ownership.
   ManualResult set_manual(bool on, double now_s);
 
   // ---- outputs ----
@@ -115,6 +138,8 @@ private:
   void update_flow(double speed, double dt);
   std::optional<SprayCommand> drive_fsm(double now_s);
   bool effective_desired() const { return manual_active_ ? true : desired_debounced_; }
+  // SP-001: manual spray only while no mission owns the valve. Fail closed before any MissionState.
+  bool manual_locked() const;
   DecisionParams decision_params() const;
   bool low_speed_cut(bool geometry_desired, double speed);
 
@@ -148,6 +173,8 @@ private:
   bool wd_ready_{false};
   double wd_recv_s_{0.0};
   bool mission_running_{false};
+  bool mission_known_{false};
+  MissionPhase mission_phase_{MissionPhase::Idle};
   uint32_t mission_id_{0};
   bool rpp_known_{false};
   uint8_t rpp_state_{0};

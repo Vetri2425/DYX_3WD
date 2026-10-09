@@ -496,6 +496,7 @@ TEST(SprayNode, HeadingEntryHoldReleasesFromFreshRppHeadingOrProgress) {
 
 TEST(SprayNode, ManualServiceHonoursTheFailSafes) {
   Rig r;
+  r.mission_state = dyx3_interfaces::msg::MissionState::STATE_IDLE;  // bench: no mission
   r.settle();
   r.north = 0.5;
   auto call = [&](bool on) {
@@ -519,6 +520,17 @@ TEST(SprayNode, ManualServiceHonoursTheFailSafes) {
   const auto refused = call(true);
   EXPECT_FALSE(refused->accepted);
   EXPECT_EQ(refused->reason_code, dyx3_interfaces::srv::SetSprayManual::Response::REASON_DISARMED);
+
+  // SP-001: a running mission owns the valve; manual ON is refused (reported as DISABLED).
+  r.armed = true;
+  r.mission_state = dyx3_interfaces::msg::MissionState::STATE_RUNNING;
+  r.run(0.2);
+  const auto locked = call(true);
+  EXPECT_FALSE(locked->accepted);
+  EXPECT_EQ(locked->reason_code, dyx3_interfaces::srv::SetSprayManual::Response::REASON_DISABLED);
+  r.run(0.2);
+  EXPECT_FALSE(r.status.manual_active);
+  EXPECT_FALSE(r.status.spraying);
 }
 
 TEST(SprayNode, RuntimeParameterChangesObeyTheirClass) {

@@ -25,6 +25,15 @@ static_assert(static_cast<uint8_t>(SprayState::Disabled) == SprayStatus::FSM_DIS
 static_assert(static_cast<uint8_t>(LeadEvent::OnEarly) == SprayStatus::EVENT_ON_EARLY);
 static_assert(static_cast<uint8_t>(LeadEvent::OffEarly) == SprayStatus::EVENT_OFF_EARLY);
 static_assert(static_cast<uint8_t>(LeadEvent::TerminalOff) == SprayStatus::EVENT_TERMINAL_OFF);
+using MS = dyx3_interfaces::msg::MissionState;
+static_assert(static_cast<uint8_t>(MissionPhase::Idle) == MS::STATE_IDLE);
+static_assert(static_cast<uint8_t>(MissionPhase::Loading) == MS::STATE_LOADING);
+static_assert(static_cast<uint8_t>(MissionPhase::Ready) == MS::STATE_READY);
+static_assert(static_cast<uint8_t>(MissionPhase::Running) == MS::STATE_RUNNING);
+static_assert(static_cast<uint8_t>(MissionPhase::Paused) == MS::STATE_PAUSED);
+static_assert(static_cast<uint8_t>(MissionPhase::Completed) == MS::STATE_COMPLETED);
+static_assert(static_cast<uint8_t>(MissionPhase::Aborted) == MS::STATE_ABORTED);
+static_assert(static_cast<uint8_t>(MissionPhase::Error) == MS::STATE_ERROR);
 static_assert(kBackendActuator == SprayActuatorCommand::BACKEND_ACTUATOR);
 static_assert(kBackendServoPwm == SprayActuatorCommand::BACKEND_SERVO_PWM);
 
@@ -122,11 +131,15 @@ SprayNode::SprayNode(const rclcpp::NodeOptions& options, ClockFn clock, bool cre
         using R = dyx3_interfaces::srv::SetSprayManual::Response;
         const ManualResult r = ctl_->set_manual(req->on, clock_());
         res->accepted = r == ManualResult::Ok;
-        res->reason_code =
-            static_cast<uint8_t>(r == ManualResult::Ok         ? R::REASON_OK
-                                 : r == ManualResult::Disabled ? R::REASON_DISABLED
-                                 : r == ManualResult::Disarmed ? R::REASON_DISARMED
-                                                               : R::REASON_WATCHDOG_NOT_READY);
+        // MissionActive has no code of its own in SetSprayManual: it is reported as DISABLED.
+        res->reason_code = static_cast<uint8_t>(
+            r == ManualResult::Ok                 ? R::REASON_OK
+            : r == ManualResult::Disabled         ? R::REASON_DISABLED
+            : r == ManualResult::MissionActive    ? R::REASON_DISABLED
+            : r == ManualResult::Disarmed         ? R::REASON_DISARMED
+                                                  : R::REASON_WATCHDOG_NOT_READY);
+        if (r == ManualResult::MissionActive)
+          RCLCPP_WARN(get_logger(), "manual spray refused: a mission owns the valve");
         step(clock_());  // act at once, do not wait for the next tick
       });
 
@@ -271,7 +284,7 @@ void SprayNode::publish_status(double now_s) {
 void SprayNode::on_mission_state(const dyx3_interfaces::msg::MissionState& m) {
   mission_running_ = m.state == dyx3_interfaces::msg::MissionState::STATE_RUNNING;
   mission_id_ = m.mission_id;
-  ctl_->set_mission(mission_running_, m.mission_id);
+  ctl_->set_mission(static_cast<MissionPhase>(m.state), m.mission_id);
   mission_source_sha_ = m.path_artifact_sha256;
   if (m.path_artifact_sha256.empty()) {
     loaded_sha_.clear();

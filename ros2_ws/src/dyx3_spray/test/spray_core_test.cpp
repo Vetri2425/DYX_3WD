@@ -393,6 +393,7 @@ struct Rig {
   bool rpp_alive{true};
   bool mission_running{true};
   std::optional<RppState> rpp_override;  // publish this state instead of tracking/pivot
+  std::optional<MissionPhase> mission_phase;  // publish this instead of RUNNING/PAUSED
   double period{0.02};                   // control tick period handed to the controller
 
   explicit Rig(bool tracking0 = true, double period_s = 0.02,
@@ -422,7 +423,10 @@ struct Rig {
     r.h_acc_m = 0.02;
     r.corrections_fresh = true;
     c->note_rtk(r, t);
-    c->set_mission(mission_running, 1);
+    c->set_mission(mission_phase     ? *mission_phase
+                   : mission_running ? MissionPhase::Running
+                                     : MissionPhase::Paused,
+                   1);
     if (rpp_alive) {
       // not tracking: an RPP state that may paint but is not TRACKING ("awaiting tracking")
       const RppState st = rpp_override ? *rpp_override
@@ -729,7 +733,7 @@ TEST(Controller, StaleCorrectionsCutValveAndRecoveryDoesNotBypassOtherGates) {
   // Restoring RPP evidence does not bypass mission ownership either.
   r.t += 0.02;
   r.world(n, true);
-  r.c->set_mission(false, 1);
+  r.c->set_mission(MissionPhase::Paused, 1);
   r.run_cmd(r.c->tick(r.t));
   EXPECT_FALSE(r.c->lease(r.t).allow_on);
   EXPECT_EQ(r.c->status(r.t).safety_reason, "mission not running");
@@ -759,6 +763,7 @@ TEST(Controller, NoSprayUntilTrackingIsSeenAndPivotingSuppressesIt) {
 
 TEST(Controller, ManualOverrideObeysFailSafesAndExpires) {
   Rig r;
+  r.mission_phase = MissionPhase::Idle;  // bench: no mission owns the valve
   r.step(0.5);
   r.step(0.5);
   EXPECT_EQ(r.c->set_manual(true, r.t), ManualResult::Ok);
@@ -771,6 +776,7 @@ TEST(Controller, ManualOverrideObeysFailSafesAndExpires) {
   EXPECT_FALSE(r.c->status(r.t).spraying);
 
   Rig d;
+  d.mission_phase = MissionPhase::Idle;
   d.step(0.5);
   EXPECT_EQ(d.c->set_manual(true, d.t), ManualResult::Ok);
   d.step(0.5, 0.35, false, /*armed=*/false);  // fail-safes outrank the override
@@ -977,4 +983,68 @@ TEST(Controller, StandingStartOnAMarkLegStillOpensAtOnce) {
   }
   EXPECT_LT(v, 0.05);
   EXPECT_TRUE(r.c->status(r.t).spraying);
+}
+
+// SP-001: the bench override cannot overrule the boundary geometry of a mission.
+TEST(Controller, ManualOnIsRefusedWhileAMissionOwnsTheValve) {
+  for (const MissionPhase ph : {MissionPhase::Loading, MissionPhase::Ready, MissionPhase::Running,
+                                MissionPhase::Paused, static_cast<MissionPhase>(42)}) {
+    Rig r;
+    r.mission_phase = ph;
+    r.step(0.5);  // TRANSIT: the geometry wants OFF
+    r.step(0.5);
+    EXPECT_EQ(r.c->set_manual(true, r.t), ManualResult::MissionActive)
+        << static_cast<int>(ph);
+    for (int i = 0; i < 5; ++i) r.step(0.5);
+    EXPECT_FALSE(r.c->status(r.t).manual_active) << static_cast<int>(ph);
+    EXPECT_FALSE(r.c->status(r.t).spraying) << static_cast<int>(ph);
+    EXPECT_EQ(r.ons, 0) << static_cast<int>(ph);
+  }
+  // Before any MissionState: fail closed.
+  ParamSet params;
+  SprayController c(&params, 0.02);
+  VehicleSnapshot v;
+  v.armed = v.offboard = v.position_valid = v.attitude_valid = v.velocity_valid = true;
+  c.note_vehicle(v, 1.0);
+  c.note_watchdog(true, true, 1.0);
+  EXPECT_EQ(c.set_manual(true, 1.0), ManualResult::MissionActive);
+  // The fail-safes are still checked first.
+  Rig d;
+  d.step(0.5);
+  d.step(0.5, 0.35, false, /*armed=*/false);
+  EXPECT_EQ(d.c->set_manual(true, d.t), ManualResult::Disarmed);
+}
+
+TEST(Controller, ActiveManualOnEndsWhenAMissionStarts) {
+  for (const MissionPhase ph : {MissionPhase::Loading, MissionPhase::Running}) {
+    Rig r;
+    r.mission_phase = MissionPhase::Idle;
+    r.step(0.5);
+    r.step(0.5);
+    ASSERT_EQ(r.c->set_manual(true, r.t), ManualResult::Ok);
+    for (int i = 0; i < 5; ++i) r.step(0.5);
+    ASSERT_TRUE(r.c->status(r.t).spraying);
+    ASSERT_TRUE(r.c->lease(r.t).allow_on);
+    const int offs = r.offs;
+    r.c->set_mission(ph, 1);  // MissionState arrives between ticks
+    EXPECT_FALSE(r.c->status(r.t).manual_active);
+    EXPECT_FALSE(r.c->lease(r.t).allow_on);  // the lease drops before the next tick
+    r.mission_phase = ph;
+    r.step(0.5);  // the next tick sends OFF at once (TRANSIT geometry, no debounce wait)
+    EXPECT_EQ(r.offs, offs + 1) << static_cast<int>(ph);
+    EXPECT_FALSE(r.c->status(r.t).spraying) << static_cast<int>(ph);
+  }
+}
+
+TEST(Controller, ManualStillWorksWhenNoMissionIsActive) {
+  for (const MissionPhase ph : {MissionPhase::Idle, MissionPhase::Completed, MissionPhase::Aborted,
+                                MissionPhase::Error}) {
+    Rig r;
+    r.mission_phase = ph;
+    r.step(0.5);
+    r.step(0.5);
+    EXPECT_EQ(r.c->set_manual(true, r.t), ManualResult::Ok) << static_cast<int>(ph);
+    for (int i = 0; i < 5; ++i) r.step(0.5);
+    EXPECT_TRUE(r.c->status(r.t).spraying) << static_cast<int>(ph);
+  }
 }
