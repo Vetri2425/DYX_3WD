@@ -47,6 +47,8 @@ enum class Event : std::uint8_t {
   kGateLost,
   kEstop,
   kSkipPoint,
+  kRppStale,
+  kRppAckTimeout,
 };
 
 /// Why a request was refused. Mapped to the service REASON_* codes by the node.
@@ -113,6 +115,11 @@ public:
   Result rpp_error(std::int64_t now_ns);
   Result gate_lost(std::uint8_t guard_reason, std::int64_t now_ns);
   Result estop(std::int64_t now_ns);
+  /// READY and RPP never acknowledged the artifact in time: ERROR (REASON_INTERNAL_ERROR).
+  Result rpp_ack_timeout(std::int64_t now_ns);
+  /// RPP stopped reporting for the running mission: automatic pause (REASON_SAFETY), never an
+  /// automatic resume.
+  Result rpp_stale(std::int64_t now_ns);
   Result skip_point(bool has_active_point, std::int64_t now_ns);
 
   State state() const { return state_; }

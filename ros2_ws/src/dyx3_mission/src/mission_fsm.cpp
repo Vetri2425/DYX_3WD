@@ -51,6 +51,10 @@ const char* to_string(Event e) {
       return "estop";
     case Event::kSkipPoint:
       return "skip_point";
+    case Event::kRppStale:
+      return "rpp_stale";
+    case Event::kRppAckTimeout:
+      return "rpp_ack_timeout";
   }
   return "?";
 }
@@ -243,6 +247,22 @@ Result MissionFsm::estop(std::int64_t now_ns) {
     return go(State::kAborted, Event::kEstop, kReasonSafety, "emergency stop", now_ns);
   }
   return ok_no_change(Event::kEstop, "no active mission", now_ns);
+}
+
+Result MissionFsm::rpp_stale(std::int64_t now_ns) {
+  if (state_ == State::kRunning) {
+    return go(State::kPaused, Event::kRppStale, kReasonSafety, "rpp status stale: automatic pause",
+              now_ns);
+  }
+  return ok_no_change(Event::kRppStale, "no running mission", now_ns);
+}
+
+Result MissionFsm::rpp_ack_timeout(std::int64_t now_ns) {
+  if (state_ == State::kReady) {
+    return go(State::kError, Event::kRppAckTimeout, kReasonInternalError,
+              "rpp never acknowledged the artifact", now_ns);
+  }
+  return ok_no_change(Event::kRppAckTimeout, "not waiting for an ack", now_ns);
 }
 
 Result MissionFsm::skip_point(bool has_active_point, std::int64_t now_ns) {

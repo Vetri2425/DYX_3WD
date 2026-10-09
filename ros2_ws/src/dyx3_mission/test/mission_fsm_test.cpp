@@ -194,6 +194,24 @@ std::vector<Case> table() {
     c.push_back({s, "estop no effect", [](MissionFsm& f) { return f.estop(kNow); }, true,
                  Reject::kNone, s, 0, false});
   }
+  // ---- rpp_stale
+  c.push_back({S::kRunning, "rpp stale -> automatic safety pause",
+               [](MissionFsm& f) { return f.rpp_stale(kNow); }, true, Reject::kNone, S::kPaused,
+               kReasonSafety, true});
+  for (State s :
+       {S::kIdle, S::kLoading, S::kReady, S::kPaused, S::kCompleted, S::kAborted, S::kError}) {
+    c.push_back({s, "rpp stale no effect", [](MissionFsm& f) { return f.rpp_stale(kNow); }, true,
+                 Reject::kNone, s, 0, false});
+  }
+  // ---- rpp_ack_timeout
+  c.push_back({S::kReady, "rpp ack timeout", [](MissionFsm& f) { return f.rpp_ack_timeout(kNow); },
+               true, Reject::kNone, S::kError, kReasonInternalError, true});
+  for (State s :
+       {S::kIdle, S::kLoading, S::kRunning, S::kPaused, S::kCompleted, S::kAborted, S::kError}) {
+    c.push_back({s, "rpp ack timeout no effect",
+                 [](MissionFsm& f) { return f.rpp_ack_timeout(kNow); }, true, Reject::kNone, s, 0,
+                 false});
+  }
   // ---- skip_point
   for (State s : {S::kRunning, S::kPaused}) {
     c.push_back({s, "skip with active point",
@@ -253,6 +271,24 @@ TEST(MissionFsmGuards, NeverAutoResumesAndNeverRunsWithoutAGate) {
   EXPECT_EQ(f.state(), State::kRunning);
 }
 
+TEST(MissionFsmGuards, StaleRppPausesWithADistinctEventAndNeverAutoResumes) {
+  MissionFsm f = in_state(State::kRunning);
+  std::vector<Transition> seen;
+  f.set_observer([&](const Transition& t) { seen.push_back(t); });
+  EXPECT_EQ(f.rpp_stale(kNow).state, State::kPaused);
+  ASSERT_EQ(seen.size(), 1U);
+  EXPECT_EQ(seen[0].event, Event::kRppStale);
+  EXPECT_STREQ(to_string(seen[0].event), "rpp_stale");
+  EXPECT_EQ(seen[0].reason, kReasonSafety);
+  // Neither another stale report, a recovering gate nor a duplicate ack resumes it.
+  f.rpp_stale(kNow);
+  f.gate_lost(0, kNow);
+  f.rpp_ack(true, 0, kNow);
+  EXPECT_EQ(f.state(), State::kPaused);
+  EXPECT_TRUE(f.resume(true, kNow).accepted);  // only an explicit resume
+  EXPECT_EQ(f.state(), State::kRunning);
+}
+
 TEST(MissionFsmGuards, TerminalStatesAreLeftOnlyByANewStart) {
   for (State s : {State::kCompleted, State::kAborted, State::kError}) {
     MissionFsm f = in_state(s);
@@ -263,6 +299,8 @@ TEST(MissionFsmGuards, TerminalStatesAreLeftOnlyByANewStart) {
     f.rpp_error(kNow);
     f.gate_lost(5, kNow);
     f.estop(kNow);
+    f.rpp_stale(kNow);
+    f.rpp_ack_timeout(kNow);
     f.skip_point(true, kNow);
     f.artifact_loaded(true, kNow);
     f.rpp_ack(true, 0, kNow);
@@ -311,7 +349,7 @@ TEST(MissionFsmProperty, InvariantsHoldUnderRandomEventSequences) {
       const bool gate = rng() % 4 != 0;
       const std::uint8_t reason = static_cast<std::uint8_t>(rng() % 14);
       const State before = f.state();
-      switch (rng() % 11) {
+      switch (rng() % 13) {
         case 0:
           f.start(gate, i);
           break;
@@ -341,6 +379,12 @@ TEST(MissionFsmProperty, InvariantsHoldUnderRandomEventSequences) {
           break;
         case 9:
           f.estop(i);
+          break;
+        case 10:
+          f.rpp_stale(i);
+          break;
+        case 11:
+          f.rpp_ack_timeout(i);
           break;
         default:
           f.skip_point(rng() % 2, i);
