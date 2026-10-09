@@ -218,7 +218,22 @@ refused unless the link is healthy; confirmation by `vehicle_status.arming_state
 `source_component=1`, `target_system=1`, `target_component=1` — DERIVED: stock companion
 addressing; no figure exists in the spec.
 
-Arm never starts motion by itself; the heartbeat carries STOP until the guard commands otherwise.
+Arm never starts motion by itself. **Only a confirmed OFFBOARD session (`Active`) forwards the
+guard's command** (XR-GPX-007): in `Prestream`, `Requested`, `Failed` and `Lost` the heartbeat
+carries the explicit STOP set (section 3) whatever the guard publishes, because PX4 may already be
+in OFFBOARD before `vehicle_status` (2 Hz) shows it. The session states:
+
+| State | Heartbeat (link healthy) | Leaves on |
+|---|---|---|
+| `Disabled` | none (except the STOP window after a disable, below) | `SetOffboard(true)` |
+| `Prestream` | STOP | `offboard_prestream_s` elapsed → mode command, `Requested` |
+| `Requested` | STOP | nav_state 14 → `Active`; `offboard_confirm_timeout_s` → `Failed` |
+| `Active` | guard command (through the gate, section 4) | nav_state ≠ 14 or link loss → `Lost` |
+| `Failed`, `Lost` | STOP | only a new `SetOffboard(true)`; **never re-requested automatically** |
+
+Link loss (handshake or session) withdraws the heartbeat in every state. From `Active` it goes to
+`Lost`: when the link returns the heartbeat resumes with STOP and OFFBOARD is not requested again.
+A request still in `Prestream`/`Requested` restarts from `Prestream` when the link returns.
 
 `SetOffboard(enable=false)` (PXL-002): from the next writer tick the heartbeat carries the explicit
 STOP set, whatever the guard commands, for `offboard_disable_stop_s` (default 0.3 s, validated

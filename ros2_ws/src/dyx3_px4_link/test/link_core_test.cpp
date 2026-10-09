@@ -209,6 +209,48 @@ TEST(Offboard, LinkLossWithdrawsHeartbeatAndRestartsPrestream) {
   EXPECT_FALSE(o.send_mode_command);  // must pre-stream again first
   EXPECT_TRUE(s.step(1.2, true, false).send_mode_command);
 }
+TEST(Offboard, OnlyActiveForwardsTheCommandEveryOtherStateStreamsStop) {  // XR-GPX-007
+  OffboardSession s{OffboardTiming{}};
+  s.enable(true, 0.0);
+  auto o = s.step(0.0, true, false);
+  EXPECT_EQ(o.state, OffboardState::Prestream);
+  EXPECT_TRUE(o.stop_only);
+  o = s.step(0.5, true, false);
+  EXPECT_EQ(o.state, OffboardState::Requested);
+  EXPECT_TRUE(o.stop_only);
+  o = s.step(0.6, true, true);
+  EXPECT_EQ(o.state, OffboardState::Active);
+  EXPECT_FALSE(o.stop_only);
+  o = s.step(0.7, true, false);
+  EXPECT_EQ(o.state, OffboardState::Lost);
+  EXPECT_TRUE(o.publish_heartbeat);
+  EXPECT_TRUE(o.stop_only);
+  OffboardSession f{OffboardTiming{}};
+  f.enable(true, 0.0);
+  f.step(0.5, true, false);
+  o = f.step(2.6, true, false);
+  EXPECT_EQ(o.state, OffboardState::Failed);
+  EXPECT_TRUE(o.stop_only);
+}
+TEST(Offboard, LinkLossFromActiveIsLostAndNeverReRequested) {  // XR-GPX-007
+  OffboardSession s{OffboardTiming{}};
+  s.enable(true, 0.0);
+  s.step(0.5, true, false);
+  ASSERT_EQ(s.step(0.6, true, true).state, OffboardState::Active);
+  auto o = s.step(0.7, false, true);
+  EXPECT_EQ(o.state, OffboardState::Lost);
+  EXPECT_FALSE(o.publish_heartbeat);
+  for (double t = 0.8; t < 5.0; t += 0.1) {  // the link returns, PX4 may still report OFFBOARD
+    o = s.step(t, true, t > 2.0);
+    EXPECT_EQ(o.state, OffboardState::Lost);
+    EXPECT_FALSE(o.send_mode_command);
+    EXPECT_TRUE(o.publish_heartbeat);
+    EXPECT_TRUE(o.stop_only);
+  }
+  s.enable(true, 5.0);  // only a new operator request starts a new session
+  EXPECT_EQ(s.step(5.0, true, false).state, OffboardState::Prestream);
+  EXPECT_TRUE(s.step(5.5, true, false).send_mode_command);
+}
 TEST(Offboard, DisableStreamsStopForTheWindowThenStopsHeartbeat) {  // PXL-002
   OffboardSession s{OffboardTiming{}};
   s.enable(true, 0.0);

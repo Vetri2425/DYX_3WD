@@ -9,10 +9,11 @@ namespace dyx3_px4_link {
 enum class OffboardState : uint8_t {
   Disabled = 0,  // no heartbeat
   Prestream,     // heartbeat with explicit STOP, waiting prestream_s before asking for the mode
-  Requested,     // mode command sent, waiting for nav_state == OFFBOARD
-  Active,        // PX4 confirmed OFFBOARD
-  Failed,        // PX4 did not enter OFFBOARD in time (heartbeat continues, no automatic retry)
-  Lost           // was Active, PX4 left OFFBOARD (its own failsafe): never re-requested silently
+  Requested,     // mode command sent (heartbeat STOP), waiting for nav_state == OFFBOARD
+  Active,        // PX4 confirmed OFFBOARD: the only state that forwards the guard's command
+  Failed,        // PX4 did not enter OFFBOARD in time (heartbeat STOP, no automatic retry)
+  Lost  // was Active, then PX4 left OFFBOARD or the link was lost (heartbeat STOP while the
+        // link is up): never re-requested silently
 };
 
 struct OffboardTiming {
@@ -40,7 +41,8 @@ public:
   void enable(bool on, double now_s);
 
   // link_ok = handshake ok && session alive. Without it the heartbeat is withdrawn (the link cannot
-  // produce a trustworthy zero) and a pending request restarts from Prestream when it returns.
+  // produce a trustworthy zero): an Active session becomes Lost, a pending request restarts from
+  // Prestream when it returns.
   // nav_state_offboard = latest vehicle_status.nav_state == 14.
   OffboardStep step(double now_s, bool link_ok, bool nav_state_offboard);
 

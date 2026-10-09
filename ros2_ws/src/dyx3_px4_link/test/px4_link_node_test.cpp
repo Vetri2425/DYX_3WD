@@ -599,6 +599,53 @@ TEST(Px4LinkNode, GuardSilenceFallsToExplicitZeroWithHeartbeatKept) {
   EXPECT_FLOAT_EQ(r.speed.back().speed_body_x, 0.3F);
 }
 
+// XR-GPX-007: the guard's command reaches PX4 only in a confirmed OFFBOARD session; before the
+// confirmation and after PX4 leaves OFFBOARD the heartbeat carries the explicit STOP.
+TEST(Px4LinkNode, HeartbeatCarriesStopOutsideAnActiveOffboardSession) {
+  Rig r;
+  r.bring_up();
+  r.nav_state = 0;  // PX4 has not entered OFFBOARD
+  auto req = std::make_shared<dyx3_interfaces::srv::SetOffboard::Request>();
+  req->enable = true;
+  auto fut = r.cli_off->async_send_request(req);
+  r.clear();
+  for (int i = 0; i < 80; ++i) {  // prestream, then the mode request, without confirmation
+    r.guard(2, 0.5F, NaN, 0.1F);
+    r.tick();
+  }
+  ASSERT_FALSE(r.speed.empty());
+  for (const auto& sp : r.speed) EXPECT_EQ(sp.speed_body_x, 0.0F);
+  ASSERT_TRUE(
+      std::any_of(r.cmds.begin(), r.cmds.end(), [](const auto& c) { return c.command == 176; }));
+  r.nav_state = 14;
+  for (int i = 0; i < 300 && fut.wait_for(0ms) != std::future_status::ready; ++i) {
+    r.guard(2, 0.5F, NaN, 0.1F);
+    r.tick();
+  }
+  ASSERT_EQ(fut.wait_for(0ms), std::future_status::ready);
+  ASSERT_TRUE(fut.get()->accepted);
+  r.guard(2, 0.5F, NaN, 0.1F);
+  r.tick();
+  r.guard(2, 0.5F, NaN, 0.1F);
+  r.tick();
+  EXPECT_FLOAT_EQ(r.speed.back().speed_body_x, 0.5F);  // Active: the guard's command goes through
+  r.nav_state = 0;                                     // PX4 left OFFBOARD (its own failsafe)
+  for (int i = 0; i < 20; ++i) {
+    r.guard(2, 0.5F, NaN, 0.1F);
+    r.tick();
+  }
+  r.clear();
+  for (int i = 0; i < 50; ++i) {
+    r.guard(2, 0.5F, NaN, 0.1F);
+    r.tick();
+  }
+  ASSERT_FALSE(r.speed.empty());
+  for (const auto& sp : r.speed) EXPECT_EQ(sp.speed_body_x, 0.0F);
+  EXPECT_TRUE(std::none_of(r.cmds.begin(), r.cmds.end(), [](const auto& c) {
+    return c.command == 176;
+  }));  // Lost: OFFBOARD is not re-requested
+}
+
 // PXL-002: SetOffboard(false) while moving puts STOP on the wire at the next writer tick, keeps
 // the heartbeat with STOP for offboard_disable_stop_s, then withdraws it.
 TEST(Px4LinkNode, DisableOffboardStreamsStopBeforeWithdrawingTheHeartbeat) {

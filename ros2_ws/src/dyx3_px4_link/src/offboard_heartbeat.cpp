@@ -27,8 +27,11 @@ OffboardStep OffboardSession::step(double now_s, bool link_ok, bool nav_state_of
     return out;
   }
   if (!link_ok) {
-    // No trustworthy zero can be published: withdraw the heartbeat and restart the sequence.
-    if (state_ != OffboardState::Failed && state_ != OffboardState::Lost) {
+    // No trustworthy zero can be published: withdraw the heartbeat. An established session is
+    // Lost (OFFBOARD is never re-requested silently); a pending request restarts the sequence.
+    if (state_ == OffboardState::Active) {
+      state_ = OffboardState::Lost;
+    } else if (state_ != OffboardState::Failed && state_ != OffboardState::Lost) {
       state_ = OffboardState::Prestream;
     }
     since_s_ = now_s;
@@ -59,6 +62,9 @@ OffboardStep OffboardSession::step(double now_s, bool link_ok, bool nav_state_of
     case OffboardState::Disabled:
       break;
   }
+  // Only a confirmed OFFBOARD session forwards the guard's command; every other state streams the
+  // explicit STOP (PX4 may enter OFFBOARD before vehicle_status shows it).
+  out.stop_only = state_ != OffboardState::Active;
   out.state = state_;
   return out;
 }
