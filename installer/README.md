@@ -131,8 +131,19 @@ owner approval and hardware validation recorded in the bench runbook.
 
 ### Tablet access and token
 
-The optional NetworkManager profile `dyx3-hotspot` uses the detected Wi-Fi device as an access
-point at `10.42.0.1/24`. NetworkManager's `shared` IPv4 mode provides tablet DHCP. The profile
+The optional NetworkManager profile `dyx3-hotspot` uses the onboard Wi-Fi device as an access
+point at the per-rover `DYX3_HOTSPOT_ADDRESS`.
+- Fleet plan (2026-10-09): `192.168.3.100/24` for the first 3WD, `192.168.3.101/24` for the next.
+- A blank address falls back to `10.42.0.1/24`. An address on the FCU subnet `10.41.10.0/24` is refused.
+
+The device is `DYX3_HOTSPOT_IFACE`, or, when that is blank, the first Wi-Fi device that is not on USB.
+A USB Wi-Fi dongle is the rover's internet uplink (client mode) and is never chosen automatically.
+Bind the uplink's client profile to the dongle, for example
+`sudo nmcli connection modify "<uplink profile>" connection.interface-name <dongle iface>`.
+The installer warns if any Wi-Fi client profile is bound to the access-point device. It also turns
+the Wi-Fi radio on, because a radio left off (`WirelessEnabled=false`) keeps the device
+"unavailable". Set `DYX3_BACKEND_HOST` in `/etc/dyx3/backend.env` to the same address so the app
+reaches the backend over the hotspot. NetworkManager's `shared` IPv4 mode provides tablet DHCP. The profile
 has no default route and no bridge. A NetworkManager pre-up hook installs firewall DROP rules
 between that Wi-Fi interface and the FCU Ethernet interface in both directions. The Wi-Fi
 hardware and AP support still need a rover bench check. NetworkManager's shared mode can
@@ -160,14 +171,14 @@ Bench check after filling the env file and rerunning the installer or upgrading:
 nmcli device
 sudo nmcli connection up dyx3-hotspot
 # Connect the tablet to the configured SSID, then from the tablet:
-curl http://10.42.0.1:8000/api/ping
+curl http://<hotspot address>:8000/api/ping   # e.g. 192.168.3.100
 iw reg get
 iw dev <if> get power_save
 ```
 
 For the 15-minute bench range check, test both `a` and `bg` bands. At 5, 10,
 15, and 25 m, keep the tablet connected for 15 minutes and record continuous
-ping loss/latency to `10.42.0.1`, the app's telemetry age, and RSSI from
+ping loss/latency to the hotspot address, the app's telemetry age, and RSSI from
 `iw dev <if> station dump` on the rover. Record any reconnects and the actual
 channel/width; rerun the installer after changing the band in `hotspot.env`.
 

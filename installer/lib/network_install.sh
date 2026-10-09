@@ -112,9 +112,28 @@ _hotspot_drop_profile() {
   fi
 }
 
+# _hotspot_pick_iface <wanted>: the Wi-Fi device for the access point. An explicit name must be a
+# Wi-Fi device NetworkManager reports. Otherwise the first Wi-Fi device that is not on USB is used:
+# a USB dongle is the rover's internet uplink (client mode), never the tablet access point.
+_hotspot_pick_iface() {
+  local wanted="$1" dev type path
+  while IFS=: read -r dev type; do
+    [ "${type}" = wifi ] && [ -n "${dev}" ] && [ "${dev}" != "--" ] || continue
+    if [ -n "${wanted}" ]; then
+      [ "${dev}" = "${wanted}" ] && { printf '%s\n' "${dev}"; return 0; }
+      continue
+    fi
+    path="$(readlink -f "${DYX3_ROOT}/sys/class/net/${dev}/device" 2>/dev/null || true)"
+    case "${path}" in */usb*) continue ;; esac
+    printf '%s\n' "${dev}"
+    return 0
+  done < <(nmcli -t -f DEVICE,TYPE device status 2>/dev/null || true)
+  return 0
+}
+
 install_hotspot_network() {
   local env_file="${DYX3_ETC}/hotspot.env" ssid="" psk="" key value iface profile dir tmp dispatcher old_umask
-  local country="IN" band="a" channel="" width="20" nm_ver major minor width_setting=""
+  local country="IN" band="a" channel="" width="20" nm_ver major minor width_setting="" address="" want_iface=""
   profile="${DYX3_ROOT}/etc/NetworkManager/system-connections/dyx3-hotspot.nmconnection"
   if [ -r "${env_file}" ]; then
     while IFS='=' read -r key value || [ -n "${key:-}" ]; do
@@ -125,6 +144,8 @@ install_hotspot_network() {
         DYX3_WIFI_BAND) band="${value}" ;;
         DYX3_WIFI_CHANNEL) channel="${value}" ;;
         DYX3_WIFI_WIDTH) width="${value}" ;;
+        DYX3_HOTSPOT_ADDRESS) address="${value}" ;;
+        DYX3_HOTSPOT_IFACE) want_iface="${value}" ;;
       esac
     done <"${env_file}"
   fi
@@ -150,6 +171,18 @@ install_hotspot_network() {
     fi
     return 0
   fi
+  # Per-rover access-point address (fleet plan 2026-10-09: 192.168.3.100/24 for the first 3WD, .101 for
+  # the next). Blank keeps NetworkManager's shared default. It must never overlap the FCU link.
+  address="${address:-10.42.0.1/24}"
+  if [[ ! "${address}" =~ ^((25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])/(1[6-9]|2[0-9]|30)$ ]] ||
+     [[ "${address}" == 10.41.10.* ]] ||
+     { [ -n "${want_iface}" ] && [[ ! "${want_iface}" =~ ^[A-Za-z0-9_.-]+$ ]]; }; then
+    warn "hotspot.env has an invalid DYX3_HOTSPOT_ADDRESS or DYX3_HOTSPOT_IFACE; access point disabled"
+    if [ -f "${profile}" ]; then
+      _hotspot_drop_profile "${profile}"
+    fi
+    return 0
+  fi
   if [ -z "${channel}" ]; then
     if [ "${band}" = "a" ]; then channel=36; else channel=6; fi
   fi
@@ -169,11 +202,13 @@ install_hotspot_network() {
     warn "nmcli not found; skipping hotspot"
     return 0
   fi
-  # DERIVED — NOT FROM V1 SPEC: select the first reported Wi-Fi device; AP
-  # capability still needs the bench check before this is used on a rover.
-  iface="$(nmcli -t -f DEVICE,TYPE device status 2>/dev/null | awk -F: '$2 == "wifi" && $1 != "--" {print $1; exit}' || true)"
+  iface="$(_hotspot_pick_iface "${want_iface}")"
   if [ -z "${iface}" ]; then
-    warn "no Wi-Fi device found; skipping hotspot profile"
+    if [ -n "${want_iface}" ]; then
+      warn "Wi-Fi device ${want_iface} not found; skipping hotspot profile"
+    else
+      warn "no Wi-Fi device found (USB Wi-Fi is reserved for the internet uplink); skipping hotspot profile"
+    fi
     return 0
   fi
   if [[ ! "${iface}" =~ ^[A-Za-z0-9_.-]+$ ]] || [[ ! "${FCU_IFACE}" =~ ^[A-Za-z0-9_.-]+$ ]]; then
@@ -247,7 +282,7 @@ psk=${psk}
 
 [ipv4]
 method=shared
-address1=10.42.0.1/24
+address1=${address}
 never-default=true
 
 [ipv6]
@@ -258,8 +293,17 @@ EOF
   mv -f "${tmp}" "${profile}"
   umask "${old_umask}"
   if [ -z "${DYX3_ROOT}" ]; then
+    # A disabled Wi-Fi radio (persisted as WirelessEnabled=false) leaves the device "unavailable".
+    nmcli radio wifi on >/dev/null 2>&1 || warn "could not enable the Wi-Fi radio (rfkill?)"
+    local other
+    while IFS=: read -r other; do
+      [ -n "${other}" ] && [ "${other}" != dyx3-hotspot ] || continue
+      if [ "$(nmcli -g connection.interface-name connection show "${other}" 2>/dev/null)" = "${iface}" ]; then
+        warn "Wi-Fi profile '${other}' is bound to the access-point device ${iface}; bind it to the USB uplink instead"
+      fi
+    done < <(nmcli -t -f NAME,TYPE connection show 2>/dev/null | awk -F: '$2 == "802-11-wireless" {print $1}')
     nmcli connection load "${profile}" >/dev/null 2>&1 || warn "NetworkManager could not load hotspot profile"
     nmcli connection up dyx3-hotspot >/dev/null 2>&1 || warn "hotspot could not start now (Wi-Fi AP support unverified)"
   fi
-  log "hotspot profile configured on ${iface} (credentials redacted)"
+  log "hotspot profile configured on ${iface} at ${address} (credentials redacted)"
 }

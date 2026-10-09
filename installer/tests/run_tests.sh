@@ -434,6 +434,32 @@ F
   printf 'DYX3_HOTSPOT_SSID=TestRover\nDYX3_HOTSPOT_PSK=DummyBenchPass123\nDYX3_WIFI_WIDTH=40\n' >"${DYX3_ETC}/hotspot.env"
   install_hotspot_network >>"${T}/hotspot_log" 2>&1
   check "40 MHz is refused by old NetworkManager" '[ ! -e "${hotspot_profile}" ] && grep -q "NetworkManager 1.50+ is required" "${T}/hotspot_log"'
+  # Per-rover address and dongle-safe interface choice (2026-10-09 fleet plan).
+  mkdir -p "${DYX3_ROOT}/sys/devices/platform/usbhost/usb1/1-1/net/wlx0" "${DYX3_ROOT}/sys/devices/pci0001/net/wlan0" "${DYX3_ROOT}/sys/class/net/wlx0" "${DYX3_ROOT}/sys/class/net/wlan0"
+  ln -sfn "${DYX3_ROOT}/sys/devices/platform/usbhost/usb1/1-1" "${DYX3_ROOT}/sys/class/net/wlx0/device"
+  ln -sfn "${DYX3_ROOT}/sys/devices/pci0001" "${DYX3_ROOT}/sys/class/net/wlan0/device"
+  nmcli() { if [ "${1:-}" = "-t" ]; then printf '%s\n' "wlx0:wifi" "wlan0:wifi"; elif [ "${1:-}" = "--version" ]; then echo 'nmcli tool, version 1.36.6'; else printf '%s\n' "$*" >>"${T}/nmcli_argv"; fi; }
+  printf 'DYX3_HOTSPOT_SSID=TestRover\nDYX3_HOTSPOT_PSK=DummyBenchPass123\nDYX3_HOTSPOT_ADDRESS=192.168.3.100/24\n' >"${DYX3_ETC}/hotspot.env"
+  install_hotspot_network >>"${T}/hotspot_log" 2>&1
+  check "hotspot uses the per-rover address and skips the USB Wi-Fi uplink" 'grep -qx "address1=192.168.3.100/24" "${hotspot_profile}" && grep -qx "interface-name=wlan0" "${hotspot_profile}"'
+  printf 'DYX3_HOTSPOT_SSID=TestRover\nDYX3_HOTSPOT_PSK=DummyBenchPass123\nDYX3_HOTSPOT_IFACE=wlx0\n' >"${DYX3_ETC}/hotspot.env"
+  install_hotspot_network >>"${T}/hotspot_log" 2>&1
+  check "an explicitly named Wi-Fi device is used as given" 'grep -qx "interface-name=wlx0" "${hotspot_profile}"'
+  printf 'DYX3_HOTSPOT_SSID=TestRover\nDYX3_HOTSPOT_PSK=DummyBenchPass123\nDYX3_HOTSPOT_IFACE=wlan9\n' >"${DYX3_ETC}/hotspot.env"
+  install_hotspot_network >>"${T}/hotspot_log" 2>&1
+  check "a named Wi-Fi device that does not exist creates no profile" 'grep -q "Wi-Fi device wlan9 not found" "${T}/hotspot_log"'
+  rm -f "${hotspot_profile}"
+  nmcli() { if [ "${1:-}" = "-t" ]; then printf '%s\n' "wlx0:wifi"; elif [ "${1:-}" = "--version" ]; then echo 'nmcli tool, version 1.36.6'; else printf '%s\n' "$*" >>"${T}/nmcli_argv"; fi; }
+  printf 'DYX3_HOTSPOT_SSID=TestRover\nDYX3_HOTSPOT_PSK=DummyBenchPass123\n' >"${DYX3_ETC}/hotspot.env"
+  install_hotspot_network >>"${T}/hotspot_log" 2>&1
+  check "a USB-only Wi-Fi rover gets no access point" '[ ! -e "${hotspot_profile}" ] && grep -q "USB Wi-Fi is reserved for the internet uplink" "${T}/hotspot_log"'
+  nmcli() { if [ "${1:-}" = "-t" ]; then printf '%s\n' "wlan0:wifi"; elif [ "${1:-}" = "--version" ]; then echo 'nmcli tool, version 1.36.6'; else printf '%s\n' "$*" >>"${T}/nmcli_argv"; fi; }
+  printf 'DYX3_HOTSPOT_SSID=TestRover\nDYX3_HOTSPOT_PSK=DummyBenchPass123\nDYX3_HOTSPOT_ADDRESS=10.41.10.50/24\n' >"${DYX3_ETC}/hotspot.env"
+  install_hotspot_network >>"${T}/hotspot_log" 2>&1
+  check "a hotspot address on the FCU subnet is refused" '[ ! -e "${hotspot_profile}" ] && grep -q "invalid DYX3_HOTSPOT_ADDRESS" "${T}/hotspot_log"'
+  printf 'DYX3_HOTSPOT_SSID=TestRover\nDYX3_HOTSPOT_PSK=DummyBenchPass123\nDYX3_HOTSPOT_ADDRESS=192.168.3.100\n' >"${DYX3_ETC}/hotspot.env"
+  install_hotspot_network >>"${T}/hotspot_log" 2>&1
+  check "a hotspot address without a prefix length is refused" '[ ! -e "${hotspot_profile}" ]'
   check "no hotspot credential appears in argv or installer logs" '! grep -q "DummyBenchPass123" "${T}/hotspot_log" "${T}/nmcli_argv" 2>/dev/null'
   install_config_templates "${DYX3_CURRENT}" >/dev/null 2>&1
   check "existing hotspot.env is never overwritten" 'grep -q "DummyBenchPass123" "${DYX3_ETC}/hotspot.env"'
