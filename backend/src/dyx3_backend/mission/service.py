@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import math
 import os
-import tempfile
 from dataclasses import dataclass
 
 from dyx3_backend.config.settings import Settings
@@ -68,11 +67,18 @@ def summarize(art: pa.PathArtifact) -> dict:
 
 class MissionService:
     def __init__(self, settings: Settings, engine_id: str | None = None) -> None:
+        # Imported here because the planner imports this module (MissionError).
+        from dyx3_backend.mission.planner import Planner
+
         self._s = settings
         self._engine_id = engine_id or pa.engine_id_from_origin_file(ORIGIN_SHA)
+        # One planning job at a time, in its own process, within plan_timeout_s (BE-004).
+        self.planner = Planner(settings.plan_timeout_s)
 
     def ingest(self, filename: str, data: bytes, params: PlanParams) -> dict:
-        """Blocking (CPU bound): call it in a worker thread."""
+        """Blocking: call it in a worker thread. Planning itself runs in a separate process (``planner``)."""
+        from dyx3_backend.mission import planner
+
         ext = os.path.splitext(filename or "")[1].lower()
         if ext not in self._s.allowed_extensions:
             raise MissionError(415, "unsupported_type", f"extension {ext or '(none)'} is not one of {list(self._s.allowed_extensions)}")
@@ -81,43 +87,35 @@ class MissionService:
         if len(data) > self._s.upload_max_bytes:
             raise MissionError(413, "too_large", f"upload exceeds {self._s.upload_max_bytes} bytes")
         params.validate()
-        from dyx3_backend.path_engine.engine import (
-            PathEngine,  # heavy import (ezdxf), only when needed
-        )
-
-        with tempfile.TemporaryDirectory(prefix="dyx3-upload-") as td:
-            path = os.path.join(td, "upload" + ext)  # the client's name is never used as a path
-            with open(path, "wb") as fh:
-                fh.write(data)
-            try:
-                plan = PathEngine().plan_file(
-                    path,
-                    unit_scale=params.unit_scale,
-                    origin=(params.origin_n, params.origin_e),
-                    rotation_deg=params.rotation_deg,
-                    close_loop=params.close_loop,
-                    anchor=params.anchor,
-                )
-            except Exception as exc:  # the engine raises many types for bad CAD input
-                raise MissionError(422, "plan_failed", f"{type(exc).__name__}: {exc}") from exc
+        blob = self.planner.run(planner.plan_dxf_job, filename, data, params, self._engine_id, self._s.plan_max_points)
         try:
-            blob = pa.encode_plan(plan, engine_id=self._engine_id, source_name=filename, source_bytes=data)
             digest, _ = pa.store(self._s.missions_dir, blob)
             art = pa.load(self._s.missions_dir, digest)
         except (pa.ArtifactError, ValueError, OSError) as exc:
             raise MissionError(422, "artifact_failed", f"{type(exc).__name__}: {exc}") from exc
         return summarize(art)
 
-    def ingest_app_plan(self, body: object) -> dict:
-        """Store a validated app plan; this path never imports the path engine."""
-        from dyx3_backend.mission.app_plan import compile_plan
+    def ingest_app_plan(self, raw: bytes) -> dict:
+        """Parse, validate and store an app plan (raw JSON body). Blocking: call it in a worker thread.
 
+        Parsing and compiling run in the planning process; this path never imports the path engine.
+        """
+        from dyx3_backend.mission import planner
+
+        blob = self.planner.run(planner.app_plan_job, bytes(raw))
         try:
-            blob = compile_plan(body)
             digest, _ = pa.store(self._s.missions_dir, blob)
             return summarize(pa.load(self._s.missions_dir, digest))
         except (pa.ArtifactError, OSError) as exc:
             raise MissionError(422, "ARTIFACT_FAILED", f"{type(exc).__name__}: {exc}") from exc
+
+    def parse_dxf(self, filename: str, data: bytes) -> dict:
+        """Parse-only DXF import (no artifact). Blocking: call it in a worker thread; ezdxf runs in the planning process."""
+        from dyx3_backend.mission import planner
+        from dyx3_backend.mission.parse_import import check_dxf_upload
+
+        check_dxf_upload(filename, data, self._s.upload_max_bytes)  # cheap refusals before a process is started
+        return self.planner.run(planner.parse_dxf_job, filename, data, self._s.upload_max_bytes)
 
     def get(self, sha256: str) -> pa.PathArtifact:
         try:

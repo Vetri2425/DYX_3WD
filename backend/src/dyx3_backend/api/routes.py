@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -199,11 +198,8 @@ async def ingest_app_plan(request: Request, _: Identity = Operator) -> JSONRespo
             return _mission_error(MissionError(413, "too_large", f"upload exceeds {limit} bytes"))
         data.extend(chunk)
     try:
-        body = json.loads(data)
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        return _mission_error(MissionError(400, "INVALID_PAYLOAD", f"invalid JSON: {exc}"))
-    try:
-        summary = await anyio.to_thread.run_sync(request.app.state.missions.ingest_app_plan, body)
+        # JSON parsing and compiling run in the planning process (BE-004), never on the event loop (BE-010).
+        summary = await anyio.to_thread.run_sync(request.app.state.missions.ingest_app_plan, bytes(data))
     except MissionError as exc:
         return _mission_error(exc)
     return JSONResponse({"ok": True, "mission": summary}, status_code=201)

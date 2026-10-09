@@ -35,6 +35,16 @@ An upload is rejected (413/415/422) for: size over `upload_max_bytes`, extension
   against `upload_max_bytes` exactly); every other route = `json_body_max_bytes` (`DYX3_JSON_BODY_MAX_BYTES`, default 64 KiB, DERIVED);
 - a non-numeric `Content-Length` -> 400.
 
+**Planning budget (BE-004).** DXF planning (`POST /missions`), app-plan parsing and compiling (`POST /missions/plan`) and DXF parsing
+(`POST /path/parse-dxf`) run in a separate, freshly spawned process (`mission/planner.py`), never on the event loop and never in a
+thread that shares the GIL with the heartbeat relay:
+- **one job at a time**: a second planning request while one runs -> **409** `{"ok":false,"code":"busy",...}` (retry later);
+- wall-clock budget `plan_timeout_s` (`DYX3_PLAN_TIMEOUT_S`, default 60 s, DERIVED, process start-up included): over budget the
+  process is terminated (then killed) -> **422** `plan_budget_exceeded`;
+- point budget `plan_max_points` (`DYX3_PLAN_MAX_POINTS`, default 200 000, DERIVED) for a DXF plan -> **422** `points_limit_exceeded`
+  (an app plan keeps its own 50 000-point limit);
+- a JSON body nested too deeply -> **400** `INVALID_PAYLOAD`; a planning process that dies without a result -> **500** `planner_crashed`.
+
 
 ## 1a. Rover identity and LAN discovery
 

@@ -29,6 +29,10 @@ class Settings:
     # DERIVED — NOT FROM V1 SPEC: cap for every other /api request body (JSON commands, RTK config). The largest
     # real body (an RTK config with its NTRIP profiles) is a few KiB.
     json_body_max_bytes: int = 64 * 1024
+    # DERIVED — NOT FROM V1 SPEC (BE-004): wall-clock budget of one planning job (DXF plan, app plan, DXF parse),
+    # process start-up included, and the most points a DXF plan may generate. Over budget = terminated, an error.
+    plan_timeout_s: float = 60.0
+    plan_max_points: int = 200_000
     # gateway reply wait; must exceed the gateway's own service_timeout_s (2.0) so its verdict arrives first
     request_timeout_s: float = 3.0
     # DERIVED — NOT FROM V1 SPEC (see contract section 3). OPEN.
@@ -80,6 +84,8 @@ class Settings:
             rtk_socket=e.get("DYX3_RTK_CONTROL_SOCKET", "/run/dyx3/rtk-control.sock"),
             upload_max_bytes=int(_f(e, "DYX3_UPLOAD_MAX_BYTES", 20 * 1024 * 1024)),
             json_body_max_bytes=int(_f(e, "DYX3_JSON_BODY_MAX_BYTES", 64 * 1024)),
+            plan_timeout_s=_f(e, "DYX3_PLAN_TIMEOUT_S", 60.0),
+            plan_max_points=int(_f(e, "DYX3_PLAN_MAX_POINTS", 200_000)),
             request_timeout_s=_f(e, "DYX3_REQUEST_TIMEOUT_S", 3.0),
             heartbeat_relay_s=_f(e, "DYX3_HEARTBEAT_RELAY_S", 0.5),
             tablet_heartbeat_timeout_s=_f(e, "DYX3_TABLET_HEARTBEAT_TIMEOUT_S", 1.5),

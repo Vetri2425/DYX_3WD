@@ -37,3 +37,22 @@ class FakeGateway:
         if self.raises is not None:
             raise self.raises
         return self.replies.get(cmd, {"v": 1, "ok": True, "code": "ok", "reason": "", "data": {"accepted": True, "reason_code": 0}})
+
+
+# ---- planning-process jobs (top level, so a spawned child can import them by reference)
+def spin_forever() -> None:
+    while True:  # CPU-bound, like a pathological DXF
+        pass
+
+
+def sleep_then(seconds: float, value):
+    import time
+
+    time.sleep(seconds)
+    return value
+
+
+def exit_hard(code: int = 3) -> None:
+    import os
+
+    os._exit(code)

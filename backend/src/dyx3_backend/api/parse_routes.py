@@ -9,7 +9,6 @@ from fastapi import APIRouter, Depends, File, Request, UploadFile
 
 from dyx3_backend.api.routes import _mission_error, require
 from dyx3_backend.auth.tokens import Role
-from dyx3_backend.mission.parse_import import parse_dxf_upload
 from dyx3_backend.mission.service import MissionError
 
 router = APIRouter(prefix="/api/path")
@@ -21,8 +20,7 @@ async def parse_dxf_file(
 ):
     data = await file.read(request.app.state.settings.upload_max_bytes + 1)
     try:
-        return await anyio.to_thread.run_sync(
-            parse_dxf_upload, file.filename or "", data, request.app.state.settings.upload_max_bytes
-        )
+        # ezdxf runs in the planning process (BE-004): one job at a time, within plan_timeout_s.
+        return await anyio.to_thread.run_sync(request.app.state.missions.parse_dxf, file.filename or "", data)
     except MissionError as exc:
         return _mission_error(exc)
