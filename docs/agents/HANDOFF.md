@@ -1257,6 +1257,86 @@ removed, **locally only**; nothing was deleted on GitHub.
 Live on the rover (unchanged): firmware `8279fa4be3`, stack `8af2595` (code identical to `master`; later commits
 are docs only), app `dbb2ba1`.
 
+## 2026-10-09 (09:43 IST) — Codex — Phase A stopped on RTK transport recovery
+
+Bench-tool work is on topic branch `codex/phase-a-stall-validation-run2`, based on `master` at `5226a16`.
+No commit or push was made. Added `tools/bench/phaseA_executor.py`; the workspace-level
+`../bench_tools/phaseA_executor.py` is now a compatibility entry point to that tracked executor. It records
+subprocess status/stderr/duration, retries empty USB NSH reads, distinguishes stall from DDS and observability
+failures, brackets DDS recovery time with USB poll observations, and writes durable JSON/CSV iteration records.
+RTK recovery now waits for `INJECTING`, then compares delivered/failure counters at 15-second intervals over a
+30-second window. This window was derived from the bench observation below. The local self-check passed, and the
+read-only preflight passed for firmware, stack, config, disarmed state, DDS/timesync, capture growth and disk.
+
+Owner reconfirmed the physical stop, disarmed PX4, wheels-up or isolated drive power, disabled spray, RC kill
+switch, USB access, capture and disk. No PX4 reboot, firmware flash, parameter change, Phase B test or reboot test
+was performed.
+
+**Firmware/stack:** PX4 `8279fa4be33d5fc26c3b895c7e4a0a8660fcfff1` (`8279fa4be3`), NuttX
+`e462af8eb32142e415b184aabe44c655eab4b735`; installed stack
+`8af2595e1cc919de89b39fea0fb2aec6e26eb934` (`8af2595`). `MAV_2_CONFIG=1000`.
+
+**Executor calibration, excluded from the fresh batch:** one restart was first evaluated with a 10-second RTK
+window. Transport failures rose 980 → 1036 → 1066 while the worker moved from `INJECTING` through
+`WAIT_TRANSPORT` back to `INJECTING`. A subsequent read-only 44-second observation showed failures flat at 1066,
+delivered frames increasing 18,882 → 19,136 and PX4 injection at 6.00–6.16 Hz. This showed the 10-second window
+was too short and led to the revised recovery window; this restart is not counted.
+
+**Fresh batch:** stopped at 2/30 under the stop-on-failure rule.
+
+- Iteration 1 PASS: DDS and timesync recovered; 388 PX4-originated non-ICMP frames in the 5-second window.
+  Reconnect interval was 0–4,069.9 ms (the lower bound is the restart trigger because recovery occurred before the
+  first successful USB poll). RTK entered `INJECTING`; over its final 15-second stable comparison, failures held
+  at 1,157 and delivered frames increased by 92. PX4 RTCM injection was 6.0 Hz, with zero dropped bytes, short
+  writes, EAGAINs or write errors. Commander cycle count increased; PX4 remained disarmed with the same firmware.
+- Iteration 2 RTK_NOT_RECOVERED: DDS and timesync recovered; 386 PX4-originated non-ICMP frames in 5 seconds.
+  RTK remained `WAIT_TRANSPORT` for the 30-second recovery window; delivered frames remained 20,003 while failures
+  rose 1,210 → 1,414. A read-only post-stop snapshot at 09:42:22 IST still showed `WAIT_TRANSPORT`, delivered
+  20,003, failures 1,534, PX4 RTCM injection 0 Hz and zero dropped bytes/write errors. PX4-originated traffic
+  continued (1,572 non-ICMP frames in 5 seconds); `dyx3-platform`, `dyx3-rtk` and `dyx3-backend` were active.
+  No further restart was issued.
+
+Persistent PCAP (private, not in Git):
+`/home/flash/bench_2026-10-09/phaseA_mav2cfg_1000/fcu_all_phaseA.pcap`.
+Fresh batch JSON/CSV and per-iteration diagnostics are in
+`~/Vetri/3WD_PROD/bench_tools/phaseA_results_fresh_20261009_093938/`; the earlier four-iteration evidence remains
+untouched in `phaseA_results/`. The initial short-window experiment and its read-only follow-up are in
+`phaseA_results_fresh_20261009_093622/`.
+
+**Disposition:** no PX4 Ethernet TX stall was observed; the RTK transport did not recover on iteration 2. Phase A
+did not reach 30/30 and firmware `8279fa4be3` is **not accepted**. Verdict: inconclusive pending investigation of
+the Jetson RTK PX4_DDS transport recovery. Do not proceed to Phase B until that issue is resolved and the owner
+authorizes it.
+
+## 2026-10-09 (09:55 IST) — Codex — USB_DIRECT migration stopped at hardware identity gate
+
+The owner reconfirmed the safety conditions, including PX4 disarmed, drive isolated or wheels raised, spray
+disabled, RC/kill switch and independent USB NSH available, secure configuration backup available, and the
+physical stop engaged. No live RTK setting was changed and no service/platform restart was issued.
+
+Read-only Jetson discovery at `dyx-3wd` (`192.168.1.32`) found one USB serial bridge:
+`1a86:7523 QinHeng Electronics CH340 serial converter`, product string `USB Serial`, with no USB serial number.
+It was attached to `usbfs`; no `/dev/ttyACM*`, `/dev/ttyUSB*`, or `/dev/serial/by-id/` entry existed, and no
+serial node was available to the `dyx3` service. The repository and local manufacturer-document search did not
+establish which UM982 COM this bridge represents, that it is distinct from the TELEM1 COM, or that the exposed
+interface is configured to accept RTCM. The official UM982 documentation establishes three UARTs and RTCM 3.x
+support in general, but that does not identify this rover's USB bridge/COM mapping. The architecture notes also
+warn that the supplied C-RTK 2HP USB/COM2/UART2 wiring can starve PX4; the physical port mapping must be proven.
+
+The production GET_STATUS snapshot showed NTRIP connected, 26,163 CRC-valid frames and zero CRC failures;
+the selected transport remained `PX4_DDS`, `WAIT_TRANSPORT`, with 20,003 frames delivered historically,
+6,160 transport failures, and stale last-delivery age (~834 s). Receiver readback was unavailable, fix type 0,
+and correction age invalid. This does not prove receiver acceptance. The existing RTK config revision 1 was
+copied to `/var/lib/dyx3/rtk/pre-usb-migration-20261009.json` on the Jetson with owner `dyx3:dyx3`, mode
+`0600`; credentials were not printed or copied into the repository. No configuration field was changed.
+
+**Blocker / next action:** do not select a port or baud and do not transmit RTCM until the physical USB/UM982
+COM mapping and separation from TELEM1 are established from the correct carrier/receiver wiring documentation
+or a documented hardware inspection. The Jetson's current enumeration has no usable tty. After that evidence is
+available, continue with interface settings, API configuration, correction acceptance and DDS-exclusion proof.
+Ethernet restart stress is deferred because the USB_DIRECT acceptance prerequisite is unmet. Sanitized discovery
+evidence is in `../bench_tools/usb_migration_20261009/`; prior Phase A evidence and executor changes remain intact.
+
 ## 2026-10-09 (10:20 IST) — Codex — CH340/CH341 production remediation prepared, not deployed
 
 The owner approved implementation of a narrowly scoped BRLTTY exclusion and investigation of a driver for the
@@ -1313,3 +1393,46 @@ acceptance, stop before
 USB_DIRECT until documentation/physical inspection proves the CH340-to-UM982 COM mapping, separation from PX4
 TELEM1, supported baud, and RTCM input capability. USB_DIRECT migration and the 30-cycle Ethernet stress batch
 remain outstanding.
+
+## 2026-10-09 (continuation) — Codex — CH341 remediation committed; release and deployment gates pending
+
+Continue from topic branch `codex/phase-a-stall-validation-run2`, HEAD
+`7360199522b6069267cf250f2efa9adc8063940d` (`Add production CH341 USB provisioning`). The production remediation
+is committed. Preserve the existing Phase A evidence and executor work; `tools/bench/phaseA_executor.py` is still
+an untracked, pre-existing bench change and is outside this commit. The handoff itself has accumulated local
+working-tree edits; review and retain them when committing any future documentation change.
+
+**No production deployment has happened.** There has been no push, merge, CI run, release publication, upgrade,
+BRLTTY rule installation, DKMS installation, module load/bind, reboot, RTK configuration change, USB_DIRECT
+selection, RTCM transmission, or Ethernet stress run. Firmware, PX4 parameters, the six rover services, and the
+live RTK config remain unchanged. The compile-only module probe and all rover discovery were read-only with
+respect to installed system state.
+
+Local validation for the committed installer change: `bash -n` and ShellCheck passed; the installer suite passed
+**133/133** using the documented GNU coreutils/findutils paths. On-rover source/header compatibility evidence and
+the module vermagic are recorded in the preceding section. The packaged DKMS source is version `ch341-dyx3 1.0.0`;
+it is not installed on the rover. Do not treat compile-only evidence as live binding or deployment acceptance.
+
+**Next steps for Claude:**
+
+1. Inspect `git status`, `git show --stat --oneline HEAD`, and the complete committed diff. Keep the unrelated
+   untracked bench executor and all pre-existing handoff history intact. Do not amend or rewrite the remediation
+   commit.
+2. Do not push or merge without the owner’s approval. The owner’s release gate requires an owner-approved merge
+   to `master`, all required CI checks passing, and a published `rover-<full-sha>` GitHub Release with verified
+   artifacts. Record the merge SHA, CI run, release tag, and artifact evidence.
+3. After that gate, use the standard production upgrade and explicitly require prebuilt application artifacts;
+   do not rebuild ROS 2 on Jetson. The documented command is
+   `sudo DYX3_ARTIFACTS=prebuilt /opt/dyx3/bin/dyx3-upgrade <full-sha>`. Kernel-specific DKMS provisioning is
+   separate from ARM64 application artifacts and must build against the exact supported Jetson kernel/headers.
+4. Immediately before live deployment, reconfirm disarmed state, isolated drive power, disabled spray power, and
+   diagnostic/rollback access. Apply only the reviewed scoped BRLTTY exclusion and compatible CH341 driver. Follow
+   the documented safe-shutdown/reboot procedure, then verify binding for `1a86:7523`, BRLTTY exclusion, tty and
+   stable identity, `dyx3` access, boot-time and installer checks, idempotent rerun, all six services, and PX4
+   Ethernet DDS. Preserve diagnostics and use the versioned uninstaller/rollback if any check fails.
+5. Stop after the CH341/BRLTTY deployment report. Do not select `USB_DIRECT` or send RTCM until a separate
+   documented/physical verification establishes the CH340-to-UM982 COM mapping, separation from PX4 TELEM1,
+   baud, and RTCM input capability. USB migration and Ethernet restart testing require a later owner approval.
+
+Current working-tree status at handoff update: `docs/agents/HANDOFF.md` is modified and
+`tools/bench/phaseA_executor.py` is untracked. Neither is part of commit `7360199522b6069267cf250f2efa9adc8063940d`.
