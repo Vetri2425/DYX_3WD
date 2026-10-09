@@ -263,6 +263,7 @@ libs() {
 
   # INS-007: a fresh install stops before any build with the per-rover inputs it lacks and the files to edit.
   check "ros.env template ships the fleet ROS domain 42" 'grep -qx "ROS_DOMAIN_ID=42" "${REPO}/deployment/network/ros.env.tmpl"'
+  check "README hotspot fleet plan matches the template (192.168.2.x; the site LAN is 192.168.3.x)" 'grep -q "192.168.2.100/24" "${REPO}/deployment/network/hotspot.env.tmpl" && grep -q "192.168.2.100/24. for the first 3WD" "${REPO}/installer/README.md" && ! grep -q "192.168.3.100" "${REPO}/installer/README.md"'
   local fresh="${T}/fresh" ffb="${T}/fresh-bin"
   make_fakebin "${ffb}"
   for s2 in useradd usermod apt-get; do printf '#!/usr/bin/env bash\necho "%s $*" >>"%s/forbidden"\nexit 1\n' "${s2}" "${T}" >"${ffb}/${s2}"; done
