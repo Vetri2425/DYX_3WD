@@ -1018,10 +1018,24 @@ prebuilt() {
   rc=$?
   check "prebuilt: missing artifacts return 1 (caller builds) and leave nothing" '[ "${rc}" -eq 1 ] && [ ! -e "${rel}" ] && [ -z "$(ls -A "${DYX3_VAR_LIB}/state")" ]'
 
+  # INS-014: a px4_msgs archive that carries its own .complete but no install tree is refused, nothing left behind
+  local bpm="${T}/badpm"
+  rm -rf "${pm}" "${rel}"
+  mkdir -p "${bpm}/opt/dyx3/px4_msgs/${FIRMWARE_SHA}" "${T}/art_pm"
+  : >"${bpm}/opt/dyx3/px4_msgs/${FIRMWARE_SHA}/.complete"
+  cp "${art}/artifacts.env" "${art}/release-${sha}.tar.zst" "${T}/art_pm/"
+  tar -C "${bpm}" --zstd -cf "${T}/art_pm/px4_msgs-${FIRMWARE_SHA}.tar.zst" "opt/dyx3/px4_msgs/${FIRMWARE_SHA}"
+  (cd "${T}/art_pm" && sha256sum artifacts.env "release-${sha}.tar.zst" "px4_msgs-${FIRMWARE_SHA}.tar.zst" >SHA256SUMS)
+  (DYX3_ARTIFACT_DIR="${T}/art_pm" install_prebuilt "${sha}") >"${T}/pb_pm" 2>&1
+  rc=$?
+  check "prebuilt: an archived px4_msgs .complete is not trusted; an incomplete tree is refused" '[ "${rc}" -eq 2 ] && [ ! -e "${pm}" ] && [ ! -e "${pm}.incoming" ] && [ ! -e "${rel}" ]'
+  mkdir -p "${pm}.incoming/install" && : >"${pm}.incoming/stale-from-an-interrupted-run"
+
   # the good set (offline directory): release + px4_msgs installed, marked prebuilt, provenance kept
   (DYX3_ARTIFACT_DIR="${art}" install_prebuilt "${sha}") >"${T}/pb_ok" 2>&1
   rc=$?
   check "prebuilt: a valid offline artifact set installs" '[ "${rc}" -eq 0 ] && [ -f "${rel}/ros2_ws/install/setup.bash" ] && [ -f "${pm}/.complete" ]'
+  check "prebuilt: px4_msgs is renamed into place, without a leftover .incoming or stale files" '[ ! -e "${pm}.incoming" ] && [ ! -e "${pm}/stale-from-an-interrupted-run" ] && [ -f "${pm}/install/setup.bash" ]'
   check "prebuilt: release marked prebuilt, not complete, provenance kept" '[ -f "${rel}/.prebuilt" ] && [ ! -f "${rel}/.complete" ] && grep -q "ARTIFACT_CI_RUN=https://ci/run/1" "${rel}/artifacts.env"'
   check "prebuilt: build_release skips a prebuilt release" '(build_release "${sha}" 2>&1 | grep -q "nothing to build")'
   check "prebuilt: the extracted release passes static verification" '(health_release_only "${rel}" 0 >/dev/null 2>&1)'

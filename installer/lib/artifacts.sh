@@ -116,6 +116,27 @@ _artifact_extract() {
   tar --zstd -xf "${archive}" -C "${DYX3_ROOT:-/}" --no-same-owner
 }
 
+# _artifact_extract_into <archive> <required-prefix> <dest>: the same member check, but the prefix's CONTENTS are
+# extracted into <dest> (a fresh directory), so the caller can verify them and rename the result into place.
+_artifact_extract_into() {
+  local archive="$1" prefix="$2" dest="$3" bad n
+  bad="$(tar --zstd -tf "${archive}" | grep -v -e "^${prefix}/" -e "^${prefix}\$" | head -n1)" || true
+  [ -z "${bad}" ] || {
+    warn "$(basename "${archive}") has a member outside ${prefix}/: ${bad}"
+    return 1
+  }
+  n="$(printf '%s' "${prefix}" | awk -F/ '{print NF}')"
+  rm -rf "${dest}"
+  mkdir -p "${dest}"
+  tar --zstd -xf "${archive}" -C "${dest}" --strip-components="${n}" --no-same-owner
+}
+
+# _px4_msgs_tree_ok <dir>: what a usable px4_msgs overlay must contain, for the pinned firmware.
+_px4_msgs_tree_ok() {
+  [ -f "$1/install/setup.bash" ] && [ -s "$1/px4_msgs.sha256" ] || return 1
+  [ ! -f "$1/firmware.sha" ] || [ "$(cat "$1/firmware.sha")" = "${FIRMWARE_SHA}" ]
+}
+
 # install_prebuilt <stack-sha>: fetch, verify and extract the release (and px4_msgs when this machine
 # lacks it). Leaves nothing half-extracted behind. Returns
 #   0  installed (or already built)
@@ -162,12 +183,18 @@ install_prebuilt() {
 
   log "installing prebuilt $(artifact_tag "${sha}") ($(_artifact_env "${dir}" ARTIFACT_CI_RUN))"
   if [ "${need_msgs}" -eq 1 ]; then
-    rm -rf "${pm}"
-    _artifact_extract "${dir}/${msgs_f}" "opt/dyx3/px4_msgs/${FIRMWARE_SHA}" && [ -f "${pm}/.complete" ] || {
-      rm -rf "${pm}" "${dir}"
-      warn "px4_msgs artifact did not install"
+    # INS-014: extract beside the final directory, verify, then one rename. The archive's own .complete is never
+    # trusted: an interrupted extraction must not look complete, so the marker is written here after the checks.
+    local inc="${pm}.incoming"
+    if ! _artifact_extract_into "${dir}/${msgs_f}" "opt/dyx3/px4_msgs/${FIRMWARE_SHA}" "${inc}" ||
+      ! rm -f "${inc}/.complete" || ! _px4_msgs_tree_ok "${inc}"; then
+      rm -rf "${inc}" "${dir}"
+      warn "px4_msgs artifact did not install (unsafe, broken or incomplete archive)"
       return 2
-    }
+    fi
+    touch "${inc}/.complete"
+    rm -rf "${pm}"
+    mv -T "${inc}" "${pm}"
   fi
   rm -rf "${rel}"
   _artifact_extract "${dir}/${rel_f}" "opt/dyx3/releases/${sha}" && [ -d "${rel}" ] || {
