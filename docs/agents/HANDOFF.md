@@ -2155,3 +2155,29 @@ Installer 148/0 (new: site LAN address + gateway, FCU-subnet refusal, hotspot/LA
   plugged in.
 - The open list is unchanged otherwise (see "END OF DAY" 18:40); items 1–2 are now partly done: Mapbox decision
   done; the owner's hands-on test and the hotspot path are still pending.
+
+## 2026-10-09 (19:00) — Claude — FIRST THING TOMORROW: prove the M1/M2 output mapping without the stick
+
+Open safety question:
+- Both of today's states (M1 = right with `FUNC1 101`; after the rewiring, M1 = left with `FUNC1 102`) were judged
+  through manual driving with `RC1_REV −1`.
+- `RC1_REV −1` came from logs 6/7 (the owner's stick-left read as roll +1); that direction was never physically
+  confirmed.
+- If it was wrong, the stick sign masks a mirrored output mapping: manual looks right, while Mission, Offboard and
+  RPP turn the wrong way. Wheels-up logs cannot tell the two apart.
+
+**Test (wheels up, spray off, disarmed; check the `actuator_test` help for the exact syntax first):**
+1. `ver git`, `param show RBCLW_FUNC*`, `param show RC1_REV`.
+2. Drive function 102 (left command → `RBCLW_FUNC1` → M1) at about +0.1 for 2 s: the **LEFT wheel must turn
+   forward**.
+3. Drive function 101 (right command → M2): the **RIGHT wheel must turn forward**.
+4. During each, run `listener wheel_encoders`: `[0]` = M1, `[1]` = M2 signs.
+- **Pass:** close the "residual sign dependency" item in `docs/Firmware/F-tasks.md`.
+- **Fail:** set `RBCLW_FUNC1 101`, `RBCLW_FUNC2 102`, `RC1_REV +1`, then re-test the outputs and the stick.
+  **No Mission/Offboard until it passes.**
+- Better still, once wheels-down: in Manual, stick left must give a negative gyro yaw rate (left turn) in the log.
+
+Also from the owner's note:
+- `installer/pins/firmware.pin` still says `27a7ac9284`; the FCU runs `8279fa4be3`. The msgs are identical, but the
+  pin selects the `px4_msgs` build, so change it deliberately (CI + upgrade).
+- Stale `4393fb07e1` line in `docs/bench/2026-10-09_bench_runbook.md`.
