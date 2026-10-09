@@ -261,8 +261,13 @@ void MotionGuardNode::step(double now_s) {
     pub_status_->publish(s);
   }
   if (reason_changed) {
-    RCLCPP_WARN(get_logger(), "decision reason %u -> %u", static_cast<unsigned>(last_reason_),
-                static_cast<unsigned>(d.reason));
+    // Every transition is on /dyx3/motion_guard/status (published above); the log line is
+    // rate-limited so a flapping gate cannot flood the logger from the control callback (MG-006).
+    ++reason_changes_;
+    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
+                         "decision reason %u -> %u (%llu reason changes since start)",
+                         static_cast<unsigned>(last_reason_), static_cast<unsigned>(d.reason),
+                         static_cast<unsigned long long>(reason_changes_));
   }
   last_reason_ = d.reason;
 

@@ -34,6 +34,7 @@ struct Rig {
   std::vector<rclcpp::SubscriptionBase::SharedPtr> keep;
   MotionSetpoint last_out;
   std::vector<MotionSetpoint> outs;
+  std::vector<dyx3_interfaces::msg::MotionSetpointStatus> statuses;
   std::vector<dyx3_interfaces::msg::SafetyGateStatus> gates;
   std::vector<dyx3_interfaces::msg::EmergencyStopState> estops;
   dyx3_interfaces::msg::MotionSetpointStatus last_status;
@@ -82,6 +83,7 @@ struct Rig {
         "/dyx3/motion_guard/status", rclcpp::QoS(10).reliable(),
         [this](dyx3_interfaces::msg::MotionSetpointStatus::ConstSharedPtr m) {
           last_status = *m;
+          statuses.push_back(*m);
         }));
     keep.push_back(world->create_subscription<dyx3_interfaces::msg::SafetyGateStatus>(
         "/dyx3/safety_gate", r1,
@@ -418,6 +420,36 @@ TEST(MotionGuardNode, ShutdownStopPublishesCanonicalStopWhileMoving) {
     EXPECT_TRUE(m.valid);
     EXPECT_GT(m.seq, i == n_before ? seq_before : r.outs[i - 1].seq);
   }
+}
+
+// MG-006: the reason-change log line is throttled, but every transition stays observable on the
+// status topic.
+TEST(MotionGuardNode, EveryReasonChangeIsOnTheStatusTopicWhateverTheLogRate) {
+  using S = dyx3_interfaces::msg::MotionSetpointStatus;
+  Rig r;
+  r.run(0.3);
+  ASSERT_EQ(r.last_status.reason_code, S::REASON_OK);
+  r.statuses.clear();
+  constexpr int kFlaps = 8;
+  for (int i = 0; i < kFlaps; ++i) {
+    for (const bool valid : {false, true}) {
+      r.now += 0.02;
+      r.publish_world();
+      r.rpp(MotionSetpoint::MODE_TRACK_RATE, 0.3F, NaN, 0.1F, valid);
+      r.pump();
+      r.guard->step(r.now);
+      r.pump();
+    }
+  }
+  int to_invalid = 0, to_ok = 0;
+  for (size_t i = 0; i < r.statuses.size(); ++i) {
+    const uint8_t prev = i == 0 ? S::REASON_OK : r.statuses[i - 1].reason_code;
+    if (r.statuses[i].reason_code == prev) continue;
+    if (r.statuses[i].reason_code == S::REASON_INVALID_MESSAGE) ++to_invalid;
+    if (r.statuses[i].reason_code == S::REASON_OK) ++to_ok;
+  }
+  EXPECT_EQ(to_invalid, kFlaps);
+  EXPECT_EQ(to_ok, kFlaps);
 }
 
 TEST(MotionGuardNode, RestartedPublisherIsStoppedUntilItRebuildsASession) {

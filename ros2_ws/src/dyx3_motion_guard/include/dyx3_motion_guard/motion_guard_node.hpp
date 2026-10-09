@@ -79,6 +79,7 @@ private:
   double last_status_pub_s_{-1e18};
   uint64_t out_seq_{0};
   Reason last_reason_{Reason::Ok};
+  uint64_t reason_changes_{0};
   uint64_t last_status_input_seq_{~0ULL};
 
   rclcpp::TimerBase::SharedPtr timer_;
