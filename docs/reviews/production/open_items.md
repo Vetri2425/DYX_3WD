@@ -42,7 +42,7 @@ Review baseline: DYX_3WD `master` `252778e` (firmware `8279fa4be3`).
 | 4 | `dyx3_interfaces` (+ px4_msgs pin) | — | — | — | prompt issued |
 | 5 | `dyx3_mission` | 2026-10-09 | 2026-10-09 | 0 / 0 / 3 / 4 | open |
 | 6 | `dyx3_gnss_rtk` | — | — | — | prompt issued |
-| 7 | `dyx3_spray` | — | — | — | prompt issued |
+| 7 | `dyx3_spray` | 2026-10-09 | 2026-10-09 | 0 / 2 / 2 / 1 | open |
 | 8 | `dyx3_geometry` | — | — | — | |
 | 9 | `dyx3_bringup` + systemd (RT, CPU, restart) | — | — | — | |
 | 10 | `dyx3_system_gateway` | — | — | — | |
@@ -453,6 +453,80 @@ Confirmed good:
 
 ---
 
+## 5. `dyx3_spray`
+
+Reviewer verdict: REQUEST CHANGES (1 CRITICAL, 2 HIGH, 2 MEDIUM). After verification: **0 CRITICAL, 2 HIGH,
+2 MEDIUM, 1 LOW**.
+- The CRITICAL (manual spray) is a documented, operator-only bench feature. It is re-rated MEDIUM as a policy
+  decision.
+- The overriding open question is unchanged and moves to X-012: does the valve close physically when every
+  Jetson path is lost?
+
+Confirmed good:
+- **A safety refusal closes the valve at once.** It goes straight to OFF and bypasses debounce, because the FSM
+  reads the safety verdict directly (`docs/contracts/dyx3_spray.md:146-151`). Debounce applies only to
+  geometric boundary edges.
+- **Manual ON cannot open during an E-stop or when disarmed.** `safety_allows_on` checks E-stop, armed and the
+  watchdog before the manual exemption (`spray_controller.cpp:135-141`).
+- **Manual ON needs the operator token.** It is reachable only through backend `POST /spray/manual` with the
+  operator role (`routes.py:179-181`) → gateway → `/dyx3/spray/set_manual`. It has a hard 10 s expiry.
+- **px4_link gives the watchdog's OFF priority** over queued controller commands and refuses the replay of an
+  older ON epoch (`px4_link_node.cpp:532-620`).
+- **Correction to the review prompt:** the valve delays are **not** 0. The defaults are `solenoid_open_delay_s`
+  0.18 and `solenoid_close_delay_s` 0.05, plus `on_overspray_margin_m` 0.02 (`spray_param_table.inc:21-24`).
+  They are prototype values, not measured on this valve. The nozzle offsets are 0.
+
+| ID | Severity | Status | Area | Where | Item |
+|---|---|---|---|---|---|
+| SP-002 | **HIGH** | ACCEPTED | Boundary | `spray_controller.cpp:318-328`; contract `dyx3_spray.md:94-97` | 3-tick debounce delays every boundary edge by up to 60 ms, and the lead maths does not compensate |
+| SP-003 | **HIGH** | DOUBT (bench measurement; = production-readiness #7) | Boundary | `spray_param_table.inc:21-24` | Valve open/close delays and the nozzle offset are prototype values, not measured |
+| SP-001 | MEDIUM (~~CRITICAL~~) | ACCEPTED ↓ (owner decision) | Manual | `spray_controller.cpp:140-141,203-223` | Manual ON overrides the mission, path and RTK gates, including **during a RUNNING autonomous mission** |
+| SP-004 | MEDIUM | ACCEPTED | Close | `spray_controller.cpp:236-238`; `spray_gates.cpp:136-144` | `min_spray_speed_mps` is declared but unused; STOPPING/CREEPING may keep the valve ON while the rover is almost stopped on a MARK leg |
+| SP-005 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Stall | `spray_node.cpp:271-337` | Conditioned-artifact load runs on the spray executor |
+
+### SP-002 — HIGH — debounce latency is not in the boundary lead
+- Confirmed. `debounce_samples` 3 at 50 Hz: an edge needs 3 identical ticks, so it is delayed 40–60 ms with
+  phase. That is about 2 cm at 0.35 m/s and up to **6 cm at 1 m/s**, on OPEN and CLOSE.
+- The contract already measured about 2 cm late at 0.35 m/s and left acceptance to GATE 5.
+- This breaks the ±1–2 cm goal at any production speed above about 0.35 m/s.
+- **Fix (behaviour-preserving for safety OFF):** add the debounce delay `(debounce_samples − 1) / tick_hz × v` to
+  both the ON and OFF leads in the projection, keeping the debounce for noise rejection. Or lower the debounce
+  once the pose noise is measured.
+- **Test:** the boundary edge error at 0.35 / 0.5 / 1.0 m/s in `spray_core_test` must be ≤ 1 cm in simulation.
+
+### SP-003 — HIGH — DOUBT — valve timing not measured
+- The lead compensation is implemented and uses prototype delays (0.18 / 0.05 s). A 30 ms error is 3 cm at
+  1 m/s.
+- **Bench, same task as production-readiness #7:**
+  - ON/OFF electrical command → paint edge latency (p50/p95) at the working pressure;
+  - nozzle forward and lateral offset relative to the navigation reference point;
+  - then set the parameters.
+
+### SP-001 — MEDIUM — manual spray authority (owner decision)
+- Re-rated. It is a deliberate bench feature in the contract ("Manual (bench) spray is exempt … armed + watchdog
+  suffice"). It is operator-only, E-stop and disarm still close it, and it expires after 10 s.
+- The real gap: `manual_active_` returns before the ownership check, so a manual ON **during a RUNNING mission**
+  overrides the boundary geometry for up to 10 s.
+- **Owner decision:** refuse manual while a mission is LOADING/READY/RUNNING/PAUSED; optionally only when the
+  rover is stationary or in a maintenance mode. An RC-driven manual marking mode would be a separate, explicit
+  feature.
+
+### SP-004 — MEDIUM — near-stationary marking
+- Confirmed: no general minimum-speed OFF. The contract removed that gate on purpose for endpoint creep.
+- STOPPING into a corner on a MARK leg can therefore paint a blob as the speed reaches 0. `terminal_off_speed_mps`
+  covers only the terminal.
+- **Fix:** OFF when the speed is below `min_spray_speed_mps` unless in terminal creep. Test: stationary on MARK
+  → OFF; terminal creep → no gap; corner STOPPING → OFF at the boundary.
+
+### SP-005 — LOW
+- Loads happen on a mission or path change, normally before RUNNING; the node is not RT; a refusal fails OFF.
+- Same pattern as RPP-001 and MS-004. Fold into one "prepare the mission off the control thread" change.
+
+Not counted: the lease has no sequence or replay check (`safety_lease.cpp:40-57`). There is one publisher, and a
+single stale lease cannot keep the watchdog alive. Hardening only.
+
+---
+
 ## Cross-part items (raised by the part reviews; owned by later parts)
 
 | ID | Owner part | Item | Status |
@@ -468,3 +542,4 @@ Confirmed good:
 | X-009 | mission / bringup | Prove that a systemd graph restart or an E-stop clear can never resume a mission without the operator | open, test (from MG review) |
 | X-010 | `px4_link` | On a graph stop every node gets SIGINT together, so only the last hop can guarantee a final STOP: `px4_link` must publish STOP and stop the offboard heartbeat cleanly before exiting | ACCEPTED: confirmed `main.cpp:15-17`; part of PXL-001 |
 | X-011 | PX4 parameter baseline | `COM_RCL_EXCEPT` = 4 (bit 2 = Offboard, firmware `commander_params.c:633-645`): **RC loss triggers no failsafe in OFFBOARD**. Carried from the prototype. The RC kill switch still works while the RC link is alive. Owner decision: keep it (the tablet link and the guard govern autonomy) or clear bit 2 so RC loss stops autonomous runs. Test it with production-readiness #5 | open, owner decision (found in PXL verification) |
+| X-012 | PX4 firmware / hardware / spray | **Physical valve close when every Jetson path is lost.** The controller and the watchdog both reach the valve only through `px4_link` → DDS → PX4. Prove on hardware what the valve output does on disarm, on offboard loss (1.0 s → disarm) and on loss of actuator commands; measure it with the valve driver. Owner decision (open since 2026-10-07): (a) a secondary UART path, (b) a PX4 companion-loss failsafe that disarms, plus a disarmed-output level that is valve-closed | **open: blocks fail-closed sign-off** |
