@@ -11,6 +11,7 @@ is the **operator-link heartbeat** (§4.3.1): it publishes `OperatorLinkStatus`,
 * **Newline-delimited JSON, UTF-8**, one object per line, every message carries `"v":1`. A line longer than 64 KiB, invalid JSON, a wrong `v`, duplicate keys or trailing garbage
   is answered `{"ok":false,"code":"bad_message"}` (the connection stays open unless the line overflows, which closes it). A client whose outbound buffer exceeds 1 MiB is dropped (slow consumer).
 * The gateway never trusts the client: every field is validated (section 3) before anything reaches ROS.
+* A client that disconnects (also with replies still queued for it) is simply removed: socket writes use `MSG_NOSIGNAL` and the node ignores `SIGPIPE`, so a backend restart can never take the gateway, and with it the control graph, down (GW-002).
 
 ### Client -> gateway
 `{"v":1,"id":<int>,"cmd":"<name>","args":{...}}`  — `id` is echoed in the reply (client-chosen, not interpreted).

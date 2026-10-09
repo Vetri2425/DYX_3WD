@@ -166,12 +166,18 @@ void IpcServer::loop() {
         to_close.push_back(id);
         continue;
       }
-      if (re & POLLOUT) {
-        const ssize_t n = write(c.fd, c.out.data(), c.out.size());
-        if (n > 0)
+      // A hung-up peer is never written to: its remaining input is still read below (a line it
+      // sent just before closing, e.g. an E-stop, is delivered), then EOF closes it. send() with
+      // MSG_NOSIGNAL turns a peer that closed between poll() and the write into EPIPE instead of a
+      // process-killing SIGPIPE (GW-002).
+      if ((re & POLLOUT) && !(re & POLLHUP)) {
+        const ssize_t n = ::send(c.fd, c.out.data(), c.out.size(), MSG_NOSIGNAL);
+        if (n > 0) {
           c.out.erase(0, static_cast<size_t>(n));
-        else if (n < 0 && errno != EAGAIN && errno != EINTR)
+        } else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+          c.out.clear();  // EPIPE / ECONNRESET: the peer is gone
           to_close.push_back(id);
+        }
       }
       if (re & (POLLIN | POLLHUP)) {
         char buf[4096];

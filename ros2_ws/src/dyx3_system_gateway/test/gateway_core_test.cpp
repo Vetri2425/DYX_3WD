@@ -3,11 +3,13 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <csignal>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -297,4 +299,74 @@ TEST(IpcServer, StaleSocketFileIsReplacedAndASlowConsumerIsDropped) {
   for (int i = 0; i < 200 && s.dropped_slow() == 0; ++i)
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   EXPECT_GE(s.dropped_slow(), 1U);
+}
+
+// GW-002: a reply queued for a peer that has already closed must not raise SIGPIPE. The server runs
+// in a forked child with the DEFAULT SIGPIPE disposition (no SIG_IGN anywhere), so only the
+// server's own send path decides whether the process survives. Each client sends an invalid line
+// (answered at once, like the gateway's bad_message reply) and closes without reading.
+TEST(IpcServer, APeerThatClosesBeforeItsReplyIsWrittenDoesNotKillTheProcess) {
+  const std::string path = tmp_sock();
+  int ready[2];
+  ASSERT_EQ(pipe(ready), 0);
+  const pid_t pid = fork();
+  ASSERT_GE(pid, 0);
+  if (pid == 0) {
+    close(ready[0]);
+    std::signal(SIGPIPE, SIG_DFL);
+    std::atomic<bool> quit{false};
+    IpcServer s;
+    IpcServer::Config c;
+    c.path = path;
+    c.max_clients = 64;
+    std::string err;
+    const bool up = s.start(
+        c,
+        [&](int cl, const std::string& l) {
+          if (l == "quit") {
+            quit = true;
+            return;
+          }
+          s.send(cl, R"({"v":1,"ok":false,"code":"bad_message","reason":")" +
+                         std::string(2048, 'r') + R"(","data":{}})");
+        },
+        &err);
+    const char b = up ? 1 : 0;
+    (void)!write(ready[1], &b, 1);
+    if (!up) _exit(2);
+    for (int i = 0; i < 3000 && !quit; ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    if (!quit) _exit(3);
+    // Every closed peer must have been removed; only the control client is left.
+    for (int i = 0; i < 300 && s.clients() != 1; ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    const int left = s.clients();
+    s.stop();
+    _exit(left == 1 ? 0 : 4);
+  }
+  // The test process itself writes to the server; do not let a dead server kill the test runner.
+  const auto old_pipe = std::signal(SIGPIPE, SIG_IGN);
+  close(ready[1]);
+  char b = 0;
+  ASSERT_EQ(read(ready[0], &b, 1), 1);
+  close(ready[0]);
+  ASSERT_EQ(b, 1);
+  int alive_after = -1;
+  for (int i = 0; i < 500; ++i) {
+    Sock a(path);
+    if (!a.ok()) break;  // the server is gone
+    a.write_all("not json\n");
+    if (i % 50 == 0) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    alive_after = i;
+  }  // each Sock closes at once, without reading its reply
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  Sock ctl(path);
+  if (ctl.ok()) ctl.write_all("quit\n");
+  int st = 0;
+  ASSERT_EQ(waitpid(pid, &st, 0), pid);  // always reaped, also when the server died
+  std::signal(SIGPIPE, old_pipe);
+  ASSERT_FALSE(WIFSIGNALED(st)) << "server killed by signal " << WTERMSIG(st) << " after "
+                                << alive_after + 1 << " clients";
+  ASSERT_TRUE(WIFEXITED(st));
+  EXPECT_EQ(WEXITSTATUS(st), 0) << "2: start failed, 3: no quit, 4: closed peers not removed";
 }
