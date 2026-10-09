@@ -147,6 +147,15 @@ libs() {
   net_prod="$(DYX3_DRY_RUN=1 install_fcu_network 2>&1)"
   net_bench="$(DYX3_DRY_RUN=1 FCU_KEEP_DHCP=1 install_fcu_network 2>&1)"
   check "fcu profile (production): manual, never-default yes" 'printf "%s" "${net_prod}" | grep -q "ipv4.method manual" && printf "%s" "${net_prod}" | grep -q "ipv4.never-default yes"'
+  mkdir -p "${DYX3_ETC}"
+  printf 'DYX3_LAN_ADDRESS=192.168.3.150/24\nDYX3_LAN_GATEWAY=192.168.3.1\n' >"${DYX3_ETC}/network.env"
+  local net_lan
+  net_lan="$(DYX3_DRY_RUN=1 install_fcu_network 2>&1)"
+  check "site LAN address joins the FCU port, router default route at metric 200" 'printf "%s" "${net_lan}" | grep -q "ipv4.addresses 10.41.10.1/24,192.168.3.150/24" && printf "%s" "${net_lan}" | grep -q "ipv4.gateway 192.168.3.1" && printf "%s" "${net_lan}" | grep -q "ipv4.route-metric 200" && printf "%s" "${net_lan}" | grep -q "ipv4.never-default no"'
+  printf 'DYX3_LAN_ADDRESS=10.41.10.9/24\n' >"${DYX3_ETC}/network.env"
+  net_lan="$(DYX3_DRY_RUN=1 install_fcu_network 2>&1)"
+  check "a site LAN address on the FCU subnet is refused" 'printf "%s" "${net_lan}" | grep -q "on the FCU subnet; ignored" && printf "%s" "${net_lan}" | grep -q "ipv4.addresses 10.41.10.1/24 "'
+  rm -f "${DYX3_ETC}/network.env"
   check "fcu profile (bench): auto, keeps default route" 'printf "%s" "${net_bench}" | grep -q "ipv4.method auto" && printf "%s" "${net_bench}" | grep -q "ipv4.never-default no"'
 
   # staged real directory creation (no chown)
@@ -461,6 +470,11 @@ F
   printf 'DYX3_HOTSPOT_SSID=TestRover\nDYX3_HOTSPOT_PSK=DummyBenchPass123\nDYX3_HOTSPOT_ADDRESS=192.168.3.100\n' >"${DYX3_ETC}/hotspot.env"
   install_hotspot_network >>"${T}/hotspot_log" 2>&1
   check "a hotspot address without a prefix length is refused" '[ ! -e "${hotspot_profile}" ]'
+  printf 'DYX3_LAN_ADDRESS=192.168.3.150/24\n' >"${DYX3_ETC}/network.env"
+  printf 'DYX3_HOTSPOT_SSID=TestRover\nDYX3_HOTSPOT_PSK=DummyBenchPass123\nDYX3_HOTSPOT_ADDRESS=192.168.3.100/24\n' >"${DYX3_ETC}/hotspot.env"
+  install_hotspot_network >>"${T}/hotspot_log" 2>&1
+  check "a hotspot on the site LAN subnet is refused" '[ ! -e "${hotspot_profile}" ] && grep -q "on the site LAN subnet" "${T}/hotspot_log"'
+  rm -f "${DYX3_ETC}/network.env"
   printf 'DYX3_HOTSPOT_SSID=TestRover\nDYX3_HOTSPOT_PSK=DummyBenchPass123\nDYX3_HOTSPOT_DOWNLOAD_LIMIT=1;reboot\n' >"${DYX3_ETC}/hotspot.env"
   install_hotspot_network >>"${T}/hotspot_log" 2>&1
   check "an invalid client-internet limit is refused (no shell injection into the hook)" '[ ! -e "${hotspot_profile}" ] && grep -q "invalid client-internet limit" "${T}/hotspot_log"'

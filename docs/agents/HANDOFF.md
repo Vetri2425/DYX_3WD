@@ -1934,3 +1934,27 @@ What still blocks production grade, by risk. Proven so far:
     that `main` is authoritative again, with the owner's OK, then rebuild the signed APK.
 - **Future (after Saturday): QR pairing.** The rover shows a QR code for a new tablet token (a CLI or local page);
   the app scans it. No copy-paste; still one token per tablet (`tablet-1`, `tablet-2`, …).
+
+## 2026-10-09 (17:40) — Claude — site router + hotspot together; app discovery beacon (backend side)
+
+**Field network on rover 01 now:**
+- A site router (`192.168.3.1`) is cabled into the rover Ethernet (the baseboard switch shared with the FCU).
+  - The Jetson has `192.168.3.150/24` on `enP8p1s0` next to `10.41.10.1/24`; the default route goes via the
+    router at metric 200.
+  - Per-rover file `/etc/dyx3/network.env` (new); applied by `install_fcu_network`.
+- The **hotspot moved to `192.168.2.100/24`** (`hotspot.env`), so it never shares the router's subnet and both
+  run at once. The installer now refuses a hotspot on the site-LAN subnet.
+- ssh, backend (`/api/ping` 200, Socket.IO 200), FCU ping, DDS and internet were verified over the router.
+  - The Jetson's own range was weak, which is why the owner moved to the router.
+- RTK after the switch: the caster accepts the login but our mountpoint is **not in the caster source table**,
+  and the stream sends no RTCM. **The base station is offline** (external): check its power, internet and NTRIP
+  output. The rover recovers by itself.
+
+**Discovery (owner requirement: no fixed IP; one token across networks; auto-connect like the 4WD app):**
+- `/api/ping` now returns `rover_id` (stable: `DYX3_ROVER_ID` or sha256 of the machine-id) and `rover_name`.
+- The backend beacons UDP 5003 every 1 s on each non-FCU network, each with that network's IP (contract 1a).
+  Ported from the 4WD UDP beacon.
+- App side (Three_Wheel_v2): beacon listener, a per-`rover_id` token, auto-connect, no hardcoded IPs. In progress.
+
+Installer 148/0 (new: site LAN address + gateway, FCU-subnet refusal, hotspot/LAN clash refusal). Backend pytest
+574 passed, ruff clean.

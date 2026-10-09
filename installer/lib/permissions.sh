@@ -75,7 +75,7 @@ install_tmpfiles() {
 # have edited them; an upgrade must never overwrite field configuration.
 install_config_templates() {
   local rel="$1" f
-  for f in platform.env mavlink-router.conf ros.env backend.env ntrip.env hotspot.env; do
+  for f in platform.env mavlink-router.conf ros.env backend.env ntrip.env hotspot.env network.env; do
     if [ -e "${DYX3_ETC}/${f}" ]; then
       log "keeping existing ${DYX3_ETC}/${f}"
     elif [ "${f}" = "ntrip.env" ] || [ "${f}" = "hotspot.env" ]; then

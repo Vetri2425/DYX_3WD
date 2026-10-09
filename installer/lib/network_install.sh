@@ -14,6 +14,27 @@ FCU_JETSON_CIDR="${FCU_JETSON_CIDR:-10.41.10.1/24}"
 # default route is kept too; otherwise the release fetch from GitHub fails (seen 2026-10-08).
 FCU_KEEP_DHCP="${FCU_KEEP_DHCP:-0}"
 
+# Per-rover site LAN on the same Ethernet port (/etc/dyx3/network.env, created once, never overwritten).
+# The Jetson baseboard has one Ethernet port behind an internal switch shared with the Pixhawk, so a site
+# router cabled into the rover reaches the Jetson on this port. DYX3_LAN_ADDRESS adds a static address
+# next to the FCU address; DYX3_LAN_GATEWAY makes that router the default route at metric 200, above a
+# USB 4G dongle (NetworkManager default 100), so the dongle stays first when present.
+# Proven on rover 01 2026-10-09: 192.168.3.150/24 via 192.168.3.1, with DDS and QGC unaffected.
+_ipv4_ok() { [[ "$1" =~ ^((25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])$ ]]; }
+_ipv4_int() { local IFS=.; read -r a b c d <<<"$1"; echo $(((a << 24) | (b << 16) | (c << 8) | d)); }
+# _ipv4_net CIDR -> "network/prefix" (prints nothing for an invalid CIDR)
+_ipv4_net() {
+  local ip="${1%/*}" pfx="${1#*/}" mask
+  _ipv4_ok "${ip}" && [[ "${pfx}" =~ ^([0-9]|[12][0-9]|3[0-2])$ ]] || return 0
+  mask=$(((0xFFFFFFFF << (32 - pfx)) & 0xFFFFFFFF))
+  echo "$(($(_ipv4_int "${ip}") & mask))/${pfx}"
+}
+# Missing file = no site LAN. Must not fail: install.sh runs under set -e and pipefail.
+_network_env() {
+  [ -r "${DYX3_ETC}/network.env" ] || return 0
+  sed -n "s/^$1=//p" "${DYX3_ETC}/network.env" | tail -n1
+}
+
 install_fcu_network() {
   if ! have nmcli && [ "${DYX3_DRY_RUN}" != "1" ]; then
     warn "nmcli not found: skipping FCU network profile"
@@ -24,12 +45,32 @@ install_fcu_network() {
     method="auto"
     never_default="no"
   fi
+  local addresses="${FCU_JETSON_CIDR}" lan_cidr lan_gw route=(ipv4.gateway "" ipv4.dns "" ipv4.route-metric -1)
+  lan_cidr="$(_network_env DYX3_LAN_ADDRESS)"
+  lan_gw="$(_network_env DYX3_LAN_GATEWAY)"
+  if [ -n "${lan_cidr}" ]; then
+    if [ -z "$(_ipv4_net "${lan_cidr}")" ] || [ "$(_ipv4_net "${lan_cidr}")" = "$(_ipv4_net "${FCU_JETSON_CIDR}")" ]; then
+      warn "network.env DYX3_LAN_ADDRESS '${lan_cidr}' is invalid or on the FCU subnet; ignored"
+      lan_cidr=""
+    else
+      addresses="${FCU_JETSON_CIDR},${lan_cidr}"
+    fi
+  fi
+  if [ -n "${lan_cidr}" ] && [ -n "${lan_gw}" ]; then
+    if _ipv4_ok "${lan_gw}"; then
+      never_default="no"
+      route=(ipv4.gateway "${lan_gw}" ipv4.dns "${lan_gw}" ipv4.route-metric 200)
+    else
+      warn "network.env DYX3_LAN_GATEWAY '${lan_gw}' is invalid; no LAN default route"
+    fi
+  fi
   local common=(
     connection.interface-name "${FCU_IFACE}"
     connection.autoconnect yes
     ipv4.method "${method}"
-    ipv4.addresses "${FCU_JETSON_CIDR}"
+    ipv4.addresses "${addresses}"
     ipv4.never-default "${never_default}"
+    "${route[@]}"
     ipv6.method disabled
   )
   if [ "${DYX3_DRY_RUN}" != "1" ] && nmcli -t -f NAME connection show | grep -qx "${FCU_CON_NAME}"; then
@@ -194,6 +235,13 @@ install_hotspot_network() {
   # rtw_country_code module parameter and the proc country_code. Under that plan only 5745 MHz (149) is
   # not no-IR, so an AP on 36-48 or 153-165 fails ("Failed to start AP functionality", rover 2026-10-09).
   # 149 is legal in India (5725-5875 MHz).
+  if [ -n "$(_network_env DYX3_LAN_ADDRESS)" ] && [ "$(_ipv4_net "${address}")" = "$(_ipv4_net "$(_network_env DYX3_LAN_ADDRESS)")" ]; then
+    warn "hotspot address ${address} is on the site LAN subnet (network.env); access point disabled"
+    if [ -f "${profile}" ]; then
+      _hotspot_drop_profile "${profile}"
+    fi
+    return 0
+  fi
   if [ -z "${channel}" ]; then
     if [ "${band}" = "a" ]; then channel=149; else channel=6; fi
   fi
