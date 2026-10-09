@@ -46,9 +46,9 @@ Review baseline: DYX_3WD `master` `252778e` (firmware `8279fa4be3`).
 | 8 | `dyx3_geometry` | 2026-10-09 | 2026-10-09 | 0 / 0 / 1 / 5 | open |
 | 9 | `dyx3_bringup` + systemd (RT, CPU, restart) | 2026-10-09 | 2026-10-09 | 0 / 0 / 3 / 2 | open |
 | 10 | `dyx3_system_gateway` | 2026-10-09 | 2026-10-09 | 0 / 2 / 1 / 5 | open |
-| 11 | `dyx3_recorder` | 2026-10-09 | 2026-10-09 | 0 / 5 / 6 / 6 | open |
+| 11 | `dyx3_recorder` | 2026-10-09 (×2) | 2026-10-09 | 0 / 5 / 10 / 9 | open |
 | 12 | backend | 2026-10-09 | 2026-10-09 | 0 / 1 / 3 / 6 | open |
-| 13 | installer / deployment | — | — | — | |
+| 13 | installer / deployment | — | — | — | prompt issued |
 | 14 | tablet app (`Three_Wheel_v2` `App-Polish`) | — | — | — | |
 | 15 | PX4 firmware rover path (`dyx-3wd-production`) | — | — | — | |
 | 16 | `dyx3_rpp_legacy` | not reviewed: reference only, deleted at GATE 7 | | | |
@@ -76,7 +76,7 @@ several are the root causes the part reviews keep hitting.
 | PC-7a | Health check: PX4 `UXRCE_DDS_DOM_ID` must equal `ROS_DOMAIN_ID` (42). Nothing enforces it | open | installer / `dyx3-health` |
 | PC-7b | Verify the `ROS_LOCALHOST_ONLY` discovery between the nodes and the XRCE agent (`dyx3-platform` does not read `ros.env`) | open | |
 | PC-7c | One installer test is not self-contained ("dry-run mentions useradd") | open | `installer/tests` |
-| PC-8 | The prototype bag manifests pair `as_run_config.rpp_params` names with the wrong values. The recorder must write correct name/value pairs | **PASS** (REC review: pairs come from each returned Parameter); coverage gap is REC-002 | `dyx3_recorder` |
+| PC-8 | The prototype bag manifests pair `as_run_config.rpp_params` names with the wrong values. The recorder must write correct name/value pairs | **Pairing PASS; precision FAIL** (doubles stored with 6 decimals, REC-020); coverage gap REC-002 | `dyx3_recorder` |
 | PC-9 | `installer/pins/firmware.pin` still pins `27a7ac9284`, but the rover runs `8279fa4be3`. `msg/`, `srv/` and `dds_topics.yaml` are identical between the two, so px4_msgs on the rover is correct. Bump the pin to `8279fa4be3` for traceability; a px4_msgs rebuild follows at the next upgrade | open (hygiene) | |
 
 Done: tcpdump in the installer (PC-7); mavlink-router template server mode; WENC timer fix in `8279fa4be3`.
@@ -834,6 +834,29 @@ Confirmed in code:
 - **REC-006.** Read the running firmware identity from PX4 (e.g. the `ver` / git hash via MAVLink
   AUTOPILOT_VERSION or a DDS topic) into `versions.json`, and flag a mismatch with `firmware_expected_sha`. Bump
   the pin (PC-9) meanwhile.
+
+### Second review (Opus, same commit): cross-check and additions
+Opus agreed with REC-001/002/004/005/006 and the race (REC-013), and found **four confirmed defects the first
+review missed**. Verified against the code and the upstream ROS 2 Humble sources (rclcpp `humble`, rosbag2
+`humble`):
+
+| ID | Severity | Status | Area | Where | Item |
+|---|---|---|---|---|---|
+| REC-018 | MEDIUM | ACCEPTED | Lifecycle | `recorder_node.cpp:61`; `main.cpp:34-39` | `SyncParametersClient::list_parameters` **throws** on a timeout (rclcpp humble `parameter_client.cpp:544`), and the collector has no `try`. A node that is discovered but not answering, e.g. a stalled `px4_link` (BR-002), **crashes the recorder** at run start (half-written directory) or at run stop (no `summary.json`). From the destructor it can call `std::terminate` |
+| REC-019 | MEDIUM | ACCEPTED | Completeness | `recorder_node.cpp:62-65` | `get_parameters` returns an empty vector on a timeout, so the node is recorded `reachable: true, params: {}`: a silent gap |
+| REC-020 | MEDIUM | ACCEPTED | Completeness | `recorder_node.cpp:63` | `value_to_string()` formats doubles with `std::to_string`, i.e. **6 fixed decimals** (rclcpp humble `parameter_value.cpp:93`): `1e-7` → `"0.000000"`. **PC-8 amended:** the pairing passes, the value precision fails. Use `%.17g` for doubles and double arrays |
+| REC-021 | MEDIUM | ACCEPTED | Durability | `recorder_node.cpp:150-151` | The rosbag2 SQLite defaults (`synchronous=OFF`, journal in memory; `metadata.yaml` only on close) mean a power cut or the SIGKILL escalation can leave a corrupt `.db3`. Add `--storage-preset-profile resilient` (exists in Humble: `sqlite_storage.cpp:136-174`) or move to MCAP (owner decision) |
+| REC-022 | LOW | ACCEPTED | Config | `deployment/scripts/start-recorder.sh:9` | The recorder starts with no parameter file, so `vehicle_id`/`operator` are always "unknown" and the config snapshot is always empty (same root as REC-007 / BR-001) |
+| REC-023 | LOW | DOUBT (measure) | Load | `dyx3-recorder.service` | No `Nice` / `IOSchedulingClass` / `CPUAffinity`. Measure the recorder's effect on the PXL-004 `fsync` (same ext4 journal) |
+| REC-024 | LOW | ACCEPTED | Process | `dyx3-recorder.service`; `start-recorder.sh:9` | `KillMode=control-group` sends SIGTERM to the bag child at the same time as the recorder; the main PID is the `ros2 run` Python wrapper. Exec the node binary and use `KillMode=mixed` |
+
+Also from Opus, folded into existing items:
+- the recorder can write `/var/lib/dyx3/rtk` (the credential store), and the ULog `fopen` is not CLOEXEC, so the
+  bag child inherits it → BR-005;
+- no operator warning for low disk or a recorder in ERROR (the gateway forwards `free_bytes`) → part of REC-001.
+
+Corrections to the Opus review: `/dyx3/vehicle_state` is 50 Hz, not 100 Hz (the 20 ms gate in `px4_link`), so its
+bag estimate is about 25 MB/h high (about 1.2–2.3 GB per field day). RPP has 119 parameters per the registry.
 
 ---
 
