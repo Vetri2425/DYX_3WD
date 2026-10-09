@@ -37,8 +37,8 @@ Review baseline: DYX_3WD `master` `252778e` (firmware `8279fa4be3`).
 | # | Part | Reviewed | Verified | Open (C/H/M/L) | Status |
 |---|---|---|---|---|---|
 | 1 | `dyx3_rpp` | 2026-10-09 | 2026-10-09 | 0 / 1 / 4 / 3 | open |
-| 2 | `dyx3_motion_guard` | 2026-10-09 | 2026-10-09 | 0 / 0 / 3 / 4 | open |
-| 3 | `dyx3_px4_link` | 2026-10-09 | 2026-10-09 | 0 / 3 / 1 / 3 | open |
+| 2 | `dyx3_motion_guard` | 2026-10-09 (+CR) | 2026-10-09 | 0 / 0 / 3 / 6 | open |
+| 3 | `dyx3_px4_link` | 2026-10-09 (+CR) | 2026-10-09 | **1** / 4 / 6 / 3 | open |
 | 4 | `dyx3_interfaces` (+ px4_msgs pin) | 2026-10-09 | 2026-10-09 | 0 / 0 / 1 / 6 | open |
 | 5 | `dyx3_mission` | 2026-10-09 | 2026-10-09 | 0 / 0 / 3 / 4 | open |
 | 6 | `dyx3_gnss_rtk` | 2026-10-09 | 2026-10-09 | 0 / 0 / 1 / 3 | open |
@@ -1041,6 +1041,40 @@ Confirmed good:
 
 Each hot-path part was re-read in full by an independent agent. The agent checked every recorded finding and
 looked for anything missed. Every new item below was verified by me against the code before being recorded.
+
+### CR-2 — `dyx3_motion_guard` + `dyx3_px4_link`
+
+Verdicts: the agent **agreed with all 19 recorded verdicts** (MG-001…007, PXL-001…008, IF-002/004/005, X-010).
+One addition to PXL-001: `COM_FAIL_ACT_T` does not delay a Disarm (`framework.cpp:490-493`), and disarm zeroes
+the motors at once (`RoverDifferential.cpp:90-93`). So the companion-loss bound is `COM_OF_LOSS_T` (1.0 s) + one
+commander cycle.
+
+**Qualifiers to earlier "confirmed good" lines:**
+- MG: "STOP is immediate, never ramped" is true **on the Jetson only**. PX4 ramps it (XR-GPX-002).
+- SP: "px4_link gives the watchdog's OFF priority" applies over **queued** requests only, **not over the in-flight
+  one** (XR-GPX-001).
+
+Time to the first STOP on the wire:
+| Fault | First STOP |
+|---|---|
+| RPP silent | ≤ 0.23 s |
+| Guard dead or starved | ≤ 0.21 s |
+| E-stop | ≤ 10 ms |
+| A status topic silent | 0.52 s |
+| `px4_link` dead / hung / SIGTERM, or `SetOffboard(false)` | **no STOP sent**; PX4 holds the last setpoint 1.0 s, then disarms |
+
+New findings (verified by me against the code and the firmware):
+| ID | Severity | Status | Where | Item |
+|---|---|---|---|---|
+| XR-GPX-001 | **CRITICAL** | ACCEPTED (code path; needs one lost ACK) | `px4_link_node.cpp:26,544-566,659,703` | **Spray OFF can wait up to 5 s behind an in-flight ON.** While a transaction is in flight, `dispatch_next_spray_transaction` returns. The in-flight request clears only on its ACK or after `kSprayTransactionTimeoutS = 5.0`. The watchdog's OFF has priority over the queue only. FCU out-topics are best-effort, so **one lost ACK** after an ON means a line-end OFF, a watchdog OFF or an E-stop-driven OFF reaches PX4 up to 5 s late: up to 5 m of paint at 1 m/s, or a puddle at an E-stop. Fix: an OFF pre-empts the in-flight ON (fail its ACK, dispatch at once); in-flight timeout about 0.3 s; keep republishing the in-flight request. Test: ON dispatched, no ACK, watchdog OFF → command 187 OFF on the wire within 50 ms |
+| XR-GPX-002 | **HIGH** | ACCEPTED (fw + params); distance to measure | fw `src/lib/rover_control/RoverControl.cpp:126-134` (+ `throttleControl` :59-67); `3wd_6x_carry_from_proto.params` `RO_DECEL_LIM 0.3` | **Every Jetson STOP, the E-stop included, is ramped by PX4 at 0.3 m/s²:** from 1.0 m/s that is ≈ 3.3 s / 1.7 m, from 0.35 m/s ≈ 1.2 s / 0.2 m. The E-stop never disarms. A crash (1.0 s, then an immediate disarm stop) can stop faster than a software E-stop. Fix: E-stop also disarms, or a "hard stop" that bypasses the slew; set `RO_DECEL_LIM` from a measured braking value. **Owner decision; part of PC-5** |
+| XR-GPX-003 | MEDIUM | DOUBT (firmware; deferred to the firmware review) | fw `DifferentialSpeedControl.cpp:113-117`; `dds_topics.h.em` | PX4 age-checks only `offboard_control_mode`. If one `/fmu/in` setpoint reader breaks while the heartbeat flows, PX4 keeps the last setpoint with no time limit |
+| XR-GPX-004 | MEDIUM | ACCEPTED | `px4_link_node.cpp:182-183` vs fw `uxrce_dds_client/utilities.hpp:80,137` | **ULog streaming never works:** the FCU writers are BEST_EFFORT and `px4_link` subscribes RELIABLE, so they never match and no chunk is ever received. The test passes because its fake FCU publishes RELIABLE. (Makes REC-005 moot until fixed; the SD-card log is the only ULog today) |
+| XR-GPX-005 | MEDIUM | ACCEPTED | `px4_link_node.cpp:556-574,626-637` | Every ACK of a reasserted spray command counts as "unmatched" and logs an **unthrottled WARN** on the writer executor (2 Hz idle, 20 Hz in watchdog bursts) |
+| XR-GPX-006 | MEDIUM | DOUBT (bench) | `px4_link_node.cpp:388-393` (`system_clock`) | A backward wall-clock step of more than 1 s (first NTP sync mid-run, site LAN coming up) makes `offboard_control_mode` look old → offboard loss → disarm mid-line. Fix: slew-only time sync while armed; a "clock synced" mission precondition |
+| XR-GPX-007 | MEDIUM | ACCEPTED | `px4_link_node.cpp:772`; `offboard_heartbeat.cpp:21-26` | The heartbeat carries the guard's command outside the Active state (the contract says an explicit STOP). On a link loss Active → Prestream, and OFFBOARD is **re-requested automatically** when the link returns (the contract says never silently). Mitigated by the guard's nav_state gate and the mission PAUSE |
+| XR-GPX-008 | LOW | ACCEPTED | `limits.cpp:51-69`; `RO_YAW_RATE_LIM 30` | The guard's 0.45 rad/s yaw envelope does not apply in TRACK_HEADING (NaN rate); PX4 allows 0.52 rad/s |
+| XR-GPX-009 | LOW | ACCEPTED | `motion_guard_node_test.cpp:284-313` | Tests do not prove E-stop immediacy (they run 0.3 s first) or the 0.5 s freshness boundary |
 
 ### CR-3 — `dyx3_system_gateway` + backend relay
 
