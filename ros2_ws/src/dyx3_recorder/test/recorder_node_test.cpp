@@ -718,3 +718,31 @@ TEST(RecorderNode, DefaultTopicsJournalParameterChangesAndLogs) {
   auto defaults = std::make_shared<RecorderNode>(o, nullptr, nullptr, nullptr, false);
   EXPECT_EQ(defaults->get_parameter("config_dir").as_string(), "/etc/dyx3");
 }
+
+// REC-017: a run directory that cannot be created does not leave the recorder "recording" with no
+// directory: the lifecycle is reset and a later MissionState retries after a backoff.
+TEST(RecorderNode, AFailedRunDirectoryIsRetriedWithBackoff) {
+  const std::string blocker =
+      (fs::temp_directory_path() / ("dyx3_blocker_" + std::to_string(getpid()))).string();
+  std::ofstream(blocker) << "a file where a directory should be";
+  Rig r(kGoodBag, true, "/bin/sh", {rclcpp::Parameter("runs_dir", blocker + "/runs")});
+  r.mission(MissionState::STATE_READY, 5);
+  EXPECT_FALSE(r.rec->recording());
+  r.rec->step(r.now += 0.1);
+  r.pump(100);
+  EXPECT_EQ(r.status.state, RecorderStatus::STATE_ERROR);
+  fs::remove(blocker);
+  fs::create_directories(blocker);  // the operator fixed it
+  r.mission(MissionState::STATE_READY, 5);  // within the 1 s backoff: ignored
+  EXPECT_FALSE(r.rec->recording());
+  r.now += 1.5;
+  r.mission(MissionState::STATE_READY, 5);
+  EXPECT_TRUE(r.rec->recording());
+  EXPECT_TRUE(fs::exists(r.rec->current_run_dir() + "/manifest.json"));
+  r.rec->step(r.now += 0.1);
+  r.pump(100);
+  EXPECT_EQ(r.status.state, RecorderStatus::STATE_RECORDING);
+  r.mission(MissionState::STATE_IDLE, 0);
+  std::error_code ec;
+  fs::remove_all(blocker, ec);
+}

@@ -35,6 +35,8 @@ except the bag/ulog streams; the ULog file is `fsync`ed on close (REC-011). A fa
 * **Dead bag child (REC-012).** If the `ros2 bag` child exits during a run, it is restarted into `rosbag2_<n>` (rosbag2 refuses an existing
   directory), at most `max_bag_restarts` (default 1) times per run, with a note each time; `bag_healthy_throughout` becomes false. After the
   limit, `RecorderStatus.state = ERROR` until the run closes. `bag_bytes` counts every bag directory of the run.
+* **Run directory not creatable (REC-017).** `RecorderStatus.state = ERROR`, the lifecycle forgets the run, and the next `READY`/`RUNNING` retries
+  after a backoff (1 s, doubling to 30 s; reset by a successful start).
 * **Interrupted runs (REC-009).** At startup, before any new run, every run directory without `summary.json` (recorder crash, power cut,
   SIGKILL) gets a minimal `summary.json` with `final_state` **`INTERRUPTED`**, `bag_healthy_throughout`/`provenance_complete` false, the bag/ULog
   bytes found, and a note (plus "metadata.yaml missing … `ros2 bag reindex`" when the bag was not finalised). Such runs then count as complete for

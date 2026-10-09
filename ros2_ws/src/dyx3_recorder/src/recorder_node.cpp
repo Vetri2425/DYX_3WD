@@ -386,6 +386,7 @@ void RecorderNode::on_mission(const dyx3_interfaces::msg::MissionState& m) {
   {
     std::lock_guard<std::mutex> lk(mu_);
     last_mission_s_ = clock_();
+    if (!lifecycle_.recording() && last_mission_s_ < retry_after_s_) return;  // REC-017 backoff
     a = lifecycle_.on_mission(m.state, m.mission_id, m.run_index);
   }
   if (a.stop) {
@@ -458,10 +459,20 @@ void RecorderNode::start_run(uint32_t mission_id, uint32_t run_index, const std:
   bool dir_ok = fs::create_directories(dir, ec) && !ec;
 
   if (!dir_ok) {
+    // REC-017: forget the run so a later MissionState retries, after a growing backoff (the
+    // mission publishes at 10 Hz).
     std::lock_guard<std::mutex> lk(mu_);
     error_ = true;
-    RCLCPP_ERROR(get_logger(), "cannot create run directory %s", dir.c_str());
+    lifecycle_.reset();
+    retry_after_s_ = clock_() + dir_backoff_s_;
+    RCLCPP_ERROR(get_logger(), "cannot create run directory %s (%s): retry in %.0f s", dir.c_str(),
+                 ec.message().c_str(), dir_backoff_s_);
+    dir_backoff_s_ = std::min(2.0 * dir_backoff_s_, 30.0);
     return;
+  }
+  {
+    std::lock_guard<std::mutex> lk(mu_);
+    dir_backoff_s_ = 1.0;
   }
   write_evidence(dir + "/manifest.json", manifest_json(info), summary);
   if (disk_low) {
