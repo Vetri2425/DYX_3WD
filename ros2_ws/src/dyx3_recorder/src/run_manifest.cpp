@@ -1,6 +1,9 @@
 #include "dyx3_recorder/run_manifest.hpp"
 
+#include <fcntl.h>
 #include <unistd.h>
+
+#include <cerrno>
 
 #include <algorithm>
 #include <cctype>
@@ -168,17 +171,37 @@ std::string unique_run_path(const std::string& root, const std::string& name) {
 }
 
 bool write_file_atomic(const std::string& path, const std::string& content) {
+  // REC-010: data reaches the disk before the name does (write, fsync, close, rename, fsync of the
+  // directory). Every step is checked; on failure the temp file is removed and false returned.
   const std::string tmp = path + ".tmp";
-  {
-    std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
-    if (!f) return false;
-    f.write(content.data(), static_cast<std::streamsize>(content.size()));
-    f.flush();
-    if (!f) return false;
+  const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+  if (fd < 0) return false;
+  bool ok = true;
+  const char* p = content.data();
+  size_t left = content.size();
+  while (ok && left > 0) {
+    const ssize_t n = ::write(fd, p, left);
+    if (n < 0 && errno == EINTR) continue;
+    if (n <= 0) {
+      ok = false;
+      break;
+    }
+    p += n;
+    left -= static_cast<size_t>(n);
   }
-  std::error_code ec;
-  fs::rename(tmp, path, ec);
-  return !ec;
+  ok = ok && ::fsync(fd) == 0;
+  ok = (::close(fd) == 0) && ok;
+  if (ok) ok = ::rename(tmp.c_str(), path.c_str()) == 0;
+  if (!ok) {
+    ::unlink(tmp.c_str());
+    return false;
+  }
+  const std::string parent = fs::path(path).parent_path().string();
+  const int dfd = ::open(parent.empty() ? "." : parent.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (dfd < 0) return false;
+  ok = ::fsync(dfd) == 0;
+  ok = (::close(dfd) == 0) && ok;
+  return ok;
 }
 
 bool is_secret_name(const std::string& filename) {

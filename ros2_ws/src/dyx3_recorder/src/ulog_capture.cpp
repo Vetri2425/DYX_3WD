@@ -1,5 +1,7 @@
 #include "dyx3_recorder/ulog_capture.hpp"
 
+#include <unistd.h>
+
 #include <cstring>
 
 #include "dyx3_recorder/run_manifest.hpp"
@@ -44,7 +46,7 @@ const char* ulog_header_state_name(UlogCapture::HeaderState s) {
 }
 
 bool UlogCapture::open_file(const std::string& path) {
-  f_ = std::fopen(path.c_str(), "wb");
+  f_ = std::fopen(path.c_str(), "wbe");  // e: O_CLOEXEC, the bag child must not inherit it
   file_bytes_ = 0;
   if (f_ != nullptr) ++segments_;
   return f_ != nullptr;
@@ -81,7 +83,9 @@ void UlogCapture::write_cached_header() {
 bool UlogCapture::close() {
   bool ok = true;
   if (f_ != nullptr) {
+    // REC-011: the run's ULog is on disk when the summary says it is.
     ok = std::fflush(f_) == 0;
+    ok = (::fsync(fileno(f_)) == 0) && ok;
     ok = (std::fclose(f_) == 0) && ok;
     f_ = nullptr;
     if (!ok) write_failed_ = true;

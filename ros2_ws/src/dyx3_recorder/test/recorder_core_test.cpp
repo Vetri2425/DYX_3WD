@@ -132,6 +132,14 @@ TEST(AtomicWrite, ReplacesWholeFileOrNothing) {
   EXPECT_EQ(slurp(d.path + "/f.json"), "two");
   EXPECT_FALSE(fs::exists(d.path + "/f.json.tmp"));
   EXPECT_FALSE(write_file_atomic(d.path + "/missing/f.json", "x"));
+  // REC-010: a failed rename (the target is a non-empty directory) is reported and leaves no
+  // temp file behind
+  fs::create_directories(d.path + "/busy.json/x");
+  EXPECT_FALSE(write_file_atomic(d.path + "/busy.json", "x"));
+  EXPECT_FALSE(fs::exists(d.path + "/busy.json.tmp"));
+  const std::string big(1 << 20, 'z');  // partial writes are looped
+  EXPECT_TRUE(write_file_atomic(d.path + "/big", big));
+  EXPECT_EQ(slurp(d.path + "/big"), big);
 }
 
 TEST(ParamSnapshot, SortedByteIdenticalAndUnreachableIsExplicit) {

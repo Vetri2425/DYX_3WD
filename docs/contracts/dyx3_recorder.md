@@ -18,7 +18,9 @@ recorder only observes; it publishes `RecorderStatus` and nothing else, runs as 
 └── summary.json              # end time, final mission state, bytes, ulog gaps, bag health, provenance_complete, notes[]
 ```
 
-Directory names are collision-free (a numeric suffix is appended if the name exists). Files are written atomically (temp + rename) except the bag/ulog streams.
+Directory names are collision-free (a numeric suffix is appended if the name exists). Files are written atomically and durably (temp file written, `fsync`, close, rename, `fsync` of the directory; every step checked — REC-010)
+except the bag/ulog streams; the ULog file is `fsync`ed on close (REC-011). A failed write is a note (`<file> could not be written`) and clears
+`provenance_complete`; a failed `summary.json` is logged and the next start marks the run INTERRUPTED.
 
 ## 2. Lifecycle (driven only by `MissionState`)
 

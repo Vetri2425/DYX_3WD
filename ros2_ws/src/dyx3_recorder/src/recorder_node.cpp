@@ -323,6 +323,14 @@ std::vector<std::string> RecorderNode::bag_options() const {
   return o;
 }
 
+// REC-011: every evidence file write is checked; a failure is a note and a provenance gap.
+static bool write_evidence(const std::string& path, const std::string& content, RunSummary& summary) {
+  if (write_file_atomic(path, content)) return true;
+  summary.notes.push_back(fs::path(path).filename().string() + " could not be written");
+  summary.provenance_complete = false;
+  return false;
+}
+
 std::vector<NodeParams> RecorderNode::collect_params() const {
   // An injected collector is as untrusted as the default one: nothing escapes into the node.
   try {
@@ -447,10 +455,7 @@ void RecorderNode::start_run(uint32_t mission_id, uint32_t run_index, const std:
     RCLCPP_ERROR(get_logger(), "cannot create run directory %s", dir.c_str());
     return;
   }
-  if (!write_file_atomic(dir + "/manifest.json", manifest_json(info))) {
-    summary.notes.push_back("manifest.json could not be written");
-    summary.provenance_complete = false;
-  }
+  write_evidence(dir + "/manifest.json", manifest_json(info), summary);
   if (disk_low) {
     // Only the manifest (and later summary.json) are written: never fill the shared disk.
     summary.notes.push_back("not recorded: free space " + std::to_string(free_now) +
@@ -478,10 +483,10 @@ void RecorderNode::start_run(uint32_t mission_id, uint32_t run_index, const std:
   if (versions.empty()) {
     summary.notes.push_back("versions file missing: " + versions_file_);
     summary.provenance_complete = false;
-    write_file_atomic(dir + "/versions.json",
-                      unavailable_json("versions", "versions file missing: " + versions_file_));
+    write_evidence(dir + "/versions.json",
+                   unavailable_json("versions", "versions file missing: " + versions_file_), summary);
   } else {
-    write_file_atomic(dir + "/versions.json", versions);
+    write_evidence(dir + "/versions.json", versions, summary);
   }
   // config snapshot (secrets excluded)
   const CopyResult cr = copy_config_tree(config_dir_, dir + "/config_snapshot");
@@ -489,9 +494,10 @@ void RecorderNode::start_run(uint32_t mission_id, uint32_t run_index, const std:
     for (const auto& e : cr.errors) summary.notes.push_back(e);
     summary.provenance_complete = false;
   }
-  write_file_atomic(
+  write_evidence(
       dir + "/params_fcu.json",
-      unavailable_json("fcu_parameters", "no FCU parameter read path in this stack yet (OPEN)"));
+      unavailable_json("fcu_parameters", "no FCU parameter read path in this stack yet (OPEN)"),
+      summary);
   summary.notes.push_back("params_fcu.json: unavailable (no FCU parameter read path yet)");
   summary.provenance_complete = false;
   if (running) {
@@ -538,10 +544,14 @@ void RecorderNode::start_run(uint32_t mission_id, uint32_t run_index, const std:
   param_thread_ = std::thread([this, dir, stamp]() {
     const auto nodes = collect_params();
     const std::string snapshot = params_ros_snapshot_json(stamp, nodes);
-    write_file_atomic(dir + "/params_ros.json", params_ros_file_json(snapshot, ""));
+    const bool written = write_file_atomic(dir + "/params_ros.json", params_ros_file_json(snapshot, ""));
     std::lock_guard<std::mutex> lk(mu_);
     if (run_dir_ != dir) return;
     params_start_ = snapshot;
+    if (!written) {
+      summary_.notes.push_back("params_ros.json (start) could not be written");
+      summary_.provenance_complete = false;
+    }
     for (const auto& n : nodes) {
       if (!n.reachable) {
         summary_.notes.push_back("parameters unreachable at start: " + n.node +
@@ -554,7 +564,7 @@ void RecorderNode::start_run(uint32_t mission_id, uint32_t run_index, const std:
 
 void RecorderNode::stop_run(const std::string& final_state) {
   join_param_job();  // the start snapshot (and its notes) belongs to this run
-  std::string dir, params_start;
+  std::string dir, params_start, gaps;
   RunSummary summary;
   RunInfo info;
   double start_s;
@@ -629,8 +639,10 @@ void RecorderNode::stop_run(const std::string& final_state) {
       summary.notes.push_back("ulog write failed");
       summary.provenance_complete = false;
     }
-    write_file_atomic(dir + "/ulog/gaps.json", ulog_.gaps_json());
+    gaps = ulog_.gaps_json();
   }
+  // fsync'ed writes happen outside mu_: the ULog callback and the status never wait on the disk.
+  write_evidence(dir + "/ulog/gaps.json", gaps, summary);
   bool disk_stopped;
   {
     std::lock_guard<std::mutex> lk(mu_);
@@ -646,14 +658,18 @@ void RecorderNode::stop_run(const std::string& final_state) {
                                 (n.note.empty() ? "" : " (" + n.note + ")"));
       }
     }
-    write_file_atomic(
+    write_evidence(
         dir + "/params_ros.json",
-        params_ros_file_json(params_start, params_ros_snapshot_json(iso_utc(wall_()), nodes)));
+        params_ros_file_json(params_start, params_ros_snapshot_json(iso_utc(wall_()), nodes)),
+        summary);
   }
   summary.end_utc = iso_utc(wall_());
   summary.final_state = final_state;
   summary.duration_s = clock_() - start_s;
-  write_file_atomic(dir + "/summary.json", summary_json(summary));
+  if (!write_file_atomic(dir + "/summary.json", summary_json(summary))) {
+    // Nothing left to note it in: the log, and the next start marks the run INTERRUPTED.
+    RCLCPP_ERROR(get_logger(), "summary.json could not be written for %s", dir.c_str());
+  }
   RCLCPP_INFO(get_logger(), "run finished: %s (%s)", info.run_id.c_str(), final_state.c_str());
   std::lock_guard<std::mutex> lk(mu_);
   run_dir_.clear();
