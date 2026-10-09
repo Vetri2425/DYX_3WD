@@ -2,6 +2,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
@@ -450,4 +451,36 @@ TEST(BagWriter, ChildDeathIsDetected) {
   EXPECT_FALSE(w.running());
   EXPECT_EQ(w.last_exit_code(), 3);
   EXPECT_TRUE(w.exited_abnormally());
+}
+
+// REC-013: status polling (running/bytes, the status timer) concurrently with stop (the mission
+// callback) on a multi-threaded executor. Run under -fsanitize=thread to prove there is no race.
+TEST(BagWriter, StatusPollingDuringStopIsSafe) {
+  TmpDir d;
+  for (int round = 0; round < 3; ++round) {
+    BagWriter w;
+    ASSERT_TRUE(w.start({"/bin/sh", "-c",
+                         "trap 'sleep 0.2; exit 0' INT; mkdir -p \"$0\"; while :; do echo x >> "
+                         "\"$0/data\"; sleep 0.02; done",
+                         d.path + "/bag" + std::to_string(round)},
+                        d.path + "/bag" + std::to_string(round)));
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    std::atomic<bool> done{false};
+    std::atomic<int> polls{0};
+    std::thread poller([&] {
+      while (!done.load()) {
+        (void)w.running();
+        (void)w.bytes();
+        (void)w.exited_abnormally();
+        (void)w.last_exit_code();
+        ++polls;
+      }
+    });
+    EXPECT_EQ(w.stop(3.0, 1.0), 0);
+    done = true;
+    poller.join();
+    EXPECT_GT(polls.load(), 0);
+    EXPECT_FALSE(w.running());
+    EXPECT_EQ(w.last_exit_code(), 0);  // the child's own exit code, reaped exactly once
+  }
 }
