@@ -2220,3 +2220,62 @@ Also from the owner's note:
    - log the run; check the turns, tracking and the stop at the end.
 4. **Only if motor output, steering, heading and mission are all correct:** start the frontend and backend contract
    / app integration (Three_Wheel_v2 `App-Polish` `4096af9`; the cleanup list is in the 18:25 and 18:40 entries).
+
+---
+
+## 2026-10-09 — Codex — PX4 Mission differential rover #27497 investigation
+
+**Scope and result:** Investigated firmware `dyx-3wd-production` at `8279fa4be3` and companion
+`master` at `1bea449`. No firmware or parameter fix is validated. `make px4_fmu-v6x_rover`
+passed (FLASH 1,825,036 B, 92.83%). The only differential SITL airframe is
+`50000_gz_rover_differential`; the Gazebo submodule is uninitialized and `gz` is absent on
+both macOS and the available PX4 container. SIH has only `10045_sihsim_rover_ackermann`.
+No square mission, before/after metrics, or SITL ULogs exist. The six local 2026-10-09
+ULogs in `PX4-Firmware/3WD/logs_2026-10-09/` only show `nav_state=0`, with no
+`mission_result` sequence, and cannot establish Mission behavior.
+`make px4_sitl_test unit-RoverControl` built the rover library test and
+`./build/px4_sitl_test/unit-RoverControl --gtest_brief=1` passed **2/2** tests.
+
+**Findings:** Upstream [#27497](https://github.com/PX4/PX4-Autopilot/issues/27497) was closed
+2026-10-07 as unable to reproduce. The reporter corrected a reversed motor configuration,
+but later described unresolved Mission pauses. No fixing PR is linked to the issue. In our
+source, `mission.cpp:201-288` fills `position_setpoint_triplet`, `navigator_main.cpp:900-901`
+publishes it, `DifferentialAutoMode.cpp:49-91` converts it to a rover waypoint, and
+`DifferentialPosControl.cpp:59-108` selects driving or spot turning. Navigator acceptance
+uses `NAV_ACC_RAD` (`mission_block.cpp:308-374`); `MIS_YAW_ERR` is only considered for
+rotary-wing yaw (`mission_block.cpp:382-405`). The 0.05 m radius is a plausible source of
+waypoint hunting under position noise, but that has not been measured. The rate output
+depends on `RD_WHEEL_TRACK / RO_MAX_THR_SPEED` (`RoverControl.cpp:195-215`); the baseline
+has 0.47 m and 1.28 m/s, so upstream's missing feedforward suggestion does not directly
+apply. `RO_YAW_RATE_TH` also suppresses small commanded rates (`DifferentialRateControl.cpp:77-83`),
+but there is no evidence that its 0.4 deg/s setting causes 90-degree turn failures.
+
+**Upstream diff since v1.17.0:** `3ebb2923a1` / PR #28476 changes rover work scheduling
+for SIH lockstep; `b07a720cfd` / PR #28840 explicitly zeros motors after disarm;
+`6cf8d80bdd` / PR #26452 guards speed planning when decel/jerk limits are disabled;
+`06dc5d0b5f` / PR #27894 corrects parameter descriptions. The remaining changes in
+the rover control path are `78c5eafa85` / PR #28469 (parking mode),
+`afa4170acb` (offboard timestamp), `2a2a44550a` (parameter format migration),
+`95d6a3c171` / PR #27211 (parameter docs), and `ce3e62841f` / PR #26476
+(module infrastructure). Navigator has broad later work, including
+`07bac1389c` / PR #27571 (fixed-wing waypoint switch distance), but no #27497-linked
+Mission differential fix. Our fork's rover diff from v1.17.0 is only `b19901b004`
+(OFFBOARD velocity setpoint handling), which is outside the Mission path.
+
+**Tomorrow's exact field configuration and gate:** Apply the existing rover navigation
+baseline values unchanged: `NAV_ACC_RAD=0.05`, `MIS_YAW_ERR=5`,
+`RD_TRANS_DRV_TRN=0.7`, `RD_TRANS_TRN_DRV=0.0349066`, `RD_WHEEL_TRACK=0.47`,
+`RO_MAX_THR_SPEED=1.28`, `RO_YAW_RATE_I=0.01`, `RO_YAW_RATE_TH=0.4`; do not flash an
+unvalidated Mission patch. Independently correct the known hardware mapping to
+`RBCLW_FUNC1=101`, `RBCLW_FUNC2=102` and verify motor direction with wheels raised,
+as specified in the preceding handoff entry. Confirm valid GNSS yaw, EKF global position,
+and RC kill. Then run a guarded four-point ~10 m square in Mission mode, return to the
+first point, and save a ULog. Record each waypoint's acceptance time, cross-track maximum,
+corner yaw error, spot-turn/driving transitions and any back-and-forth behavior. Only after
+the baseline run, compare `NAV_ACC_RAD=0.3` and `0.5` as temporary field trials if the owner
+chooses; restore the baseline after each run until a value is validated. Re-validate any
+accepted value in the field before changing the production parameter file.
+
+**DERIVED — NOT FROM V1 SPEC:** `NAV_ACC_RAD=0.3` and `0.5` are diagnostic comparison
+values from the task, not recommended production tuning. The simulator limitation prevents
+the requested parameter and firmware A/B; controller behavior remains unproven.

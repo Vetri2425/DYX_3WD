@@ -58,7 +58,7 @@ offboard *to* direct rover setpoints — the same class of stale-setpoint window
    contributing to.
 
 ### 🔴 A1.2 — #27497 · Rover Differential doesn't turn in Mission Mode (v1.17 Stable)
-`vehicle:rover`, `kind:bug` · opened 2026-05-28 · **open, 9 comments** ✅
+`vehicle:rover`, `kind:bug` · opened 2026-05-28 · **closed 2026-10-07 as unable to reproduce** ✅
 
 > *"The rover moves back and forth, trying to reach the first waypoint without success … tries
 > to make a turn, fails to do so, and ends up driving back and forth over the same spot."*
@@ -68,10 +68,25 @@ offboard *to* direct rover setpoints — the same class of stale-setpoint window
 firmware health with no companion code in the path. If F4 reproduces this, F4's gate cannot be
 evaluated as written.
 
-**Action:** attempt reproduction early — it is cheap, needs no companion stack, and the
-reporter's configuration (custom rover board target, differential) is close to ours. If it
-reproduces, either F4's gate changes to Position-mode validation, or we debug it — and a fix
-here is a strong upstream contribution.
+**2026-10-09 investigation:** The reporter found reversed motor configuration behind the initial
+failure; after correcting it, they reported that Mission still spot-turned and paused. No PR
+linked to #27497 fixes that remaining behavior. Our source uses `NAV_ACC_RAD` for both rover
+waypoint acceptance (`mission_block.cpp:308-374`) and approach stopping
+(`DifferentialPosControl.cpp:59-67`); the baseline's 0.05 m may be too tight for actual position
+scatter. `MIS_YAW_ERR` is applied only to rotary-wing yaw acceptance
+(`mission_block.cpp:382-405`), so changing it cannot fix rover turns. The rover heading
+hysteresis is `RD_TRANS_DRV_TRN`/`RD_TRANS_TRN_DRV`
+(`DifferentialPosControl.cpp:80-90`), and the yaw-rate feedforward depends on wheel track,
+top speed, and `RO_YAW_RATE_CORR` (`RoverControl.cpp:195-215`). These are **source-level risks,
+not reproduced root causes**. The known mirrored RoboClaw motor mapping is a separate hardware
+configuration issue; firmware must not compensate for it.
+
+**Status: open local validation gate.** The `px4_fmu-v6x_rover` build passes, but no differential
+rover square SITL run or ULog was produced: this checkout has no initialized Gazebo submodule,
+and the host/container has no `gz`. SIH has only an Ackermann rover airframe. Do not claim
+Mission fixed or change the production tuning baseline without controlled square evidence at
+`NAV_ACC_RAD=0.05` and 0.3–0.5 m. F4 still requires a guarded four-corner field validation
+after motor mapping and heading are verified.
 
 ### 🔴 A1.3 — #27388 · `uxrce_dds_client` stops publishing after random uptime, needs FC reboot
 `kind:bug`, `scope:middleware`, `stale` · opened 2026-05-19, updated 2026-08-20 · **open, 6 comments** ✅
