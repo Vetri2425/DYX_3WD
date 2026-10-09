@@ -47,7 +47,7 @@ Review baseline: DYX_3WD `master` `252778e` (firmware `8279fa4be3`).
 | 9 | `dyx3_bringup` + systemd (RT, CPU, restart) | 2026-10-09 | 2026-10-09 | 0 / 0 / 3 / 2 | open |
 | 10 | `dyx3_system_gateway` | — | — | — | prompt issued |
 | 11 | `dyx3_recorder` | — | — | — | prompt issued |
-| 12 | backend | — | — | — | prompt issued |
+| 12 | backend | 2026-10-09 | 2026-10-09 | 0 / 1 / 3 / 6 | open |
 | 13 | installer / deployment | — | — | — | |
 | 14 | tablet app (`Three_Wheel_v2` `App-Polish`) | — | — | — | |
 | 15 | PX4 firmware rover path (`dyx-3wd-production`) | — | — | — | |
@@ -711,6 +711,83 @@ Verdicts on known items (recorded; not new):
 
 ---
 
+## 12. backend
+
+Reviewer verdict: REQUEST CHANGES (1 CRITICAL, 3 HIGH, 6 MEDIUM). After verification: **0 CRITICAL, 1 HIGH,
+3 MEDIUM, 6 LOW**.
+- No route lets an unauthenticated client or a viewer start, resume, arm or enable motion; this is confirmed.
+- Every backend stall found ends in a STOP: the gateway keeps its own 2.0 s clock. These are availability
+  issues, not unsafe motion.
+- The real issue is that the heartbeat is shared across tablets (BE-001).
+
+Confirmed good:
+- **Socket.IO refuses missing or unknown tokens on connect** (`realtime/hub.py:30-36`). Heartbeat needs the
+  operator role (`:48-53`). E-stop: any authenticated client may assert, only an operator may clear (`:55-63`),
+  and a delivery failure is reported with `delivered`.
+- **The relay forwards only while the tablet heartbeat is ≤ 1.5 s old** (`realtime/relay.py:46-58`).
+  - The gateway runs its own 2.0 s timeout, so a stalled backend event loop causes a **STOP**, not a stuck-alive
+    link.
+  - Worst case 1.5 + 2.0 = **3.5 s** (≈ 1.2 m at 0.35 m/s), documented as OPEN in `docs/contracts/backend.md`
+    section 3.
+- **A double Start is refused while a mission is active**, by the mission FSM (busy).
+- **No path traversal:** artifact ids must be 64 lowercase hex; run ids are restricted (`storage/runs.py:9-13`).
+- **App-plan uploads are stream-limited** to 20 MiB before reading (`routes.py:189-200`).
+
+| ID | Severity | Status | Area | Where | Item |
+|---|---|---|---|---|---|
+| BE-001 | **HIGH** (~~CRITICAL~~) | ACCEPTED ↓ (owner decision) | Link | `realtime/relay.py:33-37`; `hub.py:38-53` | One global heartbeat timestamp: **any** operator tablet keeps the operator link alive for a mission started by another |
+| BE-002 | MEDIUM (~~HIGH~~) | ACCEPTED ↓ | Input | `routes.py:211-224`; `parse_routes.py:18-25` | Multipart DXF: the 20 MiB check happens after Starlette has spooled the whole upload |
+| BE-003 | MEDIUM (~~HIGH~~) | ACCEPTED ↓ | Input | `routes.py:312-314,364-379` | RTK JSON write routes take unbounded `dict` bodies |
+| BE-004 | MEDIUM (~~HIGH~~) | ACCEPTED ↓ | Input | `mission/service.py:74-109`; `routes.py:224` | DXF planning runs in a worker thread with no runtime or output budget; CPU-bound Python shares the GIL with the event loop |
+| BE-005 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Robustness | `routes.py:238-267` | Artifact read, hash and decode on the event loop for `/missions/{sha}`, `/path`, `/start` |
+| BE-006 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Link | `gateway/client.py:170-179` | `drain()` sits outside the 3 s request timeout |
+| BE-007 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Auth | `auth/tokens.py:45-73`; `hub.py:27-36` | Token revocation needs a backend restart (as documented) |
+| BE-008 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Auth | `routes.py:136-139`; `docs/contracts/backend.md:20` | The contract says heartbeat is "any authenticated", the code says operator: the code is the safer one, so fix the contract |
+| BE-009 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Robustness | `mission/path_artifact.py:245-268` | No retention or capacity check for stored mission artifacts |
+| BE-010 | LOW (~~MEDIUM~~) | DOUBT (measure) | Link | `routes.py:202` | `json.loads` of up to 20 MiB on the event loop |
+
+### BE-001 — HIGH — the shared heartbeat (owner decision)
+- Confirmed. `OperatorLinkRelay` keeps a single `_last`, and any operator session's heartbeat refreshes it.
+  `on_disconnect` clears it only when **no** operator session remains.
+- Today both tablets use the **same** operator token (`tablet-1`), so even a per-token lease would not separate
+  them.
+- Scenario: tablet A starts a mission and then loses Wi-Fi. Tablet B, open in someone's pocket with the app
+  still heartbeating, keeps the rover driving with nobody watching A's screen.
+- Re-rated HIGH, not CRITICAL: a second operator tablet is a human holding an E-stop. But "is someone actually
+  supervising" is not proven.
+- **Owner decision:**
+  - (a) single control lease: the tablet that starts or resumes owns the heartbeat, a transfer is explicit, and
+    other tablets can E-stop only;
+  - (b) accept "any operator tablet supervises" and document it.
+  - With (a), give each tablet its own token (`tablet-2`) or a per-install device id.
+- **Test:** two operator sessions, A owns, B heartbeats, A disconnects → the relay stops.
+
+### BE-002 / BE-003 / BE-004 — MEDIUM — resource admission (one patch)
+- All three need an operator token. Bearer authentication is a FastAPI dependency, resolved before the body
+  parameters; verify with a test.
+- A misbehaving client could still fill the disk or memory, or hold the planner, during a run.
+- **CPU-bound planning in a thread holds the GIL** in 5 ms slices. That is not a stall, but it slows the relay
+  and could cause a false operator-link STOP if an operator uploads the next mission while the rover is
+  marking.
+- **Fix (one change):**
+  - an ASGI body-size limiter (Content-Length + streamed count) on `/missions`, `/path/parse-dxf` and the RTK
+    writes;
+  - planning in a separate **process** with a wall-clock and point-count budget, one at a time.
+- **Test:** an oversized upload gives 413 before spooling; a pathological DXF is terminated at the budget while
+  heartbeats keep flowing.
+
+### LOW items
+- **BE-005 / BE-010.** Move the artifact load and the large `json.loads` to `anyio.to_thread` (one-liners). The
+  impact is a false STOP at worst.
+- **BE-006.** Wrap `drain()` and the reply wait in one `asyncio.timeout`. A hung gateway already ends in a guard
+  STOP (its operator-link publication goes stale).
+- **BE-007.** The documented procedure is "delete the entry, restart `dyx3-backend`". Live revocation can come
+  with QR pairing.
+- **BE-008.** Update the contract to "operator".
+- **BE-009.** Retention policy together with the recorder (REC review) and the RTK state on `/var/lib/dyx3`.
+
+---
+
 ## Cross-part items (raised by the part reviews; owned by later parts)
 
 | ID | Owner part | Item | Status |
@@ -729,3 +806,4 @@ Verdicts on known items (recorded; not new):
 | X-012 | PX4 firmware / hardware / spray | **Physical valve close when every Jetson path is lost.** The controller and the watchdog both reach the valve only through `px4_link` → DDS → PX4. Prove on hardware what the valve output does on disarm, on offboard loss (1.0 s → disarm) and on loss of actuator commands; measure it with the valve driver. Owner decision (open since 2026-10-07): (a) a secondary UART path, (b) a PX4 companion-loss failsafe that disarms, plus a disarmed-output level that is valve-closed | **open: blocks fail-closed sign-off** |
 | X-013 | installer / health | `installer/lib/health_check.sh` (deep graph check, about line 166) lists `/dyx3_mission /motion_guard /px4_link /spray /system_gateway`, **without `/rpp`**. Missing nodes and absent `/fmu` topics are WARN, not FAIL | open, installer review (from BR review) |
 | X-014 | architecture / network | `docs/architecture/...V1.md` §4.3 says "no router, no site LAN", but the rover now runs a site LAN (`network.env`, 192.168.3.0/24) next to the hotspot by owner decision of 2026-10-09. Amend §4.3 and the operator-link reasoning (§4.3.1) | open, doc (from BR review) |
+| X-015 | backend / app / network | On the site LAN, tablet Bearer tokens travel over **plain HTTP**, and the UDP beacon cannot prove rover identity, so a LAN attacker can sniff tokens or spoof a rover. Owner decision: TLS (self-signed, pinned per rover at pairing, fits QR pairing), a VPN, or the hotspot only for production | open, owner decision (from BE review) |
