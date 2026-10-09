@@ -1767,3 +1767,28 @@ Owner plan:
 - Dongle uplink.
 - Drop the office DHCP on `enP8p1s0` once Wi-Fi is the access path.
 - Fit the antennas outside any metal on every rover.
+
+## 2026-10-09 (13:55) — Claude — hotspot client-internet cap; FCU profile static; ready for the dongle
+
+- **Client-internet cap, ported from the 4WD prototype**
+  (`~/Vetri/4WD_Proto/rover_ws/scripts/network/99-dyx-hotspot-qos`, measured 2026-09-28):
+  - The installer writes `/etc/NetworkManager/dispatcher.d/99-dyx3-hotspot-qos`.
+  - It sets the Wi-Fi txqueuelen to 100, and adds a mangle FORWARD `xt_hashlimit` police on forwarded hotspot
+    traffic. Only forwarded traffic is capped; the backend, ssh and NTRIP are not.
+  - Owner decision (option B): **2 MiB/s down, 1 MiB/s up**. Set per rover with `DYX3_HOTSPOT_*_LIMIT/BURST`
+    and `DYX3_HOTSPOT_TXQUEUELEN` in `hotspot.env`.
+  - Why a cap at all: the tegra 5.15 kernel has no qdisc beyond `pfifo_fast` (no fq_codel, cake, HTB or TBF;
+    `/proc/config.gz`). The office Raspberry Pi hotspot (192.168.1.100, kernel 6.8 raspi) runs **fq_codel**,
+    which is why it gives full 20+ Mbps without app stalls.
+  - **Planned real fix:** build `sch_fq_codel` for the tegra kernel the same way as ch341 (kbuild against the
+    exact headers, installer-provisioned), then drop the cap.
+- The FCU and isolation hooks now call `iptables -w`: a concurrent NM dispatcher run hit "xtables lock" once.
+- **Rover `dyx3-fcu` profile set to static** (`ipv4.method manual`, 10.41.10.1/24, never-default) with
+  `nmcli connection modify` only, so it takes effect at the next boot.
+  - The rover was installed with the bench flag `FCU_KEEP_DHCP=1` (DHCP + static). With the office cable removed,
+    a DHCP timeout with IPv6 disabled could fail the whole connection and drop the FCU address.
+  - The repo default is already static, so no repo change is needed.
+- **USB 4G dongle:** the 4WD prototype used the same kind of dongle with no setup (plug and play). This Jetson has
+  `cdc_ether`, `rndis_host`, `cdc_ncm`, `option`, usb-modeswitch and ModemManager. `qmi_wwan`, `cdc_mbim` and
+  `huawei_cdc_ncm` are missing, which matters only if the dongle is a QMI/MBIM modem.
+- Installer suite 143/0.

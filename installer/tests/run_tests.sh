@@ -410,6 +410,7 @@ F
   install_hotspot_network >>"${T}/hotspot_log" 2>&1
   check "hotspot profile created only when configured and Wi-Fi exists" '[ -f "${hotspot_profile}" ] && grep -qx "method=shared" "${hotspot_profile}" && grep -qx "address1=10.42.0.1/24" "${hotspot_profile}" && grep -qx "never-default=true" "${hotspot_profile}" && [ "$(stat -c %a "${hotspot_profile}")" = 600 ]'
   check "hotspot isolation hook blocks Wi-Fi to FCU both ways" 'grep -q -- "-i \"wlan0\" -o \"${FCU_IFACE}\" -j DROP" "${DYX3_ROOT}/etc/NetworkManager/dispatcher.d/pre-up.d/90-dyx3-hotspot-isolation" && grep -q -- "-i \"${FCU_IFACE}\" -o \"wlan0\" -j DROP" "${DYX3_ROOT}/etc/NetworkManager/dispatcher.d/pre-up.d/90-dyx3-hotspot-isolation"'
+  check "client-internet cap (4WD 2026-09-28 fix) polices forwarded traffic and shortens the Wi-Fi queue" 'q="${DYX3_ROOT}/etc/NetworkManager/dispatcher.d/99-dyx3-hotspot-qos"; [ "$(stat -c %a "${q}")" = 700 ] && grep -q "txqueuelen 100" "${q}" && grep -q -- "-w -t mangle -A DYX3_HOTSPOT_QOS ! -i \"wlan0\" -o \"wlan0\" -m hashlimit --hashlimit-name dyx3_dl --hashlimit-above 2mb/s --hashlimit-burst 4mb -j DROP" "${q}" && grep -q -- "-i \"wlan0\" ! -o \"wlan0\" -m hashlimit --hashlimit-name dyx3_ul --hashlimit-above 1mb/s --hashlimit-burst 2mb -j DROP" "${q}" && bash -n "${q}"'
   check "hotspot profile pins 5 GHz channel 149 (the only AP-capable 5 GHz channel on the vendor driver) and WPA2 without power save" 'grep -qx "band=a" "${hotspot_profile}" && grep -qx "channel=149" "${hotspot_profile}" && grep -qx "channel-width=20" "${hotspot_profile}" && grep -qx "powersave=2" "${hotspot_profile}" && grep -qx "proto=rsn" "${hotspot_profile}"'
   check "Wi-Fi country is applied by persistent boot service" 'grep -qx "ExecStart=/usr/bin/env iw reg set IN" "${DYX3_ROOT}/etc/systemd/system/dyx3-wifi-regdom.service" && [ -L "${DYX3_ROOT}/etc/systemd/system/multi-user.target.wants/dyx3-wifi-regdom.service" ]'
   check "verified RTL8822CE module option is installed" 'grep -qx "options rtl8822ce rtw_power_mgnt=0" "${DYX3_ROOT}/etc/modprobe.d/dyx3-rtl8822ce-powersave.conf"'
@@ -460,6 +461,9 @@ F
   printf 'DYX3_HOTSPOT_SSID=TestRover\nDYX3_HOTSPOT_PSK=DummyBenchPass123\nDYX3_HOTSPOT_ADDRESS=192.168.3.100\n' >"${DYX3_ETC}/hotspot.env"
   install_hotspot_network >>"${T}/hotspot_log" 2>&1
   check "a hotspot address without a prefix length is refused" '[ ! -e "${hotspot_profile}" ]'
+  printf 'DYX3_HOTSPOT_SSID=TestRover\nDYX3_HOTSPOT_PSK=DummyBenchPass123\nDYX3_HOTSPOT_DOWNLOAD_LIMIT=1;reboot\n' >"${DYX3_ETC}/hotspot.env"
+  install_hotspot_network >>"${T}/hotspot_log" 2>&1
+  check "an invalid client-internet limit is refused (no shell injection into the hook)" '[ ! -e "${hotspot_profile}" ] && grep -q "invalid client-internet limit" "${T}/hotspot_log"'
   check "no hotspot credential appears in argv or installer logs" '! grep -q "DummyBenchPass123" "${T}/hotspot_log" "${T}/nmcli_argv" 2>/dev/null'
   install_config_templates "${DYX3_CURRENT}" >/dev/null 2>&1
   check "existing hotspot.env is never overwritten" 'grep -q "DummyBenchPass123" "${DYX3_ETC}/hotspot.env"'

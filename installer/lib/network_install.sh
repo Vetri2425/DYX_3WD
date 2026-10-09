@@ -134,6 +134,7 @@ _hotspot_pick_iface() {
 install_hotspot_network() {
   local env_file="${DYX3_ETC}/hotspot.env" ssid="" psk="" key value iface profile dir tmp dispatcher old_umask
   local country="IN" band="a" channel="" width="20" nm_ver major minor width_setting="" address="" want_iface=""
+  local dl_limit="2mb/s" dl_burst="4mb" ul_limit="1mb/s" ul_burst="2mb" txqlen="100" qos
   profile="${DYX3_ROOT}/etc/NetworkManager/system-connections/dyx3-hotspot.nmconnection"
   if [ -r "${env_file}" ]; then
     while IFS='=' read -r key value || [ -n "${key:-}" ]; do
@@ -146,6 +147,11 @@ install_hotspot_network() {
         DYX3_WIFI_WIDTH) width="${value}" ;;
         DYX3_HOTSPOT_ADDRESS) address="${value}" ;;
         DYX3_HOTSPOT_IFACE) want_iface="${value}" ;;
+        DYX3_HOTSPOT_DOWNLOAD_LIMIT) dl_limit="${value:-${dl_limit}}" ;;
+        DYX3_HOTSPOT_DOWNLOAD_BURST) dl_burst="${value:-${dl_burst}}" ;;
+        DYX3_HOTSPOT_UPLOAD_LIMIT) ul_limit="${value:-${ul_limit}}" ;;
+        DYX3_HOTSPOT_UPLOAD_BURST) ul_burst="${value:-${ul_burst}}" ;;
+        DYX3_HOTSPOT_TXQUEUELEN) txqlen="${value:-${txqlen}}" ;;
       esac
     done <"${env_file}"
   fi
@@ -191,6 +197,15 @@ install_hotspot_network() {
   if [ -z "${channel}" ]; then
     if [ "${band}" = "a" ]; then channel=149; else channel=6; fi
   fi
+  if [[ ! "${dl_limit}" =~ ^[0-9]{1,6}[km]?b/s$ ]] || [[ ! "${ul_limit}" =~ ^[0-9]{1,6}[km]?b/s$ ]] ||
+     [[ ! "${dl_burst}" =~ ^[0-9]{1,6}[km]?b$ ]] || [[ ! "${ul_burst}" =~ ^[0-9]{1,6}[km]?b$ ]] ||
+     [[ ! "${txqlen}" =~ ^[0-9]{2,4}$ ]]; then
+    warn "hotspot.env has an invalid client-internet limit or txqueuelen; access point disabled"
+    if [ -f "${profile}" ]; then
+      _hotspot_drop_profile "${profile}"
+    fi
+    return 0
+  fi
   if [ "${band}" = "a" ]; then
     case "${channel}" in 36 | 40 | 44 | 48 | 149 | 153 | 157 | 161 | 165) ;; *) warn "5 GHz DFS or invalid channel refused; hotspot disabled"; _hotspot_drop_profile "${profile}"; return 0 ;; esac
     if [ "${channel}" = 165 ] && [ "${width}" = 40 ]; then
@@ -234,6 +249,7 @@ install_hotspot_network() {
   fi
   dir="$(dirname "${profile}")"
   dispatcher="${DYX3_ROOT}/etc/NetworkManager/dispatcher.d/pre-up.d/90-dyx3-hotspot-isolation"
+  qos="${DYX3_ROOT}/etc/NetworkManager/dispatcher.d/99-dyx3-hotspot-qos"
   if [ "${DYX3_DRY_RUN}" = "1" ]; then
     log "would configure hotspot profile on ${iface} (credentials redacted)"
     return 0
@@ -247,12 +263,37 @@ install_hotspot_network() {
 set -euo pipefail
 [ "\${CONNECTION_ID:-}" = "dyx3-hotspot" ] || exit 0
 [ "\${1:-}" = "${iface}" ] || exit 0
-iptables -D FORWARD -i "${iface}" -o "${FCU_IFACE}" -j DROP 2>/dev/null || true
-iptables -I FORWARD -i "${iface}" -o "${FCU_IFACE}" -j DROP
-iptables -D FORWARD -i "${FCU_IFACE}" -o "${iface}" -j DROP 2>/dev/null || true
-iptables -I FORWARD -i "${FCU_IFACE}" -o "${iface}" -j DROP
+iptables -w -D FORWARD -i "${iface}" -o "${FCU_IFACE}" -j DROP 2>/dev/null || true
+iptables -w -I FORWARD -i "${iface}" -o "${FCU_IFACE}" -j DROP
+iptables -w -D FORWARD -i "${FCU_IFACE}" -o "${iface}" -j DROP 2>/dev/null || true
+iptables -w -I FORWARD -i "${FCU_IFACE}" -o "${iface}" -j DROP
 EOF
   chmod 0700 "${dispatcher}"
+  # Client-internet cap, ported from the 4WD prototype (rover_ws scripts/network/99-dyx-hotspot-qos).
+  # Measured there on 2026-09-28: hotspot clients' own downloads through the rover's 4G filled the
+  # 1000-packet Wi-Fi queue in front of the app websocket, and the app hung (worst ping 1459 ms).
+  # Policing them and shortening the queue gave a 90 ms worst case and 0/100 pings over 100 ms.
+  # 3WD defaults are generous (2 MiB/s down, 1 MiB/s up; owner decision 2026-10-09): with external
+  # antennas the Wi-Fi link is much faster than 4G, so the cap only bounds big background downloads.
+  # A Raspberry Pi hotspot needs no cap because its kernel runs fq_codel. The tegra kernel has no qdisc
+  # beyond pfifo_fast; building sch_fq_codel for it is the planned real fix.
+  # The tegra kernel has no HTB/fq_codel/cake/TBF, but it has xt_hashlimit. Dropping above a fixed
+  # rate makes TCP back off. Only forwarded traffic is limited; the backend, ssh and NTRIP are not.
+  # The mangle FORWARD hook runs before NetworkManager's shared-mode filter rules.
+  cat >"${qos}" <<QOS
+#!/usr/bin/env bash
+set -uo pipefail
+case "\${2:-}" in up | dhcp4-change | connectivity-change) ;; *) exit 0 ;; esac
+[ -d "/sys/class/net/${iface}" ] || exit 0
+ip link set dev "${iface}" txqueuelen ${txqlen} 2>/dev/null || true
+iptables -w -t mangle -N DYX3_HOTSPOT_QOS 2>/dev/null || true
+iptables -w -t mangle -F DYX3_HOTSPOT_QOS
+iptables -w -t mangle -C FORWARD -j DYX3_HOTSPOT_QOS 2>/dev/null || iptables -w -t mangle -I FORWARD 1 -j DYX3_HOTSPOT_QOS
+iptables -w -t mangle -A DYX3_HOTSPOT_QOS ! -i "${iface}" -o "${iface}" -m hashlimit --hashlimit-name dyx3_dl --hashlimit-above ${dl_limit} --hashlimit-burst ${dl_burst} -j DROP
+iptables -w -t mangle -A DYX3_HOTSPOT_QOS -i "${iface}" ! -o "${iface}" -m hashlimit --hashlimit-name dyx3_ul --hashlimit-above ${ul_limit} --hashlimit-burst ${ul_burst} -j DROP
+logger -t dyx3-hotspot-qos "applied on \${1:-?}/\${2:-?}: download<=${dl_limit} upload<=${ul_limit} txqueuelen=${txqlen}"
+QOS
+  chmod 0700 "${qos}"
   if [ -z "${DYX3_ROOT}" ]; then
     chown root:root "${dispatcher}"
     # Install the isolation rules before activation as well as on every pre-up.
@@ -260,6 +301,7 @@ EOF
       warn "FCU isolation rule failed; hotspot remains disabled"
       return 0
     }
+    chown root:root "${qos}"
   fi
   old_umask="$(umask)"
   umask 077
