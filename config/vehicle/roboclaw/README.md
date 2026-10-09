@@ -12,14 +12,17 @@ saved 2026-10-09 16:53. Restore it with Motion Studio → *Device* → *Load set
 | Velocity P / I (M2) | 0.83852 / 0.10062 | Autotuned |
 | Current limit | ±60 A | |
 
-**Wiring (since 2026-10-09 18:30): M1 = LEFT wheel, M2 = RIGHT wheel.** Each motor moved together with its
-encoder, so the RoboClaw closed loop is unaffected. PX4 follows with `RBCLW_FUNC1 102` (Motor 2 = left in the
-v1.17 differential mixer) and `RBCLW_FUNC2 101` (Motor 1 = right). Before the rewiring it was M1 = right
-(`101`/`102`).
-- Fix a left/right swap here, in the output functions, never with `RC1_REV`: the stick sign only fixes manual
-  driving, and Mission/Offboard/RPP would still turn the wrong way.
-- EKF2 uses only the mean of `wheel_encoders.wheel_speed[0..1]`, so the swapped "right/left" labels in that topic
-  are harmless.
+**Wiring — UNDER CORRECTION (2026-10-09 19:10).**
+- The owner confirmed in Motion Studio: **M1 = RIGHT motor, M2 = LEFT motor.**
+- The FCU still has `RBCLW_FUNC1 102` / `RBCLW_FUNC2 101` (left command → M1). That is **mirrored** for this
+  wiring.
+  - Manual only looks correct because `RC1_REV −1` inverts the stick a second time.
+  - Mission, Offboard and RPP would steer the wrong way. **Do not run them until fixed.**
+- Expected correct values: `RBCLW_FUNC1 101` (right → M1), `RBCLW_FUNC2 102` (left → M2), and the stick sign
+  re-derived (likely `RC1_REV +1`). Verify with `actuator_test` and a live stick read (HANDOFF 2026-10-09 19:10).
+- Rule: fix a left/right swap in the RBCLW_FUNC output mapping, proven by driving one output directly. Never fix
+  it with `RC1_REV`, which only changes manual driving.
+- EKF2 uses only the mean of `wheel_encoders.wheel_speed[0..1]`.
 
 **PX4 link:** `RBCLW_QPPS_MAX` = 90 % of the tuned QPPS = **151200**
 (`config/px4/3wd_6x_carry_from_proto.params`). Full stick then stays inside the RoboClaw's tuned speed, so the

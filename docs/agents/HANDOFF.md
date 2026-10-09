@@ -2181,3 +2181,42 @@ Also from the owner's note:
 - `installer/pins/firmware.pin` still says `27a7ac9284`; the FCU runs `8279fa4be3`. The msgs are identical, but the
   pin selects the `px4_msgs` build, so change it deliberately (CI + upgrade).
 - Stale `4393fb07e1` line in `docs/bench/2026-10-09_bench_runbook.md`.
+
+## 2026-10-09 (19:10) — Claude — CORRECTION: motor mapping is mirrored; tomorrow's plan (owner)
+
+**Correction to the 18:35 and 18:40 entries:**
+- Owner, from Motion Studio: **RoboClaw M1 = RIGHT motor, M2 = LEFT motor.**
+- The FCU has `RBCLW_FUNC1 102` / `RBCLW_FUNC2 101`, which sends the left command to the right wheel: **mirrored**.
+- Manual only looks correct because `RC1_REV −1` inverts the stick too (two inversions cancel). Mission, Offboard
+  and RPP have no stick in the path, so they would steer the wrong way and can spin on a heading correction.
+- Today's sequence explains it: first the stick sign was "fixed", then the mapping was swapped after a reported
+  rewiring. Each step only looked right in manual.
+- `config/vehicle/roboclaw/README.md` is marked "under correction". The repo baseline still holds the rover's
+  current (wrong) values until the test below proves the right ones.
+- **No Mission/Offboard/RPP until step 1 passes.**
+
+**Tomorrow, in this order (owner):**
+1. **Motor output mapping and stick (wheels up, spray off, disarmed):**
+   - a. Set `RBCLW_FUNC1 101`, `RBCLW_FUNC2 102`.
+     - `actuator_test` on function 101 only (about 0.1 for 2 s): the **RIGHT wheel turns forward**.
+     - Function 102: the **LEFT wheel forward**.
+     - `listener wheel_encoders` signs agree (`[0]` = M1 = right).
+     - Check the `actuator_test` help for the exact syntax first.
+   - b. Live stick read: right stick fully RIGHT ⇒ `manual_control_setpoint.roll` **> 0**; set `RC1_REV` so that
+     holds (expected `+1`). Left stick forward ⇒ throttle > 0.
+   - c. Manual, wheels up, then wheels down: stick right turns right, stick left turns left, forward is forward.
+     Wheels down, the log must show gyro yaw > 0 for a right turn.
+   - d. Persist `RBCLW_FUNC*`, `RC1_REV` (baseline + `3wd_rover01_rc_calibration.params`), fix the README, and record
+     the logs here.
+2. **RTCM injection via USB to the UM982 (outdoors):** worker INJECTING, receiver GGA quality and correction age,
+   PX4 fix type → RTK FLOAT/FIXED.
+   - The NTRIP base for our mountpoint was **offline** today (not in the caster source table). Bring it back, or
+     test with a working mountpoint. LoRa stays parked.
+   - Also check the UM982 dual-antenna heading (UNIHEADINGA must leave `INSUFFICIENT_OBS`), so the EKF gets yaw and
+     a global position.
+3. **PX4 Mission mode, 4-point mission** (outdoors, open sky):
+   - preconditions: step 1 passed; heading valid; EKF global position; RC kill switch tested;
+   - watch upstream #27497 (a differential rover does not turn in Mission mode on v1.17);
+   - log the run; check the turns, tracking and the stop at the end.
+4. **Only if motor output, steering, heading and mission are all correct:** start the frontend and backend contract
+   / app integration (Three_Wheel_v2 `App-Polish` `4096af9`; the cleanup list is in the 18:25 and 18:40 entries).
