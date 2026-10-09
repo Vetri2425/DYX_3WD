@@ -1202,3 +1202,22 @@ identical on `Runtime_Path`, so it pre-exists.
 Signed APK: `~/Vetri/3WD_PROD/App-Releases/dbb2ba1-agy-prod-transport/app-release.apk`. Certificate is the DYX
 release key (`5eaacb96…`); APK sha256 `730c6111…`. Tablets must uninstall the old debug-signed build first.
 No `agy/*` branches were deleted.
+
+---
+
+## 2026-10-09 (08:55) — Claude — bench started; handed to Codex
+
+- **08:35:** flashed firmware `8279fa4be3` over USB (verify OK). `ver git`: PX4 `8279fa4be3`, NuttX `e462af8eb3`.
+  DDS connected; `gps status` shows the new RTCM counters, 6.16 Hz, 0 dropped.
+- **08:42:** `dyx3-upgrade 8af2595` in 31 s, health OK.
+  - The agent restart caused **no stall** (first restart on the new firmware).
+  - RTK worker `INJECTING`, NTRIP → PX4_DDS, imported from ntrip.env, 0 CRC failures. 81 transport failures only
+    during the startup handshake; flat afterwards.
+  - `/var/lib/dyx3/rtk` created by StateDirectory.
+- **Skipped:** the stall reproduction on the old firmware (the owner chose to flash first).
+- **Hand fix to persist:** `tcpdump` was installed on the Jetson for the stall procedure. It must be added to the
+  installer packages.
+- Live session handed to Codex: `docs/agents/handoff_2026-10-09_codex_bench.md`. The bench runbook is
+  `docs/bench/2026-10-09_bench_runbook.md`; the helpers are `tools/bench/nsh.py` (PX4 MAVLink shell over USB) and
+  `tools/bench/rtkstat.py` (RTK worker status). The next-session brief is
+  `docs/agents/handoff_2026-10-09_next_session.md`.
