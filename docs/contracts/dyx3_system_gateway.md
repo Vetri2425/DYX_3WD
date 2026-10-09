@@ -8,8 +8,9 @@ is the **operator-link heartbeat** (§4.3.1): it publishes `OperatorLinkStatus`,
 ## 1. Transport
 
 * `SOCK_STREAM` Unix socket (`socket_path`, default `/run/dyx3/gateway.sock`, mode 0660, group `dyx3`); a stale socket file is replaced at start. At most `max_clients` (4, DERIVED) connections.
-* **Newline-delimited JSON, UTF-8**, one object per line, every message carries `"v":1`. A line longer than 64 KiB, invalid JSON, a wrong `v`, duplicate keys or trailing garbage
+* **Newline-delimited JSON, UTF-8**, one object per line, every message carries `"v":1`. A line longer than 64 KiB, invalid JSON, invalid UTF-8 inside a string (strict RFC 3629: no overlong forms, surrogates or code points above U+10FFFF; GW-008), a wrong `v`, duplicate keys or trailing garbage
   is answered `{"ok":false,"code":"bad_message"}` (the connection stays open unless the line overflows, which closes it). A client whose outbound buffer exceeds 1 MiB is dropped (slow consumer).
+* Everything the gateway writes is valid UTF-8: client bytes are never echoed unless they passed validation, and any invalid byte in a ROS string field is written as `\ufffd`.
 * The gateway never trusts the client: every field is validated (section 3) before anything reaches ROS.
 * A client that disconnects (also with replies still queued for it) is simply removed: socket writes use `MSG_NOSIGNAL` and the node ignores `SIGPIPE`, so a backend restart can never take the gateway, and with it the control graph, down (GW-002).
 

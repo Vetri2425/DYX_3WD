@@ -89,6 +89,97 @@ TEST(Json, RejectsEverythingMalformedOrAmbiguous) {
   EXPECT_FALSE(parses("1e999"));
 }
 
+// GW-008: raw (unescaped) bytes inside strings must be strict UTF-8.
+TEST(Json, RawStringBytesMustBeStrictUtf8) {
+  struct Fixture {
+    const char* bytes;
+    const char* what;
+  };
+  const Fixture good[] = {
+      {"\x24", "U+0024"},
+      {"\xC2\x80", "U+0080, smallest 2-byte"},
+      {"\xC3\xA9", "U+00E9"},
+      {"\xDF\xBF", "U+07FF, largest 2-byte"},
+      {"\xE0\xA0\x80", "U+0800, smallest 3-byte"},
+      {"\xE2\x82\xAC", "U+20AC"},
+      {"\xED\x9F\xBF", "U+D7FF, just below the surrogates"},
+      {"\xEE\x80\x80", "U+E000, just above the surrogates"},
+      {"\xEF\xBF\xBF", "U+FFFF"},
+      {"\xF0\x90\x80\x80", "U+10000, smallest 4-byte"},
+      {"\xF0\x9F\x98\x80", "U+1F600"},
+      {"\xF4\x8F\xBF\xBF", "U+10FFFF, the last code point"},
+  };
+  const Fixture bad[] = {
+      {"\x80", "lone continuation byte"},
+      {"\xBF", "lone continuation byte"},
+      {"\xC0\xAF", "overlong '/' (C0)"},
+      {"\xC1\xBF", "overlong (C1)"},
+      {"\xE0\x80\xAF", "overlong 3-byte '/'"},
+      {"\xE0\x9F\xBF", "overlong 3-byte U+07FF"},
+      {"\xF0\x80\x80\xAF", "overlong 4-byte '/'"},
+      {"\xF0\x8F\xBF\xBF", "overlong 4-byte U+FFFF"},
+      {"\xED\xA0\x80", "surrogate U+D800"},
+      {"\xED\xBF\xBF", "surrogate U+DFFF"},
+      {"\xF4\x90\x80\x80", "U+110000, above U+10FFFF"},
+      {"\xF5\x80\x80\x80", "lead byte F5"},
+      {"\xFF", "byte FF"},
+      {"\xFE", "byte FE"},
+      {"\xC3", "truncated 2-byte"},
+      {"\xE2\x82", "truncated 3-byte"},
+      {"\xF0\x9F\x98", "truncated 4-byte"},
+      {"\xC3\x28", "bad continuation"},
+      {"\xE2\x28\xA1", "bad continuation"},
+  };
+  for (const auto& f : good) {
+    EXPECT_TRUE(is_valid_utf8(f.bytes)) << f.what;
+    JsonValue v;
+    std::string e;
+    ASSERT_TRUE(parse_json(std::string("\"a") + f.bytes + "b\"", &v, &e)) << f.what << ": " << e;
+    EXPECT_EQ(v.s, std::string("a") + f.bytes + "b") << f.what;
+    EXPECT_EQ(json_escape(f.bytes), f.bytes) << f.what;  // valid text passes through untouched
+  }
+  for (const auto& f : bad) {
+    EXPECT_FALSE(is_valid_utf8(f.bytes)) << f.what;
+    EXPECT_FALSE(parses(std::string("\"a") + f.bytes + "b\"")) << f.what;
+    EXPECT_FALSE(parses(std::string("{\"") + f.bytes + "\":1}")) << f.what << " in a key";
+    EXPECT_TRUE(is_valid_utf8(json_escape(f.bytes))) << f.what;
+  }
+  EXPECT_EQ(json_escape("a\xC0\xAF"
+                        "b"),
+            "a\\ufffd\\ufffdb");
+  EXPECT_EQ(json_escape("\xE2\x82"), "\\ufffd\\ufffd");
+}
+
+TEST(Json, InvalidUtf8IsRejectedAndNeverEchoed) {
+  // A command whose name or argument carries invalid bytes is refused, and the reason text (which
+  // the gateway sends back) contains no invalid UTF-8.
+  // (ordinary string literals: the \x escapes must become raw bytes, not JSON escape text)
+  const std::string lines[] = {
+      "{\"v\":1,\"id\":5,\"cmd\":\"\xC0\xAF"
+      "reboot\"}",
+      "{\"v\":1,\"id\":5,\"cmd\":\"estop\",\"args\":{\"asserted\":true,\"source\":\"tab\xFF"
+      "let\"}}",
+      "{\"v\":1,\"id\":5,\"cmd\":\"heartbeat\",\"\xED\xA0\x80\":1}",
+  };
+  for (const std::string& line : lines) {
+    ASSERT_EQ(line.find('\\'), std::string::npos);  // really raw bytes
+    const auto r = parse_command(line);
+    EXPECT_FALSE(r.ok);
+    EXPECT_EQ(r.code, "bad_message");
+    EXPECT_NE(r.reason.find("invalid UTF-8"), std::string::npos) << r.reason;
+    EXPECT_TRUE(is_valid_utf8(r.reason)) << r.reason;
+    EXPECT_TRUE(is_valid_utf8(json_str(r.reason)));
+  }
+  // and an unknown command made of valid UTF-8 is still echoed faithfully
+  const auto r = parse_command(
+      "{\"v\":1,\"id\":5,\"cmd\":\"r\xC3\xA9"
+      "boot\"}");
+  EXPECT_EQ(r.code, "invalid_command");
+  EXPECT_NE(r.reason.find("r\xC3\xA9"
+                          "boot"),
+            std::string::npos);
+}
+
 TEST(Json, WritersEscapeAndRefuseNonFinite) {
   EXPECT_EQ(json_str("a\"\\\n\x01"), "\"a\\\"\\\\\\n\\u0001\"");
   EXPECT_EQ(json_num(NAN), "null");

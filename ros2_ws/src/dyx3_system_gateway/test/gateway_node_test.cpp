@@ -229,6 +229,13 @@ TEST(GatewayNode, BadInputNeverReachesRosAndIsAnsweredWithTheId) {
   const auto lines = c.read_lines(1);
   ASSERT_EQ(lines.size(), 1U);
   EXPECT_NE(lines[0].find("bad_message"), std::string::npos);
+  // invalid UTF-8 is refused and the reply carries none of it (GW-008)
+  c.write_all("{\"v\":1,\"id\":13,\"cmd\":\"\xC0\xAF\xFF\"}\n");
+  r.pump(100);
+  const auto bad = c.read_lines(1);
+  ASSERT_EQ(bad.size(), 1U);
+  EXPECT_NE(bad[0].find("bad_message"), std::string::npos);
+  EXPECT_TRUE(is_valid_utf8(bad[0])) << bad[0];
   EXPECT_TRUE(r.calls.empty());
 }
 
