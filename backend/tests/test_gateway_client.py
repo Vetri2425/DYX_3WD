@@ -153,3 +153,27 @@ async def test_garbage_and_foreign_versions_are_ignored(sock_path):
     assert (await gw.request("skip_point"))["ok"]
     await gw.stop()
     await srv.stop()
+
+
+async def test_a_gateway_that_stops_reading_times_out_instead_of_blocking_in_drain(sock_path):
+    accepted = []
+
+    async def never_read(reader, writer):
+        accepted.append(writer)
+        await asyncio.sleep(3600)  # accept, then never read: the client's write buffer fills up
+
+    server = await asyncio.start_unix_server(never_read, path=sock_path)
+    gw = GatewayClient(sock_path, request_timeout_s=0.3)
+    await gw.start()
+    assert await wait_until(lambda: gw.connected)
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    with pytest.raises(GatewayTimeout) as e:
+        await gw.request("pause_mission", {"pad": "x" * (16 * 1024 * 1024)})  # far beyond socket + stream buffers
+    assert loop.time() - t0 < 1.5  # bounded by the request timeout, drain() included
+    assert e.value.delivered is None
+    assert gw._pending == {}  # the pending id is removed
+    await gw.stop()
+    for w in accepted:
+        w.close()
+    server.close()
