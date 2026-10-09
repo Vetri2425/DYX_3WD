@@ -37,8 +37,8 @@ Review baseline: DYX_3WD `master` `252778e` (firmware `8279fa4be3`).
 | # | Part | Reviewed | Verified | Open (C/H/M/L) | Status |
 |---|---|---|---|---|---|
 | 1 | `dyx3_rpp` | 2026-10-09 | 2026-10-09 | 0 / 1 / 4 / 3 | open |
-| 2 | `dyx3_motion_guard` | — | — | — | prompt issued |
-| 3 | `dyx3_px4_link` | — | — | — | next |
+| 2 | `dyx3_motion_guard` | 2026-10-09 | 2026-10-09 | 0 / 0 / 3 / 4 | open |
+| 3 | `dyx3_px4_link` | — | — | — | prompt issued |
 | 4 | `dyx3_interfaces` | — | — | — | |
 | 5 | `dyx3_mission` | — | — | — | |
 | 6 | `dyx3_gnss_rtk` | — | — | — | |
@@ -167,7 +167,104 @@ Facts used to re-rate (all at `252778e`):
 
 ---
 
-## Cross-part items (raised by the RPP review; owned by later parts)
+## 2. `dyx3_motion_guard`
+
+Reviewer verdict: REQUEST CHANGES (0 CRITICAL, 2 HIGH, 3 MEDIUM, 1 LOW). After verification: **0 CRITICAL,
+0 HIGH, 3 MEDIUM, 4 LOW**.
+- The reviewer's two HIGHs do not hold as defects. MG-001 is a timeout rationale at 2.5–25× the producer
+  periods; MG-002 is the same measurement item as RPP-005.
+- Verification found a MEDIUM the reviewer missed (MG-007).
+
+Confirmed good, recorded so later reviews do not re-open them:
+- **STOP is immediate, never ramped.** `fail()` resets the limiter state (`fail_to_zero.cpp:39-46`). Accel and
+  jerk shaping is not in the production node; RPP owns the motion profile (`motion_guard_node.cpp:193-194`).
+- **A never-heard input fails.** Every gate input keeps its failing defaults until first seen
+  (`motion_guard_node.cpp:213-219`).
+- **A clean STOP is always forwarded** whatever the gates say (`fail_to_zero.cpp:54-59`).
+- **E-stop asserts immediately.** The service callback runs `step()` at once (`motion_guard_node.cpp:140`).
+- **E-stop aborts the mission**, and a mission must be started again by the operator. The mission node aborts on
+  `SafetyGateStatus` reason ESTOP (`dyx3_mission/src/mission_node.cpp:233-243`), and that gate status is computed
+  from the gate inputs, independently of the command mode (`motion_guard_node.cpp:266-273`).
+
+Producer periods used to re-rate MG-001:
+| Input | Rate | Source |
+|---|---|---|
+| `vehicle_state` | 50 Hz | `px4_link` |
+| `estimator_health` | 10 Hz | `px4_link` |
+| `px4_link/status` | 10 Hz | `px4_link_node.cpp:883` |
+| `operator_link` | 10 Hz | gateway |
+| `mission/state` | 10 Hz | mission |
+| `rtk_status` | 5 Hz | `rtk_node.cpp:112` |
+
+| ID | Severity | Status | Area | Where | Item |
+|---|---|---|---|---|---|
+| MG-007 | **MEDIUM** | ACCEPTED (new, found in verification) | E-stop / spray | `motion_guard_node.cpp:266-279,140` | E-stop and safety-gate state are published on a 100 ms cadence, not on change |
+| MG-003 | MEDIUM | ACCEPTED | Shutdown | `main.cpp:9-15` | No final STOP on SIGTERM (default rclcpp signal handling) |
+| MG-002 | MEDIUM (~~HIGH~~) | DOUBT (measure, with RPP-005) | RT | `motion_guard_node.cpp:144-146` | Timer-only output with no measured deadline on the shared FIFO CPU |
+| MG-001 | LOW (~~HIGH~~) | ACCEPTED ↓ | Gates | `motion_guard_node.cpp:173-178` | 0.5 s freshness for every status input: rationale not documented per input |
+| MG-004 | LOW (~~MEDIUM~~) | ACCEPTED ↓ (policy) | E-stop | `estop_gate.cpp:5-10`; `docs/contracts/dyx3_motion_guard.md:70-73` | Any valid source can clear an E-stop asserted by another |
+| MG-005 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Fail-safe | `fail_to_zero.cpp:5-24` | Sequence tracking cannot tell a second publisher from a restart |
+| MG-006 | LOW | ACCEPTED | RT | `motion_guard_node.cpp:260-263` | `RCLCPP_WARN` on reason change inside the control callback |
+
+### MG-007 — MEDIUM — E-stop state reaches the mission and spray up to 100 ms late, and a short pulse can be missed
+- The command STOP is immediate. But `/dyx3/safety_gate` and `/dyx3/emergency_stop_state` are published only
+  when 100 ms have passed (`motion_guard_node.cpp:266`). The `step()` called from the E-stop service obeys the
+  same gate.
+- Consequences:
+  - the mission abort (via `safety_gate`) and the spray node's E-stop input (`spray_node.cpp:100-102`) react up
+    to 100 ms late, which is about 10 cm of paint at 1 m/s if the spray lease has not already closed the valve;
+  - an assert-then-clear within one 100 ms window is never seen by the mission. The mission is then not aborted,
+    and motion can continue when the clear arrives.
+- **Fix:** publish the gate and E-stop state immediately when the E-stop latch changes (in the service callback),
+  then keep the 10 Hz cadence. Add a test: assert and clear 30 ms apart → the mission is ABORTED.
+
+### MG-003 — MEDIUM — no final STOP on SIGTERM
+- Confirmed: `rclcpp::init` with default signal handling, `rclcpp::spin`, no STOP path. RPP has one
+  (`dyx3_rpp/src/main.cpp`).
+- Impact is limited. `control_graph.launch.py:65` shuts the whole graph down when any node exits, so on a
+  graph stop every node receives SIGINT together. RPP's STOP burst then lands on a guard that is already
+  stopping. A guard-side STOP only helps if `px4_link` outlives it.
+- **The stop-on-exit that matters is in `px4_link`, the last hop** → X-010.
+- Still add the guard STOP, mirroring `rpp_node`'s `main.cpp` (cheap, symmetric).
+
+### MG-002 — MEDIUM — DOUBT — no measured deadline
+- Same root as RPP-005 (shared CPU 4, FIFO 80).
+- Downstream, `px4_link` zeroes at 0.2 s command age.
+- Measure together with RPP-005: guard wake-up jitter, `step()` duration, missed periods; nominal and during a
+  mission load.
+
+### MG-001 — LOW — 0.5 s status freshness
+- Re-rated. 0.5 s is 2.5 periods for `rtk_status` (5 Hz), 5 periods for the 10 Hz inputs and 25 for
+  `vehicle_state`.
+- The physical state does not change because a status publisher went silent.
+- A dead in-graph producer (mission, `px4_link`, gateway) takes the whole graph down (`on_exit=Shutdown`).
+  `operator_link` has its own loss timeout in the gateway.
+- The reviewer's scenario (RTK publisher silent, rover keeps moving for 0.5 s on a still-valid fix) is not a
+  hazard.
+- **Fix:** document the per-input rationale. Optionally tighten `vehicle_state_max_age_s` (50 Hz producer)
+  together with RPP's `pose_max_age_s`.
+
+### MG-004 — LOW — cross-source E-stop clear (policy)
+- The code matches the contract ("clearing needs an explicit asserted=false from a valid source").
+- Clearing does not resume motion: the mission was aborted and must be started again (see above; MG-007 covers
+  the short-pulse gap).
+- The only client is the system gateway (`gateway_node.cpp:48`), so the source string is not authentication.
+- **Owner decision:** keep "any source clears", or "only the asserting source, or the physical one, clears".
+
+### MG-005 — LOW — second publisher
+- Production has one publisher. Strictly interleaved streams keep resetting the session below `accept_count`
+  (`fail_to_zero.hpp:21`) and fail closed.
+- The realistic risk is a hand-launched `dyx3_rpp_legacy`, whose `output_topic` is configured to the same name
+  (`docs/contracts/dyx3_motion_guard.md:15`).
+- **Fix:** a `dyx3-health` check for exactly one publisher on `/dyx3/rpp/motion_setpoint`.
+
+### MG-006 — LOW — log on reason change
+- Fires only on change, after the command has been published. Keep it; consider throttling it if reasons
+  flap.
+
+---
+
+## Cross-part items (raised by the part reviews; owned by later parts)
 
 | ID | Owner part | Item | Status |
 |---|---|---|---|
@@ -178,3 +275,6 @@ Facts used to re-rate (all at `252778e`):
 | X-005 | bringup / systemd | Shared FIFO CPU placement, start-up and shutdown ordering | open |
 | X-006 | `px4_link` / bringup | `px4_link`, the final 100 Hz writer to PX4, runs under **normal scheduling**, unlike RPP and the guard (`control_graph.launch.py:33-34`) | DOUBT, measure |
 | X-007 | `px4_link` | Root cause of RPP-009: no angular-rate subscription | ACCEPTED, HIGH |
+| X-008 | `px4_link` / firmware | Measure the real stop time for three separate events: the guard sends STOP; the guard dies while `px4_link` lives (0.2 s gate); the whole graph dies (PX4 offboard loss: `COM_OF_LOSS_T` is not in the baseline, `COM_OBL_RC_ACT` 7, upstream #27514) | open, measure (from MG review) |
+| X-009 | mission / bringup | Prove that a systemd graph restart or an E-stop clear can never resume a mission without the operator | open, test (from MG review) |
+| X-010 | `px4_link` | On a graph stop every node gets SIGINT together, so only the last hop can guarantee a final STOP: `px4_link` must publish STOP and stop the offboard heartbeat cleanly before exiting | open, in PXL review |
