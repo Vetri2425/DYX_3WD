@@ -1,7 +1,9 @@
 #include <atomic>
+#include <chrono>
 #include <csignal>
 #include <cstdio>
 #include <memory>
+#include <thread>
 
 #include "dyx3_recorder/recorder_node.hpp"
 
@@ -21,7 +23,22 @@ int main(int argc, char** argv) {
     auto node = std::make_shared<dyx3_recorder::RecorderNode>();
     rclcpp::executors::MultiThreadedExecutor ex(rclcpp::ExecutorOptions(), 3);
     ex.add_node(node);
-    while (rclcpp::ok() && !g_stop.load()) ex.spin_some(std::chrono::milliseconds(20));
+    // spin() keeps all three executor threads waiting for work. A spin_some loop never waits
+    // (busy poll, ~37 % of a Jetson core) and ran callbacks on one thread only. The stopper turns
+    // the signal flag into cancel() within 50 ms.
+    std::thread stopper([&ex] {
+      while (rclcpp::ok() && !g_stop.load())
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      ex.cancel();
+    });
+    try {
+      ex.spin();
+    } catch (...) {
+      g_stop.store(true);
+      stopper.join();
+      throw;
+    }
+    stopper.join();
     node.reset();  // destructor finalises an open run (bag stop, summary.json)
   } catch (const std::exception& e) {
     std::fprintf(stderr, "recorder: %s\n", e.what());

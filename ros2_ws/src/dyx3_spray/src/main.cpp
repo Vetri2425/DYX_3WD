@@ -22,11 +22,13 @@ int main(int argc, char** argv) {
     auto node = std::make_shared<dyx3_spray::SprayNode>();
     rclcpp::executors::SingleThreadedExecutor ex;
     ex.add_node(node);
-    while (rclcpp::ok() && !g_stop.load()) ex.spin_some(std::chrono::milliseconds(10));
+    // spin_once waits for work (at most 10 ms, so a stop request is seen within 10 ms); spin_some
+    // never waits and turned this loop into a busy poll (~46 % of a Jetson core).
+    while (rclcpp::ok() && !g_stop.load()) ex.spin_once(std::chrono::milliseconds(10));
     // Close the valve and flush briefly (bounded) so the OFF reaches dyx3_px4_link before exit.
     node->shutdown_off();
     for (int i = 0; i < 20 && !node->off_confirmed(); ++i) {
-      ex.spin_some(std::chrono::milliseconds(50));
+      ex.spin_once(std::chrono::milliseconds(50));  // waits, so the flush really lasts up to ~1 s
       node->shutdown_off();
     }
   } catch (const std::exception& e) {

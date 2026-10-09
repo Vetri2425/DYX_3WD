@@ -25,10 +25,11 @@ int main(int argc, char** argv) {
     auto node = std::make_shared<dyx3_spray::SafetyWatchdogNode>();
     rclcpp::executors::SingleThreadedExecutor ex;
     ex.add_node(node);
-    while (rclcpp::ok() && !g_stop.load()) ex.spin_some(std::chrono::milliseconds(10));
+    // spin_once waits for work (at most 10 ms); spin_some never waits and busy-polled this loop.
+    while (rclcpp::ok() && !g_stop.load()) ex.spin_once(std::chrono::milliseconds(10));
     node->shutdown_off();
-    for (int i = 0; i < 30; ++i) {  // bounded flush: at most ~1.5 s
-      ex.spin_some(std::chrono::milliseconds(50));
+    for (int i = 0; i < 30; ++i) {                  // bounded flush: at most ~1.5 s
+      ex.spin_once(std::chrono::milliseconds(50));  // waits, so the bound is real
       node->step(now_s());
       if (!node->inflight()) break;
     }
