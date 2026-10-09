@@ -64,4 +64,36 @@ struct VehicleStateOut {
 VehicleStateOut assemble(const LocalPositionSample& lp, const AttitudeSample& att,
                          const StatusSample& st, const Freshness& fresh);
 
+// NED yaw (rad, (-pi, pi]) of an FRD->NED quaternion q(w, x, y, z): positive clockwise seen from
+// above, the same convention as VehicleLocalPosition.heading.
+double yaw_of(const std::array<float, 4>& q);
+
+// Yaw rate derived from consecutive vehicle_attitude samples on the PX4 sample clock
+// (timestamp_sample), not on receipt time (RPP-009). Interim Jetson-side source: the firmware's
+// vehicle_angular_velocity is not on DDS at the flashed firmware. NED, rad/s, positive clockwise.
+// Each delta is wrap-safe and is used only for 0 < dt <= kMaxDtS; it feeds a first-order low-pass
+// with time constant tau_s (0 = no filtering).
+class YawRateEstimator {
+public:
+  explicit YawRateEstimator(double tau_s) : tau_s_(tau_s) {}
+
+  // A non-finite q, a quaternion reset (EKF yaw reset), a gap over kMaxDtS or a sample time that
+  // goes backwards restarts the estimate; a repeated sample time is ignored.
+  void update(const std::array<float, 4>& q, uint64_t timestamp_sample_us, uint8_t reset_counter);
+
+  bool valid() const { return have_rate_; }
+  float rate() const { return have_rate_ ? static_cast<float>(rate_) : 0.0F; }
+
+  static constexpr double kMaxDtS = 0.2;
+
+private:
+  double tau_s_;
+  bool have_prev_{false};
+  bool have_rate_{false};
+  double prev_yaw_{0.0};
+  uint64_t prev_us_{0};
+  uint8_t prev_reset_{0};
+  double rate_{0.0};
+};
+
 }  // namespace dyx3_px4_link

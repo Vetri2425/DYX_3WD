@@ -102,7 +102,8 @@ struct Rig {
   uint64_t seq{0};
   bool fcu_answers_handshake{true};
   int hash_error_on{-1};  // lie about this topic's hash
-  bool alive{true}, lp_alive{true};
+  bool alive{true}, lp_alive{true}, att_alive{true};
+  double att_yaw_rate{0.0};  // rad/s, NED (clockwise positive); yaw = rate * (now - 100)
   uint8_t nav_state{0}, arming_state{1};
 
   explicit Rig(const rclcpp::ParameterValue* extra = nullptr, const std::string& defs = "",
@@ -276,9 +277,14 @@ struct Rig {
       st.arming_state = arming_state;
       st.nav_state = nav_state;
       p_st->publish(st);
-      px4_msgs::msg::VehicleAttitude a;
-      a.q = {1.0F, 0.0F, 0.0F, 0.0F};
-      p_att->publish(a);
+      if (att_alive) {
+        px4_msgs::msg::VehicleAttitude a;
+        const double yaw = std::remainder(att_yaw_rate * (now - 100.0), 2.0 * 3.141592653589793);
+        a.q = {static_cast<float>(std::cos(yaw / 2)), 0.0F, 0.0F,
+               static_cast<float>(std::sin(yaw / 2))};
+        a.timestamp_sample = static_cast<uint64_t>(std::llround(now * 1e6));
+        p_att->publish(a);
+      }
       px4_msgs::msg::EstimatorStatusFlags fl;
       p_fl->publish(fl);
       px4_msgs::msg::SensorGps g;
@@ -1717,6 +1723,25 @@ TEST(Px4LinkNode, EstimatorHealthDefaultsUnhealthyUntilFlagsArrive) {
   r.alive = false;
   r.run(3.5);  // beyond the 3.0 s session limit (stale_timesync_s / stale_estimator_flags_s)
   EXPECT_FALSE(r.health.flags_valid);
+}
+
+// RPP-009: yaw rate from attitude deltas on the PX4 sample clock; 0 when the attitude is stale.
+TEST(Px4LinkNode, VehicleStateYawRateFromAttitudeAndZeroWhenStale) {
+  Rig r;
+  r.bring_up();
+  r.att_yaw_rate = 0.2;
+  r.run(0.5);
+  EXPECT_TRUE(r.state.attitude_valid);
+  EXPECT_NEAR(r.state.yaw_rate_radps, 0.2, 0.01);
+  r.att_alive = false;
+  r.run(0.3);
+  EXPECT_FALSE(r.state.attitude_valid);
+  EXPECT_EQ(r.state.yaw_rate_radps, 0.0F);
+  r.att_alive = true;
+  r.att_yaw_rate = -0.3;  // counter-clockwise
+  r.run(0.5);
+  EXPECT_TRUE(r.state.attitude_valid);
+  EXPECT_NEAR(r.state.yaw_rate_radps, -0.3, 0.015);
 }
 
 TEST(Px4LinkNode, VehicleStateFanOut) {

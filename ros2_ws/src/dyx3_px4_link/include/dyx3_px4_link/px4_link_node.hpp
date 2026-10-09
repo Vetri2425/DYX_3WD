@@ -63,6 +63,7 @@ struct LinkParams {
   // An unanswered spray VehicleCommand is failed after this long (its reasserts keep republishing
   // it until then). Short, because an OFF queued behind it waits that long.
   double spray_transaction_timeout_s{0.3};
+  double yaw_rate_lpf_tau_s{0.05};
   std::string msg_definitions_dir;  // empty: <share of px4_msgs>/msg
   std::string spray_ack_token_state_path{"/var/lib/dyx3/state/px4_link_spray_ack_next"};
 };
@@ -134,6 +135,7 @@ private:
   uint32_t ts_rtt_us_{0};
   bool ts_seen_{false};
   AttitudeSample att_;
+  std::unique_ptr<YawRateEstimator> yaw_rate_;
   StatusSample st_;
   double lp_t_{-1e18}, att_t_{-1e18}, st_t_{-1e18};
   px4_msgs::msg::EstimatorStatusFlags flags_;

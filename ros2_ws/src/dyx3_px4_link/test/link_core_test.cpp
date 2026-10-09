@@ -333,3 +333,87 @@ TEST(Assembler, NonFinitePositionIsInvalid) {
   const auto o = assemble(lp, AttitudeSample{}, StatusSample{}, Freshness{true, true, true});
   EXPECT_FALSE(o.position_valid);
 }
+
+// --- yaw rate (RPP-009) --------------------------------------------------------------------------
+namespace {
+std::array<float, 4> q_of_yaw(double yaw) {  // rotation about NED down: positive is clockwise
+  return {static_cast<float>(std::cos(yaw / 2)), 0.0F, 0.0F, static_cast<float>(std::sin(yaw / 2))};
+}
+double wrap_pi(double a) { return std::remainder(a, 2.0 * 3.141592653589793); }
+}  // namespace
+
+TEST(YawRate, YawOfMatchesTheHeadingConvention) {
+  EXPECT_NEAR(yaw_of(q_of_yaw(0.5)), 0.5, 1e-6);
+  EXPECT_NEAR(yaw_of(q_of_yaw(-2.0)), -2.0, 1e-6);
+  EXPECT_NEAR(std::abs(yaw_of(q_of_yaw(3.141592653589793))), 3.141592653589793, 1e-6);
+}
+TEST(YawRate, ConstantRotationIsRecoveredWithinFivePercent) {
+  for (const double rate : {0.2, -0.2, 0.05, 1.0}) {
+    YawRateEstimator e{0.05};
+    EXPECT_FALSE(e.valid());
+    EXPECT_EQ(e.rate(), 0.0F);
+    const uint64_t t0 = 1'700'000'000'000'000ULL;  // system-clock domain microseconds
+    for (int k = 0; k <= 100; ++k) {               // 1 s at 100 Hz
+      e.update(q_of_yaw(wrap_pi(0.3 + rate * k * 0.01)), t0 + static_cast<uint64_t>(k) * 10000U, 0);
+      if (k >= 20)
+        ASSERT_NEAR(e.rate(), rate, 0.05 * std::abs(rate)) << "rate " << rate << " k " << k;
+    }
+    EXPECT_TRUE(e.valid());
+  }
+}
+TEST(YawRate, WrapAcrossPlusMinusPiIsContinuous) {
+  for (const double rate : {0.5, -0.5}) {
+    YawRateEstimator e{0.05};
+    const double start = rate > 0 ? 3.0 : -3.0;  // crosses +-pi after ~0.28 s
+    for (int k = 0; k <= 100; ++k) {
+      e.update(q_of_yaw(wrap_pi(start + rate * k * 0.01)), static_cast<uint64_t>(k) * 10000U + 1U,
+               0);
+      if (k >= 1)
+        ASSERT_NEAR(e.rate(), rate, 0.05 * std::abs(rate)) << "rate " << rate << " k " << k;
+    }
+  }
+}
+TEST(YawRate, UsesSampleTimeNotArrivalCadence) {
+  YawRateEstimator e{0.0};
+  e.update(q_of_yaw(0.0), 1000000U, 0);
+  e.update(q_of_yaw(0.02), 1020000U, 0);  // 0.02 rad over a 20 ms sample interval
+  EXPECT_NEAR(e.rate(), 1.0, 1e-4);
+}
+TEST(YawRate, StaleGapResetNonFiniteAndBackwardsTimeGiveNoRate) {
+  YawRateEstimator e{0.05};
+  uint64_t t = 1000000U;
+  double yaw = 0.0;
+  auto feed = [&](int n, uint8_t reset = 0) {
+    for (int k = 0; k < n; ++k) {
+      t += 10000U;
+      yaw += 0.003;
+      e.update(q_of_yaw(yaw), t, reset);
+    }
+  };
+  feed(20);
+  ASSERT_TRUE(e.valid());
+  EXPECT_NEAR(e.rate(), 0.3, 0.015);
+  e.update(q_of_yaw(yaw), t, 0);  // the same sample again: ignored
+  EXPECT_TRUE(e.valid());
+  t += 210000U;  // a gap over 0.2 s
+  yaw += 2.0;
+  e.update(q_of_yaw(yaw), t, 0);
+  EXPECT_FALSE(e.valid());
+  EXPECT_EQ(e.rate(), 0.0F);
+  feed(1);
+  EXPECT_TRUE(e.valid());
+  EXPECT_NEAR(e.rate(), 0.3, 0.015);  // restarted from the next delta, no spike from the gap
+  yaw += 1.0;                         // EKF yaw reset: the quaternion jumps, the counter moves
+  feed(1, 1);
+  EXPECT_FALSE(e.valid());
+  feed(1, 1);
+  EXPECT_NEAR(e.rate(), 0.3, 0.015);
+  e.update({std::numeric_limits<float>::quiet_NaN(), 0.0F, 0.0F, 0.0F}, t + 10000U, 1);
+  EXPECT_FALSE(e.valid());
+  t -= 50000U;  // sample time going backwards (FCU reboot): restart
+  feed(1, 1);
+  feed(1, 1);
+  EXPECT_TRUE(e.valid());
+  e.update(q_of_yaw(yaw), t - 5000U, 1);
+  EXPECT_FALSE(e.valid());
+}

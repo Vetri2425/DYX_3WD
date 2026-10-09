@@ -30,7 +30,7 @@ the DDS topic when the version is above 0:
 | out (we subscribe) | `/fmu/out/timesync_status` | TimesyncStatus | best effort | session liveness |
 | out | `/fmu/out/vehicle_local_position_v1` | VehicleLocalPosition (v1) | best effort | |
 | out | `/fmu/out/vehicle_status_v1` | VehicleStatus (v1) | best effort | **rate limited to 5 Hz by firmware** |
-| out | `/fmu/out/vehicle_attitude` | VehicleAttitude (v0) | best effort | q is FRD to NED |
+| out | `/fmu/out/vehicle_attitude` | VehicleAttitude (v0) | best effort | q is FRD to NED; `timestamp_sample` and `quat_reset_counter` feed the yaw rate (section 8) |
 | out | `/fmu/out/estimator_status_flags` | EstimatorStatusFlags | best effort | only estimator topic on DDS |
 | out | `/fmu/out/vehicle_gps_position` | SensorGps | best effort | |
 | out | `/fmu/out/vehicle_command_ack` | VehicleCommandAck | best effort | spray ACK matching (section 14) |
@@ -201,9 +201,21 @@ timestamps, so a clock step on either side cannot make a stale sample look fresh
 `heading` to `heading_rad`. Validity: `position_valid = xy_valid`, `velocity_valid = v_xy_valid`,
 `attitude_valid = heading_good_for_control` and an attitude sample is fresh. Dead reckoning and
 estimator faults are *not* folded into these flags; the guard owns those gates through
-`EstimatorHealth`. A stale source clears its validity flags in the same tick. `yaw_rate_radps`
-is 0 until a `vehicle_angular_velocity` source is added (it is not on DDS today); no validity
-flag depends on it. `xy_reset_counter`, `delta_*` and the global reference are copied unchanged.
+`EstimatorHealth`. A stale source clears its validity flags in the same tick. `xy_reset_counter`
+and `delta_*` are copied unchanged.
+
+`yaw_rate_radps` (RPP-009, interim Jetson-side source; `vehicle_angular_velocity` is not on DDS at
+the flashed firmware and enabling it is an owner decision): derived from consecutive
+`vehicle_attitude` samples on the **PX4 sample clock** (`timestamp_sample`), not on receipt time.
+Yaw = `atan2(2(wz + xy), 1 - 2(y² + z²))` of the FRD→NED quaternion; the wrap-safe yaw delta is
+divided by the sample interval and used only for 0 < dt ≤ 0.2 s; a first-order low-pass with time
+constant `yaw_rate_lpf_tau_s` (default 0.05 s, 0 = unfiltered) smooths it. A larger gap, a sample
+time that goes backwards, a `quat_reset_counter` change (EKF yaw reset) or a non-finite quaternion
+restarts the estimate; a repeated sample is ignored. Sign: NED, positive clockwise seen from
+above, the same convention as `heading_rad`. It is published only while `attitude_valid` and the
+estimate is running; otherwise it is **0, which also means "unknown"** (field semantics unchanged;
+no validity flag depends on it). Quantisation: float32 quaternions limit a single 10 ms delta to
+about 1e-5 rad, i.e. about 1 mrad/s of noise before the filter.
 
 ## 9. Arm and mode
 
@@ -282,6 +294,7 @@ negative injected timestamps.
 | `offboard_prestream_s`, `offboard_confirm_timeout_s` | 0.5, 2.0 | IDLE_ONLY | DERIVED |
 | `offboard_disable_stop_s` | 0.3 | IDLE_ONLY | DERIVED (PXL-002): ≥ 20 ticks of STOP, well inside `COM_OF_LOSS_T` 1.0 s; validated > 0 |
 | `ulog_streaming_enabled` | true | IDLE_ONLY | |
+| `yaw_rate_lpf_tau_s` | 0.05 | IDLE_ONLY | DERIVED (RPP-009): 5 attitude samples at 100 Hz; validated ≥ 0 |
 | `spray_transaction_timeout_s` | 0.3 | RESTART | DERIVED (XR-GPX-001): pinned PX4 answers 187/183 at once; bounds how long a queued spray request can wait; validated > 0 |
 
 ## 13. Acceptance

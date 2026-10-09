@@ -69,6 +69,7 @@ Px4LinkNode::Px4LinkNode(const rclcpp::NodeOptions& options, ClockFn clock, bool
   gate_ = std::make_unique<CommandGate>(p_.command_max_age_s);
   offboard_ = std::make_unique<OffboardSession>(p_.offboard);
   spray_ack_tokens_ = std::make_unique<SprayAckTokens>(p_.spray_ack_token_state_path);
+  yaw_rate_ = std::make_unique<YawRateEstimator>(p_.yaw_rate_lpf_tau_s);
   build_handshake();
 
   const auto reliable1 = rclcpp::QoS(1).reliable();
@@ -140,6 +141,7 @@ Px4LinkNode::Px4LinkNode(const rclcpp::NodeOptions& options, ClockFn clock, bool
       "/fmu/out/vehicle_attitude", sensor,
       [this](px4_msgs::msg::VehicleAttitude::ConstSharedPtr m) {
         for (size_t i = 0; i < 4; ++i) att_.q[i] = m->q[i];
+        yaw_rate_->update(att_.q, m->timestamp_sample, m->quat_reset_counter);
         att_t_ = clock_();
         mon_->on_sample(kAttitude, att_t_);
       });
@@ -358,6 +360,10 @@ void Px4LinkNode::declare_and_validate_params() {
   p_.arm_confirm_timeout_s = declare_checked<double>(*this, "arm_confirm_timeout_s", 2.0);
   require(p_.arm_confirm_timeout_s > 0.0, "arm_confirm_timeout_s must be > 0");
   p_.ulog_streaming_enabled = declare_checked<bool>(*this, "ulog_streaming_enabled", true);
+  p_.yaw_rate_lpf_tau_s =
+      declare_checked<double>(*this, "yaw_rate_lpf_tau_s", p_.yaw_rate_lpf_tau_s);
+  require(std::isfinite(p_.yaw_rate_lpf_tau_s) && p_.yaw_rate_lpf_tau_s >= 0.0,
+          "yaw_rate_lpf_tau_s must be >= 0");
   p_.spray_transaction_timeout_s =
       declare_checked<double>(*this, "spray_transaction_timeout_s", p_.spray_transaction_timeout_s);
   require(std::isfinite(p_.spray_transaction_timeout_s) && p_.spray_transaction_timeout_s > 0.0,
@@ -886,6 +892,8 @@ void Px4LinkNode::publish_state_and_health(double now_s) {
     s.velocity_down_mps = o.vd;
     for (size_t i = 0; i < 4; ++i) s.q_frd_to_ned[i] = o.q[i];
     s.heading_rad = o.heading;
+    // 0 also means "unknown": the rate is published only with a valid, fresh attitude.
+    s.yaw_rate_radps = o.attitude_valid && yaw_rate_->valid() ? yaw_rate_->rate() : 0.0F;
     s.xy_reset_counter = o.xy_reset_counter;
     s.delta_north_m = o.delta_north;
     s.delta_east_m = o.delta_east;
