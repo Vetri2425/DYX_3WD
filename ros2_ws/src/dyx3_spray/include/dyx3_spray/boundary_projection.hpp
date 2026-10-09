@@ -81,6 +81,11 @@ bool apply_mark_boundary_lead(bool geometry_desired, std::optional<BoundaryKind>
 struct DecisionParams {
   double solenoid_open_delay_s{0.0};
   double solenoid_close_delay_s{0.0};
+  // Deterministic latency between the raw decision and the dispatched command: the debounce holds a
+  // new desire for (debounce_samples - 1) control ticks. Added to BOTH valve delays in the lead so
+  // the commanded edge lands where the uncompensated one would have without the debounce (SP-002).
+  // 0.0 reproduces the prototype's lead exactly.
+  double debounce_delay_s{0.0};
   double on_overspray_margin_m{0.0};
   double off_overspray_margin_m{0.0};
   double max_xtrack_error_m{0.0};

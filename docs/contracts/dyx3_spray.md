@@ -17,9 +17,9 @@
 | manual override with a hard expiry; debounce; ON re-assertion | |
 
 48 of the 57 parameters assigned to spray in the updated registry are carried (`tools/gen_param_tables.py`); the 9 that belong to the unported features
-are excluded with a reason in the generator. Two carried parameters do nothing in the prototype either and are kept only for
-registry parity: `anticipatory_margin_m` (declared, never read) and `min_spray_speed_mps` (its gate was removed: spraying is a
-question of WHERE the nozzle is, slow means thin flow, never off).
+are excluded with a reason in the generator. One carried parameter does nothing in the prototype either and is kept only for
+registry parity: `anticipatory_margin_m` (declared, never read). `min_spray_speed_mps` was also unused in the prototype (its gate
+had been removed); it is live again as the low-speed cut of section 5 (SP-004).
 
 ## 2. Authority and the three layers
 
@@ -79,10 +79,20 @@ transaction completes or times out first, after which the new mapping OFF is sen
 
 Nozzle position = pose + body-frame offsets (forward, lateral right). The path model carries `cumulative_s` and MARK
 boundaries from the flag changes; **a path that ends on MARK gets a synthetic terminal MARK->TRANSIT boundary**. Lead:
-`on_lead = v * open_delay + on_margin`, `off_lead = max(0, v * close_delay - off_margin)`; the valve opens early before
+`on_lead = v * (open_delay + debounce_delay) + on_margin`, `off_lead = max(0, v * (close_delay + debounce_delay) - off_margin)`
+with `debounce_delay = (max(1, debounce_samples) - 1) / tick_hz` (SP-002, see below); the valve opens early before
 TRANSIT->MARK and closes early before MARK->TRANSIT. Terminal shutoff: forced OFF within `terminal_off_epsilon_m` of the final
 station at speed <= `terminal_off_speed_mps` (the OFF lead is ~1 mm at creep speed, so the geometric boundary is never
-crossed). Cross-track gate with hysteresis (trip at the wide level, clear at the tight one, and stay off at least
+crossed). **Low-speed cut (SP-004; DERIVED — NOT FROM V1 SPEC).** Below `min_spray_speed_mps` (0.05; 0 disables) the desire is
+OFF on a MARK leg while RPP is STOPPING (corner/brake stop, settle), and while it is TRACKING once the current MARK stretch has
+been driven at or above that speed (a stall), so a stopping or stalled rover does not lay a paint blob; with a 0.5 m/s² stop the
+OFF goes out while the rover is still rolling. Exempt, so no new gap is created: a TRACKING **standing start** (the "driven"
+latch is cleared by TRANSIT geometry, any non-TRACKING RPP state, a run or mission change and a path load, so a leg that starts
+from standstill opens as before and the opening delay elapses while the rover pulls away); the terminal **CREEPING** (the
+terminal shutoff above ends it); **PIVOTING** (its own gate, `spray_off_during_pivot`). Not covered: a rover that never moves
+after a TRACKING standing start keeps the valve open, as before. The cut shapes the desire before the debounce; it is a
+process cut, not a safety refusal (no reason string, `safety_ok` stays true), and safety OFF never depends on it. Cross-track
+gate with hysteresis (trip at the wide level, clear at the tight one, and stay off at least
 `xtrack_gate_min_off_s`); it is **load-bearing** and must not be loosened.
 
 **Geometry source (C1).** RPP conditions the source `DYX3PATH` once and writes a content-addressed `DYX3COND 1` artifact. It
@@ -91,10 +101,17 @@ contains source SHA256, conditioner config, and exact ordered conditioned runs/p
 uses those coordinates, flags, and run boundaries directly. It never conditions independently and never falls back to raw
 mission geometry. Missing, malformed, mismatched, or stale geometry leaves the path unloaded and autonomous spray OFF.
 
-**Debounce latency (carried, part of the boundary budget).** `debounce_samples` (3) means the debounced desire follows the raw one
-only after 3 identical ticks, so every valve edge is delayed by up to 3 ticks: **2.1 cm at 0.35 m/s and 50 Hz**, on the CLOSE as
-well as the OPEN. The lead maths (section 5) does not compensate for it. Measured in `spray_core_test` (the close lands ~2 cm
-after the led boundary). Whether that is acceptable against the 1.4–2 cm accuracy budget is a human decision at GATE 5.
+**Debounce latency is led (SP-002; DERIVED — NOT FROM V1 SPEC, the prototype did not compensate it).** `debounce_samples` (3)
+means the debounced desire follows the raw one only after 3 identical ticks, so a geometric edge reaches the FSM
+`(debounce_samples - 1)` ticks after the raw decision flips: 40 ms at 50 Hz, i.e. 1.4 cm at 0.35 m/s and 4 cm at 1 m/s, on the
+OPEN and on the CLOSE. That delay is deterministic, so it is added to both valve delays in the lead above, using the node's real
+control period (`1 / tick_hz`, not a constant 50 Hz). The debounce itself is kept for noise rejection. What remains is the
+sampling of the crossing: the raw decision flips at the first tick past the lead point, so each edge is late by `[0, v / tick_hz)`
+(< 0.7 cm at 0.35 m/s, < 1 cm at 0.5 m/s, **< 2 cm at 1 m/s and 50 Hz**; < 1 cm at 1 m/s needs a 100 Hz tick). Measured in
+`spray_core_test` (`DebounceIsLedSoValveEdgesLandOnTheBoundaryAtProductionSpeeds`, every sample phase). Valve delays, nozzle
+offset, pose latency and the link/FCU path are not in this figure (not provable off-target, SP-003). **Safety OFF never goes
+through the debounce or the lead:** the FSM reads the safety verdict directly, so E-stop, disarm, watchdog, lease and ownership
+refusals close at once (tested with a 10-sample debounce).
 
 ## 6. KNOWN-OPEN DEFECT — projection continuity (spec 7.8)
 
@@ -142,13 +159,22 @@ the field missions from the backend (`/var/lib/dyx3/missions/*.dyx3path`) and ru
 **Mission / RPP ownership (review C1, fix plan A1, human decision 2026-10-08), second in the order after E-stop.** Autonomous spray
 may operate only while `MissionState` is RUNNING, `RppStatus` is fresh (`rpp_timeout_s`, 0.5 s, IDLE_ONLY, DERIVED: the stack's
 0.5 s freshness convention = 25 missed ticks at 50 Hz; re-validate from Jetson jitter), reports the same `mission_id`, and is in
-TRACKING, STOPPING (corner stop lays the last ~2 cm of the leg), PIVOTING (then the pivot gate below decides) or CREEPING
+TRACKING, STOPPING (corner stop lays the last ~2 cm of the leg while still rolling at or above `min_spray_speed_mps`, section 5), PIVOTING (then the pivot gate below decides) or CREEPING
 (DERIVED — NOT FROM V1 SPEC: endpoint creep is still on the leg; the geometry decides whether it is MARK). IDLE, LOADED,
 COMPLETE, ERROR and unknown values refuse. Reasons: `mission not running`, `rpp stale`, `rpp mission mismatch`,
 `rpp not marking`. Any refusal goes through the normal OFF path: OFF command at once (no debounce: the FSM reads the safety
 verdict directly) and the lease's `allow_on` drops. The tracking evidence (B5) is no longer a permanent latch: it is set only by
 TRACKING of the RUNNING mission and cleared by any non-RUNNING mission state, a mission id change, or a path load, so a resume
-needs fresh TRACKING. Manual (bench) spray is exempt, as before (armed + watchdog suffice).
+needs fresh TRACKING.
+
+**Manual (bench) spray (SP-001; DERIVED — NOT FROM V1 SPEC, the prototype let it override a mission).** `set_manual` checks, in
+order: `spray_enabled`, armed with a fresh vehicle state, the watchdog (heartbeat fresh and `off_authority_ready`), then mission
+ownership: while `MissionState` is LOADING, READY, RUNNING or PAUSED, or any unknown value, or before any `MissionState` has been
+received (fail closed), manual ON is refused (`SetSprayManual` has no code of its own for this: the node answers
+`REASON_DISABLED` and logs a warning). A manual ON that is active when the mission enters one of those states ends at once (the
+lease's `allow_on` drops on the message, the OFF goes out on the next tick). Manual stays available while IDLE, COMPLETED,
+ABORTED or ERROR, where it is exempt from the autonomous gates as before (armed + watchdog suffice) and still expires after
+`manual_override_timeout_s`.
 
 disarmed; not OFFBOARD (`require_offboard`); path not loaded; pose stale (`pose_timeout_s`); velocity stale
 (`velocity_timeout_s`); RTK gate (below); awaiting tracking (B5: no `RppStatus` TRACKING since the path loaded, so a rover parked

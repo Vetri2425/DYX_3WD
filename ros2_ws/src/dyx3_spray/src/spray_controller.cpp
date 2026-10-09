@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <stdexcept>
 
 namespace dyx3_spray {
 
@@ -15,7 +16,11 @@ constexpr double kEstopMaxAgeS = 0.5;
 constexpr double kInf = std::numeric_limits<double>::infinity();
 }  // namespace
 
-SprayController::SprayController(const ParamSet* params) : p_(params) {}
+SprayController::SprayController(const ParamSet* params, double tick_period_s)
+    : p_(params), tick_period_s_(tick_period_s) {
+  if (!std::isfinite(tick_period_s) || tick_period_s <= 0.0)
+    throw std::invalid_argument("tick_period_s must be finite and positive");
+}
 
 void SprayController::load_path(std::shared_ptr<const PathModel> model) {
   model_ = std::move(model);
@@ -23,6 +28,7 @@ void SprayController::load_path(std::shared_ptr<const PathModel> model) {
   // globally.
   tracking_seen_ = false;
   heading_entry_hold_ = true;
+  moved_on_mark_ = false;
   dstate_ = DecisionState{};
   xtrack_trip_s_.reset();
   last_decision_.reset();
@@ -44,7 +50,10 @@ void SprayController::note_rtk(const RtkSnapshot& r, double now_s) {
 void SprayController::note_rpp(uint8_t state, uint32_t mission_id, uint32_t run_index,
                                double heading_error_rad, double path_travel_m,
                                bool heading_evidence_valid, double now_s) {
-  if (mission_id != rpp_mission_id_ || run_index != rpp_run_index_) heading_entry_hold_ = true;
+  if (mission_id != rpp_mission_id_ || run_index != rpp_run_index_) {
+    heading_entry_hold_ = true;
+    moved_on_mark_ = false;
+  }
   rpp_known_ = true;
   rpp_state_ = state;
   rpp_mission_id_ = mission_id;
@@ -62,13 +71,31 @@ void SprayController::note_rpp(uint8_t state, uint32_t mission_id, uint32_t run_
   pivot_gate_.note_state(static_cast<RppState>(state) == RppState::Pivoting, now_s);
 }
 
-void SprayController::set_mission(bool running, uint32_t mission_id) {
+void SprayController::set_mission(MissionPhase phase, uint32_t mission_id) {
+  const bool running = phase == MissionPhase::Running;
+  mission_known_ = true;
+  mission_phase_ = phase;
+  if (manual_locked()) manual_active_ = false;  // the next tick drives the valve OFF
   if (!running || mission_id != mission_id_) {
     tracking_seen_ = false;
     heading_entry_hold_ = true;
+    moved_on_mark_ = false;
   }
   mission_running_ = running;
   mission_id_ = mission_id;
+}
+
+bool SprayController::manual_locked() const {
+  if (!mission_known_) return true;
+  switch (mission_phase_) {
+    case MissionPhase::Idle:
+    case MissionPhase::Completed:
+    case MissionPhase::Aborted:
+    case MissionPhase::Error:
+      return false;
+    default:
+      return true;  // LOADING, READY, RUNNING, PAUSED, unknown
+  }
 }
 
 GateResult SprayController::ownership(double now_s) const {
@@ -137,8 +164,8 @@ bool SprayController::safety_allows_on(double now_s) const {
   if (!(estop_known_ && !estop_asserted_ && (now_s - estop_recv_s_) <= kEstopMaxAgeS)) return false;
   if (!(vehicle_fresh(now_s) && veh_.armed)) return false;
   if (!watchdog_ok(nullptr, now_s)) return false;
-  if (manual_active_)
-    return true;  // bench: armed is sufficient, OFFBOARD is an auto-spray constraint
+  if (manual_active_)  // bench: armed is sufficient, OFFBOARD is an auto-spray constraint
+    return !manual_locked();
   if (!ownership(now_s).ok) return false;
   if (p_->flag(P::require_offboard) && !veh_.offboard) return false;
   return true;
@@ -151,7 +178,7 @@ std::pair<bool, std::string> SprayController::fsm_safety_ok(double now_s) const 
   if (!(vehicle_fresh(now_s) && veh_.armed)) return {false, "disarmed"};
   std::string why;
   if (!watchdog_ok(&why, now_s)) return {false, why};
-  if (manual_active_) return {true, ""};
+  if (manual_active_ && !manual_locked()) return {true, ""};
   if (last_decision_) return {last_decision_->safety_ok, last_decision_->safety_reason};
   return {false, "distance-aware safety not yet evaluated"};
 }
@@ -160,6 +187,9 @@ DecisionParams SprayController::decision_params() const {
   DecisionParams d;
   d.solenoid_open_delay_s = std::max(0.0, p_->num(P::solenoid_open_delay_s));
   d.solenoid_close_delay_s = std::max(0.0, p_->num(P::solenoid_close_delay_s));
+  // SP-002: the debounce holds a new desire for (samples - 1) ticks before the FSM sees it.
+  d.debounce_delay_s =
+      static_cast<double>(std::max(1, p_->integer(P::debounce_samples)) - 1) * tick_period_s_;
   d.on_overspray_margin_m = std::max(0.0, p_->num(P::on_overspray_margin_m));
   d.off_overspray_margin_m = std::max(0.0, p_->num(P::off_overspray_margin_m));
   d.max_xtrack_error_m = std::max(0.0, p_->num(P::max_xtrack_error_m));
@@ -217,9 +247,35 @@ ManualResult SprayController::set_manual(bool on, double now_s) {
     manual_active_ = false;
     return ManualResult::WatchdogNotReady;
   }
+  if (manual_locked()) {
+    manual_active_ = false;
+    return ManualResult::MissionActive;
+  }
   manual_active_ = true;
   manual_deadline_s_ = now_s + std::max(0.5, p_->num(P::manual_override_timeout_s));
   return ManualResult::Ok;
+}
+
+// SP-004: no paint while (nearly) stationary on a MARK leg. Below min_spray_speed_mps the raw desire
+// is OFF while RPP is STOPPING (corner/brake stop, settle), and while it is TRACKING once this MARK
+// stretch has been driven at or above that speed (a stall). Exempt: a TRACKING standing start (the
+// valve may open while the rover pulls away, as before, so a line start is not cut), the terminal
+// CREEP (the terminal shutoff ends it), and PIVOTING (its own gate, spray_off_during_pivot). 0 disables.
+// It shapes the desire before the debounce; safety OFF never depends on it.
+bool SprayController::low_speed_cut(bool geometry_desired, double speed) {
+  const double min_speed = std::max(0.0, p_->num(P::min_spray_speed_mps));
+  const RppState st = static_cast<RppState>(rpp_state_);
+  const bool tracking = rpp_known_ && st == RppState::Tracking;
+  if (!geometry_desired || !tracking) moved_on_mark_ = false;
+  if (!(min_speed > 0.0) || !geometry_desired) return false;
+  if (speed >= min_speed) {
+    if (tracking) moved_on_mark_ = true;
+    return false;
+  }
+  if (!rpp_known_) return false;  // the ownership gate refuses autonomous spray anyway
+  if (st == RppState::Stopping) return true;
+  if (tracking) return moved_on_mark_;
+  return false;
 }
 
 std::optional<SprayCommand> SprayController::drive_fsm(double now_s) {
@@ -230,7 +286,8 @@ std::optional<SprayCommand> SprayController::drive_fsm(double now_s) {
 
 std::optional<SprayCommand> SprayController::tick(double now_s) {
   // Manual override: hard expiry, and fail-safes outrank it.
-  if (manual_active_ && (now_s >= manual_deadline_s_ || !safety_allows_on(now_s)))
+  if (manual_active_ &&
+      (now_s >= manual_deadline_s_ || manual_locked() || !safety_allows_on(now_s)))
     manual_active_ = false;
 
   const bool pf = pose_fresh(now_s);
@@ -307,6 +364,7 @@ std::optional<SprayCommand> SprayController::tick(double now_s) {
         d.desired = false;
     }
   }
+  if (low_speed_cut(d.geometry_desired, speed) && !manual_active_) d.desired = false;
   if (d.projection)
     dstate_.prev_projection_s =
         d.projection->s;  // carry the station so the next search stays on this leg

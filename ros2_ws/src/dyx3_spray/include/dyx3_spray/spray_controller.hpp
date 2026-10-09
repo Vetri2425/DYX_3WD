@@ -47,7 +47,27 @@ struct ActuatorWire {
   int pwm_us{0};
 };
 
-enum class ManualResult : uint8_t { Ok = 0, Disabled = 1, Disarmed = 2, WatchdogNotReady = 3 };
+// MissionActive: a mission owns the valve (SP-001). The service has no reason code for it; the
+// node answers REASON_DISABLED.
+enum class ManualResult : uint8_t {
+  Ok = 0,
+  Disabled = 1,
+  Disarmed = 2,
+  WatchdogNotReady = 3,
+  MissionActive = 4
+};
+
+// MissionState.state values (dyx3_interfaces/MissionState.STATE_*; spray_node static_asserts them).
+enum class MissionPhase : uint8_t {
+  Idle = 0,
+  Loading = 1,
+  Ready = 2,
+  Running = 3,
+  Paused = 4,
+  Completed = 5,
+  Aborted = 6,
+  Error = 7
+};
 
 struct ControllerStatus {
   SprayState fsm_state{SprayState::OffUnconfirmed};
@@ -71,7 +91,10 @@ struct ControllerStatus {
 
 class SprayController {
 public:
-  explicit SprayController(const ParamSet* params);
+  // tick_period_s: the real control period (1 / tick_hz) the caller ticks at. It converts
+  // debounce_samples into the delay the boundary lead compensates; throws std::invalid_argument
+  // unless finite and > 0.
+  SprayController(const ParamSet* params, double tick_period_s);
 
   // ---- inputs (all stamps are caller-supplied monotonic seconds) ----
   void load_path(std::shared_ptr<const PathModel> model);  // nullptr clears
@@ -83,8 +106,11 @@ public:
   void note_estop(bool asserted, double now_s);
   void note_watchdog(bool alive, bool off_authority_ready, double now_s);
   // MissionState: any non-RUNNING state or a different mission id clears the tracking evidence.
-  void set_mission(bool running, uint32_t mission_id);
+  // LOADING, READY, RUNNING, PAUSED (and any unknown value) lock out manual spray and end an active
+  // manual ON at once (SP-001).
+  void set_mission(MissionPhase phase, uint32_t mission_id);
 
+  // Bench override. Order: disabled, disarmed/stale vehicle, watchdog, then mission ownership.
   ManualResult set_manual(bool on, double now_s);
 
   // ---- outputs ----
@@ -112,9 +138,13 @@ private:
   void update_flow(double speed, double dt);
   std::optional<SprayCommand> drive_fsm(double now_s);
   bool effective_desired() const { return manual_active_ ? true : desired_debounced_; }
+  // SP-001: manual spray only while no mission owns the valve. Fail closed before any MissionState.
+  bool manual_locked() const;
   DecisionParams decision_params() const;
+  bool low_speed_cut(bool geometry_desired, double speed);
 
   const ParamSet* p_;
+  double tick_period_s_;
   SpraySafetyStateMachine fsm_;
   std::unique_ptr<FlowModulator> flow_;
   bool prev_commanded_{false};
@@ -143,6 +173,8 @@ private:
   bool wd_ready_{false};
   double wd_recv_s_{0.0};
   bool mission_running_{false};
+  bool mission_known_{false};
+  MissionPhase mission_phase_{MissionPhase::Idle};
   uint32_t mission_id_{0};
   bool rpp_known_{false};
   uint8_t rpp_state_{0};
@@ -153,6 +185,9 @@ private:
   bool rpp_heading_evidence_valid_{false};
   double rpp_recv_s_{0.0};
   bool heading_entry_hold_{true};
+  // SP-004: the rover has driven this MARK stretch at >= min_spray_speed_mps while TRACKING, so a
+  // later drop below it is a stop or a stall, not a standing start.
+  bool moved_on_mark_{false};
 
   bool manual_active_{false};
   double manual_deadline_s_{0.0};

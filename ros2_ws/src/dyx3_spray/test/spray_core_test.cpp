@@ -1,7 +1,10 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <memory>
+#include <stdexcept>
+#include <vector>
 
 #include "dyx3_spray/spray_controller.hpp"
 #include "dyx3_spray/watchdog_core.hpp"
@@ -390,12 +393,17 @@ struct Rig {
   bool rpp_alive{true};
   bool mission_running{true};
   std::optional<RppState> rpp_override;  // publish this state instead of tracking/pivot
+  std::optional<MissionPhase> mission_phase;  // publish this instead of RUNNING/PAUSED
+  double period{0.02};                   // control tick period handed to the controller
 
-  explicit Rig(bool tracking0 = true) {
+  explicit Rig(bool tracking0 = true, double period_s = 0.02,
+               const std::vector<Item>& extra_params = {}) {
     tracking = tracking0;
+    period = period_s;
     params.init_many(
         {{"gps_recover_hold_s", 0.0, ""}});  // recovery hold is covered in the gate tests
-    c = std::make_unique<SprayController>(&params);
+    if (!extra_params.empty()) EXPECT_TRUE(params.init_many(extra_params).ok);
+    c = std::make_unique<SprayController>(&params, period);
     c->load_path(straight());
     world(0.0, true);
   }
@@ -415,7 +423,10 @@ struct Rig {
     r.h_acc_m = 0.02;
     r.corrections_fresh = true;
     c->note_rtk(r, t);
-    c->set_mission(mission_running, 1);
+    c->set_mission(mission_phase     ? *mission_phase
+                   : mission_running ? MissionPhase::Running
+                                     : MissionPhase::Paused,
+                   1);
     if (rpp_alive) {
       // not tracking: an RPP state that may paint but is not TRACKING ("awaiting tracking")
       const RppState st = rpp_override ? *rpp_override
@@ -440,7 +451,7 @@ struct Rig {
   }
 
   void step(double north, double speed = 0.35, bool estop = false, bool armed = true) {
-    t += 0.02;
+    t += period;
     world(north, armed, speed, estop);
     run_cmd(c->tick(t));
   }
@@ -489,17 +500,123 @@ TEST(Controller, OpensEarlyByTheLeadSpraysTheMarkAndClosesBeforeTheBoundary) {
     if (!s && prev) off_at = n;
     prev = s;
   }
-  // lead = 0.35*0.18 + 0.02 = 0.083 m before the MARK start at 2.0 (debounce 3 ticks and the ack
-  // tick cost ~4 cm more)
-  EXPECT_NEAR(on_at, 2.0 - 0.083, 0.06);
-  EXPECT_LT(on_at, 2.0);
-  // The MARK ends at 9.0 (vertex 8 is the last MARK vertex). off lead = max(0, 0.35*0.05 - 0) =
-  // 0.0175 m before it; the debounce (3 ticks = 2.1 cm at 0.35 m/s) then delays the CLOSE by 2.1
-  // cm. That latency is carried from the prototype and is part of the boundary budget (see the
-  // contract, section 5).
-  EXPECT_NEAR(off_at, 9.0 - 0.0175 + 0.021, 0.02);
-  EXPECT_GT(off_at, 9.0 - 0.0175);
+  // The command goes out where the valve still needs the solenoid delay to move: lead = 0.35*0.18 +
+  // 0.02 = 0.083 m before the MARK start at 2.0. The debounce (3 samples = 2 ticks = 0.014 m at
+  // 0.35 m/s) is led as well (SP-002), so only the sampling of the crossing (< one tick, 0.007 m)
+  // remains.
+  EXPECT_GE(on_at, 2.0 - 0.083 - 1e-9);
+  EXPECT_LT(on_at, 2.0 - 0.083 + 0.007 + 1e-9);
+  // The MARK ends at 9.0 (vertex 8 is the last MARK vertex): off lead = 0.35*0.05 - 0 = 0.0175 m.
+  EXPECT_GE(off_at, 9.0 - 0.0175 - 1e-9);
+  EXPECT_LT(off_at, 9.0 - 0.0175 + 0.007 + 1e-9);
   EXPECT_EQ(r.ons, 1);
+}
+
+// SP-002: constant-speed passes. The position of the tick that dispatches the command plus the
+// distance covered during the solenoid delay is where paint starts/stops. It must land on the
+// boundary (less the deliberate overspray margin) up to the sampling of the crossing, which is
+// always late by [0, one tick of travel). Every phase of the samples against the boundary is tried.
+namespace {
+struct Edges {
+  double paint_on_err{1e9};   // where paint starts minus (2.0 - on_overspray_margin_m)
+  double paint_off_err{1e9};  // where paint stops minus (9.0 + off_overspray_margin_m)
+  int ons{0};
+};
+
+Edges constant_speed_pass(double v, double period, double phase, int debounce_samples = 3) {
+  Rig r(true, period, {{"debounce_samples", static_cast<double>(debounce_samples), ""}});
+  const double open_delay = r.params.num(P::solenoid_open_delay_s);
+  const double close_delay = r.params.num(P::solenoid_close_delay_s);
+  const double on_margin = r.params.num(P::on_overspray_margin_m);
+  const double off_margin = r.params.num(P::off_overspray_margin_m);
+  Edges e;
+  bool on_seen = false, off_seen = false;
+  const double ds = v * period;
+  for (double n = phase; n < 9.9; n += ds) {
+    const int ons = r.ons, offs = r.offs;
+    r.step(n, v);
+    if (!on_seen && r.ons > ons) {
+      on_seen = true;
+      e.paint_on_err = (n + v * open_delay) - (2.0 - on_margin);
+    } else if (on_seen && !off_seen && r.offs > offs) {
+      off_seen = true;
+      e.paint_off_err = (n + v * close_delay) - (9.0 + off_margin);
+    }
+  }
+  e.ons = r.ons;
+  return e;
+}
+}  // namespace
+
+TEST(Controller, DebounceIsLedSoValveEdgesLandOnTheBoundaryAtProductionSpeeds) {
+  for (const double v : {0.35, 0.5, 1.0}) {
+    const double tick_travel = v * 0.02;
+    double worst_on = 0.0, worst_off = 0.0;
+    for (int k = 0; k < 8; ++k) {
+      const double phase = tick_travel * k / 8.0;
+      const Edges e = constant_speed_pass(v, 0.02, phase);
+      ASSERT_EQ(e.ons, 1) << v;
+      // never early, and late by less than one tick of travel (the sampling of the crossing)
+      EXPECT_GE(e.paint_on_err, -1e-9) << "v=" << v << " phase=" << phase;
+      EXPECT_LT(e.paint_on_err, tick_travel + 1e-9) << "v=" << v << " phase=" << phase;
+      EXPECT_GE(e.paint_off_err, -1e-9) << "v=" << v << " phase=" << phase;
+      EXPECT_LT(e.paint_off_err, tick_travel + 1e-9) << "v=" << v << " phase=" << phase;
+      worst_on = std::max(worst_on, e.paint_on_err);
+      worst_off = std::max(worst_off, e.paint_off_err);
+    }
+    if (v <= 0.5) {
+      EXPECT_LE(worst_on, 0.01) << v;
+      EXPECT_LE(worst_off, 0.01) << v;
+    }
+  }
+  // Without the compensation the debounce alone would put both edges 2 ticks (4 cm at 1 m/s) late:
+  // the term is load-bearing, not absorbed by the tolerance above.
+  const Edges e = constant_speed_pass(1.0, 0.02, 0.0);
+  EXPECT_LT(e.paint_on_err, 0.04 - 0.005);
+  EXPECT_LT(e.paint_off_err, 0.04 - 0.005);
+}
+
+TEST(Controller, DebounceLeadUsesTheRealTickPeriod) {
+  // At 100 Hz the same 3 samples are 20 ms, not 40 ms; and 1 m/s stays within 1 cm at every phase.
+  for (int k = 0; k < 8; ++k) {
+    const double phase = 0.01 * k / 8.0;
+    const Edges e = constant_speed_pass(1.0, 0.01, phase);
+    ASSERT_EQ(e.ons, 1);
+    EXPECT_GE(e.paint_on_err, -1e-9) << phase;
+    EXPECT_LE(e.paint_on_err, 0.01) << phase;
+    EXPECT_GE(e.paint_off_err, -1e-9) << phase;
+    EXPECT_LE(e.paint_off_err, 0.01) << phase;
+  }
+  // A longer debounce is led by its own length.
+  const Edges e = constant_speed_pass(0.5, 0.02, 0.0, /*debounce_samples=*/8);
+  EXPECT_GE(e.paint_on_err, -1e-9);
+  EXPECT_LT(e.paint_on_err, 0.01 + 1e-9);
+  EXPECT_GE(e.paint_off_err, -1e-9);
+  EXPECT_LT(e.paint_off_err, 0.01 + 1e-9);
+  ParamSet ps;
+  EXPECT_THROW(SprayController(&ps, 0.0), std::invalid_argument);
+  EXPECT_THROW(SprayController(&ps, NAN), std::invalid_argument);
+}
+
+TEST(Controller, SafetyOffBypassesTheDebounceAndTheLead) {
+  // Even with a long debounce, a safety refusal sends OFF in the very tick it is seen.
+  Rig r(true, 0.02, {{"debounce_samples", 10.0, ""}});
+  double n = 0.0;
+  for (; n < 5.0; n += 0.02) r.step(n, 1.0);
+  ASSERT_TRUE(r.c->status(r.t).spraying);
+  int offs = r.offs;
+  r.step(n += 0.02, 1.0, /*estop=*/true);
+  EXPECT_EQ(r.offs, offs + 1);
+  EXPECT_FALSE(r.c->status(r.t).spraying);
+  EXPECT_FALSE(r.c->lease(r.t).allow_on);
+
+  Rig d(true, 0.02, {{"debounce_samples", 10.0, ""}});
+  for (n = 0.0; n < 5.0; n += 0.02) d.step(n, 1.0);
+  ASSERT_TRUE(d.c->status(d.t).spraying);
+  offs = d.offs;
+  d.step(n += 0.02, 1.0, false, /*armed=*/false);
+  EXPECT_EQ(d.offs, offs + 1);
+  EXPECT_FALSE(d.c->status(d.t).spraying);
 }
 
 TEST(Controller, EmergencyStopForcesOffAtTheNextTickAndRevokesTheLease) {
@@ -518,7 +635,7 @@ TEST(Controller, EmergencyStopForcesOffAtTheNextTickAndRevokesTheLease) {
 
 TEST(Controller, MissingEstopStateIsTreatedAsAsserted) {
   ParamSet params;
-  SprayController c(&params);
+  SprayController c(&params, 0.02);
   c.load_path(straight());
   VehicleSnapshot v;
   v.armed = v.offboard = v.position_valid = v.attitude_valid = v.velocity_valid = true;
@@ -616,7 +733,7 @@ TEST(Controller, StaleCorrectionsCutValveAndRecoveryDoesNotBypassOtherGates) {
   // Restoring RPP evidence does not bypass mission ownership either.
   r.t += 0.02;
   r.world(n, true);
-  r.c->set_mission(false, 1);
+  r.c->set_mission(MissionPhase::Paused, 1);
   r.run_cmd(r.c->tick(r.t));
   EXPECT_FALSE(r.c->lease(r.t).allow_on);
   EXPECT_EQ(r.c->status(r.t).safety_reason, "mission not running");
@@ -646,6 +763,7 @@ TEST(Controller, NoSprayUntilTrackingIsSeenAndPivotingSuppressesIt) {
 
 TEST(Controller, ManualOverrideObeysFailSafesAndExpires) {
   Rig r;
+  r.mission_phase = MissionPhase::Idle;  // bench: no mission owns the valve
   r.step(0.5);
   r.step(0.5);
   EXPECT_EQ(r.c->set_manual(true, r.t), ManualResult::Ok);
@@ -658,6 +776,7 @@ TEST(Controller, ManualOverrideObeysFailSafesAndExpires) {
   EXPECT_FALSE(r.c->status(r.t).spraying);
 
   Rig d;
+  d.mission_phase = MissionPhase::Idle;
   d.step(0.5);
   EXPECT_EQ(d.c->set_manual(true, d.t), ManualResult::Ok);
   d.step(0.5, 0.35, false, /*armed=*/false);  // fail-safes outrank the override
@@ -760,4 +879,172 @@ TEST(Controller, TrackingOfAnotherMissionIsNotEvidence) {
   for (; n < 4.0; n += 0.007) r.step(n);  // RPP of mission 1 never TRACKING
   EXPECT_FALSE(r.c->status(r.t).spraying);
   EXPECT_EQ(r.c->status(r.t).safety_reason, "awaiting tracking");
+}
+
+// SP-004: min_spray_speed_mps. No paint blob while (nearly) stationary on a MARK leg, but no new gap
+// at a line start or in the terminal creep.
+namespace {
+// 0..5 m north: TRANSIT 0..2, MARK 2..5; the path ends on MARK (synthetic terminal boundary at 5.0).
+std::shared_ptr<const PathModel> ends_on_mark() {
+  std::vector<double> n, e;
+  std::vector<bool> f;
+  for (int i = 0; i <= 5; ++i) {
+    n.push_back(i);
+    e.push_back(0.0);
+    f.push_back(i >= 2);
+  }
+  auto m = std::make_shared<PathModel>();
+  EXPECT_TRUE(build_path_model(n, e, f, m.get()));
+  return m;
+}
+}  // namespace
+
+TEST(Controller, StationaryOnMarkAfterDrivingItClosesTheValve) {
+  Rig r;
+  double n = 0.0;
+  for (; n < 4.0; n += 0.007) r.step(n);
+  ASSERT_TRUE(r.c->status(r.t).spraying);
+  const int offs = r.offs;
+  for (int i = 0; i < 5; ++i) r.step(n, 0.0);  // still TRACKING, but stalled on the mark
+  EXPECT_FALSE(r.c->status(r.t).spraying);
+  EXPECT_EQ(r.offs, offs + 1);
+  EXPECT_TRUE(r.c->status(r.t).geometry_desired);  // a process cut, not a geometry or safety one
+  EXPECT_TRUE(r.c->status(r.t).safety_ok);
+  for (int i = 0; i < 5; ++i) r.step(n += 0.007);  // moving again: paints again
+  EXPECT_TRUE(r.c->status(r.t).spraying);
+}
+
+TEST(Controller, CornerStoppingClosesTheValveBeforeTheRoverStops) {
+  for (const bool gate_on : {true, false}) {
+    Rig r(true, 0.02, {{"min_spray_speed_mps", gate_on ? 0.05 : 0.0, ""}});
+    double n = 0.0;
+    for (; n < 4.0; n += 0.007) r.step(n);
+    ASSERT_TRUE(r.c->status(r.t).spraying);
+    r.rpp_override = RppState::Stopping;  // corner stop: brake at 0.5 m/s^2 to standstill
+    double v = 0.35, v_at_off = -1.0;
+    const int offs = r.offs;
+    while (v > 0.0) {
+      v = std::max(0.0, v - 0.5 * 0.02);
+      n += v * 0.02;
+      r.step(n, v);
+      if (v_at_off < 0.0 && r.offs > offs) v_at_off = v;
+    }
+    for (int i = 0; i < 10; ++i) r.step(n, 0.0);  // standing at the corner, not yet pivoting
+    if (gate_on) {
+      ASSERT_GT(v_at_off, 0.0);  // the OFF went out while the rover was still rolling
+      EXPECT_LT(v_at_off, 0.05);
+      EXPECT_FALSE(r.c->status(r.t).spraying);
+    } else {
+      EXPECT_TRUE(r.c->status(r.t).spraying);  // the blob the gate removes
+    }
+  }
+}
+
+TEST(Controller, TerminalCreepBelowMinSpeedHasNoGap) {
+  Rig r;
+  r.c->load_path(ends_on_mark());
+  double n = 0.0;
+  for (; n < 4.6; n += 0.007) r.step(n);
+  ASSERT_TRUE(r.c->status(r.t).spraying);
+  r.rpp_override = RppState::Creeping;  // endpoint precise stop at 0.03 m/s (< min 0.05)
+  const int offs = r.offs;
+  double off_at = -1.0;
+  LeadEvent off_event = LeadEvent::None;
+  for (; n < 5.0; n += 0.03 * 0.02) {
+    r.step(n, 0.03);
+    if (off_at < 0.0 && r.offs > offs) {
+      off_at = n;
+      off_event = r.c->status(r.t).event;
+    }
+  }
+  // The only OFF is the terminal shutoff within terminal_off_epsilon_m (0.05) of the final station.
+  ASSERT_GT(off_at, 0.0);
+  EXPECT_GE(off_at, 5.0 - 0.05 - 1e-9);
+  EXPECT_LT(off_at, 5.0 - 0.05 + 0.002);
+  EXPECT_EQ(off_event, LeadEvent::TerminalOff);
+}
+
+TEST(Controller, StandingStartOnAMarkLegStillOpensAtOnce) {
+  // After a corner the next leg starts from standstill on MARK: the valve opens as before (the
+  // opening delay elapses while the rover pulls away) instead of waiting for min_spray_speed_mps.
+  Rig r;
+  for (int i = 0; i < 5; ++i) r.step(3.0, 0.0);
+  EXPECT_TRUE(r.c->status(r.t).spraying);
+  // Same after a corner stop: STOPPING at standstill is OFF, the TRACKING pull-away opens at once.
+  r.rpp_override = RppState::Stopping;
+  for (int i = 0; i < 5; ++i) r.step(3.0, 0.0);
+  ASSERT_FALSE(r.c->status(r.t).spraying);
+  r.rpp_override.reset();
+  double v = 0.0, n = 3.0;
+  for (int i = 0; i < 4; ++i) {  // accelerate at 0.5 m/s^2: 0.01 .. 0.04 m/s, all below 0.05
+    v += 0.5 * 0.02;
+    n += v * 0.02;
+    r.step(n, v);
+  }
+  EXPECT_LT(v, 0.05);
+  EXPECT_TRUE(r.c->status(r.t).spraying);
+}
+
+// SP-001: the bench override cannot overrule the boundary geometry of a mission.
+TEST(Controller, ManualOnIsRefusedWhileAMissionOwnsTheValve) {
+  for (const MissionPhase ph : {MissionPhase::Loading, MissionPhase::Ready, MissionPhase::Running,
+                                MissionPhase::Paused, static_cast<MissionPhase>(42)}) {
+    Rig r;
+    r.mission_phase = ph;
+    r.step(0.5);  // TRANSIT: the geometry wants OFF
+    r.step(0.5);
+    EXPECT_EQ(r.c->set_manual(true, r.t), ManualResult::MissionActive)
+        << static_cast<int>(ph);
+    for (int i = 0; i < 5; ++i) r.step(0.5);
+    EXPECT_FALSE(r.c->status(r.t).manual_active) << static_cast<int>(ph);
+    EXPECT_FALSE(r.c->status(r.t).spraying) << static_cast<int>(ph);
+    EXPECT_EQ(r.ons, 0) << static_cast<int>(ph);
+  }
+  // Before any MissionState: fail closed.
+  ParamSet params;
+  SprayController c(&params, 0.02);
+  VehicleSnapshot v;
+  v.armed = v.offboard = v.position_valid = v.attitude_valid = v.velocity_valid = true;
+  c.note_vehicle(v, 1.0);
+  c.note_watchdog(true, true, 1.0);
+  EXPECT_EQ(c.set_manual(true, 1.0), ManualResult::MissionActive);
+  // The fail-safes are still checked first.
+  Rig d;
+  d.step(0.5);
+  d.step(0.5, 0.35, false, /*armed=*/false);
+  EXPECT_EQ(d.c->set_manual(true, d.t), ManualResult::Disarmed);
+}
+
+TEST(Controller, ActiveManualOnEndsWhenAMissionStarts) {
+  for (const MissionPhase ph : {MissionPhase::Loading, MissionPhase::Running}) {
+    Rig r;
+    r.mission_phase = MissionPhase::Idle;
+    r.step(0.5);
+    r.step(0.5);
+    ASSERT_EQ(r.c->set_manual(true, r.t), ManualResult::Ok);
+    for (int i = 0; i < 5; ++i) r.step(0.5);
+    ASSERT_TRUE(r.c->status(r.t).spraying);
+    ASSERT_TRUE(r.c->lease(r.t).allow_on);
+    const int offs = r.offs;
+    r.c->set_mission(ph, 1);  // MissionState arrives between ticks
+    EXPECT_FALSE(r.c->status(r.t).manual_active);
+    EXPECT_FALSE(r.c->lease(r.t).allow_on);  // the lease drops before the next tick
+    r.mission_phase = ph;
+    r.step(0.5);  // the next tick sends OFF at once (TRANSIT geometry, no debounce wait)
+    EXPECT_EQ(r.offs, offs + 1) << static_cast<int>(ph);
+    EXPECT_FALSE(r.c->status(r.t).spraying) << static_cast<int>(ph);
+  }
+}
+
+TEST(Controller, ManualStillWorksWhenNoMissionIsActive) {
+  for (const MissionPhase ph : {MissionPhase::Idle, MissionPhase::Completed, MissionPhase::Aborted,
+                                MissionPhase::Error}) {
+    Rig r;
+    r.mission_phase = ph;
+    r.step(0.5);
+    r.step(0.5);
+    EXPECT_EQ(r.c->set_manual(true, r.t), ManualResult::Ok) << static_cast<int>(ph);
+    for (int i = 0; i < 5; ++i) r.step(0.5);
+    EXPECT_TRUE(r.c->status(r.t).spraying) << static_cast<int>(ph);
+  }
 }
