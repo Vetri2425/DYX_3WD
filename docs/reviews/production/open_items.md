@@ -39,7 +39,7 @@ Review baseline: DYX_3WD `master` `252778e` (firmware `8279fa4be3`).
 | 1 | `dyx3_rpp` | 2026-10-09 | 2026-10-09 | 0 / 1 / 4 / 3 | open |
 | 2 | `dyx3_motion_guard` | 2026-10-09 | 2026-10-09 | 0 / 0 / 3 / 4 | open |
 | 3 | `dyx3_px4_link` | — | — | — | prompt issued |
-| 4 | `dyx3_interfaces` | — | — | — | |
+| 4 | `dyx3_interfaces` (+ px4_msgs pin) | — | — | — | prompt issued |
 | 5 | `dyx3_mission` | — | — | — | |
 | 6 | `dyx3_gnss_rtk` | — | — | — | |
 | 7 | `dyx3_spray` | — | — | — | |
@@ -52,6 +52,34 @@ Review baseline: DYX_3WD `master` `252778e` (firmware `8279fa4be3`).
 | 14 | tablet app (`Three_Wheel_v2` `App-Polish`) | — | — | — | |
 | 15 | PX4 firmware rover path (`dyx-3wd-production`) | — | — | — | |
 | 16 | `dyx3_rpp_legacy` | not reviewed: reference only, deleted at GATE 7 | | | |
+
+---
+
+## 0. Pending since the cloud phases (owner-deferred, 2026-10-08)
+
+The owner deferred these until `claude/cloud-phases` was finished and merged. That is now done (master `ad58e72`
+and later). Status was checked against the repo and firmware on 2026-10-09. They are tracked here because
+several are the root causes the part reviews keep hitting.
+
+| ID | Item | Status | Links |
+|---|---|---|---|
+| PC-1a | Verdict on the 7 prototype tests that failed in the cloud run (`test_terminal_approach_run_remaining`, `test_segment_endpoint_precise_stop`, …): real defects or a version mismatch? | open | `docs/contracts/rpp_legacy_evidence.md` |
+| PC-1b | Review the DERIVED edits the cloud session made inside `dyx3_rpp_legacy` (signed reverse, as-flown pivot thresholds 40°/2°, closed-loop rate mode). The oracle is meant to be verbatim | open | GATE 4 / GATE 7 |
+| PC-1c | LOCAL ACTION: extract the bag fixtures on the Mac (legacy decode, geometry bag replay: `geometry_bag_replay_test` currently exits 77 = SKIPPED). This closes **GATE 3 on the field corpus** | open | HANDOFF P4, P12 |
+| PC-2 | **Timing proposal**, agreed 2026-10-08 but never written or built:<br>- RPP input `/fmu/out/vehicle_odometry` at 100 Hz, `local_position` only for resets and the reference;<br>- control tick 100 Hz, triggered by odometry arrival plus a watchdog;<br>- rpp + motion_guard + px4_link in **one component container, intra-process**;<br>- setpoints + OffboardControlMode at 100 Hz, BEST_EFFORT KEEP_LAST(1); `vehicle_command` RELIABLE;<br>- path once per mission, RELIABLE + TRANSIENT_LOCAL; status topics at 100 Hz to the bag;<br>- SCHED_FIFO + pinned CPU + mlockall.<br>The code today: 50 Hz free-running timers, separate processes, reliable depth-1 setpoints | **open: root of X-003, RPP-008, MG-002, X-006** | `docs/architecture/proposals/` (to write) |
+| PC-2b | Firmware `dds_topics.yaml`:<br>- `estimator_status_flags` 5 → 50 Hz;<br>- add `estimator_aid_src_gnss_yaw` (test ratios for the guard);<br>- `vehicle_odometry` / `vehicle_local_position` at 100 Hz;<br>- **add `vehicle_angular_velocity`** (RPP-009).<br>At `8279fa4be3` all are unchanged; angular velocity is commented out at line 56 | **open: owner decision (V1 firmware frozen)** | RPP-009, X-007 |
+| PC-2c | `COM_OF_LOSS_T` 0.5 s (offboard-loss timeout). **Not in the parameter baseline** (PX4 default applies) | open | X-008, upstream #27514 |
+| PC-3 | Prod cleanup: remove the unused prototype A/B arms from `dyx3_rpp` (parameters + code), mark them "NOT PORTED — evidence" in `docs/tuning/parameter_registry.md`, and leave the oracle alone.<br>- DROP: `use_imu_extrapolation`, `segment_corner_lookahead_extend`, `stop_latch_enabled`, `ekf_reset_compensation` (replaced by `xy_reset_counter`, X-002), `progress_publish_enabled`. All 5 are still in `rpp_param_table.inc`.<br>- **Owner to decide:** `point_hold_enabled`, `point_precise_stop_enabled`, `point_handshake_enabled`, `endpoint_approach_run_remaining` (point/dot marking? long straights?) | open | `docs/migration/ab_arm_audit.md`; RPP-003/004 shrink if extrapolation is dropped |
+| PC-4 | RTK transport. Superseded by the owner's decision of 2026-10-09: **no automatic failover**. USB_DIRECT is done (task 1). Still to build and prove: LoRa + USB, LoRa + DDS | partly done | `docs/plans/2026-10-08_production_rtk_plan.md` |
+| PC-5 | **FCU parameter baseline**, checked at the bench and not inherited from the prototype:<br>- `EKF2_GPS_P_NOISE` 0.015 (**baseline still 0.05**, flagged unsafe);<br>- `EKF2_GPS_V_NOISE` 0.05 (baseline 0.2);<br>- `RO_YAW_RATE_TH` 0.5 (baseline 0.4);<br>- re-measure `EKF2_IMU_POS_*`, the antenna positions and `GPS_YAW_OFFSET`;<br>- `RBCLW_QPPS_MAX`, `RO_MAX_THR_SPEED`;<br>- one decel value shared by all stop logic; decide whether zero-speed stops bypass `RO_DECEL_LIM` (0.3 m/s²);<br>- never send heading-error feedback as yaw rate (κ·v feed-forward only) | **open: before the 4-point Mission test** | `config/px4/3wd_6x_carry_from_proto.params` |
+| PC-6 | Prebuilt release artifacts. The proposal was accepted. Still undecided before any customer delivery: minisign signing, branch protection + 2FA (conflicts with direct-to-master) | partly done | `docs/architecture/proposals/2026-10-08_prebuilt-release-artifacts.md` |
+| PC-7a | Health check: PX4 `UXRCE_DDS_DOM_ID` must equal `ROS_DOMAIN_ID` (42). Nothing enforces it | open | installer / `dyx3-health` |
+| PC-7b | Verify the `ROS_LOCALHOST_ONLY` discovery between the nodes and the XRCE agent (`dyx3-platform` does not read `ros.env`) | open | |
+| PC-7c | One installer test is not self-contained ("dry-run mentions useradd") | open | `installer/tests` |
+| PC-8 | The prototype bag manifests pair `as_run_config.rpp_params` names with the wrong values. The recorder must write correct name/value pairs | open: check in the recorder review | `dyx3_recorder` |
+| PC-9 | `installer/pins/firmware.pin` still pins `27a7ac9284`, but the rover runs `8279fa4be3`. `msg/`, `srv/` and `dds_topics.yaml` are identical between the two, so px4_msgs on the rover is correct. Bump the pin to `8279fa4be3` for traceability; a px4_msgs rebuild follows at the next upgrade | open (hygiene) | |
+
+Done: tcpdump in the installer (PC-7); mavlink-router template server mode; WENC timer fix in `8279fa4be3`.
 
 ---
 
