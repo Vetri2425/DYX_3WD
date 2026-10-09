@@ -117,7 +117,12 @@ _artifact_extract() {
 }
 
 # install_prebuilt <stack-sha>: fetch, verify and extract the release (and px4_msgs when this machine
-# lacks it). Returns 1 when no valid artifact exists; leaves nothing half-extracted behind.
+# lacks it). Leaves nothing half-extracted behind. Returns
+#   0  installed (or already built)
+#   1  no usable artifact: not published, not in DYX3_ARTIFACT_DIR, built for another pin/OS, or source mode.
+#      `auto` may build on this machine instead.
+#   2  an artifact IS there but is invalid: digest mismatch, a file SHA256SUMS does not list, an unsafe or
+#      broken archive. Never a reason to fall back: tampered must not look like missing (INS-012).
 install_prebuilt() {
   local sha="$1" rel="${DYX3_RELEASES}/$1"
   [ "${DYX3_ARTIFACTS}" = "source" ] && return 1
@@ -135,22 +140,25 @@ install_prebuilt() {
 
   local dir="${DYX3_VAR_LIB}/state/artifacts-${sha}"
   rm -rf "${dir}" && mkdir -p "${dir}" || return 1
-  local files=(SHA256SUMS artifacts.env "${rel_f}") f ok=1
+  local files=(SHA256SUMS artifacts.env "${rel_f}") f
   [ "${need_msgs}" -eq 1 ] && files+=("${msgs_f}")
   for f in "${files[@]}"; do
     _artifact_get "${sha}" "${dir}" "${f}" || {
-      ok=0
-      break
+      rm -rf "${dir}"
+      return 1
     }
   done
-  if [ "${ok}" -eq 1 ]; then
-    for f in "${files[@]:1}"; do _artifact_verify "${dir}" "${f}" || ok=0; done
-  fi
-  [ "${ok}" -eq 1 ] && { _artifact_compatible "${dir}" "${sha}" || ok=0; }
-  if [ "${ok}" -ne 1 ]; then
+  for f in "${files[@]:1}"; do
+    _artifact_verify "${dir}" "${f}" || {
+      rm -rf "${dir}"
+      warn "artifact ${f} for ${sha:0:10} is present but does not match SHA256SUMS"
+      return 2
+    }
+  done
+  _artifact_compatible "${dir}" "${sha}" || {
     rm -rf "${dir}"
     return 1
-  fi
+  }
 
   log "installing prebuilt $(artifact_tag "${sha}") ($(_artifact_env "${dir}" ARTIFACT_CI_RUN))"
   if [ "${need_msgs}" -eq 1 ]; then
@@ -158,14 +166,14 @@ install_prebuilt() {
     _artifact_extract "${dir}/${msgs_f}" "opt/dyx3/px4_msgs/${FIRMWARE_SHA}" && [ -f "${pm}/.complete" ] || {
       rm -rf "${pm}" "${dir}"
       warn "px4_msgs artifact did not install"
-      return 1
+      return 2
     }
   fi
   rm -rf "${rel}"
   _artifact_extract "${dir}/${rel_f}" "opt/dyx3/releases/${sha}" && [ -d "${rel}" ] || {
     rm -rf "${rel}" "${dir}"
     warn "release artifact did not install"
-    return 1
+    return 2
   }
   rm -f "${rel}/.complete" "${rel}/.verified" "${rel}/.failed"
   cp "${dir}/artifacts.env" "${rel}/artifacts.env"

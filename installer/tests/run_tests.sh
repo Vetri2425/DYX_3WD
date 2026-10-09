@@ -830,6 +830,13 @@ F
   check "idle: a stale socket file with dyx3-ros stopped is idle" '[ -S "${DYX3_GATEWAY_SOCK}" ] && [ "$(idle_rc)" = 0 ]'
   rm -f "${DYX3_GATEWAY_SOCK}"
 
+  # ---- INS-012: an invalid artifact stops the upgrade in auto mode too (never a silent source build)
+  (install_prebuilt() { return 2; }; upgrade_to "${D}") >"${T}/pb_invalid" 2>&1
+  rc=$?
+  check "an INVALID prebuilt artifact stops an auto-mode upgrade before any build or switch" '[ "${rc}" -ne 0 ] && grep -q "present but INVALID" "${T}/pb_invalid" && ! grep -q "building ${D:0:10} on this machine" "${T}/pb_invalid" && [ "$(basename "$(readlink -f "${DYX3_CURRENT}")")" = "${B}" ]'
+  (install_prebuilt() { return 1; }; DYX3_ARTIFACTS=prebuilt upgrade_to "${D}") >"${T}/pb_none" 2>&1
+  check "a missing artifact stops a prebuilt-mode upgrade" 'grep -q "no prebuilt artifacts for" "${T}/pb_none"'
+
   # ---- INS-006: a fault already present before the switch (agent down on B too) does not fail the upgrade
   (FAKE_NO_AGENT="${T}/no_agent" upgrade_to "${F}") >"${T}/bl_up" 2>&1
   rc=$?
@@ -986,7 +993,7 @@ prebuilt() {
   printf 'x' >>"${T}/art_bad/release-${sha}.tar.zst"
   (DYX3_ARTIFACT_DIR="${T}/art_bad" install_prebuilt "${sha}") >"${T}/pb_bad" 2>&1
   rc=$?
-  check "prebuilt: a digest mismatch is refused and extracts nothing" '[ "${rc}" -ne 0 ] && grep -q "sha256 mismatch" "${T}/pb_bad" && [ ! -e "${rel}" ] && [ ! -e "${pm}" ]'
+  check "prebuilt: a digest mismatch is refused as INVALID (2) and extracts nothing" '[ "${rc}" -eq 2 ] && grep -q "sha256 mismatch" "${T}/pb_bad" && [ ! -e "${rel}" ] && [ ! -e "${pm}" ]'
 
   # artifact for another firmware pin: refused
   cp -r "${art}" "${T}/art_fw"
@@ -994,7 +1001,7 @@ prebuilt() {
   (cd "${T}/art_fw" && sha256sum artifacts.env "release-${sha}.tar.zst" "px4_msgs-${FIRMWARE_SHA}.tar.zst" >SHA256SUMS)
   (DYX3_ARTIFACT_DIR="${T}/art_fw" install_prebuilt "${sha}") >"${T}/pb_fw" 2>&1
   rc=$?
-  check "prebuilt: an artifact for another firmware pin is refused" '[ "${rc}" -ne 0 ] && grep -q "firmware pin" "${T}/pb_fw" && [ ! -e "${rel}" ]'
+  check "prebuilt: an artifact for another firmware pin is unusable (1), not invalid" '[ "${rc}" -eq 1 ] && grep -q "firmware pin" "${T}/pb_fw" && [ ! -e "${rel}" ]'
 
   # an archive member outside its prefix: refused
   mkdir -p "${T}/evil/etc" && : >"${T}/evil/etc/passwd-dyx3-test"
@@ -1003,13 +1010,13 @@ prebuilt() {
   (cd "${T}/art_evil" && sha256sum artifacts.env "release-${sha}.tar.zst" "px4_msgs-${FIRMWARE_SHA}.tar.zst" >SHA256SUMS)
   (DYX3_ARTIFACT_DIR="${T}/art_evil" install_prebuilt "${sha}") >"${T}/pb_evil" 2>&1
   rc=$?
-  check "prebuilt: an archive member outside its prefix is refused" '[ "${rc}" -ne 0 ] && grep -q "outside" "${T}/pb_evil" && [ ! -e "${DYX3_ROOT}/etc/passwd-dyx3-test" ]'
+  check "prebuilt: an archive member outside its prefix is refused as INVALID (2)" '[ "${rc}" -eq 2 ] && grep -q "outside" "${T}/pb_evil" && [ ! -e "${DYX3_ROOT}/etc/passwd-dyx3-test" ]'
 
   # missing artifacts: auto falls back (rc 1), nothing left behind
   mkdir -p "${T}/art_empty"
   (DYX3_ARTIFACT_DIR="${T}/art_empty" install_prebuilt "${sha}") >/dev/null 2>&1
   rc=$?
-  check "prebuilt: missing artifacts return 1 (caller builds) and leave nothing" '[ "${rc}" -ne 0 ] && [ ! -e "${rel}" ] && [ -z "$(ls -A "${DYX3_VAR_LIB}/state")" ]'
+  check "prebuilt: missing artifacts return 1 (caller builds) and leave nothing" '[ "${rc}" -eq 1 ] && [ ! -e "${rel}" ] && [ -z "$(ls -A "${DYX3_VAR_LIB}/state")" ]'
 
   # the good set (offline directory): release + px4_msgs installed, marked prebuilt, provenance kept
   (DYX3_ARTIFACT_DIR="${art}" install_prebuilt "${sha}") >"${T}/pb_ok" 2>&1

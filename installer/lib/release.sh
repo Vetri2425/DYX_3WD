@@ -322,10 +322,16 @@ upgrade_to() {
   fi
 
   # Prebuilt first (proposal 2026-10-08): the same build, done once by green CI, digest-verified.
-  if ! install_prebuilt "${sha}"; then
-    [ "${DYX3_ARTIFACTS}" = "prebuilt" ] && die "no valid prebuilt artifacts for ${sha:0:10} (DYX3_ARTIFACTS=prebuilt)"
-    log "building ${sha:0:10} on this machine (DYX3_ARTIFACTS=${DYX3_ARTIFACTS})"
-  fi
+  local pb=0
+  install_prebuilt "${sha}" || pb=$?
+  case "${pb}" in
+    0) ;;
+    1)
+      [ "${DYX3_ARTIFACTS}" = "prebuilt" ] && die "no prebuilt artifacts for ${sha:0:10} (DYX3_ARTIFACTS=prebuilt)"
+      log "building ${sha:0:10} on this machine (DYX3_ARTIFACTS=${DYX3_ARTIFACTS})"
+      ;;
+    *) die "prebuilt artifacts for ${sha:0:10} are present but INVALID (see above); refusing to install or to build instead. Check the release assets or DYX3_ARTIFACT_DIR" ;;
+  esac
   build_px4_msgs || die "px4_msgs build failed"
   build_release "${sha}" || die "release build failed"
 
