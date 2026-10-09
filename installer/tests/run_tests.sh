@@ -1040,6 +1040,11 @@ prebuilt() {
   : >"${stage}/opt/dyx3/px4_msgs/${FIRMWARE_SHA}/install/setup.bash"
   : >"${stage}/opt/dyx3/px4_msgs/${FIRMWARE_SHA}/.complete"
   echo abc >"${stage}/opt/dyx3/px4_msgs/${FIRMWARE_SHA}/px4_msgs.sha256"
+  # A real release carries the backend venv and its interpreter links: these must stay allowed.
+  mkdir -p "${stage}/opt/dyx3/releases/${sha}/venv/bin" "${stage}/opt/dyx3/releases/${sha}/venv/lib"
+  ln -s /usr/bin/python3 "${stage}/opt/dyx3/releases/${sha}/venv/bin/python3"
+  ln -s python3 "${stage}/opt/dyx3/releases/${sha}/venv/bin/python"
+  ln -s lib "${stage}/opt/dyx3/releases/${sha}/venv/lib64"
   tar -C "${stage}" --zstd -cf "${art}/release-${sha}.tar.zst" "opt/dyx3/releases/${sha}"
   tar -C "${stage}" --zstd -cf "${art}/px4_msgs-${FIRMWARE_SHA}.tar.zst" "opt/dyx3/px4_msgs/${FIRMWARE_SHA}"
   printf 'ARTIFACT_STACK_SHA=%s\nARTIFACT_FIRMWARE_SHA=%s\nARTIFACT_ROS_DISTRO=humble\nARTIFACT_CI_RUN=https://ci/run/1\n' \
@@ -1076,6 +1081,36 @@ prebuilt() {
   rc=$?
   check "prebuilt: an archive member outside its prefix is refused as INVALID (2)" '[ "${rc}" -eq 2 ] && grep -q "outside" "${T}/pb_evil" && [ ! -e "${DYX3_ROOT}/etc/passwd-dyx3-test" ]'
 
+  # INS-020: a ".." member inside the prefix, and a symlink that escapes the release, are refused
+  mkdir -p "${T}/art_dd"
+  cp "${art}/artifacts.env" "${art}/px4_msgs-${FIRMWARE_SHA}.tar.zst" "${T}/art_dd/"
+  python3 - "${T}/dd.tar" "opt/dyx3/releases/${sha}" <<'PY'
+import io
+import sys
+import tarfile
+
+with tarfile.open(sys.argv[1], "w") as tf:
+    for name in (sys.argv[2] + "/ros2_ws/install/setup.bash", sys.argv[2] + "/../../../../../tmp/dyx3-dotdot-test"):
+        info = tarfile.TarInfo(name)
+        info.size = 0
+        tf.addfile(info, io.BytesIO(b""))
+PY
+  tar --zstd -cf "${T}/art_dd/release-${sha}.tar.zst" "@${T}/dd.tar"
+  (cd "${T}/art_dd" && sha256sum artifacts.env "release-${sha}.tar.zst" "px4_msgs-${FIRMWARE_SHA}.tar.zst" >SHA256SUMS)
+  (DYX3_ARTIFACT_DIR="${T}/art_dd" install_prebuilt "${sha}") >"${T}/pb_dd" 2>&1
+  rc=$?
+  check "prebuilt: a member with a '..' component is refused as INVALID" '[ "${rc}" -eq 2 ] && grep -q "component" "${T}/pb_dd" && [ ! -e "${rel}" ] && [ ! -e "${DYX3_RELEASES}/.incoming-${sha}" ]'
+  local esc="${T}/esc"
+  mkdir -p "${esc}/opt/dyx3/releases/${sha}/ros2_ws/install" "${T}/art_esc"
+  : >"${esc}/opt/dyx3/releases/${sha}/ros2_ws/install/setup.bash"
+  ln -s ../../../../../../etc "${esc}/opt/dyx3/releases/${sha}/ros2_ws/escape"
+  cp "${art}/artifacts.env" "${art}/px4_msgs-${FIRMWARE_SHA}.tar.zst" "${T}/art_esc/"
+  tar -C "${esc}" --zstd -cf "${T}/art_esc/release-${sha}.tar.zst" "opt/dyx3/releases/${sha}"
+  (cd "${T}/art_esc" && sha256sum artifacts.env "release-${sha}.tar.zst" "px4_msgs-${FIRMWARE_SHA}.tar.zst" >SHA256SUMS)
+  (DYX3_ARTIFACT_DIR="${T}/art_esc" install_prebuilt "${sha}") >"${T}/pb_esc" 2>&1
+  rc=$?
+  check "prebuilt: a symlink escaping the release is refused as INVALID" '[ "${rc}" -eq 2 ] && grep -q "escapes the release" "${T}/pb_esc" && [ ! -e "${rel}" ] && [ ! -e "${DYX3_RELEASES}/.incoming-${sha}" ]'
+
   # missing artifacts: auto falls back (rc 1), nothing left behind
   mkdir -p "${T}/art_empty"
   (DYX3_ARTIFACT_DIR="${T}/art_empty" install_prebuilt "${sha}") >/dev/null 2>&1
@@ -1100,6 +1135,7 @@ prebuilt() {
   rc=$?
   check "prebuilt: a valid offline artifact set installs" '[ "${rc}" -eq 0 ] && [ -f "${rel}/ros2_ws/install/setup.bash" ] && [ -f "${pm}/.complete" ]'
   check "prebuilt: px4_msgs is renamed into place, without a leftover .incoming or stale files" '[ ! -e "${pm}.incoming" ] && [ ! -e "${pm}/stale-from-an-interrupted-run" ] && [ -f "${pm}/install/setup.bash" ]'
+  check "prebuilt: the venv interpreter links are kept" '[ "$(readlink "${rel}/venv/bin/python3")" = /usr/bin/python3 ] && [ -L "${rel}/venv/lib64" ] && [ ! -e "${DYX3_RELEASES}/.incoming-${sha}" ]'
   check "prebuilt: release marked prebuilt, not complete, provenance kept" '[ -f "${rel}/.prebuilt" ] && [ ! -f "${rel}/.complete" ] && grep -q "ARTIFACT_CI_RUN=https://ci/run/1" "${rel}/artifacts.env"'
   check "prebuilt: build_release skips a prebuilt release" '(build_release "${sha}" 2>&1 | grep -q "nothing to build")'
   check "prebuilt: the extracted release passes static verification" '(health_release_only "${rel}" 0 >/dev/null 2>&1)'

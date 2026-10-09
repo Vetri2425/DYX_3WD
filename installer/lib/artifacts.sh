@@ -105,30 +105,59 @@ _artifact_compatible() {
   }
 }
 
-# _artifact_extract <archive> <required-prefix>: every member must live under the prefix.
-_artifact_extract() {
-  local archive="$1" prefix="$2" bad
-  bad="$(tar --zstd -tf "${archive}" | grep -v -e "^${prefix}/" -e "^${prefix}\$" | head -n1)" || true
+# _artifact_members_ok <archive> <required-prefix>: every member lives under the prefix and no member name has a
+# ".." component (INS-020: "prefix/../../etc/x" passes a plain prefix test).
+_artifact_members_ok() {
+  local archive="$1" prefix="$2" list bad
+  list="$(tar --zstd -tf "${archive}")" || {
+    warn "$(basename "${archive}") cannot be listed"
+    return 1
+  }
+  bad="$(printf '%s\n' "${list}" | grep -v -e "^${prefix}/" -e "^${prefix}\$" | head -n1)" || true
   [ -z "${bad}" ] || {
     warn "$(basename "${archive}") has a member outside ${prefix}/: ${bad}"
     return 1
   }
-  tar --zstd -xf "${archive}" -C "${DYX3_ROOT:-/}" --no-same-owner
+  bad="$(printf '%s\n' "${list}" | grep -E '(^|/)\.\.(/|$)' | head -n1)" || true
+  [ -z "${bad}" ] || {
+    warn "$(basename "${archive}") has a member with a '..' component: ${bad}"
+    return 1
+  }
 }
 
-# _artifact_extract_into <archive> <required-prefix> <dest>: the same member check, but the prefix's CONTENTS are
-# extracted into <dest> (a fresh directory), so the caller can verify them and rename the result into place.
+# _artifact_links_ok <dir>: no symlink in the extracted tree points outside it (INS-020). Absolute targets are refused
+# except the interpreter links python3 -m venv makes (venv/bin/python3 -> /usr/bin/python3[.N]).
+_artifact_links_ok() {
+  local dir="$1" l t rel
+  while IFS= read -r -d '' l; do
+    t="$(readlink "${l}")"
+    case "${t}" in
+      /*)
+        [[ "${t}" =~ ^/usr/bin/python3(\.[0-9]+)?$ ]] && continue
+        warn "artifact symlink ${l#"${dir}"/} -> ${t} points outside the release"
+        return 1
+        ;;
+    esac
+    rel="$(realpath -ms --relative-to="${dir}" "$(dirname "${l}")/${t}")"
+    case "${rel}" in
+      .. | ../*)
+        warn "artifact symlink ${l#"${dir}"/} -> ${t} escapes the release"
+        return 1
+        ;;
+    esac
+  done < <(find "${dir}" -type l -print0)
+}
+
+# _artifact_extract_into <archive> <required-prefix> <dest>: the prefix's CONTENTS are extracted into <dest> (a fresh
+# directory beside the final one), checked, and left for the caller to verify and rename into place.
 _artifact_extract_into() {
-  local archive="$1" prefix="$2" dest="$3" bad n
-  bad="$(tar --zstd -tf "${archive}" | grep -v -e "^${prefix}/" -e "^${prefix}\$" | head -n1)" || true
-  [ -z "${bad}" ] || {
-    warn "$(basename "${archive}") has a member outside ${prefix}/: ${bad}"
-    return 1
-  }
+  local archive="$1" prefix="$2" dest="$3" n
+  _artifact_members_ok "${archive}" "${prefix}" || return 1
   n="$(printf '%s' "${prefix}" | awk -F/ '{print NF}')"
   rm -rf "${dest}"
   mkdir -p "${dest}"
-  tar --zstd -xf "${archive}" -C "${dest}" --strip-components="${n}" --no-same-owner
+  tar --zstd -xf "${archive}" -C "${dest}" --strip-components="${n}" --no-same-owner || return 1
+  _artifact_links_ok "${dest}"
 }
 
 # _px4_msgs_tree_ok <dir>: what a usable px4_msgs overlay must contain, for the pinned firmware.
@@ -198,12 +227,14 @@ install_prebuilt() {
     mv -T "${inc}" "${pm}"
     sync_fs "${DYX3_PX4_MSGS_DIR}"
   fi
-  rm -rf "${rel}"
-  _artifact_extract "${dir}/${rel_f}" "opt/dyx3/releases/${sha}" && [ -d "${rel}" ] || {
-    rm -rf "${rel}" "${dir}"
-    warn "release artifact did not install"
+  local rinc="${DYX3_RELEASES}/.incoming-${sha}"
+  _artifact_extract_into "${dir}/${rel_f}" "opt/dyx3/releases/${sha}" "${rinc}" || {
+    rm -rf "${rinc}" "${dir}"
+    warn "release artifact did not install (unsafe or broken archive)"
     return 2
   }
+  rm -rf "${rel}"
+  mv -T "${rinc}" "${rel}"
   rm -f "${rel}/.complete" "${rel}/.verified" "${rel}/.failed"
   cp "${dir}/artifacts.env" "${rel}/artifacts.env"
   touch "${rel}/.prebuilt"
