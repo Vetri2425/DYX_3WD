@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -50,7 +51,8 @@ struct Rig {
   std::vector<rclcpp::SubscriptionBase::SharedPtr> keep;
 
   explicit Rig(const std::string& bag_script = kGoodBag, bool with_versions = true,
-               const std::string& bag_exe = "/bin/sh") {
+               const std::string& bag_exe = "/bin/sh",
+               const std::vector<rclcpp::Parameter>& extra = {}) {
     ctx = std::make_shared<rclcpp::Context>();
     rclcpp::InitOptions io;
     io.set_domain_id(120 + (getpid() % 100));
@@ -71,6 +73,9 @@ struct Rig {
     o.append_parameter_override("bag_command",
                                 std::vector<std::string>{bag_exe, "-c", bag_script, "{dir}"});
     o.append_parameter_override("bag_finalize_timeout_s", 3.0);
+    // the test machine's /tmp may have less than the 2 GiB production default
+    o.append_parameter_override("min_free_bytes", int64_t{1} << 20);
+    for (const auto& p : extra) o.append_parameter_override(p.get_name(), p.get_parameter_value());
     rec = std::make_shared<RecorderNode>(
         o, [this]() { return now; }, [this]() { return wall; },
         [](const std::vector<std::string>&, double) {
@@ -500,4 +505,74 @@ TEST(RecorderNode, DefaultBagOptionsAreCompactAndResilient) {
   EXPECT_TRUE(has("--compression-mode", "file"));
   EXPECT_TRUE(has("--compression-format", "zstd"));
   EXPECT_TRUE(has("--max-bag-duration", "300"));
+}
+
+// REC-001: below min_free_bytes no bag starts, and a running bag is stopped at the next step.
+TEST(RecorderNode, LowDiskNeverStartsTheBagAndStopsARunningOne) {
+  Rig r(kGoodBag, true, "/bin/sh", {rclcpp::Parameter("min_free_bytes", int64_t{2} << 30)});
+  std::atomic<uint64_t> free_b{uint64_t{1} << 30};  // 1 GiB < the 2 GiB default
+  r.rec->set_free_space_source([&](const std::string&) { return free_b.load(); });
+  r.mission(MissionState::STATE_READY, 1);
+  const std::string d1 = r.run_dir();
+  EXPECT_TRUE(fs::exists(d1 + "/manifest.json"));
+  EXPECT_FALSE(fs::exists(d1 + "/rosbag2"));
+  EXPECT_FALSE(fs::exists(d1 + "/config_snapshot"));
+  r.rec->step(r.now += 1.0);
+  r.pump(100);
+  EXPECT_EQ(r.status.state, RecorderStatus::STATE_ERROR);
+  EXPECT_EQ(r.status.free_bytes, uint64_t{1} << 30);
+  r.mission(MissionState::STATE_IDLE, 0);
+  const std::string s1 = slurp(d1 + "/summary.json");
+  EXPECT_NE(s1.find("not recorded: free space"), std::string::npos);
+  EXPECT_NE(s1.find("\"bag_healthy_throughout\": false"), std::string::npos);
+
+  free_b = uint64_t{50} << 30;
+  r.wall += 60;
+  r.mission(MissionState::STATE_READY, 2);
+  std::string d2;
+  for (const auto& e : fs::directory_iterator(r.root + "/runs"))
+    if (e.path().string().find("mission_0002") != std::string::npos) d2 = e.path().string();
+  ASSERT_FALSE(d2.empty());
+  r.mission(MissionState::STATE_RUNNING, 2);
+  r.pump(300);
+  r.rec->step(r.now += 1.0);
+  r.pump(100);
+  EXPECT_EQ(r.status.state, RecorderStatus::STATE_RECORDING);
+  free_b = uint64_t{1} << 20;  // the disk fills up during the run
+  r.rec->step(r.now += 1.0);
+  r.pump(100);
+  EXPECT_EQ(r.status.state, RecorderStatus::STATE_ERROR);
+  EXPECT_FALSE(r.status.bag_healthy);
+  const uint64_t stopped_at = fs::exists(d2 + "/rosbag2/data") ? fs::file_size(d2 + "/rosbag2/data") : 0;
+  r.pump(300);
+  EXPECT_EQ(fs::exists(d2 + "/rosbag2/data") ? fs::file_size(d2 + "/rosbag2/data") : 0, stopped_at);
+  r.mission(MissionState::STATE_COMPLETED, 2);
+  const std::string s2 = slurp(d2 + "/summary.json");
+  EXPECT_NE(s2.find("recording stopped: free space"), std::string::npos);
+  EXPECT_NE(s2.find("\"final_state\": \"COMPLETED\""), std::string::npos);
+  EXPECT_NE(s2.find("\"bag_healthy_throughout\": false"), std::string::npos);
+  EXPECT_EQ(s2.find("bag process died"), std::string::npos);  // a deliberate stop, not a death
+}
+
+TEST(RecorderNode, RetentionPrunesOldCompleteRunsAtRunStart) {
+  Rig r(kGoodBag, true, "/bin/sh", {rclcpp::Parameter("max_runs_bytes", int64_t{1})});
+  r.mission(MissionState::STATE_READY, 1);
+  const std::string d1 = r.run_dir();
+  r.mission(MissionState::STATE_IDLE, 0);  // a complete (NOT_STARTED) run with summary.json
+  ASSERT_TRUE(fs::exists(d1 + "/summary.json"));
+  const std::string open_run = r.root + "/runs/2000-01-01_000000_mission_0099";  // no summary
+  fs::create_directories(open_run);
+  std::ofstream(open_run + "/x") << std::string(100, 'x');
+  r.wall += 60;
+  r.mission(MissionState::STATE_READY, 2);
+  EXPECT_FALSE(fs::exists(d1));       // oldest complete run pruned
+  EXPECT_TRUE(fs::exists(open_run));  // never a run without summary.json
+  EXPECT_EQ(r.run_count(), 2U);
+  r.mission(MissionState::STATE_IDLE, 0);
+  std::string d2;
+  for (const auto& e : fs::directory_iterator(r.root + "/runs"))
+    if (e.path().string().find("mission_0002") != std::string::npos) d2 = e.path().string();
+  ASSERT_FALSE(d2.empty());  // the active run is never pruned
+  EXPECT_NE(slurp(d2 + "/summary.json").find("retention removed 1 old complete run"),
+            std::string::npos);
 }

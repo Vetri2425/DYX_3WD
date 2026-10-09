@@ -69,9 +69,21 @@ last split is uncompressed, and it is a valid WAL database). These options are a
 container (22 topics at production rates, 60 s, every float field noisy): default sqlite3 153 MB/h, these defaults **60 MB/h** (zstd per message: 108 MB/h).
 The payload alone compresses to ~30 MB/h; the rest is the sqlite row/index overhead. **OPEN (owner):** for < 50 MB/h install
 `ros-humble-rosbag2-storage-mcap` and set `bag_storage: mcap`, `bag_storage_preset: zstd_small`, `bag_compression_mode: none` (chunk compression; not measured here) ·
-`bag_finalize_timeout_s` 10 (DERIVED: the last split is compressed while finalising) · `param_timeout_s` 2 (DERIVED) · `status_hz` 2 (DERIVED) · `min_free_bytes` **0 = no check** (no source for a threshold; **OPEN**: a full disk is detected by the bag
-process dying, not predicted) · `bag_stall_s` **0 = off** (rosbag2's sqlite file does not grow every second; no source).
+`bag_finalize_timeout_s` 10 (DERIVED: the last split is compressed while finalising) · `param_timeout_s` 2 (DERIVED) · `status_hz` 2 (DERIVED) · `min_free_bytes` **2 GiB** (REC-001, DERIVED; 0 = off) · `max_runs_bytes` **20 GiB** (retention budget, DERIVED; 0 = off) · `bag_stall_s` **0 = off** (rosbag2's sqlite file does not grow every second; no source).
 **OPEN:** whether to also bag the raw `/fmu/out/**` topics (default: not recorded; the `/dyx3/vehicle_state` fan-out is).
+
+## 7. Disk safety and retention (REC-001)
+
+The runs share `/var/lib/dyx3` with the missions, the RTK state and the spray-ACK ledger, so the recorder must never fill it.
+* **Free space** (`statvfs` `f_bavail`) is checked at run start and at every `step` (4 Hz) while recording. Below `min_free_bytes`: at start, only
+  `manifest.json` (and at the end `summary.json`) is written — no bag, no ULog, no snapshots; during a run, the bag is stopped (SIGINT first), the
+  ULog file closed, and the end parameter snapshot skipped. Either way `RecorderStatus.state = ERROR` until the run closes, `bag_healthy_throughout`
+  false, and a note with the free bytes. The mission is never touched.
+* **Retention** at every run start (before the new directory): while the run directories exceed `max_runs_bytes`, the oldest **complete** run
+  (one with `summary.json`; names sort by UTC start) is deleted. Never the active run, never a directory without `summary.json`, never anything that
+  is not a directory. What was removed is a note in the new run's summary.
+* **OPEN (owner):** a separate partition or quota for `/var/lib/dyx3/runs` would make this independent of the other state; an operator warning
+  for low disk / recorder ERROR belongs to the gateway (it forwards `free_bytes`).
 
 ## 6. Acceptance
 

@@ -15,7 +15,8 @@ add_library(dyx3_recorder_core STATIC
   src/ulog_capture.cpp
   src/param_snapshot.cpp
   src/bag_writer.cpp
-  src/run_lifecycle.cpp)
+  src/run_lifecycle.cpp
+  src/run_store.cpp)
 target_include_directories(dyx3_recorder_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)

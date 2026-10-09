@@ -1,7 +1,8 @@
 // recorder_node — see docs/contracts/dyx3_recorder.md
 #include "dyx3_recorder/recorder_node.hpp"
 
-#include <sys/statvfs.h>
+#include "dyx3_recorder/run_store.hpp"
+
 #include <unistd.h>
 
 #include <chrono>
@@ -33,15 +34,6 @@ std::string hostname() {
   char b[256] = {0};
   if (gethostname(b, sizeof b - 1) != 0) return "unknown";
   return b;
-}
-
-uint64_t free_bytes(const std::string& path) {
-  struct statvfs s{};
-  std::error_code ec;
-  fs::path p = path;
-  while (!p.empty() && !fs::exists(p, ec)) p = p.parent_path();
-  if (p.empty() || statvfs(p.c_str(), &s) != 0) return 0;
-  return static_cast<uint64_t>(s.f_bavail) * static_cast<uint64_t>(s.f_frsize);
 }
 
 }  // namespace
@@ -152,7 +144,8 @@ RecorderNode::RecorderNode(const rclcpp::NodeOptions& options, ClockFn clock, Wa
                            : ParamCollector([ctx = options.context()](
                                                 const std::vector<std::string>& n, double t) {
                                return collect_ros_params(n, t, ctx);
-                             })) {
+                             })),
+      free_fn_(fs_free_bytes) {
   declare_params();
   cb_mission_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
   cb_ulog_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
@@ -192,6 +185,7 @@ RecorderNode::RecorderNode(const rclcpp::NodeOptions& options, ClockFn clock, Wa
 }
 
 RecorderNode::~RecorderNode() {
+  std::lock_guard<std::mutex> tl(run_mu_);
   if (lifecycle_.recording()) stop_run("RECORDER_SHUTDOWN");
   join_param_job();
 }
@@ -242,7 +236,15 @@ void RecorderNode::declare_params() {
   bag_finalize_timeout_s_ = declare_parameter<double>("bag_finalize_timeout_s", 10.0);
   param_timeout_s_ = declare_parameter<double>("param_timeout_s", 2.0);
   status_hz_ = declare_parameter<double>("status_hz", 2.0);
-  min_free_bytes_ = static_cast<uint64_t>(declare_parameter<int64_t>("min_free_bytes", 0));
+  // REC-001: the runs share /var/lib/dyx3 with the missions, the RTK state and the spray-ACK
+  // ledger. Below min_free_bytes no run starts and a running bag is stopped (checked at every
+  // step); retention keeps the complete runs under max_runs_bytes. 0 disables either.
+  const int64_t min_free = declare_parameter<int64_t>("min_free_bytes", int64_t{2} << 30);
+  const int64_t max_runs = declare_parameter<int64_t>("max_runs_bytes", int64_t{20} << 30);
+  if (min_free < 0 || max_runs < 0)
+    throw std::invalid_argument("recorder parameter invalid: min_free_bytes / max_runs_bytes < 0");
+  min_free_bytes_ = static_cast<uint64_t>(min_free);
+  max_runs_bytes_ = static_cast<uint64_t>(max_runs);
   const auto bad = [](double v) { return !std::isfinite(v) || v <= 0.0; };
   if (bad(bag_finalize_timeout_s_) || bad(param_timeout_s_) || bad(status_hz_)) {
     throw std::invalid_argument(
@@ -297,6 +299,20 @@ std::vector<NodeParams> RecorderNode::collect_params() const {
   }
 }
 
+void RecorderNode::set_free_space_source(FreeSpaceFn f) {
+  std::lock_guard<std::mutex> lk(mu_);
+  free_fn_ = f ? std::move(f) : FreeSpaceFn(fs_free_bytes);
+}
+
+uint64_t RecorderNode::free_space() const {
+  FreeSpaceFn f;
+  {
+    std::lock_guard<std::mutex> lk(mu_);
+    f = free_fn_;
+  }
+  return f(runs_dir_);
+}
+
 bool RecorderNode::recording() const {
   std::lock_guard<std::mutex> lk(mu_);
   return lifecycle_.recording();
@@ -308,6 +324,7 @@ std::string RecorderNode::current_run_dir() const {
 }
 
 void RecorderNode::on_mission(const dyx3_interfaces::msg::MissionState& m) {
+  std::lock_guard<std::mutex> tl(run_mu_);
   LifecycleAction a;
   {
     std::lock_guard<std::mutex> lk(mu_);
@@ -359,9 +376,25 @@ void RecorderNode::start_run(uint32_t mission_id, uint32_t run_index, const std:
     info.timesync_round_trip_us = fresh ? ts_rtt_us_ : 0U;
   }
   fs::create_directories(runs_dir_, ec);
+  RunSummary summary;
+  // Retention first (no run is open here: stop_run came before): it may free the space we need.
+  if (max_runs_bytes_ > 0) {
+    const PruneResult pr = prune_runs(runs_dir_, max_runs_bytes_);
+    if (!pr.removed.empty()) {
+      summary.notes.push_back("retention removed " + std::to_string(pr.removed.size()) +
+                              " old complete run(s), " + std::to_string(pr.bytes_removed) +
+                              " bytes (max_runs_bytes " + std::to_string(max_runs_bytes_) + ")");
+      RCLCPP_WARN(get_logger(), "retention removed %zu old run(s), oldest %s", pr.removed.size(),
+                  pr.removed.front().c_str());
+    }
+    for (const auto& e : pr.errors) summary.notes.push_back("retention: " + e);
+    if (pr.bytes_after > max_runs_bytes_)
+      summary.notes.push_back("runs exceed max_runs_bytes and nothing more may be pruned");
+  }
+  const uint64_t free_now = free_space();
+  const bool disk_low = min_free_bytes_ > 0 && free_now < min_free_bytes_;
   const std::string dir = unique_run_path(runs_dir_, run_dir_name(now, mission_id, run_index));
   info.run_id = fs::path(dir).filename().string();
-  RunSummary summary;
   bool dir_ok = fs::create_directories(dir, ec) && !ec;
 
   if (!dir_ok) {
@@ -370,13 +403,30 @@ void RecorderNode::start_run(uint32_t mission_id, uint32_t run_index, const std:
     RCLCPP_ERROR(get_logger(), "cannot create run directory %s", dir.c_str());
     return;
   }
-  if (min_free_bytes_ > 0 && free_bytes(dir) < min_free_bytes_) {
-    summary.notes.push_back("free space below min_free_bytes at start");
-    summary.provenance_complete = false;
-  }
   if (!write_file_atomic(dir + "/manifest.json", manifest_json(info))) {
     summary.notes.push_back("manifest.json could not be written");
     summary.provenance_complete = false;
+  }
+  if (disk_low) {
+    // Only the manifest (and later summary.json) are written: never fill the shared disk.
+    summary.notes.push_back("not recorded: free space " + std::to_string(free_now) +
+                            " below min_free_bytes " + std::to_string(min_free_bytes_));
+    summary.bag_healthy_throughout = false;
+    summary.provenance_complete = false;
+    std::lock_guard<std::mutex> lk(mu_);
+    run_dir_ = dir;
+    info_ = info;
+    summary_ = summary;
+    params_start_.clear();
+    run_start_s_ = clock_();
+    error_ = true;
+    disk_stopped_ = true;
+    bag_died_ = false;
+    finalizing_ = false;
+    RCLCPP_ERROR(get_logger(), "run %s not recorded: free space %llu below min_free_bytes %llu",
+                 info.run_id.c_str(), static_cast<unsigned long long>(free_now),
+                 static_cast<unsigned long long>(min_free_bytes_));
+    return;
   }
   // versions.json
   const std::string versions =
@@ -426,6 +476,7 @@ void RecorderNode::start_run(uint32_t mission_id, uint32_t run_index, const std:
     run_start_s_ = clock_();
     error_ = false;
     bag_died_ = false;
+    disk_stopped_ = false;
     finalizing_ = false;
     if (!ulog_.open(dir + "/ulog/stream.ulg")) {
       summary_.notes.push_back("ulog file could not be created");
@@ -512,16 +563,25 @@ void RecorderNode::stop_run(const std::string& final_state) {
     }
     write_file_atomic(dir + "/ulog/gaps.json", ulog_.gaps_json());
   }
-  const auto nodes = collect_params();
-  for (const auto& n : nodes) {
-    if (!n.reachable) {
-      summary.notes.push_back("parameters unreachable at end: " + n.node +
-                              (n.note.empty() ? "" : " (" + n.note + ")"));
-    }
+  bool disk_stopped;
+  {
+    std::lock_guard<std::mutex> lk(mu_);
+    disk_stopped = disk_stopped_;
   }
-  write_file_atomic(
-      dir + "/params_ros.json",
-      params_ros_file_json(params_start, params_ros_snapshot_json(iso_utc(wall_()), nodes)));
+  if (disk_stopped) {
+    summary.notes.push_back("end parameter snapshot skipped: free space below min_free_bytes");
+  } else {
+    const auto nodes = collect_params();
+    for (const auto& n : nodes) {
+      if (!n.reachable) {
+        summary.notes.push_back("parameters unreachable at end: " + n.node +
+                                (n.note.empty() ? "" : " (" + n.note + ")"));
+      }
+    }
+    write_file_atomic(
+        dir + "/params_ros.json",
+        params_ros_file_json(params_start, params_ros_snapshot_json(iso_utc(wall_()), nodes)));
+  }
   summary.end_utc = iso_utc(wall_());
   summary.final_state = final_state;
   summary.duration_s = clock_() - start_s;
@@ -531,13 +591,48 @@ void RecorderNode::stop_run(const std::string& final_state) {
   run_dir_.clear();
   finalizing_ = false;
   error_ = false;
+  disk_stopped_ = false;
+}
+
+void RecorderNode::check_disk(double) {
+  // Called from step() with run_mu_ held. The bag is stopped (never killed mid-write without
+  // SIGINT first) and the ULog file closed; the run stays open until the mission ends so that
+  // summary.json still records how it ended.
+  if (min_free_bytes_ == 0) return;
+  {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!lifecycle_.recording() || run_dir_.empty() || disk_stopped_ || finalizing_) return;
+  }
+  const uint64_t free_now = free_space();
+  if (free_now >= min_free_bytes_) return;
+  RCLCPP_ERROR(get_logger(), "free space %llu below min_free_bytes %llu: stopping the bag",
+               static_cast<unsigned long long>(free_now),
+               static_cast<unsigned long long>(min_free_bytes_));
+  {
+    std::lock_guard<std::mutex> lk(mu_);
+    disk_stopped_ = true;  // from here on step() does not report the bag as died
+    error_ = true;
+  }
+  const int esc = bag_.stop(bag_finalize_timeout_s_, 2.0);
+  std::lock_guard<std::mutex> lk(mu_);
+  ulog_.close();
+  summary_.bag_healthy_throughout = false;
+  summary_.provenance_complete = false;
+  summary_.notes.push_back("recording stopped: free space " + std::to_string(free_now) +
+                           " below min_free_bytes " + std::to_string(min_free_bytes_) +
+                           (esc > 0 ? " (bag needed escalation step " + std::to_string(esc) + ")"
+                                    : std::string()));
 }
 
 void RecorderNode::step(double now_s) {
   {
+    std::unique_lock<std::mutex> tl(run_mu_, std::try_to_lock);
+    if (tl.owns_lock()) check_disk(now_s);
+  }
+  {
     std::lock_guard<std::mutex> lk(mu_);
-    if (lifecycle_.recording() && !run_dir_.empty() && !finalizing_ && !error_ && !bag_.running() &&
-        !bag_died_) {
+    if (lifecycle_.recording() && !run_dir_.empty() && !finalizing_ && !error_ && !disk_stopped_ &&
+        !bag_.running() && !bag_died_) {
       bag_died_ = true;
       error_ = true;
       summary_.bag_healthy_throughout = false;
@@ -567,7 +662,7 @@ void RecorderNode::publish_status(double) {
   }
   s.bag_healthy = lifecycle_.recording() && !error_ && !bag_died_ && bag_.running();
   s.bytes_written = lifecycle_.recording() ? bag_.bytes() + ulog_.bytes() : 0;
-  s.free_bytes = free_bytes(runs_dir_);
+  s.free_bytes = free_fn_(runs_dir_);
   pub_status_->publish(s);
 }
 

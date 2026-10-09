@@ -13,6 +13,7 @@
 #include "dyx3_recorder/param_snapshot.hpp"
 #include "dyx3_recorder/run_lifecycle.hpp"
 #include "dyx3_recorder/run_manifest.hpp"
+#include "dyx3_recorder/run_store.hpp"
 #include "dyx3_recorder/ulog_capture.hpp"
 #include "ulog_synth.hpp"
 
@@ -341,6 +342,43 @@ TEST(Lifecycle, ReadyThenIdleClosesAsNotStarted) {
   EXPECT_TRUE(a.stop && a.start);
   EXPECT_EQ(a.final_state, "SUPERSEDED");
   EXPECT_EQ(l.on_mission(kMissionAborted, 10, 1).final_state, "NOT_STARTED");
+}
+
+// REC-001 retention: oldest complete runs go first; the active run and runs without summary.json
+// are never deleted.
+TEST(RunStore, PruneDeletesOldestCompleteRunsOnly) {
+  TmpDir d;
+  auto make = [&](const std::string& name, size_t bytes, bool complete) {
+    fs::create_directories(d.path + "/" + name + "/rosbag2");
+    std::ofstream(d.path + "/" + name + "/rosbag2/data", std::ios::binary) << std::string(bytes, 'x');
+    if (complete) std::ofstream(d.path + "/" + name + "/summary.json") << "{}";
+  };
+  make("2026-01-01_000000_mission_0001", 1000, false);  // oldest but interrupted: never pruned
+  make("2026-01-02_000000_mission_0002", 1000, true);
+  make("2026-01-03_000000_mission_0003", 1000, true);
+  make("2026-01-04_000000_mission_0004", 1000, true);
+  make("2026-01-05_000000_mission_0005", 1000, false);  // the active run
+  std::ofstream(d.path + "/stray_file") << std::string(5000, 'y');  // not a run: not counted
+  const uint64_t total = dir_bytes(d.path + "/2026-01-02_000000_mission_0002");
+  EXPECT_EQ(total, 1002U);
+  PruneResult r = prune_runs(d.path, 3 * total, d.path + "/2026-01-05_000000_mission_0005");
+  ASSERT_EQ(r.removed.size(), 2U);
+  EXPECT_EQ(r.removed[0], "2026-01-02_000000_mission_0002");
+  EXPECT_EQ(r.removed[1], "2026-01-03_000000_mission_0003");
+  EXPECT_LE(r.bytes_after, 3 * total);
+  EXPECT_TRUE(fs::exists(d.path + "/2026-01-01_000000_mission_0001"));
+  EXPECT_TRUE(fs::exists(d.path + "/2026-01-04_000000_mission_0004"));
+  EXPECT_TRUE(fs::exists(d.path + "/2026-01-05_000000_mission_0005"));
+  EXPECT_TRUE(fs::exists(d.path + "/stray_file"));
+  // a budget nothing can meet: everything complete goes, the rest stays
+  r = prune_runs(d.path, 0, "2026-01-05_000000_mission_0005");
+  EXPECT_EQ(r.removed.size(), 1U);
+  EXPECT_GT(r.bytes_after, 0U);
+  EXPECT_TRUE(fs::exists(d.path + "/2026-01-01_000000_mission_0001"));
+  EXPECT_TRUE(fs::exists(d.path + "/2026-01-05_000000_mission_0005"));
+  EXPECT_TRUE(prune_runs(d.path + "/missing", 0).removed.empty());
+  EXPECT_GT(fs_free_bytes(d.path), 0U);
+  EXPECT_GT(fs_free_bytes(d.path + "/not/yet/created"), 0U);  // nearest existing parent
 }
 
 // ---- bag supervision against a fake child

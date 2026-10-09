@@ -24,6 +24,7 @@ namespace dyx3_recorder {
 
 using ClockFn = std::function<double()>;  // monotonic seconds
 using WallFn = std::function<time_t()>;   // UTC wall time
+using FreeSpaceFn = std::function<uint64_t(const std::string& path)>;
 using ParamCollector =
     std::function<std::vector<NodeParams>(const std::vector<std::string>& nodes, double timeout_s)>;
 
@@ -51,6 +52,8 @@ public:
   void step(double now_s);  // health + status; public for deterministic tests
   bool recording() const;
   std::string current_run_dir() const;
+  // Test hook: where free space comes from (default: statvfs of runs_dir).
+  void set_free_space_source(FreeSpaceFn f);
 
 private:
   void declare_params();
@@ -66,6 +69,8 @@ private:
   void mark_running();
   void join_param_job();
   void stop_run(const std::string& final_state);
+  void check_disk(double now_s);
+  uint64_t free_space() const;
   void publish_status(double now_s);
 
   ClockFn clock_;
@@ -76,7 +81,12 @@ private:
   std::string bag_storage_, bag_storage_preset_, bag_compression_mode_, bag_compression_format_;
   int64_t bag_compression_threads_{1}, bag_max_duration_s_{300};
   double bag_finalize_timeout_s_{10.0}, param_timeout_s_{2.0}, status_hz_{2.0};
-  uint64_t min_free_bytes_{0};
+  uint64_t min_free_bytes_{0}, max_runs_bytes_{0};
+  FreeSpaceFn free_fn_;  // guarded by mu_
+
+  // Serialises run transitions (start, stop, the disk stop, ...): on_mission and the destructor
+  // take it; step() only tries it, so status publishing never waits on a stopping bag.
+  std::mutex run_mu_;
 
   mutable std::mutex mu_;
   RunLifecycle lifecycle_;
@@ -92,6 +102,7 @@ private:
   bool error_{false};
   bool finalizing_{false};
   bool bag_died_{false};
+  bool disk_stopped_{false};  // the bag was stopped because free space fell below min_free_bytes
   double last_status_s_{-1e18};
   // newest FCU timesync evidence from dyx3_px4_link (guarded by mu_); stale after link_max_age_s
   bool ts_valid_{false};
