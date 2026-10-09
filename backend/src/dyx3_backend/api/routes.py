@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Annotated, Literal
 
 import anyio
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, StrictBool
 
 from dyx3_backend.api.admission import bearer_identity
@@ -236,23 +237,32 @@ async def list_missions(request: Request, _: Identity = Viewer) -> dict:
 
 @router.get("/missions/{sha}")
 async def get_mission(sha: str, request: Request, _: Identity = Viewer):
+    svc = request.app.state.missions
     try:
-        return {"mission": summarize(request.app.state.missions.get(sha))}
+        # read + hash + decode off the event loop (BE-005)
+        return {"mission": await anyio.to_thread.run_sync(lambda: summarize(svc.get(sha)))}
     except MissionError as exc:
         return _mission_error(exc)
+
+
+def _render_path(svc, sha: str) -> bytes:
+    art = svc.get(sha)
+    body = {
+        "sha256": art.sha256,
+        "frame": "local_ned",
+        "points": [[p.north_m, p.east_m, p.flags] for p in art.points],
+    }
+    # Same rendering as JSONResponse, done here so a 200 000-point body is not serialised on the event loop.
+    return json.dumps(body, ensure_ascii=False, allow_nan=False, indent=None, separators=(",", ":")).encode("utf-8")
 
 
 @router.get("/missions/{sha}/path")
 async def get_mission_path(sha: str, request: Request, _: Identity = Viewer):
     try:
-        art = request.app.state.missions.get(sha)
+        content = await anyio.to_thread.run_sync(_render_path, request.app.state.missions, sha)  # BE-005
     except MissionError as exc:
         return _mission_error(exc)
-    return {
-        "sha256": art.sha256,
-        "frame": "local_ned",
-        "points": [[p.north_m, p.east_m, p.flags] for p in art.points],
-    }
+    return Response(content=content, media_type="application/json")
 
 
 @router.post("/missions/{sha}/start")
@@ -260,7 +270,8 @@ async def start_mission(sha: str, request: Request, _: Identity = Operator) -> J
     if len(sha) != 64 or any(c not in "0123456789abcdef" for c in sha):
         return JSONResponse({"ok": False, "code": "bad_id", "reason": "sha256 must be 64 lowercase hex characters"}, status_code=400)
     try:
-        request.app.state.missions.get(sha)  # never start a mission whose artifact this side cannot read
+        # never start a mission whose artifact this side cannot read; read + verify off the event loop (BE-005)
+        await anyio.to_thread.run_sync(request.app.state.missions.get, sha)
     except MissionError as exc:
         return _mission_error(exc)
     return await send(request, "start_mission", {"path_artifact_sha256": sha})

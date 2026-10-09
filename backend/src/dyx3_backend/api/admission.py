@@ -17,6 +17,7 @@ The per-route checks stay in place behind it.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 
 from starlette.responses import JSONResponse
@@ -32,8 +33,55 @@ RAW_UPLOAD_PATHS = frozenset({"/api/missions/plan"})
 MULTIPART_ENVELOPE_BYTES = 64 * 1024
 
 
-class _BodyTooLarge(Exception):
+# DERIVED — NOT FROM V1 SPEC (BE-010): the deepest real JSON body (an RTK config with its profiles) is 4 levels.
+# Deeper nesting is refused before FastAPI parses it: depending on the Python version a deep body either fails to
+# parse (RecursionError) or parses and then breaks the validation-error response (500).
+MAX_JSON_DEPTH = 32
+
+_JSON_TOKEN = re.compile(rb'[\[\]{}"\\]')
+
+
+class _Refused(Exception):
     pass
+
+
+class JsonDepthScanner:
+    """Incremental nesting-depth check over a JSON byte stream (strings and escapes aware). Not a validator."""
+
+    def __init__(self, limit: int = MAX_JSON_DEPTH) -> None:
+        self.limit = limit
+        self.depth = 0
+        self._in_str = False
+        self._skip_first = False  # a backslash ended the previous chunk: the next byte is escaped
+
+    def feed(self, data: bytes) -> bool:
+        """Returns False as soon as the nesting depth exceeds the limit."""
+        start = 0
+        if self._skip_first and data:
+            self._skip_first = False
+            start = 1
+        for m in _JSON_TOKEN.finditer(data, start):
+            pos = m.start()
+            if pos < start:
+                continue  # escaped by a backslash just before it
+            c = data[pos]
+            if self._in_str:
+                if c == 0x5C:  # backslash: skip the escaped byte
+                    if pos + 1 < len(data):
+                        start = pos + 2
+                    else:
+                        self._skip_first = True
+                elif c == 0x22:
+                    self._in_str = False
+            elif c == 0x22:
+                self._in_str = True
+            elif c in (0x5B, 0x7B):
+                self.depth += 1
+                if self.depth > self.limit:
+                    return False
+            elif c in (0x5D, 0x7D):
+                self.depth = max(0, self.depth - 1)
+        return True
 
 
 def _header(scope, name: bytes) -> str | None:
@@ -64,6 +112,11 @@ class AdmissionMiddleware:
         self._tokens = tokens
         self._upload_max = int(upload_max_bytes)
         self._json_max = int(json_max_bytes)
+
+    @staticmethod
+    def is_upload(path: str) -> bool:
+        p = path.rstrip("/") or "/"
+        return p in MULTIPART_UPLOAD_PATHS or p in RAW_UPLOAD_PATHS
 
     def cap_for(self, path: str) -> int:
         p = path.rstrip("/") or "/"
@@ -103,27 +156,33 @@ class AdmissionMiddleware:
                 await _reject(scope, receive, send, 413, "too_large", f"request body exceeds {cap} bytes")
                 return
 
-        # 3. Streamed size (chunked bodies, or a client sending more than it declared).
+        # 3. Streamed size (chunked bodies, or a client sending more than it declared), and the JSON nesting depth on
+        #    the small JSON routes (the upload routes parse their bodies in the planning process).
+        scanner = None if self.is_upload(path) else JsonDepthScanner()
         received = 0
-        exceeded = False
+        refusal: tuple[int, str, str] | None = None
         started = False
 
         async def limited_receive():
-            nonlocal received, exceeded
-            if exceeded:
-                raise _BodyTooLarge()
+            nonlocal received, refusal
+            if refusal is not None:
+                raise _Refused()
             message = await receive()
             if message["type"] == "http.request":
-                received += len(message.get("body", b""))
+                chunk = message.get("body", b"")
+                received += len(chunk)
                 if received > cap:
-                    exceeded = True
-                    raise _BodyTooLarge()
+                    refusal = (413, "too_large", f"request body exceeds {cap} bytes")
+                    raise _Refused()
+                if scanner is not None and not scanner.feed(chunk):
+                    refusal = (400, "bad_request", f"JSON nested deeper than {scanner.limit} levels")
+                    raise _Refused()
             return message
 
         async def guarded_send(message) -> None:
             nonlocal started
-            if exceeded and not started:
-                return  # whatever the app made of the truncated body is replaced by the 413 below
+            if refusal is not None and not started:
+                return  # whatever the app made of the truncated body is replaced by the refusal below
             if message["type"] == "http.response.start":
                 started = True
             await send(message)
@@ -131,10 +190,10 @@ class AdmissionMiddleware:
         try:
             await self.app(scope, limited_receive, guarded_send)
         except Exception:
-            if not exceeded:
+            if refusal is None:
                 raise
-        if exceeded and not started:
-            await _reject(scope, receive, send, 413, "too_large", f"request body exceeds {cap} bytes")
+        if refusal is not None and not started:
+            await _reject(scope, receive, send, *refusal)
 
 
 async def _reject(scope, receive, send, status: int, code: str, reason: str) -> None:

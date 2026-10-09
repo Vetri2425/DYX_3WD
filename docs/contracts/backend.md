@@ -33,7 +33,12 @@ An upload is rejected (413/415/422) for: size over `upload_max_bytes`, extension
   streamed byte count passes the cap (chunked bodies). Caps: `POST /missions/plan` = `upload_max_bytes`; the multipart uploads
   `POST /missions` and `POST /path/parse-dxf` = `upload_max_bytes` + 64 KiB multipart envelope (the route still checks the file
   against `upload_max_bytes` exactly); every other route = `json_body_max_bytes` (`DYX3_JSON_BODY_MAX_BYTES`, default 64 KiB, DERIVED);
-- a non-numeric `Content-Length` -> 400.
+- a non-numeric `Content-Length` -> 400;
+- on the JSON routes (not the uploads), a body nested deeper than 32 levels (DERIVED) -> **400** `{"ok":false,"code":"bad_request",...}`,
+  checked on the stream before FastAPI parses it (deep nesting otherwise ends in a parse error or a 500, depending on the Python version).
+
+Artifact reads for `GET /missions/{sha}`, `GET /missions/{sha}/path` (including rendering its JSON) and `POST /missions/{sha}/start`
+run in a worker thread, never on the event loop (BE-005).
 
 **Planning budget (BE-004).** DXF planning (`POST /missions`), app-plan parsing and compiling (`POST /missions/plan`) and DXF parsing
 (`POST /path/parse-dxf`) run in a separate, freshly spawned process (`mission/planner.py`), never on the event loop and never in a
