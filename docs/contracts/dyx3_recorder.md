@@ -42,7 +42,8 @@ Directory names are collision-free (a numeric suffix is appended if the name exi
   on its own thread after the bag runs** (parameter RPCs never delay the bag). Stop joins that thread first, so its notes belong to the run. A step that fails is
   recorded in `summary.notes` and clears `provenance_complete`; only a bag that cannot be started sets `RecorderStatus.state = ERROR`.
   The recorder never blocks, delays or gates the mission: if it is dead or in ERROR the mission runs on, and the absence of evidence is itself visible (`RecorderStatus`, summary).
-* Stop order: bag finalised (SIGINT to its process group, wait `bag_finalize_timeout_s`, then SIGTERM, then SIGKILL) -> ulog closed (`gaps.json`) -> `params_ros.json` end -> `summary.json`.
+* Stop order: bag finalised (SIGINT to its process group, wait `bag_finalize_timeout_s`, then SIGTERM, then SIGKILL; any escalation, or a
+  `rosbag2*` directory without `metadata.yaml` afterwards, clears `bag_healthy_throughout` with a note — REC-014) -> ulog closed (`gaps.json`) -> `params_ros.json` end -> `summary.json`.
 
 ## 3. ULog reassembly
 

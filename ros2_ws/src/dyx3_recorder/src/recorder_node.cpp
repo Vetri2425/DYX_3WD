@@ -5,6 +5,7 @@
 
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -550,8 +551,31 @@ void RecorderNode::stop_run(const std::string& final_state) {
   // appended.
   const bool was_running = bag_.running();
   const int esc = bag_.stop(bag_finalize_timeout_s_, 2.0);
-  if (esc > 0)
+  if (esc > 0) {
+    // REC-014: SIGTERM/SIGKILL means rosbag2 did not finalise on SIGINT within the timeout.
     summary.notes.push_back("bag needed escalation step " + std::to_string(esc) + " to stop");
+    summary.bag_healthy_throughout = false;
+  }
+  // REC-014: a finalised rosbag2 directory has metadata.yaml; without it the bag needs a reindex.
+  {
+    std::error_code ec;
+    std::vector<std::string> bag_dirs;
+    for (auto it = fs::directory_iterator(dir, ec); !ec && it != fs::directory_iterator();
+         it.increment(ec)) {
+      const std::string n = it->path().filename().string();
+      std::error_code e2;
+      if (n.rfind("rosbag2", 0) == 0 && it->is_directory(e2)) bag_dirs.push_back(n);
+    }
+    std::sort(bag_dirs.begin(), bag_dirs.end());
+    for (const auto& n : bag_dirs) {
+      std::error_code e2;
+      if (!fs::exists(dir + "/" + n + "/metadata.yaml", e2)) {
+        summary.notes.push_back("rosbag2 metadata.yaml missing in " + n +
+                                ": the bag was not finalised (ros2 bag reindex may recover it)");
+        summary.bag_healthy_throughout = false;
+      }
+    }
+  }
   if (!was_running && bag_.exited_abnormally()) {
     summary.notes.push_back("bag process exited with code " +
                             std::to_string(bag_.last_exit_code()));

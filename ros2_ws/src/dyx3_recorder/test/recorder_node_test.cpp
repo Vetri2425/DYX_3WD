@@ -31,9 +31,10 @@ std::string slurp(const std::string& p) {
   return o.str();
 }
 
+// A well-behaved fake rosbag2: grows while running, finalises (metadata.yaml) on SIGINT.
 const char* kGoodBag =
-    "trap 'exit 0' INT; mkdir -p \"$0\"; while :; do echo xxxxxxxxxx >> \"$0/data\"; sleep 0.05; "
-    "done";
+    "trap 'echo m > \"$0/metadata.yaml\"; exit 0' INT; mkdir -p \"$0\"; while :; do echo "
+    "xxxxxxxxxx >> \"$0/data\"; sleep 0.05; done";
 
 struct Rig {
   std::shared_ptr<rclcpp::Context> ctx;
@@ -637,4 +638,27 @@ TEST(RecorderNode, StartupMarksALeftOpenRunInterrupted) {
   const std::string summary = slurp(cut + "/summary.json");
   EXPECT_NE(summary.find("\"final_state\": \"INTERRUPTED\""), std::string::npos);
   second.reset();
+}
+
+// REC-014: a bag that had to be killed, or that never wrote its metadata, is not healthy.
+TEST(RecorderNode, EscalationOrMissingMetadataClearsBagHealth) {
+  {
+    Rig r("trap '' INT; mkdir -p \"$0\"; while :; do echo x >> \"$0/data\"; sleep 0.05; done",
+          true, "/bin/sh", {rclcpp::Parameter("bag_finalize_timeout_s", 0.3)});
+    r.mission(MissionState::STATE_RUNNING);
+    r.pump(200);
+    r.mission(MissionState::STATE_COMPLETED);
+    const std::string summary = slurp(r.run_dir() + "/summary.json");
+    EXPECT_NE(summary.find("escalation step 1"), std::string::npos);
+    EXPECT_NE(summary.find("\"bag_healthy_throughout\": false"), std::string::npos);
+  }
+  {
+    Rig r("trap 'exit 0' INT; mkdir -p \"$0\"; while :; do echo x >> \"$0/data\"; sleep 0.05; done");
+    r.mission(MissionState::STATE_RUNNING);
+    r.pump(200);
+    r.mission(MissionState::STATE_COMPLETED);
+    const std::string summary = slurp(r.run_dir() + "/summary.json");
+    EXPECT_NE(summary.find("metadata.yaml missing in rosbag2"), std::string::npos);
+    EXPECT_NE(summary.find("\"bag_healthy_throughout\": false"), std::string::npos);
+  }
 }
