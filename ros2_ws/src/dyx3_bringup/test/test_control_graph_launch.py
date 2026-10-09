@@ -25,6 +25,14 @@ def test_parameter_files_are_applied_only_when_they_exist(tmp_path):
     assert all(x["params_file"] is None for x in mod.plan(str(tmp_path / "missing")))
 
 
+def test_only_control_executors_receive_real_time_scheduling():
+    plans = mod.plan("/nonexistent")
+    assert {p["package"] for p in plans if p["prefix"] is not None} == {
+        "dyx3_motion_guard", "dyx3_rpp"
+    }
+    assert all(p["prefix"] == mod.RT_CONTROL_PREFIX for p in plans if p["prefix"] is not None)
+
+
 def test_launch_description_builds_and_every_node_is_created():
     nodes = mod.build_nodes("/nonexistent")
     assert len(nodes) == len(mod.GRAPH)

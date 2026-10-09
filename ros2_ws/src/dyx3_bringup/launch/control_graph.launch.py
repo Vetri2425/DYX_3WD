@@ -8,7 +8,9 @@ Runs: mission, motion_guard, px4_link, rpp, spray, system_gateway. NOT in this g
 
 DERIVED — NOT FROM V1 SPEC: when ANY node of this graph exits, the whole launch shuts down and systemd restarts the unit. A graph with a
 dead px4_link or guard is not a degraded graph worth keeping half alive, and a restart mid-mission aborts the run anyway.
-Per-node real-time priority / CPU affinity (architecture 8) is NOT expressed here: OPEN.
+DERIVED — NOT FROM V1 SPEC: retain the existing FIFO 80 / CPU 4 allocation only for
+RPP and motion_guard, the two control executors named by architecture section 8. The
+mission, px4_link, spray and gateway executors stay under normal scheduling.
 """
 
 import os
@@ -28,6 +30,9 @@ GRAPH = (
     ("dyx3_system_gateway", "gateway_node", "system_gateway", "gateway"),
 )
 
+RT_CONTROL_PACKAGES = frozenset(("dyx3_motion_guard", "dyx3_rpp"))
+RT_CONTROL_PREFIX = "taskset -c 4 chrt -f 80"
+
 
 def plan(config_dir: str) -> list[dict]:
     """What will be launched: package, executable, name and the parameter file that exists (or None)."""
@@ -42,6 +47,7 @@ def plan(config_dir: str) -> list[dict]:
                 "executable": executable,
                 "name": name,
                 "params_file": params_file if os.path.isfile(params_file) else None,
+                "prefix": RT_CONTROL_PREFIX if package in RT_CONTROL_PACKAGES else None,
             }
         )
     return out
@@ -55,6 +61,7 @@ def build_nodes(config_dir: str) -> list:
             name=p["name"],
             output="screen",
             parameters=[p["params_file"]] if p["params_file"] else [],
+            prefix=p["prefix"],
             on_exit=Shutdown(reason=f"{p['name']} exited"),
         )
         for p in plan(config_dir)

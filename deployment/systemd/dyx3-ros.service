@@ -22,12 +22,9 @@ ProtectKernelModules=yes
 ProtectControlGroups=yes
 
 LimitNOFILE=65536
-# Real-time: the control loop runs at 250 Hz. Pinned core + FIFO priority.
-# CPUQuota is deliberately NOT set — it has no effect under SCHED_FIFO.
+# The launcher and non-control nodes must be scheduled normally. The launch file gives only
+# the RPP and motion-guard control executors FIFO priority and CPU affinity.
 LimitRTPRIO=99
-CPUSchedulingPolicy=fifo
-CPUSchedulingPriority=80
-CPUAffinity=4
 
 StandardOutput=journal
 StandardError=journal

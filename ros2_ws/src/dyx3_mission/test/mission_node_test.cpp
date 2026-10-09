@@ -7,10 +7,12 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <ctime>
 #include <fstream>
 #include <functional>
 #include <memory>
 #include <string>
+#include <thread>
 
 #include "dyx3_interfaces/action/execute_mission.hpp"
 #include "dyx3_interfaces/msg/mission_state.hpp"
@@ -154,6 +156,18 @@ protected:
   std::size_t state_count_ = 0;
   std::vector<di::msg::PointResult> points_;
 };
+
+TEST_F(MissionNodeTest, IdleExecutorWaitsBetweenTenHertzStateCallbacks) {
+  const std::clock_t cpu_before = std::clock();
+  std::thread spin_thread([this] { exec_.spin(); });
+  std::this_thread::sleep_for(1500ms);
+  exec_.cancel();
+  spin_thread.join();
+  const double cpu_s = static_cast<double>(std::clock() - cpu_before) / CLOCKS_PER_SEC;
+  EXPECT_GE(state_count_, 5U);
+  EXPECT_LE(state_count_, 30U);
+  EXPECT_LT(cpu_s, 0.5) << "an idle mission process consumed too much CPU";
+}
 
 }  // namespace
 
