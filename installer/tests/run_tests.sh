@@ -199,6 +199,24 @@ TOOL
   else
     bad "first install records the adapter identity under set -euo pipefail"
   fi
+  # BRLTTY is masked (not removed) and recorded for the uninstaller; already-masked units are left alone.
+  brlroot="${T}/usb-brltty-root"
+  mkdir -p "${brlroot}"
+  if (set -euo pipefail
+      systemctl() {
+        case "$1" in
+          list-unit-files) printf '%s enabled\n' "$3" ;;
+          is-enabled) [ "$2" = brltty.service ] && echo masked || echo enabled ;;
+          mask) printf '%s\n' "$3" >>"${T}/brltty-masked-calls" ;;
+        esac
+      }
+      DYX3_ROOT="${brlroot}" _usb_serial_mask_brltty) >"${T}/brltty-mask.out" 2>&1 &&
+     [ "$(cat "${T}/brltty-masked-calls")" = "brltty-udev.service" ] &&
+     [ "$(cat "${brlroot}/etc/dyx3/brltty-masked-by-dyx3")" = "brltty-udev.service" ]; then
+    ok "BRLTTY units are masked once and recorded for the uninstaller"
+  else
+    bad "BRLTTY units are masked once and recorded for the uninstaller"
+  fi
   # Regression (rover 2026-10-09): one unit failing to restart must not abort the upgrade before
   # health/rollback; every enabled unit is still restarted.
   if (set -euo pipefail

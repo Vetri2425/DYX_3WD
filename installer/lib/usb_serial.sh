@@ -233,6 +233,38 @@ _usb_serial_write_receiver_identity() {
   mv -f "${tmp}" "${dst}"
 }
 
+# The running brltty-udev daemon auto-detects USB serial bridges on its own and keeps the CH340
+# claimed through usbfs; the scoped udev exclusion cannot release a device it already holds (rover
+# 2026-10-09: ch341 loaded, device stayed on usbfs). The rover is headless with no braille display,
+# so BRLTTY is masked. Only units that exist and are not already masked are touched, and they are
+# recorded so usb_serial_uninstall.sh unmasks exactly those. No package is removed.
+_usb_serial_mask_brltty() {
+  local root marker unit
+  root="$(_usb_serial_sysroot)"
+  marker="${root}/etc/dyx3/brltty-masked-by-dyx3"
+  for unit in brltty-udev.service brltty.service; do
+    systemctl list-unit-files --no-legend "${unit}" 2>/dev/null | grep -q "^${unit}" || continue
+    [ "$(systemctl is-enabled "${unit}" 2>/dev/null || true)" = masked ] && continue
+    systemctl mask --now "${unit}" || die "could not mask ${unit}; CH340 stays claimed by BRLTTY"
+    install -d -m 0755 "$(dirname "${marker}")"
+    grep -qx "${unit}" "${marker}" 2>/dev/null || printf '%s\n' "${unit}" >>"${marker}"
+  done
+}
+
+# Force the kernel to re-probe the CH340 so ch341 can claim it after BRLTTY released it.
+_usb_serial_reenumerate_adapter() {
+  local d vid pid
+  for d in "${DYX3_CH341_USB_SYSFS}"/*; do
+    [ -r "${d}/idVendor" ] && [ -r "${d}/idProduct" ] && [ -w "${d}/authorized" ] || continue
+    IFS= read -r vid <"${d}/idVendor" || true; IFS= read -r pid <"${d}/idProduct" || true
+    [ "${vid,,}" = "${DYX3_CH341_VID}" ] && [ "${pid,,}" = "${DYX3_CH341_PID}" ] || continue
+    echo 0 >"${d}/authorized" || true
+    sleep 1
+    echo 1 >"${d}/authorized" || die "could not re-authorize CH340 at ${d}"
+  done
+  sleep 2
+}
+
 # provision_usb_serial_support: installer entry point. Hardware identity is derived per rover.
 provision_usb_serial_support() {
   local kernel id_path
@@ -265,11 +297,9 @@ provision_usb_serial_support() {
     done
     if [ "${found}" -eq 0 ] || [ "${DYX3_USB_BRLTTY_RULE_CHANGED}" -eq 1 ]; then
       udevadm control --reload-rules
-      if systemctl is-active --quiet brltty-udev.service 2>/dev/null; then
-        systemctl restart brltty-udev.service || die "could not restart BRLTTY after installing the scoped device exclusion"
-      fi
+      _usb_serial_mask_brltty
       modprobe ch341 || die "modprobe ch341 failed; see dmesg"
-      udevadm trigger --subsystem-match=usb
+      _usb_serial_reenumerate_adapter
       udevadm settle --timeout=10 || true
     fi
     found=0

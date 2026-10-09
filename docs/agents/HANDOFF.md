@@ -1436,3 +1436,53 @@ it is not installed on the rover. Do not treat compile-only evidence as live bin
 
 Current working-tree status at handoff update: `docs/agents/HANDOFF.md` is modified and
 `tools/bench/phaseA_executor.py` is untracked. Neither is part of commit `7360199522b6069267cf250f2efa9adc8063940d`.
+
+---
+
+## 2026-10-09 (11:50) — Claude — Task 1 DONE: RTK over USB to the UM982 (USB_DIRECT)
+
+Owner priority: USB RTK → Ethernet no-stall + QGC → calibration/tuning/mission → backend/frontend → RPP.
+
+**Release:** master `0eafcd5`, live on the rover; health OK, all 6 services plus `dyx3-usb-serial-check`.
+Merged Codex `7360199` (CH341 packaging), plus Claude fixes:
+- `d8716af`: the RTK worker accepts `/dev/serial/by-path`. The CH340 has no USB serial number.
+- `f2d1888`: provisioning no longer aborts when no identity file exists yet. The unguarded `sed` exited 2
+  under pipefail.
+- `0eafcd5`:
+  - the module is built directly with kbuild, **no DKMS**: `apt install dkms` pulled gcc-12 and upgraded 11
+    system libraries, which the installer's guard refused;
+  - the restart loop no longer aborts before health/rollback. A failed unit restart had left `current`
+    switched with old processes running;
+- plus this commit: BRLTTY is masked and the adapter re-enumerated (below), and `tcpdump` is in the base packages.
+
+**Receiver identity, proven from the receiver itself:**
+- Method: passive listen at every baud, then only the read-only queries `CONFIG` and `UNILOGLIST`. Nothing on the
+  receiver was changed.
+- USB (CH340 `1a86:7523`, `/dev/serial/by-path/platform-3610000.usb-usb-0:2.1:1.0-port0`) = **UM982 COM3**:
+  GNGSV and GPVTG are logged only on COM3, and the USB stream carries them.
+- COM1 (to PX4 TELEM1) is separate.
+- COM1, COM2 and COM3 are all 230400 baud.
+- COM3 outputs GGA at 5 Hz, so readback is available.
+
+**Hand steps on the rover, now in the installer (this commit):**
+- `systemctl mask --now brltty-udev.service brltty.service`. The BRLTTY daemon kept the CH340 claimed via usbfs
+  even after the scoped udev exclusion.
+- Re-authorize the device (`authorized` 0 → 1) so `ch341` binds.
+- Note: on this rover the units were masked by hand before the marker file existed, so
+  `/etc/dyx3/brltty-masked-by-dyx3` is absent. The uninstaller will not unmask them unless the marker is added.
+
+**RTK config rev 2 (in `/var/lib/dyx3/rtk/config.json`):** `NTRIP → USB_DIRECT`, baud 230400,
+`write_timeout_s` 0.2, `reopen_delay_s` 2.0 (both DERIVED).
+
+**Evidence (indoors):**
+- Worker `INJECTING`; delivered = valid frames (361 after ~1 min), **0 failures**.
+- `/dyx3/rtcm` has no traffic, so there is no DDS/PX4 injection and no double injection.
+- Receiver readback: GGA quality **1 → 2 (DGPS)**, receiver correction age **1.2 s** (valid), 7 satellites,
+  HDOP 2.8. PX4 also shows fix type 4.
+- Still to do outdoors: RTK FLOAT/FIXED.
+
+**Found for task 2 (not fixed here):**
+- RTK PX4_DDS transport never recovered after an agent restart: stuck in WAIT_TRANSPORT since 09:41.
+- A `mission…` process at RT priority burns 94 % of one core; Jetson load average ~50.
+- `dyx3-platform` takes 90 s to stop on restart (systemd stop timeout).
+- A Codex trace prompt for the first two was handed to the owner.

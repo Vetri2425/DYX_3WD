@@ -33,6 +33,13 @@ rm -f "${unit}"
 rm -rf "${source_dir}"
 if [ -f "${identity}" ] && grep -Fq '# Managed by DYX 3WD installer: ch341-dyx3' "${identity}"; then rm -f "${identity}"; fi
 if [ -f "${receiver_identity}" ] && grep -Fq '# Managed by DYX 3WD installer: confirmed UM982 USB identity' "${receiver_identity}"; then rm -f "${receiver_identity}"; fi
+brltty_marker=/etc/dyx3/brltty-masked-by-dyx3
+if [ -f "${brltty_marker}" ] && command -v systemctl >/dev/null 2>&1; then
+  while IFS= read -r unit; do
+    [ -n "${unit}" ] && systemctl unmask "${unit}" 2>/dev/null || true
+  done <"${brltty_marker}"
+  rm -f "${brltty_marker}"
+fi
 udevadm control --reload-rules
 if command -v systemctl >/dev/null 2>&1; then systemctl daemon-reload; fi
 depmod -a "$(uname -r)"

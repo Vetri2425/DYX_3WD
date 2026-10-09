@@ -197,3 +197,25 @@ the store at startup and a restart interrupts the tablet connection.
 * **OPEN**: per-node real-time priority/affinity (the `dyx3-ros` unit applies FIFO 80 / CPU 4 to the whole tree), DDS scoping (loopback-only vs an eth0 whitelist), the backend port (8000, DERIVED), and the ROS domain number.
 
 Tested against a staged root (`installer/tests/run_tests.sh`, 80 checks); **never run on a Jetson**.
+
+
+### Selecting the UM982 USB link (USB_DIRECT) on a new rover
+
+Proven on the 3WD rover 2026-10-09. Never configure the receiver: only the read-only queries `CONFIG` and
+`UNILOGLIST` are sent, and only to identify the port.
+
+1. Provisioning (this installer) binds the CH340 to `ch341`. BRLTTY is masked because its daemon keeps the
+   adapter claimed through usbfs. Result: `/dev/ttyUSB0`, `/dev/serial/by-path/<...>:1.0-port0`.
+2. Identify the COM, with the RTK worker not using the port:
+   `sudo python3 tools/bench/um982_usb_probe.py /dev/serial/by-path/<...>` (passive, every baud), then
+   `... --query <baud>`. Compare the passive message set with `UNILOGLIST`. The USB COM must not be the COM
+   wired to PX4 TELEM1 (COM1 on this rover).
+   This rover: USB = **COM3** (GNGSV + GPVTG appear only there), all COMs 230400 baud. COM3 outputs GGA at
+   5 Hz, so the worker reads fix quality and correction age back.
+3. Select it through the RTK control API (or socket `SET_CONFIG`, keeping `revision`): `transport=USB_DIRECT`,
+   `usb.receiver_device` = the by-path link, `usb.baud` = the COM's baud, `write_timeout_s` 0.2 and
+   `reopen_delay_s` 2.0 (both DERIVED; re-validate in the field). The config persists in
+   `/var/lib/dyx3/rtk/config.json`.
+4. Accept when the worker is `INJECTING` with delivered = valid frames and 0 failures, `/dyx3/rtcm` has no
+   publisher traffic, and the receiver readback shows GGA quality > 1 with a valid correction age.
+   Measured 2026-10-09 indoors: quality 2 (DGPS), correction age 1.2 s, 0 failures.

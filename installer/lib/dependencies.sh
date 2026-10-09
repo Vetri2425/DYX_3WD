@@ -3,7 +3,7 @@
 # shellcheck shell=bash
 
 APT_PACKAGES=(
-  build-essential cmake ninja-build meson pkg-config git curl ca-certificates
+  build-essential cmake ninja-build meson pkg-config git curl ca-certificates tcpdump
   gnupg lsb-release python3-pip python3-venv network-manager iproute2 iputils-ping
   dnsmasq-base iptables iw
   libssl-dev libasio-dev libtinyxml2-dev nlohmann-json3-dev zstd
