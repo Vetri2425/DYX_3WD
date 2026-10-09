@@ -23,7 +23,6 @@ constexpr uint32_t kCmdLoggingStart = 2510;  // VEHICLE_CMD_LOGGING_START
 constexpr uint32_t kCmdDoSetServo = 183;     // VEHICLE_CMD_DO_SET_SERVO
 constexpr uint32_t kCmdDoSetActuator = 187;  // VEHICLE_CMD_DO_SET_ACTUATOR
 constexpr size_t kMaxSprayTransactions = 16;
-constexpr double kSprayTransactionTimeoutS = 5.0;
 
 struct UsedTopic {
   const char* request_name;  // BASE topic name: the firmware matches the uORB name, no _vN suffix
@@ -351,6 +350,10 @@ void Px4LinkNode::declare_and_validate_params() {
   p_.arm_confirm_timeout_s = declare_checked<double>(*this, "arm_confirm_timeout_s", 2.0);
   require(p_.arm_confirm_timeout_s > 0.0, "arm_confirm_timeout_s must be > 0");
   p_.ulog_streaming_enabled = declare_checked<bool>(*this, "ulog_streaming_enabled", true);
+  p_.spray_transaction_timeout_s =
+      declare_checked<double>(*this, "spray_transaction_timeout_s", p_.spray_transaction_timeout_s);
+  require(std::isfinite(p_.spray_transaction_timeout_s) && p_.spray_transaction_timeout_s > 0.0,
+          "spray_transaction_timeout_s must be > 0");
   p_.spray_ack_token_state_path = declare_checked<std::string>(*this, "spray_ack_token_state_path",
                                                                p_.spray_ack_token_state_path);
   p_.msg_definitions_dir = declare_checked<std::string>(*this, "msg_definitions_dir", "");
@@ -598,6 +601,15 @@ void Px4LinkNode::on_spray_command(const dyx3_interfaces::msg::SprayActuatorComm
     }
   }
 
+  // An OFF never waits behind an in-flight ON: the ON's ACK may be lost (best-effort FCU topic) and
+  // the valve would stay open until the transaction timed out. The ON is failed, the OFF goes now.
+  const bool preempt_on = !request.on && spray_inflight_ && spray_inflight_->on;
+  if (preempt_on) {
+    publish_spray_ack(spray_inflight_->seq, spray_inflight_->source, false,
+                      dyx3_interfaces::msg::SprayActuatorAck::RESULT_LINK_REFUSED);
+    spray_inflight_.reset();
+  }
+
   const size_t active_count = spray_queue_.size() + (spray_inflight_ ? 1U : 0U);
   if (active_count >= kMaxSprayTransactions) {
     auto evict = std::find_if(spray_queue_.begin(), spray_queue_.end(), [](const SprayPending& p) {
@@ -613,7 +625,7 @@ void Px4LinkNode::on_spray_command(const dyx3_interfaces::msg::SprayActuatorComm
     spray_queue_.erase(evict);
   }
 
-  if (watchdog_off) {
+  if (watchdog_off || preempt_on) {
     spray_queue_.push_front(std::move(request));
   } else {
     spray_queue_.push_back(std::move(request));
@@ -700,7 +712,7 @@ void Px4LinkNode::service_spray_transactions(double now_s) {
     return;
   }
 
-  if (spray_inflight_ && now_s - spray_inflight_->sent_s > kSprayTransactionTimeoutS) {
+  if (spray_inflight_ && now_s - spray_inflight_->sent_s > p_.spray_transaction_timeout_s) {
     publish_spray_ack(spray_inflight_->seq, spray_inflight_->source, false,
                       dyx3_interfaces::msg::SprayActuatorAck::RESULT_LINK_REFUSED);
     spray_inflight_.reset();

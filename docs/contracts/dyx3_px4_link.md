@@ -240,6 +240,7 @@ negative injected timestamps.
 | `handshake_timeout_s`, `handshake_retry_s` | 5.0, 1.0 | IDLE_ONLY | DERIVED |
 | `offboard_prestream_s`, `offboard_confirm_timeout_s` | 0.5, 2.0 | IDLE_ONLY | DERIVED |
 | `ulog_streaming_enabled` | true | IDLE_ONLY | |
+| `spray_transaction_timeout_s` | 0.3 | RESTART | DERIVED (XR-GPX-001): pinned PX4 answers 187/183 at once; bounds how long a queued spray request can wait; validated > 0 |
 
 ## 13. Acceptance
 
@@ -257,6 +258,15 @@ source replaces that source's older queued request; a replaced request receives 
 `SprayActuatorAck` (`result=255`). A watchdog OFF supersedes every queued request from any other source (ON **and** OFF; each receives a
 failed `SprayActuatorAck`, `RESULT_LINK_REFUSED`) and is placed at the front of the queue (commit `6b8b4b1`). If all queue capacity is occupied by watchdog OFF requests, a new request is
 refused rather than displacing them. Link loss fails the in-flight request and all queued requests.
+
+**An OFF never waits behind an in-flight ON** (XR-GPX-001). FCU ACKs arrive on a best-effort
+topic, so one lost ACK would otherwise hold a line-end, watchdog or E-stop OFF until the ON timed
+out. Any OFF (controller or watchdog) that arrives while an ON is in flight fails that ON
+(`RESULT_LINK_REFUSED`), goes to the front of the queue and is dispatched in the same callback,
+without waiting for a tick. A late ACK of the pre-empted ON cannot confirm the OFF (different
+identity). An OFF does not pre-empt an in-flight OFF. An unanswered in-flight request is failed
+after `spray_transaction_timeout_s` (default 0.3 s, validated > 0); until then every exact reassert
+of it is republished with its identity.
 
 Each dispatched logical proof epoch receives a durable `(VehicleCommand.source_system,
 VehicleCommand.source_component)` identity. The allocator uses source systems 1..255 and component

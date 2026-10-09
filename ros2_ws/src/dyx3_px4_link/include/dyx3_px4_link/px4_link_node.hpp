@@ -60,6 +60,9 @@ struct LinkParams {
   OffboardTiming offboard;
   double arm_confirm_timeout_s{2.0};
   bool ulog_streaming_enabled{true};
+  // An unanswered spray VehicleCommand is failed after this long (its reasserts keep republishing
+  // it until then). Short, because an OFF queued behind it waits that long.
+  double spray_transaction_timeout_s{0.3};
   std::string msg_definitions_dir;  // empty: <share of px4_msgs>/msg
   std::string spray_ack_token_state_path{"/var/lib/dyx3/state/px4_link_spray_ack_next"};
 };
