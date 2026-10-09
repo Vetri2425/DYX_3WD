@@ -2067,3 +2067,21 @@ Installer 148/0 (new: site LAN address + gateway, FCU-subnet refusal, hotspot/LA
 - Reconcile `App-Polish` and `main` into one authoritative branch.
 - Update tablet `R5GL1016QFB` (it has `2e75125`).
 - Hands-on owner test pending: Disconnect/Connect, relaunch, and the hotspot path.
+
+## 2026-10-09 (18:35) — Claude — motor rewiring: M1 is now the left wheel; fixed in the RoboClaw output mapping
+
+- The owner rewired the drive: **RoboClaw M1 = LEFT wheel, M2 = RIGHT wheel** (each motor moved with its
+  encoder). Steering then came out mirrored.
+- **Fix:** `RBCLW_FUNC1 102`, `RBCLW_FUNC2 101` (FCU saved, plus `config/px4/3wd_6x_carry_from_proto.params`).
+  - `RC1_REV` stays −1. A left/right swap must be fixed in the output mapping; the stick sign would fix only
+    manual, and Mission/Offboard/RPP would turn the wrong way.
+  - EKF2 uses only the mean of `wheel_encoders.wheel_speed[0..1]` (EKF2.cpp:2243), so the swapped right/left
+    labels in that topic are harmless.
+- **Verified:**
+  - Before: log23/24 (12:49 UTC) showed consistent motor/encoder pairs, so a channel-level move.
+  - After: log28 (13:00 UTC), stick left → PX4 right motor +0.17…+0.48 → M2 encoder +1.0…+2.9 rad/s; left motor
+    −0.19…−0.49 → M1 −1.1…−3.0 rad/s.
+  - The owner confirmed physically: it turns correctly.
+- `config/vehicle/roboclaw/README.md` documents the current wiring and the rule.
+- Log download over the router: request as a GCS component (source_component 190). Component 0 gets no LOG_ENTRY
+  reply through mavlink-router.
