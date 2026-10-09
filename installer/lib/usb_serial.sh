@@ -168,11 +168,19 @@ _usb_serial_ensure_host_build_tools() {
   fi
 }
 
+# Read DYX3_CH341_EXPECTED_ID_PATH from an env file. A missing file means "not provisioned yet"
+# and must not abort callers running under set -euo pipefail (first install, fresh rover).
+_usb_serial_recorded_id_path() {
+  local file="$1"
+  [ -f "${file}" ] || return 0
+  sed -n 's/^DYX3_CH341_EXPECTED_ID_PATH=//p' "${file}" | head -n1
+}
+
 _usb_serial_write_adapter_identity() {
   local id_path="$1" root dst tmp existing
   root="$(_usb_serial_sysroot)"
   dst="${root}/etc/dyx3/ch341-adapter.env"
-  existing="$(sed -n 's/^DYX3_CH341_EXPECTED_ID_PATH=//p' "${dst}" 2>/dev/null | head -n1)"
+  existing="$(_usb_serial_recorded_id_path "${dst}")"
   if [ -n "${existing}" ] && [ "${existing}" != "${id_path}" ]; then
     die "recorded CH340 ID_PATH differs from detected adapter (${existing} vs ${id_path}); verify physical connection and remove ${dst} only as part of an approved reprovision"
   fi
@@ -286,7 +294,7 @@ provision_usb_serial_support() {
 # configured receiver identity is deliberately gated on separate physical confirmation.
 health_usb_serial() {
   local kernel="${DYX3_CH341_KERNEL:-$(uname -r)}" count=0 d vid pid driver expected actual
-  expected="$(sed -n 's/^DYX3_CH341_EXPECTED_ID_PATH=//p' "${DYX3_ROOT}/etc/dyx3/ch341-adapter.env" 2>/dev/null | head -n1)"
+  expected="$(_usb_serial_recorded_id_path "${DYX3_ROOT}/etc/dyx3/ch341-adapter.env")"
   if ! have lsusb || ! lsusb -d "${DYX3_CH341_VID}:${DYX3_CH341_PID}" 2>/dev/null | grep -q .; then
     if [ -n "${expected}" ]; then _fail "provisioned CH340 adapter ID_PATH=${expected} is absent"; else _warn "CH340 adapter not present; USB RTK device is not provisioned"; fi
     return 0

@@ -189,6 +189,21 @@ TOOL
   mkdir -p "${usbroot}/etc/udev/rules.d"
   printf 'administrator rule\n' >"${usbroot}/etc/udev/rules.d/85-brltty.rules"
   if (_usb_serial_install_brltty_override platform-test-usb-0:2.1) >"${T}/usb-admin-rule.out" 2>&1; then bad "administrator udev override is preserved"; else ok "administrator udev override is preserved"; fi
+  # Regression (rover 2026-10-09): on a first install /etc/dyx3/ch341-adapter.env does not exist yet;
+  # the unguarded sed exited 2 and set -euo pipefail aborted provisioning before anything ran.
+  freshroot="${T}/usb-fresh-root"
+  mkdir -p "${freshroot}"
+  if (set -euo pipefail; DYX3_ROOT="${freshroot}" _usb_serial_write_adapter_identity platform-fresh-usb-0:2.1) >"${T}/usb-fresh.out" 2>&1 &&
+     grep -qx "DYX3_CH341_EXPECTED_ID_PATH=platform-fresh-usb-0:2.1" "${freshroot}/etc/dyx3/ch341-adapter.env"; then
+    ok "first install records the adapter identity under set -euo pipefail"
+  else
+    bad "first install records the adapter identity under set -euo pipefail"
+  fi
+  if (set -euo pipefail; [ -z "$(_usb_serial_recorded_id_path "${T}/does-not-exist.env")" ]) >/dev/null 2>&1; then
+    ok "missing adapter identity file reads as unprovisioned, not as an error"
+  else
+    bad "missing adapter identity file reads as unprovisioned, not as an error"
+  fi
   check "administrator udev override contents remain untouched" 'grep -qx "administrator rule" "${usbroot}/etc/udev/rules.d/85-brltty.rules"'
   rm -f "${usbroot}/etc/udev/rules.d/85-brltty.rules"
   cat >"${usbtools}/lsusb" <<'TOOL'
