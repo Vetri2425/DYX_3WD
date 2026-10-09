@@ -190,7 +190,10 @@ health_run() {
     deep=1
     shift
   fi
-  local rel="${1:-${DYX3_CURRENT}}"
+  local rel="${1:-${DYX3_CURRENT}}" pins
+  # The release's own pin (INS-003): a revert or rollback across a firmware-pin change checks its own px4_msgs.
+  pins="$(_pins_dir_of "${rel}")"
+  local PINS_DIR="${pins}"
   _health_fail=0
   load_pin firmware
   health_release "$(readlink -f "${rel}")"

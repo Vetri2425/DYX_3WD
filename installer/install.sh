@@ -73,19 +73,26 @@ main() {
   # this kernel, its headers, or its USB identity cannot be provisioned safely.
   provision_usb_serial_support
   install_fcu_network
-
-  # Bootstrap the release from this checkout's origin so the release has real provenance.
-  local checkout_root origin
-  checkout_root="$(cd "${INSTALLER_DIR}/.." && pwd)"
-  if [ -z "${DYX3_REPO_URL:-}" ] && origin="$(git -C "${checkout_root}" remote get-url origin 2>/dev/null)"; then
-    export DYX3_REPO_URL="${origin}"
-  fi
-  if [ -z "${ref}" ]; then
-    ref="$(git -C "${checkout_root}" rev-parse HEAD 2>/dev/null)" ||
-      die "not in a git checkout; pass --ref"
-  fi
-  DYX3_FORCE=1 upgrade_to "${ref}"
-  log "install complete"
 }
 
+# Bootstrap the release from this checkout's origin so the release has real provenance.
+checkout_root="$(cd "${INSTALLER_DIR}/.." && pwd)"
+if [ -z "${DYX3_REPO_URL:-}" ] && origin="$(git -C "${checkout_root}" remote get-url origin 2>/dev/null)"; then
+  export DYX3_REPO_URL="${origin}"
+fi
+if [ -z "${ref}" ]; then
+  ref="$(git -C "${checkout_root}" rev-parse HEAD 2>/dev/null)" ||
+    die "not in a git checkout; pass --ref"
+fi
+
 with_lock "${DYX3_RUN}/install.lock" main
+# The release itself is installed by ITS OWN installer and pins (INS-002), exactly like an upgrade. DYX3_FORCE=1:
+# an install converges (rebuilds markers, restarts) even when current already is that release.
+export DYX3_FORCE=1
+if [ "${DYX3_DRY_RUN}" = "1" ]; then
+  log "dry-run: would hand over to the installer of ${ref}; showing this installer's plan"
+  with_lock "${DYX3_RUN}/install.lock" upgrade_to "${ref}"
+  log "install complete (dry-run)"
+  exit 0
+fi
+handoff_to_target "${ref}"

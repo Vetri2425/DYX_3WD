@@ -39,6 +39,11 @@ resolve_ref() {
     run git init -q --bare "${mirror}"
     run git -C "${mirror}" remote add origin "$(_repo_url)"
   fi
+  # A full SHA already in the mirror is immutable: no fetch (the re-executed target installer resolves its own SHA).
+  if printf '%s' "${ref}" | grep -Eq '^[0-9a-f]{40}$' && git -C "${mirror}" rev-parse --verify --quiet "${ref}^{commit}" >/dev/null; then
+    printf '%s' "${ref}"
+    return 0
+  fi
   run git -C "${mirror}" fetch -q --prune origin \
     '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*'
   local cand
@@ -54,6 +59,59 @@ resolve_ref() {
     git -C "${mirror}" rev-parse --verify --quiet "${ref}^{commit}" && return 0
   fi
   die "cannot resolve git ref '${ref}' in $(_repo_url)"
+}
+
+# installer_api_of <installer-dir>: the DYX3_INSTALLER_API that installer declares (0 = before the hand-over existed).
+installer_api_of() {
+  local v
+  v="$(sed -n 's/^DYX3_INSTALLER_API=\([0-9][0-9]*\).*/\1/p' "$1/lib/common.sh" 2>/dev/null | head -n1)"
+  printf '%s' "${v:-0}"
+}
+
+# stage_target_installer <ref>: fetch and resolve, then extract the TARGET commit's installer/ and deployment/ into a
+# fresh staging directory. Prints "<sha> <dir>".
+stage_target_installer() {
+  local ref="$1" sha stage
+  sha="$(resolve_ref "${ref}")" || die "cannot resolve '${ref}'"
+  [ -n "${sha}" ] || die "cannot resolve '${ref}'"
+  stage="${DYX3_VAR_LIB}/state/installer-stage"
+  rm -rf "${stage}"
+  mkdir -p "${stage}/${sha}"
+  git -C "$(_mirror)" archive "${sha}" installer deployment | tar -x -C "${stage}/${sha}" ||
+    die "cannot extract the installer of ${sha:0:10}"
+  [ -f "${stage}/${sha}/installer/upgrade.sh" ] || die "release ${sha:0:10} has no installer/upgrade.sh"
+  printf '%s %s\n' "${sha}" "${stage}/${sha}"
+}
+
+# handoff_to_target <ref> [upgrade.sh args...]: INS-002/INS-003. The release is installed by its OWN installer,
+# libraries, units and pins, never by the running release's: a firmware-pin change then builds px4_msgs for the
+# target's pin. Does not return (execs the target's upgrade.sh).
+handoff_to_target() {
+  local ref="$1" staged sha dir api
+  shift
+  # Gate here too: a target older than the interlock would not ask.
+  require_rover_idle "upgrade to ${ref}"
+  staged="$(with_lock "${DYX3_RUN}/install.lock" stage_target_installer "${ref}")" || exit 1
+  sha="${staged%% *}"
+  dir="${staged#* }"
+  api="$(installer_api_of "${dir}/installer")"
+  if [ "${api}" -lt "${DYX3_INSTALLER_API}" ]; then
+    [ "${DYX3_FORCE:-0}" = "1" ] ||
+      die "the installer of ${sha:0:10} is API ${api}, older than this one (API ${DYX3_INSTALLER_API}); it lacks protections added since. DYX3_FORCE=1 installs it anyway, with its own installer"
+    warn "DYX3_FORCE=1: handing over to the OLDER installer (API ${api}) of ${sha:0:10}"
+  fi
+  log "handing over to the installer of ${sha:0:10} (API ${api}; this one is API ${DYX3_INSTALLER_API})"
+  exec env DYX3_REEXEC=1 DYX3_TARGET_SHA="${sha}" DYX3_PARENT_API="${DYX3_INSTALLER_API}" \
+    bash "${dir}/installer/upgrade.sh" "${sha}" "$@"
+}
+
+# reexec_contract <sha>: in a re-executed target installer, check what the parent handed over.
+reexec_contract() {
+  [ "$1" = "${DYX3_TARGET_SHA:-}" ] || die "re-executed for '${1}', but the parent resolved '${DYX3_TARGET_SHA:-}'"
+  if [ "${DYX3_PARENT_API:-0}" -gt "${DYX3_INSTALLER_API}" ] && [ "${DYX3_FORCE:-0}" != "1" ]; then
+    die "this installer (API ${DYX3_INSTALLER_API}) is older than the one that started it (API ${DYX3_PARENT_API}); DYX3_FORCE=1 to accept"
+  fi
+  log "installer of ${1:0:10} (API ${DYX3_INSTALLER_API}) takes over from API ${DYX3_PARENT_API:-0}"
 }
 
 # build_release <sha>: extract + colcon build + launchers. Idempotent per SHA.
@@ -234,6 +292,9 @@ upgrade_to() {
 
 # health_release_only <release-dir>: static verification (no services).
 health_release_only() {
+  local pins
+  pins="$(_pins_dir_of "$1")"
+  local PINS_DIR="${pins}"
   _health_fail=0
   health_release "$1" "${2:-1}"
   return "${_health_fail}"
@@ -262,7 +323,9 @@ build_backend_venv() {
 # write_versions_file <release-dir>: /etc/dyx3/versions.json — the provenance the recorder copies into every run.
 # Machine-written at every switch/rollback, so it always describes what is CURRENT.
 write_versions_file() {
-  local rel="$1" stack pm msgs origin
+  local rel="$1" stack pm msgs origin pins
+  pins="$(_pins_dir_of "${rel}")"
+  local PINS_DIR="${pins}"
   stack="$(basename "$(readlink -f "${rel}")")"
   origin="built on this machine"
   if [ -f "${rel}/artifacts.env" ]; then

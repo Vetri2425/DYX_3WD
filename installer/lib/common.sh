@@ -14,6 +14,13 @@ DYX3_DRY_RUN="${DYX3_DRY_RUN:-0}"
 INSTALLER_DIR="${INSTALLER_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 PINS_DIR="${INSTALLER_DIR}/pins"
 
+# Installer API (INS-002). An upgrade is carried out by the TARGET release's own installer: the running one fetches,
+# extracts the target's installer/ + deployment/ and re-executes its upgrade.sh with DYX3_REEXEC=1. Both sides refuse
+# a target whose API is older than the running one unless DYX3_FORCE=1. Raise it whenever an older installer would
+# drop a protection or misread the hand-over contract (DYX3_REEXEC, DYX3_TARGET_SHA, DYX3_PARENT_API).
+# Absent (installers before this line) = 0. Keep this line's format: other releases read it with sed.
+DYX3_INSTALLER_API=1
+
 DYX3_PREFIX="${DYX3_ROOT}/opt/dyx3"
 DYX3_ETC="${DYX3_ROOT}/etc/dyx3"
 DYX3_VAR_LIB="${DYX3_ROOT}/var/lib/dyx3"
@@ -60,6 +67,15 @@ load_pin() {
   [ -f "$f" ] || die "missing pin file: $f"
   # shellcheck disable=SC1090
   . "$f"
+}
+
+# _pins_dir_of <release-dir>: that release's own pins. Health and versions.json for a release (a revert or rollback
+# across a firmware-pin change) must use its pin, not the running installer's. Callers assign it to a `local PINS_DIR` AFTER calling this
+# (the fallback reads the outer PINS_DIR).
+_pins_dir_of() {
+  local d
+  d="$(readlink -f "$1" 2>/dev/null)/installer/pins"
+  if [ -f "${d}/firmware.pin" ]; then printf '%s' "${d}"; else printf '%s' "${PINS_DIR}"; fi
 }
 
 # manifest_section <section> [manifest]: print the non-comment lines of a section.

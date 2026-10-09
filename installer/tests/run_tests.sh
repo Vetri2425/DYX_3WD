@@ -67,6 +67,55 @@ idle_rc() {
   echo $?
 }
 
+# make_fakebin <dir>: fake colcon / ss / ping, and flock(1) over python's fcntl.flock (macOS has no util-linux).
+make_fakebin() {
+  mkdir -p "$1"
+  cat >"$1/colcon" <<'F'
+#!/usr/bin/env bash
+if [ -e ros2_ws/src/BREAK ] || [ -e src/BREAK ]; then echo "fake colcon: broken build" >&2; exit 1; fi
+mkdir -p install && : >install/setup.bash
+F
+  cat >"$1/ss" <<'F'
+#!/usr/bin/env bash
+[ -e "${FAKE_NO_AGENT:-/nonexistent}" ] || echo "UNCONN 0 0 0.0.0.0:8888 0.0.0.0:*"
+F
+  printf '#!/usr/bin/env bash\nexit 0\n' >"$1/ping"
+  cat >"$1/flock" <<'F'
+#!/usr/bin/env bash
+# fake flock [-n] [-x] <fd>: lock the open file description the caller passed as <fd>
+nb=0 fd=""
+for a in "$@"; do case "${a}" in -n) nb=1 ;; -x | -e) ;; *) fd="${a}" ;; esac; done
+exec python3 -c '
+import fcntl, sys
+try:
+    fcntl.flock(int(sys.argv[1]), fcntl.LOCK_EX | (fcntl.LOCK_NB if sys.argv[2] == "1" else 0))
+except OSError:
+    sys.exit(1)' "${fd}" "${nb}"
+F
+  chmod +x "$1"/*
+}
+
+# make_src <dir>: a git repo with this installer and deployment, enabling only dyx3-platform (the staged root has no
+# gateway, backend or RTK). Commit "A" is made.
+make_src() {
+  local src="$1"
+  mkdir -p "${src}"
+  cp -r "${REPO}/installer" "${REPO}/deployment" "${src}/"
+  rm -rf "${src}/installer/tests"
+  awk '/^\[enabled_services\]/ { print; print "dyx3-platform"; skip = 1; next }
+       /^\[/ { skip = 0 }
+       skip && /^dyx3-/ { next }
+       { print }' "${src}/installer/manifests/production.manifest" >"${src}/manifest.tmp"
+  mv "${src}/manifest.tmp" "${src}/installer/manifests/production.manifest"
+  mkdir -p "${src}/ros2_ws/src"
+  : >"${src}/ros2_ws/src/.keep"
+  git -C "${src}" init -q -b main
+  git -C "${src}" config user.email t@t
+  git -C "${src}" config user.name t
+  git -C "${src}" add -A
+  git -C "${src}" commit -q -m A
+}
+
 # ---------------------------------------------------------------- supervisor
 sup() {
   local d="${T}/sup"
@@ -692,6 +741,85 @@ F
   rm -f "${DYX3_GATEWAY_SOCK}"
 }
 
+# ---------------------------------------------------------------- INS-002/003: the target's own installer
+handoff() {
+  local src="${T}/ho_src" fb="${T}/ho_bin" out
+  make_fakebin "${fb}"
+  make_src "${src}"
+  # Releases A and B differ only in what their install_hotspot_network does.
+  local net="${src}/installer/lib/network_install.sh"
+  printf '\ninstall_hotspot_network() { echo A >"${DYX3_ROOT}/hotspot_marker"; }\n' >>"${net}"
+  git -C "${src}" commit -q -am "A: hotspot marker A"
+  local A B C D
+  A="$(git -C "${src}" rev-parse HEAD)"
+  sed -i.bak 's/echo A >/echo B >/' "${net}" && rm -f "${net}.bak"
+  git -C "${src}" commit -q -am "B: hotspot marker B"
+  B="$(git -C "${src}" rev-parse HEAD)"
+
+  local root="${T}/ho_root" fwpin
+  fwpin="$(sed -n 's/^FIRMWARE_SHA=//p' "${REPO}/installer/pins/firmware.pin")"
+  mkdir -p "${root}/opt/dyx3/px4_msgs/${fwpin}/install"
+  touch "${root}/opt/dyx3/px4_msgs/${fwpin}/install/setup.bash" "${root}/opt/dyx3/px4_msgs/${fwpin}/.complete"
+  echo abc >"${root}/opt/dyx3/px4_msgs/${fwpin}/px4_msgs.sha256"
+  mkdir -p "${root}/var/lib/dyx3/state" "${root}/var/lib/dyx3/runs" "${root}/var/lib/dyx3/rtk" "${root}/etc/dyx3" "${root}/opt/dyx3/bin"
+  chmod 0700 "${root}/var/lib/dyx3/rtk"
+  : >"${T}/ho_ros.bash"
+  up() { # up <installer-dir> <ref> [env...]: run that installer's upgrade.sh as the operator would, in the staged root
+    local dir="$1" r="$2"
+    shift 2
+    env -u INSTALLER_DIR PATH="${fb}:${PATH}" DYX3_ROOT="${root}" DYX3_REPO_URL="file://${src}" ROS_SETUP="${T}/ho_ros.bash" \
+      DYX3_SKIP_SYSTEMD=1 DYX3_SKIP_BACKEND=1 DYX3_HEALTH_SETTLE_S=0 DYX3_ARTIFACTS=source DYX3_ALLOW_ANY_OS=1 "$@" \
+      bash "${dir}/upgrade.sh" "${r}"
+  }
+  cur() { basename "$(readlink -f "${root}/opt/dyx3/current")"; }
+
+  up "${REPO}/installer" "${A}" >"${T}/ho_a" 2>&1
+  check "handoff: the first release is installed by its own installer" 'grep -q "upgrade complete" "${T}/ho_a" && [ "$(cur)" = "${A}" ] && grep -q "handing over to the installer of ${A:0:10}" "${T}/ho_a" && [ "$(cat "${root}/hotspot_marker")" = A ]'
+  up "${root}/opt/dyx3/current/installer" "${B}" >"${T}/ho_b" 2>&1
+  check "handoff: A -> B runs B's install_hotspot_network, not A's" 'grep -q "upgrade complete" "${T}/ho_b" && [ "$(cur)" = "${B}" ] && [ "$(cat "${root}/hotspot_marker")" = B ]'
+
+  # C changes the firmware pin: px4_msgs must be built and expected for C's pin, from C's pin file.
+  local fw="${T}/ho_fw" sk="${T}/ho_px4msgs" fwsha sksha
+  mkdir -p "${fw}/msg/versioned" "${fw}/srv" "${sk}/msg"
+  echo "uint64 timestamp" >"${fw}/msg/VehicleStatus.msg"
+  echo "uint64 timestamp" >"${fw}/msg/versioned/VehicleLocalPosition.msg"
+  echo "---" >"${fw}/srv/VehicleCommand.srv"
+  : >"${sk}/CMakeLists.txt"
+  : >"${sk}/package.xml"
+  echo "stock" >"${sk}/msg/Stock.msg"
+  local r
+  for r in "${fw}" "${sk}"; do
+    git -C "${r}" init -q -b main && git -C "${r}" add -A &&
+      git -C "${r}" -c user.email=t@t -c user.name=t commit -q -m pin &&
+      git -C "${r}" config uploadpack.allowFilter true && git -C "${r}" config uploadpack.allowAnySHA1InWant true
+  done
+  fwsha="$(git -C "${fw}" rev-parse HEAD)"
+  sksha="$(git -C "${sk}" rev-parse HEAD)"
+  printf 'FIRMWARE_REPO=file://%s\nFIRMWARE_BRANCH=main\nFIRMWARE_SHA=%s\nPX4_MSGS_REPO=file://%s\nPX4_MSGS_SKELETON_REF=%s\n' \
+    "${fw}" "${fwsha}" "${sk}" "${sksha}" >"${src}/installer/pins/firmware.pin"
+  git -C "${src}" commit -q -am "C: new firmware pin"
+  C="$(git -C "${src}" rev-parse HEAD)"
+  up "${root}/opt/dyx3/current/installer" "${C}" >"${T}/ho_c" 2>&1
+  check "handoff: a pin change builds px4_msgs for the TARGET's pin" 'grep -q "upgrade complete" "${T}/ho_c" && [ "$(cur)" = "${C}" ] && [ -f "${root}/opt/dyx3/px4_msgs/${fwsha}/.complete" ] && [ "$(cat "${root}/opt/dyx3/px4_msgs/${fwsha}/firmware.sha")" = "${fwsha}" ] && [ -s "${root}/opt/dyx3/px4_msgs/${fwsha}/px4_msgs.sha256" ]'
+  check "handoff: versions.json expects the target's firmware pin" 'grep -q "\"firmware_expected_sha\": \"${fwsha}\"" "${root}/etc/dyx3/versions.json"'
+  out="$(env -u INSTALLER_DIR PATH="${fb}:${PATH}" DYX3_ROOT="${root}" ROS_SETUP="${T}/ho_ros.bash" DYX3_SKIP_SYSTEMD=1 \
+    DYX3_HEALTH_SETTLE_S=0 bash "${root}/opt/dyx3/current/installer/rollback.sh" 2>&1)"
+  check "handoff: a rollback across the pin change checks and records the older release's own pin" '[ "$(cur)" = "${B}" ] && grep -q "\"firmware_expected_sha\": \"${fwpin}\"" "${root}/etc/dyx3/versions.json"'
+
+  # D declares an older installer API: refused unless DYX3_FORCE=1.
+  sed -i.bak 's/^DYX3_INSTALLER_API=.*/DYX3_INSTALLER_API=0/' "${src}/installer/lib/common.sh" && rm -f "${src}/installer/lib/common.sh.bak"
+  git -C "${src}" commit -q -am "D: older installer API"
+  D="$(git -C "${src}" rev-parse HEAD)"
+  up "${root}/opt/dyx3/current/installer" "${D}" >"${T}/ho_d" 2>&1
+  check "handoff: a target with an older installer API is refused" '[ "$(cur)" = "${B}" ] && grep -q "is API 0, older than this one" "${T}/ho_d"'
+  up "${root}/opt/dyx3/current/installer" "${D}" DYX3_FORCE=1 >"${T}/ho_d2" 2>&1
+  check "handoff: DYX3_FORCE=1 installs it with its own (older) installer" '[ "$(cur)" = "${D}" ] && grep -q "OLDER installer" "${T}/ho_d2"'
+  out="$(up "${root}/var/lib/dyx3/state/installer-stage/${D}/installer" "${D}" DYX3_REEXEC=1 DYX3_TARGET_SHA="${D}" DYX3_PARENT_API=9 2>&1)"
+  check "handoff: the target side refuses a newer parent too" 'printf "%s" "${out}" | grep -q "older than the one that started it"'
+  out="$(up "${root}/var/lib/dyx3/state/installer-stage/${D}/installer" "${D}" DYX3_REEXEC=1 DYX3_TARGET_SHA="${B}" 2>&1)"
+  check "handoff: the target refuses a SHA other than the one handed over" 'printf "%s" "${out}" | grep -q "parent resolved"'
+}
+
 # ---------------------------------------------------------------- prebuilt artifacts
 prebuilt() {
   if ! tar --zstd -cf /dev/null --files-from /dev/null 2>/dev/null; then
@@ -773,6 +901,7 @@ prebuilt() {
 sup
 (libs)
 (lifecycle)
+(handoff)
 (prebuilt)
 pass="$(grep -c '^ok' "${RESULTS}")"
 fail="$(grep -c '^bad' "${RESULTS}")"
