@@ -309,13 +309,25 @@ std::string GatewayNode::gateway_json(double now_s) const {
       .boolean("operator_alive", s.alive)
       .num("operator_age_s", s.age_s)
       .integer("clients", ipc_.clients())
+      .raw("ipc", JsonLine()
+                      .integer("dropped_slow", static_cast<int64_t>(ipc_.dropped_slow()))
+                      .integer("overflows", static_cast<int64_t>(ipc_.overflows()))
+                      .integer("rejected_full", static_cast<int64_t>(ipc_.rejected_full()))
+                      .dump())
       .dump();
 }
 
 template <typename Srv, typename Fill, typename Render>
 void GatewayNode::call(const Inbound& in, double now_s, typename rclcpp::Client<Srv>::SharedPtr cli,
                        const char* name, Fill fill, Render render) {
+  const Command& c = in.pr.cmd;
+  const std::string what =
+      c.kind == CmdKind::Estop
+          ? std::string("E-stop ") + (c.flag ? "assert" : "clear") + " (source=" + c.source + ")"
+          : std::string(to_string(c.kind));
   if (!cli->service_is_ready()) {
+    RCLCPP_WARN(get_logger(), "%s from client %d: %s is not available", what.c_str(), in.client,
+                name);
     reply(in.client, in.pr.has_id, in.pr.id, false, "service_unavailable",
           std::string(name) + " is not available");
     return;
@@ -324,7 +336,7 @@ void GatewayNode::call(const Inbound& in, double now_s, typename rclcpp::Client<
   fill(*req);
   const uint64_t token = next_token_++;
   pending_[token] =
-      Pending{in.client, in.pr.has_id, in.pr.id, in.pr.cmd.kind, now_s + service_timeout_s_};
+      Pending{in.client, in.pr.has_id, in.pr.id, c.kind, now_s + service_timeout_s_, what};
   cli->async_send_request(req, [this, token, render](typename rclcpp::Client<Srv>::SharedFuture f) {
     const auto it = pending_.find(token);
     if (it == pending_.end()) return;  // already answered with "timeout"
@@ -333,6 +345,10 @@ void GatewayNode::call(const Inbound& in, double now_s, typename rclcpp::Client<
     const auto res = f.get();
     bool accepted = false;
     const std::string data = render(*res, &accepted);
+    if (p.kind == CmdKind::Estop) {
+      RCLCPP_WARN(get_logger(), "%s from client %d: %s by motion_guard %s", p.what.c_str(),
+                  p.client, accepted ? "ACCEPTED" : "REJECTED", data.c_str());
+    }
     reply(p.client, p.has_id, p.id, accepted, accepted ? "ok" : "rejected",
           accepted ? "" : "refused by the target (see data.reason_code)", data);
   });
@@ -385,6 +401,8 @@ void GatewayNode::process(const Inbound& in, double now_s) {
           });
       return;
     case CmdKind::Estop:
+      RCLCPP_WARN(get_logger(), "E-stop %s requested (source=%s, client %d)",
+                  c.flag ? "assert" : "clear", c.source.c_str(), in.client);
       call<dyx3_interfaces::srv::SetEmergencyStop>(
           in, now_s, cli_estop_, "motion_guard emergency-stop service",
           [&](auto& rq) {
@@ -414,11 +432,43 @@ void GatewayNode::process(const Inbound& in, double now_s) {
 
 void GatewayNode::publish_operator_link(double now_s) {
   const OperatorLinkState s = link_state(now_s);
+  if (s.alive != link_alive_) {
+    link_alive_ = s.alive;
+    if (s.alive) {
+      RCLCPP_WARN(get_logger(), "operator link ALIVE (heartbeat from client %d)", link_.client());
+    } else {
+      const bool conn = ipc_.connected(link_.client());
+      RCLCPP_WARN(get_logger(), "operator link LOST: %s (client %d, heartbeat age %.2f s)",
+                  conn ? "heartbeat timeout" : "heartbeating connection closed", link_.client(),
+                  s.age_s);
+    }
+  }
   dyx3_interfaces::msg::OperatorLinkStatus m;
   m.stamp = get_clock()->now();
   m.alive = s.alive;
   m.age_s = static_cast<float>(s.age_s);
   pub_link_->publish(m);
+}
+
+void GatewayNode::audit_ipc(double now_s) {
+  // Checked at most once a second, so a reconnect loop cannot flood the log.
+  if (now_s - last_audit_s_ < 1.0) return;
+  last_audit_s_ = now_s;
+  const int cl = ipc_.clients();
+  if (cl != audit_clients_) {
+    RCLCPP_INFO(get_logger(), "IPC clients: %d (was %d)", cl, audit_clients_);
+    audit_clients_ = cl;
+  }
+  const auto delta = [this](uint64_t now_v, uint64_t* seen, const char* what) {
+    if (now_v == *seen) return;
+    RCLCPP_WARN(get_logger(), "IPC: %llu %s (total %llu)",
+                static_cast<unsigned long long>(now_v - *seen), what,
+                static_cast<unsigned long long>(now_v));
+    *seen = now_v;
+  };
+  delta(ipc_.dropped_slow(), &audit_dropped_, "client(s) dropped as slow consumers");
+  delta(ipc_.overflows(), &audit_overflows_, "client(s) closed for an oversize line");
+  delta(ipc_.rejected_full(), &audit_rejected_, "connection(s) refused at max_clients");
 }
 
 void GatewayNode::step(double now_s) {
@@ -439,6 +489,8 @@ void GatewayNode::step(double now_s) {
   for (auto it = pending_.begin(); it != pending_.end();) {
     if (now_s >= it->second.deadline_s) {
       const Pending p = it->second;
+      RCLCPP_WARN(get_logger(), "%s from client %d: no answer within %.1f s, reported as timeout",
+                  p.what.c_str(), p.client, service_timeout_s_);
       reply(p.client, p.has_id, p.id, false, "timeout",
             std::string(to_string(p.kind)) + " was not answered in time");
       it = pending_.erase(it);
@@ -446,6 +498,7 @@ void GatewayNode::step(double now_s) {
       ++it;
     }
   }
+  audit_ipc(now_s);
   if (now_s - last_link_pub_s_ >= 1.0 / operator_link_hz_ - 1e-9) {
     last_link_pub_s_ = now_s;
     publish_operator_link(now_s);

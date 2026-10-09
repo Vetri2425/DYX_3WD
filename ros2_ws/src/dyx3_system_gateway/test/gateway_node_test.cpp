@@ -357,6 +357,21 @@ TEST(GatewayNode, SnapshotAndTelemetryPushCarryAgeAndFreshness) {
   EXPECT_EQ(d->get("vehicle_state")->type,
             JsonValue::Type::Null);  // never received: null, not a stale zero
   EXPECT_FALSE(d->get("gateway")->get("operator_alive")->b);
+  // the IPC counters are exported for the audit trail (XR-GW-001)
+  const JsonValue* ipc = d->get("gateway")->get("ipc");
+  ASSERT_NE(ipc, nullptr);
+  for (const char* k : {"dropped_slow", "overflows", "rejected_full"}) {
+    ASSERT_NE(ipc->get(k), nullptr) << k;
+    EXPECT_TRUE(ipc->get(k)->is_int) << k;
+    EXPECT_EQ(ipc->get(k)->i, 0) << k;
+  }
+  {
+    std::vector<std::unique_ptr<Sock>> extra;  // max_clients is 4: the 5th connection is refused
+    for (int i = 0; i < 4; ++i) extra.push_back(std::make_unique<Sock>(r.sock));
+    for (int i = 0; i < 100 && r.gw->ipc().rejected_full() < 1; ++i) r.pump(10);
+  }
+  v = r.ask(c, R"({"v":1,"id":52,"cmd":"get_snapshot"})", 52);
+  EXPECT_EQ(v.get("data")->get("gateway")->get("ipc")->get("rejected_full")->i, 1);
   // a telemetry push arrives without being asked; once the data is old it says so
   r.now += 5.0;
   r.gw->step(r.now);

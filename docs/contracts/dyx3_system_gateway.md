@@ -43,7 +43,7 @@ available the reply is `service_unavailable` at once; if it does not answer with
 One JSON object, assembled from the latest message of each source with its receive age. `null` = never received. Every source carries `age_s` (gateway steady clock) and `fresh`
 (age <= `snapshot_fresh_s`, default 1.0, DERIVED); a consumer must treat a stale or missing source as unknown, never as the last value. Sources: `vehicle_state`, `estimator_health`,
 `rtk_status`, `gnss_report`, `ntrip_status`, `px4_link`, `safety_gate`, `emergency_stop`, `motion_guard`, `rpp`, `mission`, `last_point_result`, `spray`, `recorder`, plus `gateway`
-(`operator_alive`, `clients`, `schema`). Field subsets are chosen for the tablet; the recorder, not the gateway, is the evidence path.
+(`operator_alive`, `operator_age_s`, `clients`, `schema`, and `ipc`: the cumulative `dropped_slow` / `overflows` / `rejected_full` socket counters, added in place without a protocol version change). Field subsets are chosen for the tablet; the recorder, not the gateway, is the evidence path.
 The existing `ntrip_status` subset includes the selected security mode, verified TLS state, verification failure, plaintext credential warning, source bytes, valid frames, and RTK handoff count. The existing `px4_link` subset includes accepted/refused RTCM chunk counts. No credential or Authorization value is serialized. These are observation fields, not an RTK control API.
 
 ## 4. Operator link (R13)
@@ -55,6 +55,11 @@ Never heard, heartbeating client gone, or timeout -> `alive == false`, `age_s` =
 The backend must send `heartbeat` only while the *tablet* is heartbeating to it, so a tablet WiFi dropout propagates through.
 **`operator_link_timeout_s` default 2.0 is DERIVED — NOT FROM V1 SPEC** (§4.3.1 says "design explicitly in Stage E", no number exists). **OPEN (human):** the value; too short stops the rover on WiFi
 jitter, too long drives on after a dropout (at 0.35 m/s, 2 s = 70 cm). Boot behaviour: `alive == false` until the first heartbeat, so the guard blocks motion until a tablet is present.
+
+### Audit log (XR-GW-001)
+The node logs at WARN: every operator-link `alive` transition (with the reason: heartbeat timeout or heartbeating connection closed), every E-stop request with its
+`source` and client and its outcome (accepted / rejected / unavailable / timeout), every service call that times out or finds its service unavailable, and, checked once a
+second, any increase of the dropped-slow, overflow and refused-at-`max_clients` counters. Client count changes are logged at INFO.
 
 ## 5. Parameters (RESTART)
 

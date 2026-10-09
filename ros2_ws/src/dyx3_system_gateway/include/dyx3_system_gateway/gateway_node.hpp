@@ -67,6 +67,7 @@ private:
     int64_t id;
     CmdKind kind;
     double deadline_s;
+    std::string what;  // audit label, e.g. "E-stop assert (source=tablet)"
   };
   void declare_params();
   void on_line(int client, const std::string& line);
@@ -79,6 +80,7 @@ private:
   std::string gateway_json(double now_s) const;
   OperatorLinkState link_state(double now_s) const;
   void publish_operator_link(double now_s);
+  void audit_ipc(double now_s);
 
   ClockFn clock_;
   std::string socket_path_;
@@ -95,6 +97,11 @@ private:
   uint64_t next_token_{1};
   std::vector<CmdKind> last_batch_;
   double last_link_pub_s_{-1e18}, last_tel_s_{-1e18};
+  // Audit log state (XR-GW-001): last logged operator-link state and IPC counters.
+  bool link_alive_{false};
+  double last_audit_s_{-1e18};
+  int audit_clients_{0};
+  uint64_t audit_dropped_{0}, audit_overflows_{0}, audit_rejected_{0};
 
   rclcpp::Publisher<dyx3_interfaces::msg::OperatorLinkStatus>::SharedPtr pub_link_;
   rclcpp::Client<dyx3_interfaces::srv::StartMission>::SharedPtr cli_start_;
