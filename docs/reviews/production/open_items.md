@@ -36,14 +36,14 @@ Review baseline: DYX_3WD `master` `252778e` (firmware `8279fa4be3`).
 
 | # | Part | Reviewed | Verified | Open (C/H/M/L) | Status |
 |---|---|---|---|---|---|
-| 1 | `dyx3_rpp` | 2026-10-09 | 2026-10-09 | 0 / 1 / 4 / 3 | open |
+| 1 | `dyx3_rpp` | 2026-10-09 (+CR) | 2026-10-09 | 0 / 1 / 11 / 7 | open |
 | 2 | `dyx3_motion_guard` | 2026-10-09 (+CR) | 2026-10-09 | 0 / 0 / 3 / 6 | open |
 | 3 | `dyx3_px4_link` | 2026-10-09 (+CR) | 2026-10-09 | **1** / 4 / 6 / 3 | open |
 | 4 | `dyx3_interfaces` (+ px4_msgs pin) | 2026-10-09 | 2026-10-09 | 0 / 0 / 1 / 6 | open |
 | 5 | `dyx3_mission` | 2026-10-09 | 2026-10-09 | 0 / 0 / 3 / 4 | open |
 | 6 | `dyx3_gnss_rtk` | 2026-10-09 | 2026-10-09 | 0 / 0 / 1 / 3 | open |
 | 7 | `dyx3_spray` | 2026-10-09 | 2026-10-09 | 0 / 2 / 2 / 1 | open |
-| 8 | `dyx3_geometry` | 2026-10-09 | 2026-10-09 | 0 / 0 / 1 / 5 | open |
+| 8 | `dyx3_geometry` | 2026-10-09 (+CR) | 2026-10-09 | 0 / 0 / 0 / 5 | open |
 | 9 | `dyx3_bringup` + systemd (RT, CPU, restart) | 2026-10-09 | 2026-10-09 | 0 / 0 / 3 / 2 | open |
 | 10 | `dyx3_system_gateway` | 2026-10-09 (+CR) | 2026-10-09 | 0 / 2 / 2 / 8 | open |
 | 11 | `dyx3_recorder` | 2026-10-09 (×2) | 2026-10-09 | 0 / 5 / 10 / 9 | open |
@@ -99,14 +99,14 @@ Facts used to re-rate (all at `252778e`):
 
 | ID | Severity | Status | Area | Where | Item |
 |---|---|---|---|---|---|
-| RPP-009 | **HIGH** | ACCEPTED (new, found in verification) | Fail-safe / accuracy | `dyx3_px4_link/src/px4_link_node.cpp:838-860`; `rpp_core.cpp:171-176,436`; `stop_pivot_fsm.cpp:51,131` | `VehicleState.yaw_rate_radps` is never filled, so RPP always sees a yaw rate of 0 |
+| RPP-009 | MEDIUM (~~HIGH~~) | ACCEPTED, re-rated by CR-1 (bounded by pivot rate law + settle hold; bench) | Fail-safe / accuracy | `dyx3_px4_link/src/px4_link_node.cpp:838-860`; `rpp_core.cpp:171-176,436`; `stop_pivot_fsm.cpp:51,131` | `VehicleState.yaw_rate_radps` is never filled, so RPP always sees a yaw rate of 0 |
 | RPP-001 | MEDIUM (~~CRITICAL~~) | ACCEPTED ↓ | Stall / RT | `rpp_node.cpp:200-202,217-312,321-322` | Mission load, conditioning, hashing and disk I/O run on the FIFO-80 control thread |
 | RPP-003 | MEDIUM (~~HIGH~~) | ACCEPTED ↓ | Latency | `rpp_node.cpp:57-72`; `rpp_core.cpp:157-169,782` | Pose age is measured from RPP receipt, not the PX4 sample time |
 | RPP-005 | MEDIUM (~~HIGH~~) | DOUBT (measure) | RT | `control_graph.launch.py:34`; `main.cpp:22-36` | RPP and `motion_guard` share CPU 4 at equal FIFO 80 |
 | RPP-008 | MEDIUM | DOUBT (measure) | Latency | `rpp_node.cpp:125-127` | Free-running tick, not synchronised to pose arrival |
 | RPP-002 | LOW (~~CRITICAL~~) | ACCEPTED ↓ | Hardening | `rpp_node.cpp:57-72` | No `isfinite` check at the RPP boundary |
 | RPP-004 | LOW (~~HIGH~~) | ACCEPTED ↓ | Hardening | `rpp_core.cpp:782-797` | Negative or non-finite age is not rejected before extrapolation |
-| RPP-006 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Params | `rpp_node.cpp:116`; `docs/contracts/rpp_node.md:40` | IDLE_ONLY conditioning parameters are accepted while READY/PAUSED but take effect only at the next load |
+| RPP-006 | MEDIUM | ACCEPTED, re-rated by CR-1 (IDLE_ONLY gates change on resume) | Params | `rpp_node.cpp:116`; `docs/contracts/rpp_node.md:40` | IDLE_ONLY conditioning parameters are accepted while READY/PAUSED but take effect only at the next load |
 | RPP-007 | — | REJECTED | — | `rpp_node.cpp:317-343` | "Tick overrun has no fail-safe" |
 
 ### RPP-009 — HIGH — yaw rate is never populated; stop and pivot confirmation ignore rotation
@@ -604,7 +604,7 @@ Facts used:
 
 | ID | Severity | Status | Area | Where | Item |
 |---|---|---|---|---|---|
-| GEO-004 | MEDIUM | DOUBT (test) | RT / Hint | `project_onto_path.cpp:28-35`; `rpp_core.cpp:864-865` | A valid hint on the last 1–2 segments widens to a **full-path scan every tick**; ties go to the lowest index |
+| GEO-004 | — | **REJECTED by CR-1** (n ≥ 4 ⇒ window ≥ 3; no run-end full scan) | RT / Hint | `project_onto_path.cpp:28-35`; `rpp_core.cpp:864-865` | A valid hint on the last 1–2 segments widens to a **full-path scan every tick**; ties go to the lowest index |
 | GEO-001 | LOW (~~HIGH~~) | ACCEPTED ↓ | RT | `curvature.cpp:30-44`; `rpp_param_table.inc:50` | Baseline walk is linear in `baseline / spacing`: about 2 steps at the defaults, but the LIVE parameter has no upper bound |
 | GEO-002 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Correctness | `project_onto_path.cpp:43-78`; header `:21,29` | An all-degenerate window returns `valid=true` with cross-track 0 (only the hint is invalidated); RPP never reads `.valid` |
 | GEO-003 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Numeric | `line_intersection.cpp:13-17` | Absolute determinant threshold 1e-9 m² (load time only; matches Python) |
@@ -1041,6 +1041,41 @@ Confirmed good:
 
 Each hot-path part was re-read in full by an independent agent. The agent checked every recorded finding and
 looked for anything missed. Every new item below was verified by me against the code before being recorded.
+
+### CR-1 — `dyx3_rpp` + the geometry it calls per tick
+
+Verdicts on recorded findings:
+- **GEO-004 is REJECTED** (my verification arithmetic was wrong). The window is `lo = max(0, s−2)`,
+  `hi = min(n−1, s+4)`, and the hint is always ≤ n−2, so `hi − lo ≥ 3` whenever n ≥ 4. **There is no full scan
+  at a run end.** Full scans happen only with an invalid hint (the first tick, or after a JumpSkip).
+- **RPP-009 is re-rated MEDIUM (DOUBT, bench).** The yaw-rate gate is lost, but the pivot command is
+  `1.5·err` (0.052 rad/s at the 2° band edge), the settle brake holds the current nose, and release needs 0.2 s
+  inside ±2°. Before a pivot the rover drove straight, so the stop-confirm yaw gate is nearly redundant. It goes
+  back to HIGH if the bench shows a release while still turning faster than 0.05 rad/s.
+- **RPP-006 is re-rated MEDIUM; its scope is wider.** The core reads many IDLE_ONLY values **every tick**
+  (`require_rtk_fix`, `pose_max_age_s`, `rtk_*`, `ekf_*`, `point_hold_enabled`, `segment_command_mode`,
+  `segment_corner_threshold_deg`). A change made while **PAUSED** takes effect **on resume**, so the RTK and
+  stale-pose gates can be switched off mid-mission.
+- **RPP-003, a sharper bound:** `px4_link` re-sends its cached sample every 20 ms while it is under 0.2 s old, so
+  the real worst-case pose staleness is about **0.72 s**, not the 0.5 s `pose_max_age_s`.
+- **RPP-002 is stronger than stated** (still LOW, because the current producer cannot send it): a NaN velocity with
+  a fresh flag makes `brake_speed` return **+cap forward**.
+- All other RPP, GEO and IF findings: agreed.
+
+New findings (verified by me against the code):
+| ID | Severity | Status | Where | Item |
+|---|---|---|---|---|
+| XR-RPP-001 | **HIGH** | ACCEPTED (mapping CONFIRMED; endless rocking DOUBT, sim test) | `rpp_core.cpp:692-724`; `rpp_command.cpp:30-31` | **The endpoint precise stop throws away its sideways correction.** With a sideways miss between 2 and 15 cm the core aims diagonally (`dir = d/radial`), but CREEP sends only the speed projected onto the nose, with a yaw rate of 0. The rover drives straight back and forth through the end plane at ≥ 0.1 m/s (reverse allowed down to −0.10) and cannot fix the sideways error, so it may never COMPLETE. The prototype steered toward the vector, so the equivalence test cannot see this. Fix: finish when stopped and `|residual| ≤ along_tol`, reporting the miss, and let the 8 s timeout brake-and-finish. Test: final approach with an east offset of 0.03 m → COMPLETE within 10 s, at most 2 sign changes |
+| XR-RPP-002 | MEDIUM | ACCEPTED | `rpp_core.cpp:565,736`; `rpp_node.cpp:341-344` | **A one-tick STOP while driving** at a run handover that needs no alignment: `advance_run()` publishes nothing, `out_` defaults to `cmd = Stop`, and the node does not check `velocity_published`. Gives a speed dip on line → tangent arc |
+| XR-RPP-004 | MEDIUM | ACCEPTED | `rpp_core.cpp:1021-1030`; `rpp_command.cpp:19-20` | On smooth runs `make_track_rate(hypot(v), yaw_rate)` drops the velocity direction, so `smooth_lateral_gain` and the 75° cone clamp have **no effect** (in the prototype the firmware steered along that vector). Fold them into the rate or remove them (PC-3) |
+| XR-RPP-005 | MEDIUM | ACCEPTED | `rpp_core.cpp:638,688,726` | During the precise stop, `cross = (pos_n−b.n)·ue − (pos_e−b.e)·un` is **positive to the left**, the opposite of `cross_track_right_m` (`frames.md`). This corrupts the 1 cm acceptance data at every endpoint. Debug only: control uses `fabs` |
+| XR-RPP-003 | MEDIUM | DOUBT (bag replay) | `rpp_core.cpp:158-164,769-771,836-848` | The jump threshold is scaled by RPP **receipt** gaps (always about 20 ms, because samples are re-sent), so it stays at 0.05 m. At 1 m/s, sample bunching or a 60 ms XRCE stall gives a false JumpSkip (a STOP tick and a lost hint). Use `xy_reset_counter` (X-002) and sample-stamp gaps |
+| XR-RPP-006 | MEDIUM | ACCEPTED | `rpp_node_test.cpp:146-176,251-287`; `orchestrator_equivalence_test.cpp:205` | **The 13,166-tick equivalence compares core output, not the published `MotionSetpoint`**, so it cannot see what `command_from_tick` throws away (XR-RPP-001/002/004). The node test drives a due-north line from heading 0 with instant dynamics. Add command-level checks, an L-shaped mission, an offset endpoint, and a pause with coast |
+| XR-RPP-007 | LOW | ACCEPTED | `rpp_core.cpp:1159,1268,1291-1293` | For 2 ticks after a pivot, TRACK_HEADING carries the previous leg's heading (`last_yaw_cmd_` updates only when the speed is above 0.01) |
+| XR-RPP-008 | LOW | ACCEPTED | `rpp_core.cpp:1317-1321` | `pause()` keeps `last_pos_`, `hint_`, `have_last_tick_` and `endpoint_stop_start_ns_`: a jump skip on resume after coasting, or a **permanent EKF offset** if `ekf_reset_compensation` was set while paused, and the 8 s precise-stop timeout keeps counting through the pause |
+| XR-RPP-009 | LOW | ACCEPTED | `rpp_param_table.inc:33,39,43,118`; `rpp_params.hpp:77`; `stop_pivot_fsm.cpp:91-92` | No upper bound on `pose_max_age_s` / `rtk_fix_timeout_s`; `integer()` overflows; `CornerFsm::go` allocates a `std::string` in the tick |
+| XR-RPP-010 | LOW | ACCEPTED | `main.cpp:29-44`; `rpp_node.cpp:282,299` | An exception (`filesystem_error` from the throwing `exists`/`remove`) skips the STOP burst. `px4_link`'s 0.2 s gate still applies |
+| XR-RPP-011 | LOW | ACCEPTED | `stop_pivot_fsm.cpp:40-48` | The stale-velocity hold counts from hold entry: after 2 s of braking, one stale-velocity tick confirms the stop, so a pivot can start on a frozen pose |
 
 ### CR-2 — `dyx3_motion_guard` + `dyx3_px4_link`
 
