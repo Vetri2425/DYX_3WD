@@ -126,6 +126,11 @@ function on stack structs; a reason change is recorded from the node after the p
 rate-limited logging). QoS declared per topic: commands and gates reliable depth 1, status
 reliable depth 10.
 
+Shutdown: rclcpp's own signal handler is disabled (as in `rpp_node`). SIGINT/SIGTERM raise a flag,
+the spin loop exits, then a bounded burst (5) of canonical STOP goes out on
+`/dyx3/motion_guard/command` while the context is still up. SIGPIPE is ignored. The stop-on-exit that
+matters most is in `dyx3_px4_link`, the last hop; this burst only helps if `px4_link` outlives the guard.
+
 ## 8. Not proven off-target
 
 Loop jitter, behaviour under DDS reordering, the real tablet heartbeat path, the interaction with the

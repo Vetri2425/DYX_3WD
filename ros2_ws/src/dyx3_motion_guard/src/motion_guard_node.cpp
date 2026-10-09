@@ -283,4 +283,17 @@ void MotionGuardNode::step(double now_s) {
   }
 }
 
+void MotionGuardNode::shutdown_stop() {
+  const Motion stop = canonical_stop();
+  MotionSetpoint out;
+  out.stamp = ros_now();
+  out.seq = out_seq_++;
+  out.mode = static_cast<uint8_t>(stop.mode);
+  out.speed_body_x = stop.speed_body_x;
+  out.yaw_setpoint = stop.yaw_setpoint;
+  out.yaw_rate_setpoint = stop.yaw_rate_setpoint;
+  out.valid = true;
+  pub_cmd_->publish(out);
+}
+
 }  // namespace dyx3_motion_guard

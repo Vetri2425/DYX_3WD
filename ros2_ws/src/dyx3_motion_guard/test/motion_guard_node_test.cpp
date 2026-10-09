@@ -396,6 +396,30 @@ TEST(MotionGuardNode, EmergencyStopAssertAndClearWithinOneGatePeriodAreBothPubli
   EXPECT_TRUE(ok_after);
 }
 
+// MG-003: the shutdown path publishes a canonical STOP even while a motion command is being
+// forwarded and every gate passes.
+TEST(MotionGuardNode, ShutdownStopPublishesCanonicalStopWhileMoving) {
+  Rig r;
+  r.run(0.3);
+  ASSERT_EQ(r.last_out.mode, MotionSetpoint::MODE_TRACK_RATE);
+  const uint64_t seq_before = r.last_out.seq;
+  const size_t n_before = r.outs.size();
+  for (int i = 0; i < 5; ++i) {
+    r.guard->shutdown_stop();
+    r.pump(5);
+  }
+  ASSERT_EQ(r.outs.size(), n_before + 5);
+  for (size_t i = n_before; i < r.outs.size(); ++i) {
+    const auto& m = r.outs[i];
+    EXPECT_EQ(m.mode, MotionSetpoint::MODE_STOP);
+    EXPECT_EQ(m.speed_body_x, 0.0F);
+    EXPECT_TRUE(std::isnan(m.yaw_setpoint));
+    EXPECT_EQ(m.yaw_rate_setpoint, 0.0F);
+    EXPECT_TRUE(m.valid);
+    EXPECT_GT(m.seq, i == n_before ? seq_before : r.outs[i - 1].seq);
+  }
+}
+
 TEST(MotionGuardNode, RestartedPublisherIsStoppedUntilItRebuildsASession) {
   Rig r;
   r.run(0.3);
