@@ -71,6 +71,12 @@ private:
 
   uint64_t seq_{0};
   uint8_t last_state_{255};
+  // XR-RPP-002: a running tick on which the core publishes no command (a run handover that needs
+  // no alignment) repeats the previous running tick's command once, instead of a one-tick STOP
+  // while driving. Bounded: a second consecutive silent tick is STOP.
+  bool repeat_available_{false};
+  MotionCommand last_running_cmd_;
+  uint8_t last_running_state_{0};
   bool stopped_for_shutdown_{false};
 
   rclcpp::Publisher<dyx3_interfaces::msg::MotionSetpoint>::SharedPtr pub_motion_;

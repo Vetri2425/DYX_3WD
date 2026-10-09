@@ -218,6 +218,7 @@ void RppNode::load_mission(uint32_t mission_id, const std::string& sha) {
   mission_id_ = mission_id;
   sha_ = sha;
   loaded_ = false;
+  repeat_available_ = false;
   load_failed_ = true;  // until proven otherwise; step() retries
   retry_load_at_ns_ = clock_() + 1'000'000'000;
   const auto r = dyx3_mission::load_artifact(artifact_dir_, sha);
@@ -322,6 +323,8 @@ void RppNode::step(int64_t now_ns) {
     load_mission(pending_mission_id_, pending_sha_);
 
   MotionCommand cmd = make_stop();
+  // Only the command of the previous RUNNING tick of the same mission may be repeated.
+  if (!(wants_mission_ && loaded_ && mission_running_)) repeat_available_ = false;
   if (!wants_mission_ || !(loaded_ || load_failed_)) {
     publish_motion(cmd);
     publish_status(RppStatus::STATE_IDLE, nullptr, cmd);
@@ -349,6 +352,17 @@ void RppNode::step(int64_t now_ns) {
     cmd = make_stop();
   } else if (core_.path_done()) {
     state = RppStatus::STATE_COMPLETE;
+  } else if (!out.velocity_published) {
+    // XR-RPP-002: the core switched runs without publishing (out_ defaults to STOP). Repeat the
+    // previous running command once rather than drop to STOP for one tick while driving.
+    if (repeat_available_) {
+      cmd = last_running_cmd_;
+      state = last_running_state_;
+    } else {
+      cmd = make_stop();
+      state = RppStatus::STATE_STOPPING;
+    }
+    repeat_available_ = false;
   } else {
     switch (out.cmd) {
       case CmdKind::Track:
@@ -367,6 +381,11 @@ void RppNode::step(int64_t now_ns) {
         state = RppStatus::STATE_STOPPING;
         break;
     }
+  }
+  if (out.velocity_published && out.handoff == Handoff::None && !core_.path_done()) {
+    repeat_available_ = true;
+    last_running_cmd_ = cmd;
+    last_running_state_ = state;
   }
   publish_motion(cmd);
   publish_status(state, &out, cmd);

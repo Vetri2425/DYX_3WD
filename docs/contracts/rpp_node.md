@@ -29,6 +29,9 @@
   negative speed, never a spot turn; permission is the guard's); PIVOT -> `MODE_PIVOT` with `omega = clamp(1.5 * err, +/- max_yaw_rate_body)`; CREEP -> `MODE_CREEP` along the nose, or `TRACK_HEADING` toward the precise stop's correction vector when it is more than 2° off the nose axis
   (forward ahead of the beam, reverse behind it; XR-RPP-001, `rpp_motion_output.md` section 2).
   Any non-finite value becomes the canonical STOP.
+  A running tick on which the core publishes nothing (`velocity_published == false`: a run handover that needs no alignment) repeats the previous
+  running tick's command and state **once** instead of the default STOP (XR-RPP-002); a second consecutive silent tick, or one with no previous
+  running command, is STOP.
 * **State reporting** (`RppStatus.state`): TRACKING only while actually tracking (tick state TRACKING or APPROACH) — `dyx3_spray` reads TRACKING as the
   "mission has started" evidence and PIVOTING as the pivot gate, so STOPPING (brake, corner stop, a gate refusal), CREEPING (precise stop) and COMPLETE must never be
   reported as TRACKING; LOADED while waiting; ERROR when the artifact is bad or an unported feature is enabled; COMPLETE when the core finished.
@@ -52,13 +55,14 @@ shared with motion_guard, comes from the launch prefix in `dyx3_bringup/launch/c
 
 ## 5. Proof
 
-`rpp_node_test` (in-process, private DDS domain, injected monotonic clock, a kinematic stand-in vehicle): 16 cases — startup validation; load by id and
+`rpp_node_test` (in-process, private DDS domain, injected monotonic clock, a kinematic stand-in vehicle): 19 cases — startup validation; load by id and
 acknowledgement; a missing artifact; a **whole mission driven to COMPLETE** (the line is marked where the planner says, stops on the final point within 6 cm);
 stale pose; RTK drop with the reason; pause and resume from rest; entry pivot; parameter classes; the unported feature; every emitted mode contract-conforming; a final approach 3 cm to the side of the endpoint completes within 10 s
 with at most 2 speed reversals (XR-RPP-001); on an L-shaped mission the first heading after the corner pivot is the exit leg (XR-RPP-007).
 Command-level cases (XR-RPP-006) drive the stand-in from the published `MotionSetpoint` alone, which the equivalence suites (core output)
 cannot see: an L-shaped mission (corner pivot sign, heading per leg, at most 5 cm off the path, COMPLETE at the end); an endpoint 5 cm to the
 side (every creep moves toward it, ends within 2 cm); a pause with a 0.2 m coast and a resume (STOP while paused, ramp from rest, COMPLETE).
+A tangent run handover (smooth TRANSIT arc into a segment MARK line) crossed at speed publishes no STOP before COMPLETE (XR-RPP-002).
 The stand-in can limit its acceleration (`accel_limit`) so a body-axis brake decelerates through zero as a vehicle does. `rpp_core_test` pins core behaviour the prototype did not have (the precise-stop timeout brake).
 The stand-in vehicle does exactly what the last command asks: it proves the wiring and the state machine, not the controller on a rover.
 

@@ -676,3 +676,52 @@ TEST(RppNode, APauseWithACoastResumesAlongTheLineFromRest) {
   EXPECT_NEAR(r.north, 6.0, 0.06);
   EXPECT_NEAR(r.east, 0.0, 0.03);
 }
+
+// XR-RPP-002: a run handover that needs no alignment (a gentle TRANSIT arc, a smooth run, into
+// the tangent MARK line, a segment run) is crossed at speed. The core publishes nothing on the
+// switching tick; the node must not turn that into a one-tick STOP while driving.
+TEST(RppNode, ATangentRunHandoverNeverPublishesAStopWhileDriving) {
+  std::vector<ArtPoint> path;
+  const double radius = 10.0;
+  for (int k = 0; k <= 6; ++k) {  // 30 degrees of a 10 m radius arc to the right, TRANSIT
+    const double th = k * 5.0 * M_PI / 180.0;
+    path.push_back({radius * std::sin(th), radius - radius * std::cos(th), 0});
+  }
+  const ArtPoint end = path.back();
+  const double h = 30.0 * M_PI / 180.0;
+  for (int i = 1; i <= 3; ++i)  // then 3 m straight along the tangent, MARK
+    path.push_back({end.n + i * std::cos(h), end.e + i * std::sin(h), 1});
+  // The speed profile is not under test: open the curvature acceleration gate and the
+  // hard-curvature latch, which otherwise hold this sparse, vertex-smoothed arc near zero speed
+  // from rest.
+  Rig r({rclcpp::Parameter("accel_gate_curv_full", 2.5),
+         rclcpp::Parameter("accel_gate_curv_none", 5.0), rclcpp::Parameter("kappa_hard_exit", 4.0),
+         rclcpp::Parameter("kappa_hard_enter", 5.0)},
+        true, path);
+  r.auto_drive = true;
+  r.accel_limit = 0.5;
+  r.heading = 0.0;
+  r.mission_state = MissionState::STATE_RUNNING;
+  bool moving = false, crossed = false;
+  int stops_while_driving = 0;
+  uint32_t run = 0;
+  for (int i = 0; i < 2500 && r.status.state != RppStatus::STATE_COMPLETE; ++i) {
+    r.cycle();
+    const MotionSetpoint& m = r.motion.back();
+    if (r.status.run_index == 1 && run == 0) {
+      run = 1;
+      crossed = r.speed > 0.05;  // the stand-in was moving when the core switched runs
+    }
+    if (m.mode != MotionSetpoint::MODE_STOP && m.speed_body_x > 0.05F) moving = true;
+    if (moving && m.mode == MotionSetpoint::MODE_STOP &&
+        r.status.state != RppStatus::STATE_COMPLETE) {
+      ++stops_while_driving;
+      ADD_FAILURE() << "STOP while driving at tick " << i << " run " << r.status.run_index << " n "
+                    << r.north << " e " << r.east << " speed " << r.speed;
+    }
+  }
+  EXPECT_TRUE(crossed) << "the handover was not crossed at speed";
+  EXPECT_EQ(stops_while_driving, 0);
+  EXPECT_EQ(r.status.state, RppStatus::STATE_COMPLETE)
+      << "run " << r.status.run_index << " n " << r.north << " e " << r.east;
+}
