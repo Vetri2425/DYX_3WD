@@ -155,6 +155,8 @@ bool RppCore::advance_run(bool pre_stopped) {
 // inputs
 // ------------------------------------------------------------------------------------------------
 void RppCore::on_pose(const NedPose& pose, int64_t now_ns) {
+  // RPP-002: a non-finite sample is not a pose; the last good one ages out into STALE.
+  if (!std::isfinite(pose.n) || !std::isfinite(pose.e) || !std::isfinite(pose.yaw_ned)) return;
   if (have_pose_) {
     const double gap_s = ns_to_s(now_ns - pose_recv_ns_);
     if (gap_s > 0.0 && gap_s < 1.0) {
@@ -169,6 +171,9 @@ void RppCore::on_pose(const NedPose& pose, int64_t now_ns) {
 }
 
 void RppCore::on_velocity(double v_north, double v_east, double yaw_rate_ned, int64_t now_ns) {
+  // RPP-002: a non-finite velocity is not fed (a NaN with a fresh stamp made brake_speed return
+  // +cap forward); the last good sample goes stale instead.
+  if (!std::isfinite(v_north) || !std::isfinite(v_east) || !std::isfinite(yaw_rate_ned)) return;
   vel_n_ = v_north;
   vel_e_ = v_east;
   yaw_rate_ned_ = yaw_rate_ned;
@@ -800,15 +805,16 @@ void RppCore::control_loop_impl(int64_t now_ns) {
   const double effective_max_age = max_age_s + (use_extrap ? extrap_horizon : 0.0);
 
   const double pose_age_s = ns_to_s(now_ns - pose_recv_ns_);
-  if (pose_age_s > effective_max_age) {
+  // RPP-004: a negative (a pose stamped after this tick) or non-finite age is not fresh.
+  if (!std::isfinite(pose_age_s) || pose_age_s < 0.0 || pose_age_s > effective_max_age) {
     publish_zero(StateCode::Stale, pose_age_s * 1000);
     return;
   }
 
   double use_n = pose_.n, use_e = pose_.e;
-  if (use_extrap && vel_.has) {
+  if (use_extrap && vel_.has && std::isfinite(vel_n_) && std::isfinite(vel_e_)) {
     const double vel_age_s = ns_to_s(now_ns - vel_.ns);
-    if (vel_age_s < extrap_horizon) {
+    if (vel_age_s >= 0.0 && vel_age_s < extrap_horizon) {
       const double dt = pose_age_s + std::max(0.0, params_.num(P::pose_latency_bias_s));
       const double d_n = vel_n_ * dt;
       const double d_e = vel_e_ * dt;
@@ -882,6 +888,13 @@ void RppCore::control_loop_impl(int64_t now_ns) {
   dyx3_geometry::PathProjection smooth_proj;
   if (!profile_segment_) {
     smooth_proj = dyx3_geometry::project_onto_path(Point{pos_n, pos_e}, path, hint_);
+    // GEO-002 (consumer side): no valid projection, no guidance. Fail to zero.
+    if (!smooth_proj.valid) {
+      hint_.seg = 0;
+      hint_.valid = false;
+      publish_zero(StateCode::Idle, pose_age_s * 1000);
+      return;
+    }
     update_path_progress(smooth_proj.seg_idx, smooth_proj.t);
   }
 
@@ -1125,6 +1138,10 @@ void RppCore::control_segment(double pos_n, double pos_e, double yaw_ned, double
 
     const bool final_segment = seg_idx >= n_pts - 2;
     const auto sp = dyx3_geometry::project_onto_segment(Point{pos_n, pos_e}, path, seg_idx);
+    if (!sp.valid) {  // GEO-002 (consumer side): no valid projection, no guidance
+      publish_zero(StateCode::Idle, pose_age_s * 1000.0, dist_to_goal);
+      return;
+    }
     const double signed_xtrack = sp.signed_cross;
     const double dist_to_end_along = sp.dist_to_end_along;
     update_path_progress(seg_idx, sp.t);

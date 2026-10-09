@@ -132,3 +132,9 @@ episodes that start part-way along a run) is not a case the prototype supports e
 * The explicit FSM reproduced the prototype's behaviour on every tick of the fixture; where the contract proposed cleaner semantics
   (`rpp_stop_pivot_fsm.md`) they were NOT adopted, because the equivalence is the Gate 7 oracle. Decide before changing any.
 * `progress_publish_enabled` / point handshake: port, drop, or move to the mission layer.
+
+## Input hardening (RPP-002 / RPP-004 / GEO-002, production, not in the prototype)
+`on_pose` / `on_velocity` drop a sample with any non-finite field (the previous one ages out). A pose age that is negative or non-finite is
+STALE (STOP). Extrapolation uses the velocity only when it is finite and its age is in `[0, imu_max_extrap_age_s)`. A projection with
+`valid == false` (geometry may return it for a degenerate window) publishes zero (IDLE) and drops the hint. Behaviour-neutral for valid
+input: the equivalence vectors are unchanged.

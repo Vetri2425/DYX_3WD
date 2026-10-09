@@ -7,7 +7,7 @@
 
 | Direction | Topic | Type | QoS | Notes |
 |---|---|---|---|---|
-| in | `/dyx3/vehicle_state` | VehicleState | R1 | pose is fed only while `position_valid` and `attitude_valid`; velocity while `velocity_valid`. An invalid sample is **not** fed: the pose ages out and the core stops (STALE) |
+| in | `/dyx3/vehicle_state` | VehicleState | R1 | pose is fed only while `position_valid` and `attitude_valid` and north, east and heading are finite; velocity while `velocity_valid` and both components and the yaw rate are finite (RPP-002; the core repeats the check). An invalid sample is **not** fed: the pose ages out and the core stops (STALE) |
 | in | `/dyx3/rtk_status` | RtkStatus | R1 | `fix_type` and `horizontal_accuracy_m` (0 = unknown, passed as unknown) |
 | in | `/dyx3/mission/state` | MissionState | R1 | `path_artifact_sha256` + `mission_id` select the path; `state == RUNNING` is the only state in which the core ticks |
 | out | `/dyx3/rpp/motion_setpoint` | MotionSetpoint | R1 | every tick, always `valid`; STOP unless running |
@@ -61,7 +61,7 @@ shared with motion_guard, comes from the launch prefix in `dyx3_bringup/launch/c
 
 ## 5. Proof
 
-`rpp_node_test` (in-process, private DDS domain, injected monotonic clock, a kinematic stand-in vehicle): 21 cases — startup validation; load by id and
+`rpp_node_test` (in-process, private DDS domain, injected monotonic clock, a kinematic stand-in vehicle): 22 cases — startup validation; load by id and
 acknowledgement; a missing artifact; a **whole mission driven to COMPLETE** (the line is marked where the planner says, stops on the final point within 6 cm);
 stale pose; RTK drop with the reason; pause and resume from rest; entry pivot; parameter classes; the unported feature; every emitted mode contract-conforming; a final approach 3 cm to the side of the endpoint completes within 10 s
 with at most 2 speed reversals (XR-RPP-001); on an L-shaped mission the first heading after the corner pivot is the exit leg (XR-RPP-007).

@@ -768,3 +768,15 @@ TEST(RppNode, IdleOnlyParametersAreRefusedWhileAMissionIsLoadedOrActive) {
   EXPECT_TRUE(r.rpp->set_parameter(rclcpp::Parameter("pose_max_age_s", 0.4)).successful);
   EXPECT_DOUBLE_EQ(r.rpp->params().num(P::pose_max_age_s), 0.4);
 }
+
+// RPP-002: a VehicleState with its valid flags set but a non-finite heading (or position) is not
+// fed: the pose ages out and RPP stops with STALE, never steering on a NaN.
+TEST(RppNode, ANonFiniteVehicleStateIsNeverFed) {
+  Rig r;
+  r.mission_state = MissionState::STATE_RUNNING;
+  r.run(0.3);
+  r.heading = std::nan("");  // the stand-in publishes the NaN heading with every flag valid
+  r.run(0.8);
+  EXPECT_EQ(r.motion.back().mode, MotionSetpoint::MODE_STOP);
+  EXPECT_EQ(r.status.tick_state, -1) << "stale, not a tracking tick on a NaN pose";
+}

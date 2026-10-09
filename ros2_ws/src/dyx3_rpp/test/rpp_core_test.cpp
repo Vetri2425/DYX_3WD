@@ -149,3 +149,65 @@ TEST(RppCore, APauseRestartsThePreciseStopTimer) {
   for (int i = 0; i < 300; ++i) r.step();  // past 8 s since the re-engagement
   EXPECT_EQ(r.step().cmd, CmdKind::Brake);
 }
+
+// RPP-002: a non-finite pose is not fed; the last good pose ages out into STALE (STOP).
+TEST(RppCore, ANonFinitePoseIsNeverFedAndAgesOut) {
+  CoreRig r({north_run(6.0, Profile::Segment, 6.0)});
+  r.n = 1.0;
+  EXPECT_NE(r.step().state, StateCode::Stale);
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  for (const NedPose bad : {NedPose{nan, 0.0, 0.0}, NedPose{1.0, nan, 0.0}, NedPose{1.0, 0.0, nan},
+                            NedPose{std::numeric_limits<double>::infinity(), 0.0, 0.0}}) {
+    CoreRig q({north_run(6.0, Profile::Segment, 6.0)});
+    q.n = 1.0;
+    q.step();
+    q.feed_pose = false;
+    StateCode last = StateCode::Idle;
+    for (int i = 0; i < 30; ++i) {  // 0.6 s of non-finite poses: pose_max_age_s is 0.5 s
+      q.now += kTickNs;
+      q.core->on_pose(bad, q.now);
+      q.core->on_velocity(0.0, 0.0, 0.0, q.now);
+      const TickOutput& o = q.core->tick(q.now);
+      EXPECT_TRUE(std::isfinite(o.v_n) && std::isfinite(o.v_e)) << i;
+      last = o.state;
+    }
+    EXPECT_EQ(last, StateCode::Stale);
+  }
+}
+
+// RPP-002 (CR-1): a NaN velocity with a fresh stamp made the body-axis brake +cap FORWARD. It is
+// not fed: the velocity goes stale and the brake is zero.
+TEST(RppCore, ANonFiniteVelocityNeverBecomesAForwardBrake) {
+  CoreRig r({north_run(6.0, Profile::Segment, 6.0)},
+            {{"segment_precise_endpoint_stop_enabled", 0.0, ""}});
+  r.n = 6.0;  // at the final point: the completion hold brakes until a confirmed stop
+  bool braked = false;
+  r.vn = 0.0;
+  r.step();
+  r.feed_vel = false;
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  for (int i = 0; i < 40; ++i) {
+    r.core->on_velocity(nan, 0.0, 0.0, r.now + kTickNs);
+    const TickOutput& o = r.step();
+    if (o.cmd == CmdKind::Brake) {
+      braked = true;
+      EXPECT_LE(o.brake_speed, 0.0) << "tick " << i;
+    }
+    EXPECT_TRUE(std::isfinite(o.v_n) && std::isfinite(o.v_e)) << i;
+  }
+  EXPECT_TRUE(braked) << "the completion hold was not reached";
+}
+
+// RPP-004: a pose stamped after the tick (negative age) is not fresh: STALE, no extrapolation.
+TEST(RppCore, ANegativePoseAgeStops) {
+  CoreRig r({north_run(6.0, Profile::Segment, 6.0)}, {{"use_imu_extrapolation", 1.0, ""}});
+  r.n = 1.0;
+  r.vn = 0.5;
+  r.step();
+  r.now += kTickNs;
+  r.core->on_pose(NedPose{1.0, 0.0, 0.0}, r.now + 200'000'000);  // 0.2 s in the future
+  r.core->on_velocity(0.5, 0.0, 0.0, r.now);
+  const TickOutput& o = r.core->tick(r.now);
+  EXPECT_EQ(o.state, StateCode::Stale);
+  EXPECT_EQ(o.cmd, CmdKind::Stop);
+}

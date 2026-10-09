@@ -59,14 +59,18 @@ RppNode::RppNode(const rclcpp::NodeOptions& options, ClockFn clock, bool create_
         const int64_t now = clock_();
         // An invalid measurement is NOT fed: the pose then ages out and the core stops (STALE),
         // which is the fail-safe behaviour; a stale-but-plausible pose would be worse.
-        if (m->position_valid && m->attitude_valid) {
+        // RPP-002: a non-finite value is never fed, whatever its valid flag says (the producer's
+        // discipline is not this package's safety argument).
+        if (m->position_valid && m->attitude_valid && std::isfinite(m->north_m) &&
+            std::isfinite(m->east_m) && std::isfinite(m->heading_rad)) {
           NedPose p;
           p.n = m->north_m;
           p.e = m->east_m;
           p.yaw_ned = m->heading_rad;
           core_.on_pose(p, now);
         }
-        if (m->velocity_valid) {
+        if (m->velocity_valid && std::isfinite(m->velocity_north_mps) &&
+            std::isfinite(m->velocity_east_mps) && std::isfinite(m->yaw_rate_radps)) {
           core_.on_velocity(m->velocity_north_mps, m->velocity_east_mps, m->yaw_rate_radps, now);
         }
       });
