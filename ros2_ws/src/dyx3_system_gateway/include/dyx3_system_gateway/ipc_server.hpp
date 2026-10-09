@@ -1,7 +1,12 @@
 // ipc_server — Unix-domain-socket NDJSON server on its own thread. Contract:
 // docs/contracts/dyx3_system_gateway.md section 1. POSIX/std only. Complete lines are handed to the
 // callback ON THE IPC THREAD; send()/broadcast() are thread safe.
+// Path ownership: start() takes an exclusive flock on "<path>.lock" and refuses to start while
+// another instance holds it; stop() unlinks the socket only if it is still the one this instance
+// bound (same device and inode).
 #pragma once
+
+#include <sys/types.h>
 
 #include <atomic>
 #include <functional>
@@ -45,9 +50,14 @@ private:
     bool drop{false};
   };
   void loop();
+  void release_path();
   Config cfg_;
   OnLine on_line_;
   int listen_fd_{-1};
+  int lock_fd_{-1};
+  bool own_sock_{false};
+  dev_t sock_dev_{0};
+  ino_t sock_ino_{0};
   int wake_[2]{-1, -1};
   std::thread th_;
   std::atomic<bool> run_{false};

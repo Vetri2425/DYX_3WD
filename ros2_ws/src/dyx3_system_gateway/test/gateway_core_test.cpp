@@ -478,3 +478,55 @@ TEST(IpcServer, APeerThatClosesBeforeItsReplyIsWrittenDoesNotKillTheProcess) {
   ASSERT_TRUE(WIFEXITED(st));
   EXPECT_EQ(WEXITSTATUS(st), 0) << "2: start failed, 3: no quit, 4: closed peers not removed";
 }
+
+// XR-GW-003: a second instance on the same path must neither steal nor delete the live socket.
+TEST(IpcServer, ASecondServerOnTheSamePathIsRefusedAndTheFirstKeepsServing) {
+  const std::string path = tmp_sock();
+  IpcServer a;
+  IpcServer::Config c;
+  c.path = path;
+  std::string err;
+  ASSERT_TRUE(a.start(c, [&](int cl, const std::string& l) { a.send(cl, "a:" + l); }, &err)) << err;
+  struct stat before{};
+  ASSERT_EQ(stat(path.c_str(), &before), 0);
+  {
+    IpcServer b;
+    err.clear();
+    EXPECT_FALSE(b.start(c, [](int, const std::string&) {}, &err));
+    EXPECT_NE(err.find("another gateway"), std::string::npos) << err;
+  }  // b's destructor (stop) must not unlink a's socket either
+  struct stat after{};
+  ASSERT_EQ(stat(path.c_str(), &after), 0);
+  EXPECT_EQ(after.st_ino, before.st_ino);  // the same socket, not re-bound
+  Sock s(path);
+  ASSERT_TRUE(s.ok());
+  s.write_all("ping\n");
+  const auto r = s.read_lines(1);
+  ASSERT_EQ(r.size(), 1U);
+  EXPECT_EQ(r[0], "a:ping");
+  a.stop();
+  EXPECT_FALSE(std::filesystem::exists(path));
+  // once released, the path can be served again
+  IpcServer d;
+  EXPECT_TRUE(d.start(c, [](int, const std::string&) {}, &err)) << err;
+  d.stop();
+  std::filesystem::remove(path + ".lock");
+}
+
+TEST(IpcServer, StopLeavesASocketFileItDidNotCreate) {
+  const std::string path = tmp_sock();
+  IpcServer a;
+  IpcServer::Config c;
+  c.path = path;
+  std::string err;
+  ASSERT_TRUE(a.start(c, [](int, const std::string&) {}, &err)) << err;
+  // the path is replaced behind the server's back (e.g. by an operator's manual instance)
+  ASSERT_EQ(unlink(path.c_str()), 0);
+  {
+    std::ofstream(path) << "someone else";
+  }
+  a.stop();
+  EXPECT_TRUE(std::filesystem::exists(path));
+  std::filesystem::remove(path);
+  std::filesystem::remove(path + ".lock");
+}

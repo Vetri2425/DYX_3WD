@@ -2,6 +2,7 @@
 
 #include <fcntl.h>
 #include <poll.h>
+#include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -24,28 +25,61 @@ bool IpcServer::start(const Config& cfg, OnLine on_line, std::string* err) {
     if (err) *err = "socket path too long";
     return false;
   }
+  // One instance per path (XR-GW-003): the lock is released by the kernel when the holder exits,
+  // so a crashed run never blocks the next one. Read-only open + 0644 so a lock file left by a
+  // manual run under another user does not lock the service out.
+  const std::string lock_path = cfg.path + ".lock";
+  lock_fd_ = open(lock_path.c_str(), O_RDONLY | O_CREAT | O_CLOEXEC, 0644);
+  if (lock_fd_ < 0) {
+    if (err) *err = "lock " + lock_path + ": " + std::strerror(errno);
+    return false;
+  }
+  (void)fchmod(lock_fd_, 0644);  // best effort, against a restrictive umask; fails if not ours
+  if (flock(lock_fd_, LOCK_EX | LOCK_NB) != 0) {
+    const int e = errno;
+    if (err) {
+      *err = e == EWOULDBLOCK
+                 ? "another gateway is serving " + cfg.path + " (" + lock_path + " is locked)"
+                 : "lock " + lock_path + ": " + std::strerror(e);
+    }
+    release_path();
+    return false;
+  }
   listen_fd_ = socket(AF_UNIX, SOCK_STREAM, 0);
   if (listen_fd_ < 0) {
     if (err) *err = std::string("socket: ") + std::strerror(errno);
+    release_path();
     return false;
   }
-  unlink(cfg.path.c_str());  // a stale socket file from a crashed run is replaced
+  unlink(cfg.path.c_str());  // we hold the lock: a socket file here is stale (a crashed run)
   sockaddr_un a{};
   a.sun_family = AF_UNIX;
   std::strncpy(a.sun_path, cfg.path.c_str(), sizeof(a.sun_path) - 1);
   const mode_t old = umask(0);
   const int br = bind(listen_fd_, reinterpret_cast<sockaddr*>(&a), sizeof a);
   umask(old);
-  if (br != 0 || chmod(cfg.path.c_str(), cfg.mode) != 0 || listen(listen_fd_, 8) != 0) {
+  if (br == 0) {
+    struct stat st{};
+    if (lstat(cfg.path.c_str(), &st) == 0) {
+      own_sock_ = true;
+      sock_dev_ = st.st_dev;
+      sock_ino_ = st.st_ino;
+    }
+  }
+  if (br != 0 || !own_sock_ || chmod(cfg.path.c_str(), cfg.mode) != 0 ||
+      listen(listen_fd_, 8) != 0) {
     if (err) *err = std::string("bind/listen ") + cfg.path + ": " + std::strerror(errno);
     close(listen_fd_);
     listen_fd_ = -1;
+    release_path();
     return false;
   }
   set_nonblock(listen_fd_);
   if (pipe(wake_) != 0) {
+    if (err) *err = std::string("pipe: ") + std::strerror(errno);
     close(listen_fd_);
     listen_fd_ = -1;
+    release_path();
     return false;
   }
   set_nonblock(wake_[0]);
@@ -55,12 +89,29 @@ bool IpcServer::start(const Config& cfg, OnLine on_line, std::string* err) {
   return true;
 }
 
+void IpcServer::release_path() {
+  if (own_sock_) {
+    // Only remove the socket this instance bound: if the file was replaced (another instance, a
+    // manual launch) it is not ours to delete.
+    struct stat st{};
+    if (lstat(cfg_.path.c_str(), &st) == 0 && st.st_dev == sock_dev_ && st.st_ino == sock_ino_) {
+      unlink(cfg_.path.c_str());
+    }
+    own_sock_ = false;
+  }
+  if (lock_fd_ >= 0) {
+    close(lock_fd_);  // releases the flock
+    lock_fd_ = -1;
+  }
+}
+
 void IpcServer::stop() {
   if (!run_.exchange(false)) {
     if (listen_fd_ >= 0) {
       close(listen_fd_);
       listen_fd_ = -1;
     }
+    release_path();
     return;
   }
   const char c = 1;
@@ -75,7 +126,7 @@ void IpcServer::stop() {
   close(wake_[0]);
   close(wake_[1]);
   wake_[0] = wake_[1] = -1;
-  unlink(cfg_.path.c_str());
+  release_path();
 }
 
 bool IpcServer::connected(int client) const {

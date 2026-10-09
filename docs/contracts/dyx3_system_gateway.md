@@ -7,7 +7,7 @@ is the **operator-link heartbeat** (§4.3.1): it publishes `OperatorLinkStatus`,
 
 ## 1. Transport
 
-* `SOCK_STREAM` Unix socket (`socket_path`, default `/run/dyx3/gateway.sock`, mode 0660, group `dyx3`); a stale socket file is replaced at start. At most `max_clients` (4, DERIVED) connections.
+* `SOCK_STREAM` Unix socket (`socket_path`, default `/run/dyx3/gateway.sock`, mode 0660, group `dyx3`). One instance per path (XR-GW-003): at start the gateway takes an exclusive `flock` on `<socket_path>.lock` and **refuses to start** while another instance holds it; holding the lock, a stale socket file (crashed run) is replaced. At stop it unlinks the socket only if it is still the inode it bound; the lock file itself stays (harmless, released by the kernel on exit). At most `max_clients` (4, DERIVED) connections.
 * **Newline-delimited JSON, UTF-8**, one object per line, every message carries `"v":1`. A line longer than 64 KiB, invalid JSON, invalid UTF-8 inside a string (strict RFC 3629: no overlong forms, surrogates or code points above U+10FFFF; GW-008), a wrong `v`, duplicate keys or trailing garbage
   is answered `{"ok":false,"code":"bad_message"}` (the connection stays open unless the line overflows, which closes it). A client whose outbound buffer exceeds 1 MiB is dropped (slow consumer).
 * Everything the gateway writes is valid UTF-8: client bytes are never echoed unless they passed validation, and any invalid byte in a ROS string field is written as `\ufffd`.
