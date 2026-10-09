@@ -35,15 +35,49 @@ health_release() {
   fi
 }
 
+_svc_prop() { systemctl show -p "$2" --value "$1.service" 2>/dev/null || true; }
+_svc_active() { [ "$(_svc_prop "$1" ActiveState)" = active ]; }
+
+# health_services <release-dir>: INS-005. One is-active sample right after a restart let a crash-looping release pass.
+# Every enabled unit must reach active (within DYX3_HEALTH_SETTLE_S), then STAY active for DYX3_HEALTH_HOLD_S (default
+# 10, sampled every second) with NRestarts unchanged.
+health_services() {
+  local rel="$1" hold="${DYX3_HEALTH_HOLD_S:-10}" name i
+  local -a names=()
+  local -A restarts=() gone=()
+  mapfile -t names < <(manifest_section enabled_services "${rel}/installer/manifests/production.manifest" | grep .)
+  for name in "${names[@]}"; do
+    if _settle _svc_active "${name}"; then
+      restarts[${name}]="$(_svc_prop "${name}" NRestarts)"
+    else
+      _fail "${name}.service is '$(_svc_prop "${name}" ActiveState)'"
+    fi
+  done
+  [ "${#restarts[@]}" -gt 0 ] || return 0
+  for ((i = 0; i < hold; i++)); do
+    sleep 1
+    for name in "${!restarts[@]}"; do
+      [ -z "${gone[${name}]:-}" ] && ! _svc_active "${name}" && gone[${name}]="$(_svc_prop "${name}" ActiveState)"
+    done
+  done
+  for name in "${names[@]}"; do
+    [ -n "${restarts[${name}]+x}" ] || continue
+    if [ -n "${gone[${name}]:-}" ]; then
+      _fail "${name}.service went '${gone[${name}]}' during the ${hold} s hold"
+    elif [ "$(_svc_prop "${name}" NRestarts)" != "${restarts[${name}]}" ]; then
+      _fail "${name}.service restarted during the ${hold} s hold (NRestarts ${restarts[${name}]} -> $(_svc_prop "${name}" NRestarts))"
+    elif ! _svc_active "${name}"; then
+      _fail "${name}.service is '$(_svc_prop "${name}" ActiveState)' after the hold"
+    else
+      _pass "${name}.service active for ${hold} s with no restart"
+    fi
+  done
+}
+
 health_platform() {
   local rel="${1:-${DYX3_CURRENT}}"
   if systemd_available; then
-    local name state
-    while IFS= read -r name; do
-      [ -n "${name}" ] || continue
-      state="$(systemctl is-active "${name}.service" 2>/dev/null || true)"
-      if [ "${state}" = "active" ]; then _pass "${name}.service active"; else _fail "${name}.service is '${state}'"; fi
-    done < <(manifest_section enabled_services "${rel}/installer/manifests/production.manifest")
+    health_services "${rel}"
   else
     _warn "systemd checks skipped"
   fi
@@ -80,7 +114,11 @@ _settle() {
   done
 }
 
-_gateway_up() { [ -S "${DYX3_RUN}/gateway.sock" ]; }
+# INS-005: the socket file outlives a dead gateway; ask it for a snapshot instead.
+_gateway_up() {
+  [ -S "${DYX3_GATEWAY_SOCK}" ] && have python3 &&
+    DYX3_GATEWAY_QUERY_TIMEOUT_S="${DYX3_GATEWAY_PING_TIMEOUT_S:-2}" _gateway_query ping >/dev/null 2>&1
+}
 _backend_up() { curl -fsS --max-time 3 "http://$1:$2/api/ping" >/dev/null 2>&1; }
 _rtk_up() {
   [ -S "${DYX3_RUN}/rtk-control.sock" ] || return 1
@@ -127,7 +165,7 @@ health_extras() {
   health_wifi
   if declare -F health_usb_serial >/dev/null 2>&1; then health_usb_serial; fi
   if _enabled dyx3-ros "${m}"; then
-    if _settle _gateway_up; then _pass "gateway socket present"; else _fail "gateway socket ${DYX3_RUN}/gateway.sock missing (dyx3-ros / system_gateway down?)"; fi
+    if _settle _gateway_up; then _pass "gateway answers get_snapshot on ${DYX3_GATEWAY_SOCK}"; else _fail "gateway does not answer on ${DYX3_GATEWAY_SOCK} (dyx3-ros / system_gateway down?)"; fi
   fi
   if _enabled dyx3-rtk "${m}"; then
     if _settle _rtk_up; then _pass "dyx3-rtk control socket answers GET_STATUS"; else _fail "dyx3-rtk control socket unavailable"; fi

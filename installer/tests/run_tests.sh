@@ -830,6 +830,38 @@ F
   check "idle: a stale socket file with dyx3-ros stopped is idle" '[ -S "${DYX3_GATEWAY_SOCK}" ] && [ "$(idle_rc)" = 0 ]'
   rm -f "${DYX3_GATEWAY_SOCK}"
 
+  # ---- INS-005: a service must stay up through the hold with no restart; the gateway must answer
+  echo 0 >"${T}/nrestarts"
+  : >"${T}/svc_state"
+  fake_systemctl() {
+    case "$*" in
+      "show -p ActiveState --value dyx3-platform.service") if [ -s "${T}/svc_state" ]; then cat "${T}/svc_state"; else echo active; fi ;;
+      "show -p NRestarts --value dyx3-platform.service")
+        cat "${T}/nrestarts"
+        [ -e "${T}/flapping" ] && echo $(($(cat "${T}/nrestarts") + 1)) >"${T}/nrestarts"
+        ;;
+    esac
+  }
+  svc_health() { (systemd_available() { return 0; }; systemctl() { fake_systemctl "$@"; }; DYX3_HEALTH_HOLD_S=2 health_platform "${DYX3_CURRENT}") >"${T}/svc_out" 2>&1; }
+  svc_health
+  check "service hold: a unit that stays active with no restart passes" 'grep -q "^PASS  dyx3-platform.service active for 2 s with no restart" "${T}/svc_out" && ! grep -q "^FAIL" "${T}/svc_out"'
+  : >"${T}/flapping"
+  svc_health
+  check "service hold: a unit that restarts during the hold fails (crash loop)" 'grep -q "^FAIL  dyx3-platform.service restarted during the 2 s hold" "${T}/svc_out"'
+  rm -f "${T}/flapping"
+  echo failed >"${T}/svc_state"
+  (systemd_available() { return 0; }; systemctl() { fake_systemctl "$@"; }; DYX3_HEALTH_SETTLE_S=1 health_platform "${DYX3_CURRENT}") >"${T}/svc_out" 2>&1
+  check "service hold: a unit that never becomes active fails" 'grep -q "^FAIL  dyx3-platform.service is .failed." "${T}/svc_out"'
+  gw_state "${gwf}" 1 true 0 true
+  fake_gateway_start "${DYX3_GATEWAY_SOCK}" "${gwf}"
+  check "gateway health: a gateway that answers get_snapshot passes" '_gateway_up'
+  echo silent >"${gwf}"
+  check "gateway health: a silent gateway fails" '! DYX3_GATEWAY_PING_TIMEOUT_S=1 _gateway_up'
+  kill "${FAKE_GW_PID}" 2>/dev/null
+  wait "${FAKE_GW_PID}" 2>/dev/null
+  check "gateway health: a socket file with nothing behind it fails" '[ -S "${DYX3_GATEWAY_SOCK}" ] && ! _gateway_up'
+  rm -f "${DYX3_GATEWAY_SOCK}"
+
   # ---- INS-012: an invalid artifact stops the upgrade in auto mode too (never a silent source build)
   (install_prebuilt() { return 2; }; upgrade_to "${D}") >"${T}/pb_invalid" 2>&1
   rc=$?
