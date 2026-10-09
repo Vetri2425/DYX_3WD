@@ -1813,3 +1813,48 @@ Owner plan:
 
 GPS indoors after the power cycle: fix 0, 4 satellites (expected). Next: outdoor RTK/heading and a line-of-sight
 Wi-Fi range walk.
+
+## 2026-10-09 (15:05) — Claude — task 3: rover crept backwards on arm, and steering was mirrored; both fixed (RC)
+
+**Symptoms (owner, wheels up):** on arm in Manual the rover drove backwards. Steering right turned left.
+
+**Root cause (read-only on the FCU, then log replay):**
+- **Creep:** `manual_control_setpoint.throttle` was −0.128 with the sticks at rest.
+  - Throttle is ch3 (`RC_MAP_THROTTLE 3`, `RC3_REV −1`). Its raw rest value is 1560, but `RC3_TRIM` was 1999
+    (QGC throttle calibration stores the trim at one end). `rc_update.cpp` then auto-centres the trim to
+    (min+max)/2 = 1499.
+  - `DifferentialManualMode` passes throttle to the motors with **no deadzone**, so −0.128 became reverse
+    drive; the RoboClaw driver's 3 % deadband cannot hide it.
+- **Mirrored steering:** log `log7_2026-10-09_09-26-16.ulg` showed the owner's LEFT stick arriving as roll +1.
+  - PX4, the mixer and the RoboClaw are consistent: Motor 1 = right (`control[0]`), and the encoders follow the
+    commands. So only the input sign was wrong, and auto modes were never affected.
+- The live mapping (throttle 3 / roll 1 / pitch 2 / yaw 4) differed from the repo baseline (throttle 2 / roll 3 /
+  pitch 1). A QGC radio calibration probably rewrote it to the drone layout. The live layout is what the owner
+  drives with.
+
+**Fix (on the FCU, saved):** `RC3_TRIM 1560`, `RC1_REV −1`.
+
+**Verified** (`log8_2026-10-09_09-29-38.ulg`, armed, wheels up):
+- LEFT stick → roll −1 → right +1 / left −1 → encoders +7.0 / −7.0 rad/s (left turn). RIGHT → the mirror image.
+- At rest after release: motors ≤ 0.017 (below the deadband), encoders 0.00 rad/s; throttle −0.005 to −0.007.
+- Logs are in `~/Vetri/3WD_PROD/PX4-Firmware/3WD/logs_2026-10-09/`.
+
+**Persisted:**
+- `config/px4/3wd_6x_carry_from_proto.params`: `RC_MAP_*` 3/1/2/4, `RC1_REV −1`, `RC3_REV −1`.
+- New `config/px4/3wd_rover01_rc_calibration.params`: this transmitter's RC1–4 min/trim/max/rev, plus the rule
+  that after any QGC radio calibration you set `RC3_TRIM` to the measured ch3 rest and re-apply the mapping.
+
+**4WD vs 3WD RoboClaw/encoder comparison:**
+
+| | 4WD proto (v1.16.2, `1fe1789089`) | 3WD prod (v1.17, `8279fa4be3`) |
+|---|---|---|
+| Control mode | `RBCLW_VEL_CTRL` open/closed loop | always closed loop |
+| Zero handling | <1 % → stop | 3 % deadband + <1 % → stop |
+| Stop in Hold (AUTO_LOITER) | explicit | none |
+| Fault reporting | `esc_status`, comm-failure flag | none |
+| Encoder reads | speed + counters at `RBCLW_ENC_HZ` 20 | speed only, every cycle |
+| EKF2 wheel fusion | yes | yes (`EKF2_WENC_CTRL 1`, `RAD 0.1498`, `LAT_N 0.1`) |
+| `COUNTS_REV` / `QPPS_MAX` | 160000 / 171000 | 148000 / 172000 |
+
+Port candidates (firmware is V1-frozen; needs the owner's OK): Hold-mode stop, `esc_status`/fault reporting,
+open-loop fallback.

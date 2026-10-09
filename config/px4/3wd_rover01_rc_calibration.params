@@ -1,0 +1,29 @@
+# DYX 3WD rover 01 (192.168.3.100): RC calibration for its transmitter, measured on the rover 2026-10-09.
+# Calibration, not vehicle config: apply only to this rover with this transmitter. Mapping and channel
+# directions live in 3wd_6x_carry_from_proto.params.
+#
+# Stick layout (verified from logs 2026-10-09, firmware 8279fa4be3):
+#   ch1 steering (RC_MAP_ROLL 1, RC1_REV -1)   ch3 throttle (RC_MAP_THROTTLE 3, RC3_REV -1)
+#
+# RC3_TRIM is the throttle stick's measured REST value, not min/max. PX4 rover Manual mode passes
+# throttle straight to the motors with no deadzone (DifferentialManualMode). QGC radio calibration
+# stores the throttle trim at one end, and rc_update then centres it to (min+max)/2 = 1499. With the
+# stick resting at 1560, that read -0.128: the rover crept backwards on arm. After any QGC radio
+# calibration: read input_rc ch3 at rest, set RC3_TRIM to it, and re-apply RC_MAP_* / RC*_REV.
+# Vehicle-Id Component-Id Name Value Type
+1	1	RC1_MIN	1000	9
+1	1	RC1_TRIM	1512	9
+1	1	RC1_MAX	1999	9
+1	1	RC1_REV	-1	9
+1	1	RC2_MIN	1000	9
+1	1	RC2_TRIM	1466	9
+1	1	RC2_MAX	1997	9
+1	1	RC2_REV	-1	9
+1	1	RC3_MIN	1000	9
+1	1	RC3_TRIM	1560	9
+1	1	RC3_MAX	1999	9
+1	1	RC3_REV	-1	9
+1	1	RC4_MIN	1000	9
+1	1	RC4_TRIM	1477	9
+1	1	RC4_MAX	1988	9
+1	1	RC4_REV	1	9
