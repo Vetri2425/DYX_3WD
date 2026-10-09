@@ -243,17 +243,40 @@ TEST(GatewayNode, AnEstopThatCannotBeDeliveredIsNeverReportedAsAccepted) {
   Rig r;
   Sock c(r.sock);
   ASSERT_TRUE(c.ok());
+  const std::string assert_line = R"(,"cmd":"estop","args":{"asserted":true,"source":"tablet"}})";
   // 1. delivered and accepted
-  auto v =
-      r.ask(c, R"({"v":1,"id":21,"cmd":"estop","args":{"asserted":true,"source":"tablet"}})", 21);
+  auto v = r.ask(c, R"({"v":1,"id":21)" + assert_line, 21);
   EXPECT_TRUE(ok_of(v));
+  EXPECT_EQ(code_of(v), "ok");
   EXPECT_EQ(r.calls.back(), "estop:1:tablet");
-  // 2. the service answers late/never: a timeout, reported as failed
-  r.svc_keep[5].reset();  // the guard's service disappears
-  r.pump(300);
-  v = r.ask(c, R"({"v":1,"id":22,"cmd":"estop","args":{"asserted":true,"source":"tablet"}})", 22);
+  // 2. delivered and refused by the guard: the refusal is passed through
+  r.estop_accepts = false;
+  v = r.ask(c, R"({"v":1,"id":22)" + assert_line, 22);
   EXPECT_FALSE(ok_of(v));
-  EXPECT_TRUE(code_of(v) == "service_unavailable" || code_of(v) == "timeout") << code_of(v);
+  EXPECT_EQ(code_of(v), "rejected");
+  r.estop_accepts = true;
+  // 3. the guard's service exists and receives the request but never answers: exactly "timeout"
+  // once service_timeout_s (1.0 s here) has passed, never "ok"
+  r.estop_answers = false;
+  const size_t n_calls = r.calls.size();
+  v = r.ask(c, R"({"v":1,"id":23)" + assert_line, 23, 3.0);
+  EXPECT_FALSE(ok_of(v));
+  EXPECT_EQ(code_of(v), "timeout");
+  EXPECT_EQ(r.calls.size(), n_calls + 1);  // it was delivered, the answer never came
+  // 4. the guard's service disappears: exactly "service_unavailable", at once
+  r.svc_keep[5].reset();
+  // (by node: the plain service list also shows the name while the gateway's client exists)
+  const auto gone = [&r]() {
+    const auto names = r.gw->get_service_names_and_types_by_node("world", "/");
+    return names.find("/dyx3/motion_guard/set_emergency_stop") == names.end();
+  };
+  for (int i = 0; i < 100 && !gone(); ++i) r.pump(50);
+  ASSERT_TRUE(gone());
+  r.pump(200);
+  v = r.ask(c, R"({"v":1,"id":24)" + assert_line, 24);
+  EXPECT_FALSE(ok_of(v));
+  EXPECT_EQ(code_of(v), "service_unavailable");
+  EXPECT_EQ(r.calls.size(), n_calls + 1);
 }
 
 TEST(GatewayNode, TimedOutRequestsAreRemovedFromTheRosClient) {

@@ -78,5 +78,5 @@ local access control; the backend is the policy owner for who may send what.
 ## 7. Acceptance
 
 Off-target: JSON parser (strict, duplicate keys, depth, escapes), command validation table, snapshot ageing, operator-link timing, the socket server (framing, oversized line, slow consumer, max clients,
-stale socket), and a node test with fake services (reply routing, timeout, service_unavailable, estop never reported accepted when undelivered, heartbeat -> `OperatorLinkStatus`).
+stale socket), and a node test with fake services (reply routing; an E-stop that is accepted, rejected, delivered but never answered (exactly `timeout`) and undeliverable (exactly `service_unavailable`), never reported accepted unless the guard accepted it; heartbeat -> `OperatorLinkStatus`).
 **Not provable off-target:** socket permissions under systemd, the real tablet path, latency.
