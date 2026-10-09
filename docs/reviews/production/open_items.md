@@ -41,9 +41,9 @@ Review baseline: DYX_3WD `master` `252778e` (firmware `8279fa4be3`).
 | 3 | `dyx3_px4_link` | 2026-10-09 | 2026-10-09 | 0 / 3 / 1 / 3 | open |
 | 4 | `dyx3_interfaces` (+ px4_msgs pin) | — | — | — | prompt issued |
 | 5 | `dyx3_mission` | 2026-10-09 | 2026-10-09 | 0 / 0 / 3 / 4 | open |
-| 6 | `dyx3_gnss_rtk` | — | — | — | prompt issued |
+| 6 | `dyx3_gnss_rtk` | 2026-10-09 | 2026-10-09 | 0 / 0 / 1 / 3 | open |
 | 7 | `dyx3_spray` | 2026-10-09 | 2026-10-09 | 0 / 2 / 2 / 1 | open |
-| 8 | `dyx3_geometry` | — | — | — | |
+| 8 | `dyx3_geometry` | — | — | — | prompt issued |
 | 9 | `dyx3_bringup` + systemd (RT, CPU, restart) | — | — | — | |
 | 10 | `dyx3_system_gateway` | — | — | — | |
 | 11 | `dyx3_recorder` | — | — | — | |
@@ -524,6 +524,66 @@ Confirmed good:
 
 Not counted: the lease has no sequence or replay check (`safety_lease.cpp:40-57`). There is one publisher, and a
 single stale lease cannot keep the watchdog alive. Hardening only.
+
+---
+
+## 6. `dyx3_gnss_rtk`
+
+Reviewer verdict: acceptance pending (0 CRITICAL, 1 HIGH, 3 MEDIUM); the reviewer marked it a partial review.
+After verification: **0 CRITICAL, 0 HIGH, 1 MEDIUM, 3 LOW**.
+- The reviewer's two status concerns cannot let the guard pass a bad fix: the guard checks the receiver's own
+  fix and rejects an accuracy of 0.
+
+Confirmed good:
+- **The guard's RTK gate is strict** (`dyx3_motion_guard/include/.../rtk_gate.hpp:23-30`). It requires all of:
+  - a fresh `rtk_status` and `corrections_fresh`;
+  - fix 5 or 6, and at least `rtk_min_fix_type` 6;
+  - an accuracy that is finite and **> 0**, so the unknown sentinel 0 fails;
+  - hrms ≤ 0.10 m.
+  Spray also gates on `corrections_fresh` (`spray_gates.cpp:86-88`). A stale or missing GNSS report leaves
+  `fix_type` 0, which fails.
+- **The fix comes from the receiver's own report** (`/dyx3/gnss_report` from PX4's driver) and is never derived
+  from correction packets.
+- **The only serial write to the UM982 is validated RTCM frames** (`transport_sink.cpp:81-104`, with
+  partial-write handling). No configuration command was found. The LoRa port is read-only. The NTRIP writes go
+  to the caster (request + GGA), not to the receiver.
+- **One injector:** `injection_authority` selects one sink, and generation numbers reject callbacks from an old
+  source.
+- **RTCM integrity:** CRC-24Q, partial-frame buffering and resynchronisation (`rtcm_parser.cpp:43-85`).
+- **The control socket is limited:** Unix socket 0660, 64 KiB request cap, its own thread
+  (`control_socket.cpp:45-63`).
+- **A bad config starts the service STOPPED/ERROR** with the socket up (`rtk_node.cpp:79-103`).
+
+| ID | Severity | Status | Area | Where | Item |
+|---|---|---|---|---|---|
+| RTK-001 | MEDIUM (~~HIGH~~) | ACCEPTED ↓ | Stall | `ntrip_client.cpp:270-291,386-395`; `rtk_node.cpp:231-244` | `getaddrinfo()` has no deadline; a config change joins the NTRIP worker, so a hung resolver hangs the control socket |
+| RTK-002 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Status | `rtk_node.cpp:376-395`; `correction_health.cpp:13-15` | `correction_age_s` is the age since source receipt, not the receiver's correction age |
+| RTK-003 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Status | `rtk_node.cpp:384-388` | Accuracy 0 = unknown; the guard and RPP already reject it |
+| RTK-004 | LOW (~~MEDIUM~~) | DOUBT (measure) | Stall | `rtk_node.cpp:112-117,372-379` | The 200 ms status timer also polls the USB readback |
+
+### RTK-001 — MEDIUM — DNS with no deadline
+- Confirmed. `getaddrinfo` sits outside `connect_timeout_s`. It runs on the NTRIP worker thread, not the ROS
+  executor, so status publishing continues and corrections are already gone if DNS is broken.
+- The real stall: `SET_CONFIG` / STOP on the control-socket thread → `apply_config` → `authority_->stop()` → join
+  the worker. That blocks until glibc's resolver gives up, about 5 s × attempts per `resolv.conf`.
+- The tablet's RTK control hangs meanwhile. A service stop can wait for the systemd default TimeoutStopSec of
+  90 s, which is not set in `dyx3-rtk.service`.
+- **Fix:** resolve with a deadline (`getaddrinfo_a` with a timeout, or a resolver thread whose result is
+  abandoned on stop without holding the client); set `TimeoutStopSec`.
+- **Test:** a black-holed DNS + SET_CONFIG must complete in ≤ connect_timeout + 1 s.
+
+### RTK-002 / RTK-003 / RTK-004 — LOW
+- **RTK-002.** The safety decision rests on the receiver's fix and accuracy; `correction_age_s` is diagnostics.
+  Label it "source age" in the app. Add the receiver correction age (the UM982 differential age from GGA
+  readback; the control status already has `receiver_correction_age_*`) when the interface is next bumped.
+- **RTK-003.** Consumers already treat 0 as unknown (guard `rtk_gate.hpp:28`; RPP `rpp_node.cpp:75-80`). Only
+  the app display needs "—" instead of 0.000 m.
+- **RTK-004.** The readback is non-blocking. Measure the status inter-publish gap during USB unplug/replug and
+  SET_CONFIG; the guard allows 0.5 s, which is 2.5 periods.
+
+The reviewer's cross-part notes: "GNSS report freshness" is X-001. "Guard interpretation of unknown accuracy" is
+closed by the gate above. "DDS RTCM chunk acceptance in PX4" is still to be checked when the PX4_DDS transport is
+used; the rover uses USB_DIRECT today.
 
 ---
 
