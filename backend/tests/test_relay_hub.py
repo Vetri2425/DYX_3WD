@@ -198,3 +198,46 @@ def test_health_reports_relay_running_and_operator_alive(tmp_path):
         assert h["relay_running"] is True and h["operator_alive"] is False
     h = TestClient(api).get("/api/health", headers={"Authorization": "Bearer view-tok"}).json()
     assert h["relay_running"] is False
+
+
+async def test_heartbeats_processed_right_after_a_loop_stall_do_not_extend_the_link():
+    gw, clk = FakeGateway(), Clock()
+    relay = OperatorLinkRelay(gw, relay_s=0.5, tablet_timeout_s=1.5, clock=clk)
+    relay.note_tablet()  # t=100.0, the last heartbeat before the stall
+    await relay.step()  # t=100.0 relayed
+    clk.t += 0.5
+    await relay.step()  # t=100.5 relayed (on time: no stall)
+    assert len(gw.calls) == 2 and relay.stalls == 0
+    # The event loop blocks for 2.0 s. The tablet is gone, but heartbeats it sent before vanishing sat in the socket
+    # buffer and are processed now, stamped "now", before the relay task runs.
+    clk.t += 2.0
+    relay.note_tablet()
+    assert relay.tablet_alive() is True  # without the guard this backlog would look fresh
+    await relay.step()  # 2.0 s since the previous tick > 0.5 + 0.3: stall
+    assert relay.stalls == 1
+    assert len(gw.calls) == 2  # nothing relayed: the trusted stamp (100.0) is 2.5 s old
+    assert relay.tablet_alive() is False
+    clk.t += 0.2
+    assert relay.note_tablet() is False  # still inside the quarantine (relay_s): ignored
+    await relay.step()
+    assert len(gw.calls) == 2
+    clk.t += 0.4  # quarantine over: a live tablet re-proves itself with its next heartbeat
+    assert relay.note_tablet() is True
+    await relay.step()
+    assert len(gw.calls) == 3 and relay.tablet_alive() is True
+
+
+async def test_a_short_stall_keeps_a_truthful_heartbeat_and_on_time_ticks_change_nothing():
+    gw, clk = FakeGateway(), Clock()
+    relay = OperatorLinkRelay(gw, relay_s=0.5, tablet_timeout_s=1.5, clock=clk)
+    for _ in range(10):  # 20 Hz-ish jitter but on time: never a stall
+        relay.note_tablet()
+        await relay.step()
+        clk.t += 0.5 + 0.29
+    assert relay.stalls == 0 and len(gw.calls) == 10
+    relay.note_tablet()  # stamped before the stall: truthful
+    await relay.step()
+    clk.t += 0.9  # late by 0.4 s: a stall
+    await relay.step()
+    assert relay.stalls == 1
+    assert len(gw.calls) == 12  # the pre-stall stamp is 0.9 s old: still alive, still relayed
