@@ -44,7 +44,7 @@ void require(bool ok, const std::string& what) {
 SprayNode::SprayNode(const rclcpp::NodeOptions& options, ClockFn clock, bool create_timer)
     : rclcpp::Node("spray", options), clock_(clock ? std::move(clock) : ClockFn(steady_now_s)) {
   declare_and_validate_params();
-  ctl_ = std::make_unique<SprayController>(&params_);
+  ctl_ = std::make_unique<SprayController>(&params_, 1.0 / tick_hz_);
 
   // Commands must not be dropped and must keep order: reliable. The lease is depth 1 (only the
   // newest matters).

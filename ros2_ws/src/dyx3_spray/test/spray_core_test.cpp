@@ -1,7 +1,10 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <memory>
+#include <stdexcept>
+#include <vector>
 
 #include "dyx3_spray/spray_controller.hpp"
 #include "dyx3_spray/watchdog_core.hpp"
@@ -390,12 +393,16 @@ struct Rig {
   bool rpp_alive{true};
   bool mission_running{true};
   std::optional<RppState> rpp_override;  // publish this state instead of tracking/pivot
+  double period{0.02};                   // control tick period handed to the controller
 
-  explicit Rig(bool tracking0 = true) {
+  explicit Rig(bool tracking0 = true, double period_s = 0.02,
+               const std::vector<Item>& extra_params = {}) {
     tracking = tracking0;
+    period = period_s;
     params.init_many(
         {{"gps_recover_hold_s", 0.0, ""}});  // recovery hold is covered in the gate tests
-    c = std::make_unique<SprayController>(&params);
+    if (!extra_params.empty()) EXPECT_TRUE(params.init_many(extra_params).ok);
+    c = std::make_unique<SprayController>(&params, period);
     c->load_path(straight());
     world(0.0, true);
   }
@@ -440,7 +447,7 @@ struct Rig {
   }
 
   void step(double north, double speed = 0.35, bool estop = false, bool armed = true) {
-    t += 0.02;
+    t += period;
     world(north, armed, speed, estop);
     run_cmd(c->tick(t));
   }
@@ -489,17 +496,123 @@ TEST(Controller, OpensEarlyByTheLeadSpraysTheMarkAndClosesBeforeTheBoundary) {
     if (!s && prev) off_at = n;
     prev = s;
   }
-  // lead = 0.35*0.18 + 0.02 = 0.083 m before the MARK start at 2.0 (debounce 3 ticks and the ack
-  // tick cost ~4 cm more)
-  EXPECT_NEAR(on_at, 2.0 - 0.083, 0.06);
-  EXPECT_LT(on_at, 2.0);
-  // The MARK ends at 9.0 (vertex 8 is the last MARK vertex). off lead = max(0, 0.35*0.05 - 0) =
-  // 0.0175 m before it; the debounce (3 ticks = 2.1 cm at 0.35 m/s) then delays the CLOSE by 2.1
-  // cm. That latency is carried from the prototype and is part of the boundary budget (see the
-  // contract, section 5).
-  EXPECT_NEAR(off_at, 9.0 - 0.0175 + 0.021, 0.02);
-  EXPECT_GT(off_at, 9.0 - 0.0175);
+  // The command goes out where the valve still needs the solenoid delay to move: lead = 0.35*0.18 +
+  // 0.02 = 0.083 m before the MARK start at 2.0. The debounce (3 samples = 2 ticks = 0.014 m at
+  // 0.35 m/s) is led as well (SP-002), so only the sampling of the crossing (< one tick, 0.007 m)
+  // remains.
+  EXPECT_GE(on_at, 2.0 - 0.083 - 1e-9);
+  EXPECT_LT(on_at, 2.0 - 0.083 + 0.007 + 1e-9);
+  // The MARK ends at 9.0 (vertex 8 is the last MARK vertex): off lead = 0.35*0.05 - 0 = 0.0175 m.
+  EXPECT_GE(off_at, 9.0 - 0.0175 - 1e-9);
+  EXPECT_LT(off_at, 9.0 - 0.0175 + 0.007 + 1e-9);
   EXPECT_EQ(r.ons, 1);
+}
+
+// SP-002: constant-speed passes. The position of the tick that dispatches the command plus the
+// distance covered during the solenoid delay is where paint starts/stops. It must land on the
+// boundary (less the deliberate overspray margin) up to the sampling of the crossing, which is
+// always late by [0, one tick of travel). Every phase of the samples against the boundary is tried.
+namespace {
+struct Edges {
+  double paint_on_err{1e9};   // where paint starts minus (2.0 - on_overspray_margin_m)
+  double paint_off_err{1e9};  // where paint stops minus (9.0 + off_overspray_margin_m)
+  int ons{0};
+};
+
+Edges constant_speed_pass(double v, double period, double phase, int debounce_samples = 3) {
+  Rig r(true, period, {{"debounce_samples", static_cast<double>(debounce_samples), ""}});
+  const double open_delay = r.params.num(P::solenoid_open_delay_s);
+  const double close_delay = r.params.num(P::solenoid_close_delay_s);
+  const double on_margin = r.params.num(P::on_overspray_margin_m);
+  const double off_margin = r.params.num(P::off_overspray_margin_m);
+  Edges e;
+  bool on_seen = false, off_seen = false;
+  const double ds = v * period;
+  for (double n = phase; n < 9.9; n += ds) {
+    const int ons = r.ons, offs = r.offs;
+    r.step(n, v);
+    if (!on_seen && r.ons > ons) {
+      on_seen = true;
+      e.paint_on_err = (n + v * open_delay) - (2.0 - on_margin);
+    } else if (on_seen && !off_seen && r.offs > offs) {
+      off_seen = true;
+      e.paint_off_err = (n + v * close_delay) - (9.0 + off_margin);
+    }
+  }
+  e.ons = r.ons;
+  return e;
+}
+}  // namespace
+
+TEST(Controller, DebounceIsLedSoValveEdgesLandOnTheBoundaryAtProductionSpeeds) {
+  for (const double v : {0.35, 0.5, 1.0}) {
+    const double tick_travel = v * 0.02;
+    double worst_on = 0.0, worst_off = 0.0;
+    for (int k = 0; k < 8; ++k) {
+      const double phase = tick_travel * k / 8.0;
+      const Edges e = constant_speed_pass(v, 0.02, phase);
+      ASSERT_EQ(e.ons, 1) << v;
+      // never early, and late by less than one tick of travel (the sampling of the crossing)
+      EXPECT_GE(e.paint_on_err, -1e-9) << "v=" << v << " phase=" << phase;
+      EXPECT_LT(e.paint_on_err, tick_travel + 1e-9) << "v=" << v << " phase=" << phase;
+      EXPECT_GE(e.paint_off_err, -1e-9) << "v=" << v << " phase=" << phase;
+      EXPECT_LT(e.paint_off_err, tick_travel + 1e-9) << "v=" << v << " phase=" << phase;
+      worst_on = std::max(worst_on, e.paint_on_err);
+      worst_off = std::max(worst_off, e.paint_off_err);
+    }
+    if (v <= 0.5) {
+      EXPECT_LE(worst_on, 0.01) << v;
+      EXPECT_LE(worst_off, 0.01) << v;
+    }
+  }
+  // Without the compensation the debounce alone would put both edges 2 ticks (4 cm at 1 m/s) late:
+  // the term is load-bearing, not absorbed by the tolerance above.
+  const Edges e = constant_speed_pass(1.0, 0.02, 0.0);
+  EXPECT_LT(e.paint_on_err, 0.04 - 0.005);
+  EXPECT_LT(e.paint_off_err, 0.04 - 0.005);
+}
+
+TEST(Controller, DebounceLeadUsesTheRealTickPeriod) {
+  // At 100 Hz the same 3 samples are 20 ms, not 40 ms; and 1 m/s stays within 1 cm at every phase.
+  for (int k = 0; k < 8; ++k) {
+    const double phase = 0.01 * k / 8.0;
+    const Edges e = constant_speed_pass(1.0, 0.01, phase);
+    ASSERT_EQ(e.ons, 1);
+    EXPECT_GE(e.paint_on_err, -1e-9) << phase;
+    EXPECT_LE(e.paint_on_err, 0.01) << phase;
+    EXPECT_GE(e.paint_off_err, -1e-9) << phase;
+    EXPECT_LE(e.paint_off_err, 0.01) << phase;
+  }
+  // A longer debounce is led by its own length.
+  const Edges e = constant_speed_pass(0.5, 0.02, 0.0, /*debounce_samples=*/8);
+  EXPECT_GE(e.paint_on_err, -1e-9);
+  EXPECT_LT(e.paint_on_err, 0.01 + 1e-9);
+  EXPECT_GE(e.paint_off_err, -1e-9);
+  EXPECT_LT(e.paint_off_err, 0.01 + 1e-9);
+  ParamSet ps;
+  EXPECT_THROW(SprayController(&ps, 0.0), std::invalid_argument);
+  EXPECT_THROW(SprayController(&ps, NAN), std::invalid_argument);
+}
+
+TEST(Controller, SafetyOffBypassesTheDebounceAndTheLead) {
+  // Even with a long debounce, a safety refusal sends OFF in the very tick it is seen.
+  Rig r(true, 0.02, {{"debounce_samples", 10.0, ""}});
+  double n = 0.0;
+  for (; n < 5.0; n += 0.02) r.step(n, 1.0);
+  ASSERT_TRUE(r.c->status(r.t).spraying);
+  int offs = r.offs;
+  r.step(n += 0.02, 1.0, /*estop=*/true);
+  EXPECT_EQ(r.offs, offs + 1);
+  EXPECT_FALSE(r.c->status(r.t).spraying);
+  EXPECT_FALSE(r.c->lease(r.t).allow_on);
+
+  Rig d(true, 0.02, {{"debounce_samples", 10.0, ""}});
+  for (n = 0.0; n < 5.0; n += 0.02) d.step(n, 1.0);
+  ASSERT_TRUE(d.c->status(d.t).spraying);
+  offs = d.offs;
+  d.step(n += 0.02, 1.0, false, /*armed=*/false);
+  EXPECT_EQ(d.offs, offs + 1);
+  EXPECT_FALSE(d.c->status(d.t).spraying);
 }
 
 TEST(Controller, EmergencyStopForcesOffAtTheNextTickAndRevokesTheLease) {
@@ -518,7 +631,7 @@ TEST(Controller, EmergencyStopForcesOffAtTheNextTickAndRevokesTheLease) {
 
 TEST(Controller, MissingEstopStateIsTreatedAsAsserted) {
   ParamSet params;
-  SprayController c(&params);
+  SprayController c(&params, 0.02);
   c.load_path(straight());
   VehicleSnapshot v;
   v.armed = v.offboard = v.position_valid = v.attitude_valid = v.velocity_valid = true;

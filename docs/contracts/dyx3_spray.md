@@ -79,7 +79,8 @@ transaction completes or times out first, after which the new mapping OFF is sen
 
 Nozzle position = pose + body-frame offsets (forward, lateral right). The path model carries `cumulative_s` and MARK
 boundaries from the flag changes; **a path that ends on MARK gets a synthetic terminal MARK->TRANSIT boundary**. Lead:
-`on_lead = v * open_delay + on_margin`, `off_lead = max(0, v * close_delay - off_margin)`; the valve opens early before
+`on_lead = v * (open_delay + debounce_delay) + on_margin`, `off_lead = max(0, v * (close_delay + debounce_delay) - off_margin)`
+with `debounce_delay = (max(1, debounce_samples) - 1) / tick_hz` (SP-002, see below); the valve opens early before
 TRANSIT->MARK and closes early before MARK->TRANSIT. Terminal shutoff: forced OFF within `terminal_off_epsilon_m` of the final
 station at speed <= `terminal_off_speed_mps` (the OFF lead is ~1 mm at creep speed, so the geometric boundary is never
 crossed). Cross-track gate with hysteresis (trip at the wide level, clear at the tight one, and stay off at least
@@ -91,10 +92,17 @@ contains source SHA256, conditioner config, and exact ordered conditioned runs/p
 uses those coordinates, flags, and run boundaries directly. It never conditions independently and never falls back to raw
 mission geometry. Missing, malformed, mismatched, or stale geometry leaves the path unloaded and autonomous spray OFF.
 
-**Debounce latency (carried, part of the boundary budget).** `debounce_samples` (3) means the debounced desire follows the raw one
-only after 3 identical ticks, so every valve edge is delayed by up to 3 ticks: **2.1 cm at 0.35 m/s and 50 Hz**, on the CLOSE as
-well as the OPEN. The lead maths (section 5) does not compensate for it. Measured in `spray_core_test` (the close lands ~2 cm
-after the led boundary). Whether that is acceptable against the 1.4–2 cm accuracy budget is a human decision at GATE 5.
+**Debounce latency is led (SP-002; DERIVED — NOT FROM V1 SPEC, the prototype did not compensate it).** `debounce_samples` (3)
+means the debounced desire follows the raw one only after 3 identical ticks, so a geometric edge reaches the FSM
+`(debounce_samples - 1)` ticks after the raw decision flips: 40 ms at 50 Hz, i.e. 1.4 cm at 0.35 m/s and 4 cm at 1 m/s, on the
+OPEN and on the CLOSE. That delay is deterministic, so it is added to both valve delays in the lead above, using the node's real
+control period (`1 / tick_hz`, not a constant 50 Hz). The debounce itself is kept for noise rejection. What remains is the
+sampling of the crossing: the raw decision flips at the first tick past the lead point, so each edge is late by `[0, v / tick_hz)`
+(< 0.7 cm at 0.35 m/s, < 1 cm at 0.5 m/s, **< 2 cm at 1 m/s and 50 Hz**; < 1 cm at 1 m/s needs a 100 Hz tick). Measured in
+`spray_core_test` (`DebounceIsLedSoValveEdgesLandOnTheBoundaryAtProductionSpeeds`, every sample phase). Valve delays, nozzle
+offset, pose latency and the link/FCU path are not in this figure (not provable off-target, SP-003). **Safety OFF never goes
+through the debounce or the lead:** the FSM reads the safety verdict directly, so E-stop, disarm, watchdog, lease and ownership
+refusals close at once (tested with a 10-sample debounce).
 
 ## 6. KNOWN-OPEN DEFECT — projection continuity (spec 7.8)
 

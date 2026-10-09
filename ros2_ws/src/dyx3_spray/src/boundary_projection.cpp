@@ -263,9 +263,13 @@ Decision make_decision(const DecisionInput& in, const DecisionParams& p, const D
     }
     if (src_kind && std::isfinite(src_dist)) {
       d.distance_to_boundary_m = src_dist;
-      const double on_lead = in.speed_mps * p.solenoid_open_delay_s + p.on_overspray_margin_m;
+      // The debounce delay is part of the time between this decision and the valve moving, so it is
+      // led like the solenoid delay (SP-002). Safety OFF does not pass through here.
+      const double on_lead =
+          in.speed_mps * (p.solenoid_open_delay_s + p.debounce_delay_s) + p.on_overspray_margin_m;
       const double off_lead =
-          std::max(0.0, in.speed_mps * p.solenoid_close_delay_s - p.off_overspray_margin_m);
+          std::max(0.0, in.speed_mps * (p.solenoid_close_delay_s + p.debounce_delay_s) -
+                            p.off_overspray_margin_m);
       LeadEvent ev;
       d.geometry_desired =
           apply_mark_boundary_lead(d.geometry_desired, src_kind, src_dist, on_lead, off_lead, &ev);

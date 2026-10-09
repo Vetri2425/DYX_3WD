@@ -285,8 +285,8 @@ TEST(SprayNode, FullRunOpensEarlyOnTheMarkAndClosesAtItsEnd) {
     prev = r.status.spraying;
   }
   EXPECT_NEAR(on_at, 2.0 - 0.083, 0.08);
-  EXPECT_NEAR(off_at, 9.0 - 0.0175 + 0.021,
-              0.08);  // see the controller test: the debounce delays the close
+  EXPECT_NEAR(off_at, 9.0 - 0.0175,
+              0.08);  // see the controller test: the debounce is led (SP-002)
   EXPECT_GE(r.count(true, SprayActuatorCommand::SOURCE_CONTROLLER), 1);
   const auto& last_ctl = [&]() -> const SprayActuatorCommand& {
     for (auto it = r.cmds.rbegin(); it != r.cmds.rend(); ++it) {

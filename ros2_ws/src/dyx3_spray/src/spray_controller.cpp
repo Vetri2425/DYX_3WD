@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <stdexcept>
 
 namespace dyx3_spray {
 
@@ -15,7 +16,11 @@ constexpr double kEstopMaxAgeS = 0.5;
 constexpr double kInf = std::numeric_limits<double>::infinity();
 }  // namespace
 
-SprayController::SprayController(const ParamSet* params) : p_(params) {}
+SprayController::SprayController(const ParamSet* params, double tick_period_s)
+    : p_(params), tick_period_s_(tick_period_s) {
+  if (!std::isfinite(tick_period_s) || tick_period_s <= 0.0)
+    throw std::invalid_argument("tick_period_s must be finite and positive");
+}
 
 void SprayController::load_path(std::shared_ptr<const PathModel> model) {
   model_ = std::move(model);
@@ -160,6 +165,9 @@ DecisionParams SprayController::decision_params() const {
   DecisionParams d;
   d.solenoid_open_delay_s = std::max(0.0, p_->num(P::solenoid_open_delay_s));
   d.solenoid_close_delay_s = std::max(0.0, p_->num(P::solenoid_close_delay_s));
+  // SP-002: the debounce holds a new desire for (samples - 1) ticks before the FSM sees it.
+  d.debounce_delay_s =
+      static_cast<double>(std::max(1, p_->integer(P::debounce_samples)) - 1) * tick_period_s_;
   d.on_overspray_margin_m = std::max(0.0, p_->num(P::on_overspray_margin_m));
   d.off_overspray_margin_m = std::max(0.0, p_->num(P::off_overspray_margin_m));
   d.max_xtrack_error_m = std::max(0.0, p_->num(P::max_xtrack_error_m));

@@ -71,7 +71,10 @@ struct ControllerStatus {
 
 class SprayController {
 public:
-  explicit SprayController(const ParamSet* params);
+  // tick_period_s: the real control period (1 / tick_hz) the caller ticks at. It converts
+  // debounce_samples into the delay the boundary lead compensates; throws std::invalid_argument
+  // unless finite and > 0.
+  SprayController(const ParamSet* params, double tick_period_s);
 
   // ---- inputs (all stamps are caller-supplied monotonic seconds) ----
   void load_path(std::shared_ptr<const PathModel> model);  // nullptr clears
@@ -115,6 +118,7 @@ private:
   DecisionParams decision_params() const;
 
   const ParamSet* p_;
+  double tick_period_s_;
   SpraySafetyStateMachine fsm_;
   std::unique_ptr<FlowModulator> flow_;
   bool prev_commanded_{false};
