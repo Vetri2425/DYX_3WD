@@ -1486,3 +1486,82 @@ Merged Codex `7360199` (CH341 packaging), plus Claude fixes:
 - A `mission…` process at RT priority burns 94 % of one core; Jetson load average ~50.
 - `dyx3-platform` takes 90 s to stop on restart (systemd stop timeout).
 - A Codex trace prompt for the first two was handed to the owner.
+
+---
+
+## 2026-10-09 — Codex T2 trace before proposed fixes (`codex/t2-dds-rtk-and-rt-cpu`)
+
+Started from `origin/master` `0eafcd5` in a separate worktree. No rover mutation is authorized in this task.
+
+**RTK trace:** `rtk_node.cpp:208-215` requires a received fresh `Px4LinkStatus` with both
+`session_alive` and `handshake_ok`, plus a matched `/dyx3/rtcm` subscriber. `DdsSink::deliver()`
+calls `open()` again on every fresh frame (`transport_sink.cpp:200-224`), so its inactive flag
+is not a permanent latch. `InjectionAuthority::deliver()` retains the selected DDS sink and
+does not fall back to USB (`injection_authority.cpp:29-32`). `px4_link_node.cpp:737-752` re-arms
+the handshake after a session reset, and `:882-923` continues publishing status at 10 Hz.
+The 09:41 bench observations record fresh valid frames and rising delivery failures, but only
+summary RTK status, so they do not identify which readiness input remained false. The rover
+accepted TCP/22, but initial SSH reads intermittently stalled; live topic/status evidence is
+still being collected. The proposed fix must preserve single-sink generation authority and
+report readiness inputs explicitly.
+
+**CPU trace:** `dyx3_mission` runs `rclcpp::spin` (`mission/src/main.cpp:8-17`) and its normal
+10 Hz timer (`mission/src/mission_node.cpp:150-151,290-301`); no busy loop is visible in its
+code. `dyx3-ros.service:27-30` applies FIFO 80 and CPU 4 to the entire ROS launch tree, so
+mission inherits real-time priority despite `mission/src/main.cpp:1-2` declaring it non-RT.
+The launch graph (`dyx3_bringup/launch/control_graph.launch.py`) contains all six ROS nodes.
+The code evidence points to inherited scheduling as the definite priority defect; the exact
+source of the observed mission CPU usage and polkit/journal load still needs live process and
+journal evidence. The architecture §8 grants RT discipline to RPP and motion_guard, not mission.
+
+**Read-only rover evidence collected after the initial trace (about 11:40 IST):**
+`/proc/loadavg` read `65.98 63.03 61.24`. `ps` showed PID 14265 `mission_node` as
+`FF`/RTPRIO 80 at 87.0% CPU, PID 14291 `px4_link_node` as `FF`/80 at 0.0%, and
+PID 14304 `rpp_node` as `FF`/80 at 0.0%. Per-thread `ps -L` isolated the 87.0% to
+mission TID 14275, not its main executor TID 14265. `GET_STATUS` through the RTK
+read-only control socket returned `WAIT_TRANSPORT`, 20,003 delivered, 44,358 failures,
+`dds_session_alive=false`, `dds_handshake_ok=false`, both PX4 RTCM counters null, and
+transport delivery age 7,200 s. Null PX4 counters in `status_json()` mean the status
+sample is stale, so the definite failed readiness condition is **fresh link status**.
+The matched `/dyx3/rtcm` subscription could not be established from this snapshot:
+`ros2 topic echo --once /dyx3/px4_link/status` and `ros2 topic info -v /dyx3/rtcm`
+timed out under the load. `journalctl` over 10 minutes counted 137,795 and 73,587
+`brltty` log entries from two PIDs; a sample was repeated `Ignored Byte` messages.
+That separate journal load is consistent with the CH341/BRLTTY remediation already
+committed in this repo but not yet deployed, per the preceding handoff sections.
+No rover process, service, or configuration was changed.
+
+**Local fix and verification:** `b6c4799` adds the exact DDS block reason, status age,
+and RTCM subscriber count to RTK `GET_STATUS`, plus a deterministic DdsSink/authority
+test that covers stale status, handshake pending, subscription disappearance/rematch,
+recovery on the next valid frame, no replay, and no USB fallback. `455d847` removes
+FIFO 80/CPU 4 from the entire `dyx3-ros.service` launch tree and applies the existing
+allocation only to RPP and motion_guard at launch. A launch-plan test checks that
+mission, px4_link, spray and gateway remain non-RT; a mission integration test checks
+10 Hz idle callbacks and less than 0.5 CPU second over 1.5 wall seconds. The mission
+source contains no busy loop; the high-CPU task was a secondary thread, so the code
+fix removes its inherited RT scheduling rather than changing mission callbacks.
+
+`./tools/dev/ros2_humble.sh test-pkg dyx3_gnss_rtk dyx3_mission dyx3_bringup`
+passed (462 tests reported by `test-result`, 0 failures, 2 pre-existing skips).
+`./tools/dev/ros2_humble.sh build-test` passed for all 12 packages, same result:
+462 tests, 0 errors/failures, 2 skips. The full build had existing CMake deprecation
+and gateway missing-initializer warnings. `clang-format` was applied to changed C++
+and `git diff --check` passed. No timing, scheduler, or DDS recovery claim has been
+verified on the rover because no deployment/restart was authorized.
+
+**Claude rover-side actions after review/merge:** deploy this branch only under the
+owner's bench safety gate, then verify `mission_node` is normal scheduling, only RPP
+and motion_guard are FIFO 80 on CPU 4, `px4_link` publishes fresh status and its
+handshake completes after an XRCE restart, `/dyx3/rtcm` matches, RTK resumes
+`INJECTING` with increasing deliveries and no replay, and PX4 `gps status` injection
+returns. Measure the 100 Hz control chain and ensure RPP/guard middleware threads do
+not spin under FIFO. Apply/verify the already committed CH341/BRLTTY remediation as
+a separate reviewed rover action; its log flood remains live in this trace.
+The previous 53% `polkitd` snapshot was transient (later `ps` showed 0.6% and
+`journalctl _COMM=polkitd --since -10min` had no entries); its cause is not proven.
+
+**Open limitation:** the local tests prove retry semantics and idle scheduling policy,
+not the exact Fast DDS thread behavior or a successful rover recovery. The RTK status
+was stale; `/dyx3/rtcm` match could not be observed while the graph was starved.
+The field stress test and PX4 RTCM rate are required before accepting this fix.
