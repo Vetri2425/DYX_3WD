@@ -1858,3 +1858,63 @@ Wi-Fi range walk.
 
 Port candidates (firmware is V1-frozen; needs the owner's OK): Hold-mode stop, `esc_status`/fault reporting,
 open-loop fallback.
+
+## 2026-10-09 (16:20) — Claude — production-readiness open list (owner-requested)
+
+What still blocks production grade, by risk. Proven so far:
+- 60/60 agent restarts with zero Ethernet stalls, plus 3 full power cycles.
+- RT starvation fixed (Jetson load ~50 → 1.8). QGC recovers in 1–2 s.
+- RTK over USB, 0 failures, reboot-persistent.
+- Hotspot + 4G dongle without Ethernet. No OS auto-updates.
+- Arm creep and mirrored steering fixed.
+
+**Safety blockers (before any unattended or autonomous driving):**
+1. **RoboClaw serial timeout is disabled** (`<timeout>0</timeout>` in `config/vehicle/roboclaw/Roboclaw_09-10-2026.cfg`,
+   read from the prod RoboClaw today). If PX4 stops sending (FCU crash, cable cut), the RoboClaw keeps the last
+   speed command forever.
+   - Fix: set ~0.5 s in Motion Studio, then Write Settings.
+   - Verify wheels-up: unplug the RoboClaw serial lead while it drives; the wheels must stop.
+2. **RoboClaw battery window:** min main 5.9 V (factory default: no over-discharge cut), max 27.8 V.
+   - PX4 is set for 8S LiFePO4 (3.4 V full / 2.75 V empty per cell ≈ 27.2 / 22 V). A full pack (28.8–29.2 V) or
+     braking can trip overvoltage and stop the drive mid-run.
+   - Set min ≈ 22 V and max ≈ 30 V after confirming the battery type and the RoboClaw model rating.
+3. **`RBCLW_QPPS_MAX` 172000 is above the RoboClaw's tuned QPPS 165500** (both motors, today's autotune), so the speed
+   loop saturates at full stick. Set 149000 (90 %) on the FCU and in `config/px4/3wd_6x_carry_from_proto.params`.
+4. **Upstream #27514** (stale setpoint ~900 ms after the external process dies): the px4_link fail-to-zero (0.2 s) is
+   not hardware-proven. Kill `dyx3-ros` while driving wheels-up and measure the time to stop.
+5. **RC loss, tablet-link loss and app E-stop:** none tested on this rover (wheels-up first).
+6. **No RoboClaw fault visibility:** the 3WD driver publishes no `esc_status`. The 4WD has it; porting it is a firmware
+   change (V1 frozen), so it needs the owner's decision.
+7. **Spray valve close test** not done (not needed for the drive-only demo).
+
+**Autonomy blockers (Mission / Offboard / RPP):**
+8. **UM982 dual-antenna heading** reports `UNIHEADINGA INSUFFICIENT_OBS`, so there is no yaw and the EKF has no global
+   position. Prove it outdoors: antenna 2 cabling and sky view.
+9. **RTK FIXED** not yet observed (indoor DGPS only).
+10. **Upstream #27497:** a differential rover does not turn in Mission mode on v1.17. Verify; a workaround may be
+    needed.
+11. PX4 rover modules are "experimental", and raw Offboard is not guaranteed valid for rovers. The px4_link Offboard
+    path needs wheels-up, then ground validation.
+
+**Stall / hang / crash, not fully closed:**
+12. **Long soak:** hours with motion + DDS + RTK + QGC + app together. Only the restart stress and power cycles are
+    done.
+13. **Upstream #27388** (uXRCE client silently stops publishing): px4_link detects staleness and fails to zero, but
+    there is no automatic recovery. The soak shows whether it happens.
+14. **Hotspot:** no 15-min app-stream test and no outdoor 15–25 m walk yet. The tegra kernel has no fq_codel, so the
+    2/1 MiB/s cap stands in; the real fix is building `sch_fq_codel` (ch341-style kbuild).
+15. The mission_node 87 % CPU root cause was never found (gone since the RT fix). Watch it in the soak.
+
+**Production hygiene (rover == repo):**
+16. The rover runs release `cacc1ba`; the hotspot, QoS, no-auto-update and RC changes were applied by hand.
+    Upgrade to the latest master release.
+17. No scripted apply/verify of the PX4 parameter baseline on a new FCU.
+18. `/etc/dyx3/backend.env` still binds `0.0.0.0`; set `192.168.3.100`.
+19. A fresh-rover install from scratch has never run end to end; USB auto-select is proven only on upgrade.
+20. Persistence debt: ROS domain health check, NTRIP credential procedure doc, BRLTTY marker missing on this rover.
+21. The app (`Three_Wheel_v2` `dbb2ba1`) has never connected over the hotspot: host config, tablet token, end-to-end
+    test.
+22. Commit `config/vehicle/roboclaw/Roboclaw_09-10-2026.cfg` (untracked in the main clone) after items 1–2.
+
+**Suggested order:** RoboClaw settings 1–3, then the rover upgrade 16, then wheels-up safety stops 4–5, then outdoors
+8–10 and 14, then the soak 12.
