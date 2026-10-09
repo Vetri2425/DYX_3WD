@@ -34,6 +34,8 @@ if [ "${DYX3_REEXEC:-0}" = "1" ]; then
   with_lock "${DYX3_RUN}/install.lock" upgrade_to "${ref}"
   exit 0
 fi
+# A dropped ssh session must not kill the upgrade half-way (INS-004): continue as a transient systemd unit.
+detach_or_continue upgrade "${BASH_SOURCE[0]}" "${ref}"
 if [ "${DYX3_DRY_RUN}" = "1" ]; then
   log "dry-run: would hand over to the installer of ${ref}; showing this installer's plan"
   with_lock "${DYX3_RUN}/install.lock" upgrade_to "${ref}"

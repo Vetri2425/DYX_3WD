@@ -211,6 +211,95 @@ prune_releases() {
   done < <(find "${DYX3_RELEASES}" -mindepth 1 -maxdepth 1 -type d -name '[0-9a-f]*' -printf '%T@ %p\n' 2>/dev/null | sort -rn | cut -d' ' -f2-)
 }
 
+# ---- interruption (INS-004)
+# DYX3 settings a detached run must see: systemd-run starts the unit with a clean environment.
+DYX3_DETACH_ENV=(DYX3_FORCE DYX3_FORCE_UNSAFE DYX3_ARTIFACTS DYX3_ARTIFACT_DIR DYX3_REPO_URL DYX3_BUILD_JOBS
+  DYX3_COLCON_WORKERS DYX3_SKIP_BACKEND DYX3_KEEP_RELEASES DYX3_HEALTH_SETTLE_S DYX3_HEALTH_HOLD_S
+  FCU_IFACE FCU_KEEP_DHCP DYX3_UM982_USB_ID_PATH DYX3_UM982_USB_BAUD)
+
+# detach_or_continue <kind> <script> [args...]: re-run <script> as a transient systemd unit, so a dropped ssh
+# session (the access point coming back, a flaky link) cannot kill an upgrade or rollback half-way. Returns, to run
+# attached, only when already detached, in a staged root (tests), in a dry run, with DYX3_NO_DETACH=1, or without
+# systemd-run. Otherwise exits 0 once the unit has started.
+detach_or_continue() {
+  local kind="$1" script="$2" unit v
+  shift 2
+  if [ "${DYX3_DETACHED:-0}" = "1" ] || [ -n "${DYX3_ROOT}" ] || [ "${DYX3_DRY_RUN}" = "1" ]; then return 0; fi
+  if [ "${DYX3_NO_DETACH:-0}" = "1" ] || ! have systemd-run; then
+    warn "running attached (DYX3_NO_DETACH=1 or no systemd-run): a dropped session kills this ${kind}"
+    return 0
+  fi
+  unit="dyx3-${kind}-$(date -u +%Y%m%dT%H%M%SZ)"
+  local args=(--unit="${unit}" --collect --quiet --setenv=DYX3_DETACHED=1)
+  for v in "${DYX3_DETACH_ENV[@]}"; do
+    if [ -n "${!v+x}" ]; then args+=(--setenv="${v}=${!v}"); fi
+  done
+  systemd-run "${args[@]}" /bin/bash "$(readlink -f "${script}")" "$@" || die "could not start ${unit} with systemd-run"
+  log "${kind} started in the background as ${unit}; it survives this session ending"
+  log "follow it:  journalctl -fu ${unit}"
+  log "it ends with '${kind} complete' or a FATAL line; dyx3-version shows what is current"
+  exit 0
+}
+
+_switch_marker() { printf '%s/state/upgrade_in_progress' "${DYX3_VAR_LIB}"; }
+
+# mark_switch_in_progress <kind> <target-sha> <previous-sha>: written before the switch, removed after the health
+# result. Still present on the next run = that run was killed between the two.
+mark_switch_in_progress() {
+  [ "${DYX3_DRY_RUN}" = "1" ] && return 0
+  local m
+  m="$(_switch_marker)"
+  install -d "$(dirname "${m}")"
+  printf 'kind=%s\ntarget=%s\nprevious=%s\nstarted=%s\n' "$1" "$2" "$3" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"${m}.tmp"
+  mv -f "${m}.tmp" "${m}"
+}
+
+clear_switch_in_progress() { [ "${DYX3_DRY_RUN}" = "1" ] || rm -f "$(_switch_marker)"; }
+
+# finish_interrupted_switch: report a switch whose run was killed. Keep the result when it is healthy now; otherwise
+# go back to the release it replaced (and stop: the operator re-runs the command). DYX3_FORCE=1 keeps an unhealthy
+# result and continues.
+finish_interrupted_switch() {
+  local m kind target previous started cur=""
+  m="$(_switch_marker)"
+  [ -f "${m}" ] || return 0
+  kind="$(sed -n 's/^kind=//p' "${m}")"
+  target="$(sed -n 's/^target=//p' "${m}")"
+  previous="$(sed -n 's/^previous=//p' "${m}")"
+  started="$(sed -n 's/^started=//p' "${m}")"
+  [ -L "${DYX3_CURRENT}" ] && cur="$(basename "$(readlink -f "${DYX3_CURRENT}")")"
+  warn "an interrupted ${kind:-switch} was found: ${previous:0:10} -> ${target:0:10}, started ${started}; current is ${cur:0:10}"
+  if [ "${cur}" = "${previous}" ]; then
+    log "the switch never happened; nothing to finish"
+    clear_switch_in_progress
+    return 0
+  fi
+  if [ -n "${cur}" ] && health_run "${DYX3_CURRENT}"; then
+    log "current ${cur:0:10} is healthy: keeping it"
+    clear_switch_in_progress
+    return 0
+  fi
+  if [ "${DYX3_FORCE:-0}" = "1" ]; then
+    warn "DYX3_FORCE=1: current ${cur:0:10} is unhealthy after the interrupted ${kind}; continuing without a revert"
+    clear_switch_in_progress
+    return 0
+  fi
+  [ -n "${previous}" ] && [ -f "${DYX3_RELEASES}/${previous}/.complete" ] ||
+    die "current ${cur:0:10} is unhealthy after an interrupted ${kind} and ${previous:-no release} cannot be restored; DYX3_FORCE=1 to continue anyway"
+  require_rover_idle "the revert of the interrupted ${kind}"
+  warn "current ${cur:0:10} is unhealthy: reverting the interrupted ${kind} to ${previous:0:10}"
+  atomic_symlink "${DYX3_RELEASES}/${previous}" "${DYX3_CURRENT}"
+  if [ -n "${cur}" ]; then printf '%s\n' "${cur}" >"${DYX3_VAR_LIB}/state/previous_release"; fi
+  install_units "${DYX3_CURRENT}"
+  install_operator_shims
+  write_versions_file "${DYX3_CURRENT}"
+  restart_enabled_services "${DYX3_CURRENT}"
+  local result=FAILED
+  health_run "${DYX3_CURRENT}" && result=OK
+  clear_switch_in_progress
+  die "the interrupted ${kind} was reverted to ${previous:0:10} (health after the revert: ${result}); re-run the command"
+}
+
 # upgrade_to <git-ref>: stop-free build, verify, switch, restart, health; auto-revert on failure.
 upgrade_to() {
   # An upgrade from the DDS-only release has no RTK runtime directory yet. The directory is
@@ -224,6 +313,7 @@ upgrade_to() {
   sha="$(resolve_ref "${ref}")" || die "cannot resolve '${ref}'"
   [ -n "${sha}" ] || die "cannot resolve '${ref}'"
   log "upgrade: ${ref} = ${sha}"
+  finish_interrupted_switch
   [ -L "${DYX3_CURRENT}" ] && prev="$(basename "$(readlink -f "${DYX3_CURRENT}")")"
   if [ "${prev}" = "${sha}" ] && [ "${DYX3_FORCE:-0}" != "1" ]; then
     log "already on ${sha:0:10}; nothing to do (DYX3_FORCE=1 to rebuild/restart)"
@@ -253,16 +343,20 @@ upgrade_to() {
 
   # The build can take an hour: the rover may have started a mission meanwhile.
   require_rover_idle "the switch to ${sha:0:10}"
+  mark_switch_in_progress upgrade "${sha}" "${prev}"
   switch_release "${sha}"
   install_units "${DYX3_CURRENT}"
   install_config_templates "${DYX3_CURRENT}"
-  install_hotspot_network
   install_no_auto_updates
   install_operator_shims
   write_versions_file "${DYX3_CURRENT}"
   restart_enabled_services "${DYX3_CURRENT}"
 
   if health_run "${DYX3_CURRENT}"; then
+    clear_switch_in_progress
+    # The access point last, and only once the release is healthy: re-activating it drops every Wi-Fi session,
+    # including the ssh session an operator may be watching from (INS-004).
+    install_hotspot_network
     prune_releases
     log "upgrade complete: ${sha:0:10}"
     return 0
@@ -273,7 +367,7 @@ upgrade_to() {
   if [ -n "${prev}" ] && [ -d "${DYX3_RELEASES}/${prev}" ]; then
     # Someone may have armed the new release already: a revert restarts the graph under them.
     rover_may_restart "the revert to ${prev:0:10}" ||
-      die "release ${sha:0:10} failed health but the rover is not known idle (${ROVER_BUSY_REASON}); NOT reverting. When it is idle, run dyx3-rollback"
+      die "release ${sha:0:10} failed health but the rover is not known idle (${ROVER_BUSY_REASON}); NOT reverting. When it is idle, the next dyx3-upgrade or dyx3-rollback reverts it"
     warn "post-switch health FAILED: reverting to ${prev:0:10}"
     stop_enabled_services "${DYX3_RELEASES}/${sha}"
     atomic_symlink "${DYX3_RELEASES}/${prev}" "${DYX3_CURRENT}"
@@ -281,12 +375,14 @@ upgrade_to() {
     install_operator_shims
     write_versions_file "${DYX3_CURRENT}"
     restart_enabled_services "${DYX3_CURRENT}"
+    clear_switch_in_progress
     die "upgrade to ${sha:0:10} reverted to ${prev:0:10}"
   fi
   stop_enabled_services "${DYX3_RELEASES}/${sha}"
   disable_enabled_services "${DYX3_RELEASES}/${sha}"
   run rm -f "${DYX3_CURRENT}"
   run rm -f "${DYX3_ETC}/versions.json"
+  clear_switch_in_progress
   die "health failed on first install of ${sha:0:10}; no previous release to revert to"
 }
 
@@ -367,6 +463,7 @@ print_version() {
 # After a rollback `previous_release` is the release we rolled away from, so a second rollback undoes the first.
 rollback_release() {
   local cur="" prev=""
+  finish_interrupted_switch
   [ -L "${DYX3_CURRENT}" ] && cur="$(basename "$(readlink -f "${DYX3_CURRENT}")")"
   prev="$(cat "${DYX3_VAR_LIB}/state/previous_release" 2>/dev/null || true)"
   [ -n "${prev}" ] || die "no previous release is recorded; nothing to roll back to"
@@ -378,6 +475,7 @@ rollback_release() {
   require_rover_idle "rollback to ${prev:0:10}"
 
   log "rollback: ${cur:0:10} -> ${prev:0:10}"
+  mark_switch_in_progress rollback "${prev}" "${cur}"
   atomic_symlink "${DYX3_RELEASES}/${prev}" "${DYX3_CURRENT}"
   printf '%s\n' "${cur}" >"${DYX3_VAR_LIB}/state/previous_release"
   install_units "${DYX3_CURRENT}"
@@ -385,16 +483,18 @@ rollback_release() {
   write_versions_file "${DYX3_CURRENT}"
   restart_enabled_services "${DYX3_CURRENT}"
   if health_run "${DYX3_CURRENT}"; then
+    clear_switch_in_progress
     log "rollback complete: ${prev:0:10}"
     return 0
   fi
   rover_may_restart "restoring ${cur:0:10}" ||
-    die "rollback to ${prev:0:10} failed health but the rover is not known idle (${ROVER_BUSY_REASON}); NOT restoring ${cur:0:10}. When it is idle, run dyx3-rollback"
+    die "rollback to ${prev:0:10} failed health but the rover is not known idle (${ROVER_BUSY_REASON}); NOT restoring ${cur:0:10}. When it is idle, the next dyx3-upgrade or dyx3-rollback restores it"
   warn "post-rollback health FAILED: restoring ${cur:0:10}"
   atomic_symlink "${DYX3_RELEASES}/${cur}" "${DYX3_CURRENT}"
   printf '%s\n' "${prev}" >"${DYX3_VAR_LIB}/state/previous_release"
   install_units "${DYX3_CURRENT}"
   write_versions_file "${DYX3_CURRENT}"
   restart_enabled_services "${DYX3_CURRENT}"
+  clear_switch_in_progress
   die "rollback to ${prev:0:10} was unhealthy; restored ${cur:0:10}"
 }

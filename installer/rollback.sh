@@ -21,4 +21,5 @@ case "${1:-}" in
 esac
 
 require_root
+detach_or_continue rollback "${BASH_SOURCE[0]}"
 with_lock "${DYX3_RUN}/install.lock" rollback_release

@@ -116,10 +116,11 @@ _hotspot_driver_powersave() {
 }
 
 _hotspot_install_regdom() {
-  local country="$1" unit dir
+  local country="$1" unit dir before=""
   unit="${DYX3_ROOT}/etc/systemd/system/dyx3-wifi-regdom.service"
   dir="${DYX3_ROOT}/etc/systemd/system/multi-user.target.wants"
   install -d -m 0755 "$(dirname "${unit}")" "${dir}"
+  [ -f "${unit}" ] && before="$(cat "${unit}")"
   cat >"${unit}" <<EOF
 [Unit]
 Description=Set DYX3 Wi-Fi regulatory country
@@ -135,6 +136,8 @@ WantedBy=multi-user.target
 EOF
   chmod 0644 "${unit}"
   ln -sfn ../dyx3-wifi-regdom.service "${dir}/dyx3-wifi-regdom.service"
+  # Unchanged: leave the running Wi-Fi alone (INS-004).
+  [ "${before}" = "$(cat "${unit}")" ] && return 0
   if [ -z "${DYX3_ROOT}" ]; then
     systemctl daemon-reload
     systemctl restart dyx3-wifi-regdom.service || warn "could not apply Wi-Fi country now; check iw reg get"
@@ -384,9 +387,19 @@ never-default=true
 method=disabled
 EOF
   chmod 0600 "${tmp}"
+  umask "${old_umask}"
+  # Byte-identical to the installed profile: do not reload or re-activate the access point (INS-004). Re-activating
+  # drops every Wi-Fi client, including an operator's ssh session. Only bring it up if it is not active.
+  if [ -f "${profile}" ] && cmp -s "${tmp}" "${profile}"; then
+    rm -f "${tmp}"
+    if [ -z "${DYX3_ROOT}" ] && ! nmcli -t -f NAME connection show --active 2>/dev/null | grep -qx dyx3-hotspot; then
+      nmcli connection up dyx3-hotspot >/dev/null 2>&1 || warn "hotspot could not start now (Wi-Fi AP support unverified)"
+    fi
+    log "hotspot profile unchanged on ${iface}; access point left as it is (credentials redacted)"
+    return 0
+  fi
   if [ -z "${DYX3_ROOT}" ]; then chown root:root "${tmp}"; fi
   mv -f "${tmp}" "${profile}"
-  umask "${old_umask}"
   if [ -z "${DYX3_ROOT}" ]; then
     # A disabled Wi-Fi radio (persisted as WirelessEnabled=false) leaves the device "unavailable".
     nmcli radio wifi on >/dev/null 2>&1 || warn "could not enable the Wi-Fi radio (rfkill?)"

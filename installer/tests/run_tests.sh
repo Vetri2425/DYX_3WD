@@ -9,7 +9,7 @@ set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 T="$(mktemp -d)"
-trap '[ -n "${KEEP_T:-}" ] || rm -rf "${T}"' EXIT
+trap 'if [ -n "${KEEP_T:-}" ]; then echo "kept ${T}"; else rm -rf "${T}"; fi' EXIT
 RESULTS="${T}/results"
 : >"${RESULTS}"
 ok() { printf 'ok   %s\n' "$1"; echo ok >>"${RESULTS}"; }
@@ -221,6 +221,16 @@ libs() {
   check "launcher exits non-zero without a domain" '! env -u ROS_DOMAIN_ID DYX3_RELEASE_DIR="${e}/rel" "${REPO}/deployment/scripts/start-spray-watchdog.sh" >/dev/null 2>&1'
   check "backend launcher refuses without its venv" '! DYX3_RELEASE_DIR="${e}/rel" "${REPO}/deployment/scripts/start-backend.sh" >/dev/null 2>&1'
   check "backend launcher binds the hotspot address, never 0.0.0.0" 'grep -q "10.42.0.1" "${REPO}/deployment/scripts/start-backend.sh" && ! grep -v "^#" "${REPO}/deployment/scripts/start-backend.sh" | grep -q "0.0.0.0"'
+
+  # INS-004: upgrade and rollback continue as a transient unit; never in a staged root.
+  local sr="${T}/sysrun"
+  mkdir -p "${sr}"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" >"%s/argv"\n' "${sr}" >"${sr}/systemd-run"
+  chmod +x "${sr}/systemd-run"
+  out="$( (PATH="${sr}:${PATH}" DYX3_ROOT="" DYX3_FORCE=1 DYX3_FORCE_UNSAFE=1 detach_or_continue upgrade "${REPO}/installer/upgrade.sh" main; echo returned) 2>&1)"
+  check "detach: an upgrade re-runs itself under systemd-run with the ref and the force flags" '! printf "%s" "${out}" | grep -q returned && grep -q "^--unit=dyx3-upgrade-" "${sr}/argv" && grep -qx -- "--collect" "${sr}/argv" && grep -qx -- "--setenv=DYX3_DETACHED=1" "${sr}/argv" && grep -qx -- "--setenv=DYX3_FORCE=1" "${sr}/argv" && grep -qx -- "--setenv=DYX3_FORCE_UNSAFE=1" "${sr}/argv" && [ "$(tail -n1 "${sr}/argv")" = main ] && printf "%s" "${out}" | grep -q "journalctl -fu dyx3-upgrade-"'
+  out="$( (PATH="${sr}:${PATH}" detach_or_continue upgrade "${REPO}/installer/upgrade.sh" main; echo returned) 2>&1)"
+  check "detach: never in a staged root" 'printf "%s" "${out}" | grep -q returned'
 
   printf 'ID=ubuntu\nVERSION_ID="22.04"\n' >"${T}/os22"
   printf 'ID=ubuntu\nVERSION_ID="24.04"\n' >"${T}/os24"
@@ -518,6 +528,10 @@ F
   modinfo() { if [ "${1:-}" = "-p" ] && [ "${2:-}" = "rtl8822ce" ]; then echo 'rtw_power_mgnt:Power management'; else return 1; fi; }
   install_hotspot_network >>"${T}/hotspot_log" 2>&1
   check "hotspot profile created only when configured and Wi-Fi exists" '[ -f "${hotspot_profile}" ] && grep -qx "method=shared" "${hotspot_profile}" && grep -qx "address1=10.42.0.1/24" "${hotspot_profile}" && grep -qx "never-default=true" "${hotspot_profile}" && [ "$(stat -c %a "${hotspot_profile}")" = 600 ]'
+  local hs_inode
+  hs_inode="$(stat -c %i "${hotspot_profile}")"
+  install_hotspot_network >"${T}/hotspot_again" 2>&1
+  check "an unchanged hotspot profile is neither rewritten nor re-activated" 'grep -q "profile unchanged" "${T}/hotspot_again" && [ "$(stat -c %i "${hotspot_profile}")" = "${hs_inode}" ]'
   check "hotspot isolation hook blocks Wi-Fi to FCU both ways" 'grep -q -- "-i \"wlan0\" -o \"${FCU_IFACE}\" -j DROP" "${DYX3_ROOT}/etc/NetworkManager/dispatcher.d/pre-up.d/90-dyx3-hotspot-isolation" && grep -q -- "-i \"${FCU_IFACE}\" -o \"wlan0\" -j DROP" "${DYX3_ROOT}/etc/NetworkManager/dispatcher.d/pre-up.d/90-dyx3-hotspot-isolation"'
   check "client-internet cap (4WD 2026-09-28 fix) polices forwarded traffic and shortens the Wi-Fi queue" 'q="${DYX3_ROOT}/etc/NetworkManager/dispatcher.d/99-dyx3-hotspot-qos"; [ "$(stat -c %a "${q}")" = 700 ] && grep -q "txqueuelen 100" "${q}" && grep -q -- "-w -t mangle -A DYX3_HOTSPOT_QOS ! -i \"wlan0\" -o \"wlan0\" -m hashlimit --hashlimit-name dyx3_dl --hashlimit-above 2mb/s --hashlimit-burst 4mb -j DROP" "${q}" && grep -q -- "-i \"wlan0\" ! -o \"wlan0\" -m hashlimit --hashlimit-name dyx3_ul --hashlimit-above 1mb/s --hashlimit-burst 2mb -j DROP" "${q}" && bash -n "${q}"'
   check "hotspot profile pins 5 GHz channel 149 (the only AP-capable 5 GHz channel on the vendor driver) and WPA2 without power save" 'grep -qx "band=a" "${hotspot_profile}" && grep -qx "channel=149" "${hotspot_profile}" && grep -qx "channel-width=20" "${hotspot_profile}" && grep -qx "powersave=2" "${hotspot_profile}" && grep -qx "proto=rsn" "${hotspot_profile}"'
@@ -614,11 +628,13 @@ F
   local D
   D="$(git -C "${src}" rev-parse HEAD)"
   : >"${T}/no_agent"
-  (FAKE_NO_AGENT="${T}/no_agent" upgrade_to "${D}") >"${T}/up_d" 2>&1
+  (install_hotspot_network() { touch "${T}/hs_on_fail"; }; FAKE_NO_AGENT="${T}/no_agent" upgrade_to "${D}") >"${T}/up_d" 2>&1
   rc=$?
   check "unhealthy upgrade fails (rc!=0)" '[ "${rc}" -ne 0 ]'
   check "unhealthy upgrade reverted to B" '[ "$(basename "$(readlink -f "${DYX3_CURRENT}")")" = "${B}" ]'
   check "unhealthy upgrade is ineligible and records its failure" '[ ! -f "${DYX3_RELEASES}/${D}/.complete" ] && [ -f "${DYX3_RELEASES}/${D}/.failed" ]'
+  check "the access point is not touched by an upgrade that fails health" '[ ! -e "${T}/hs_on_fail" ]'
+  check "a failed upgrade leaves no in-progress marker" '[ ! -e "${DYX3_VAR_LIB}/state/upgrade_in_progress" ]'
   check "unhealthy upgrade restores recorded version and persistent state" 'grep -q "\"stack_sha\": \"${B}\"" "${DYX3_ETC}/versions.json" && grep -q "keep mission and recorder data" "${DYX3_VAR_LIB}/runs/persistent"'
 
   # A static failure happens after a successful build but before activation.
@@ -631,9 +647,12 @@ F
   check "static verification rejects a built release" '[ "${rc}" -ne 0 ] && grep -q "failed verification" "${T}/up_static_fail"'
   check "static verification failure leaves no completion marker" '[ ! -f "${DYX3_RELEASES}/${E}/.complete" ] && [ "$(basename "$(readlink -f "${DYX3_CURRENT}")")" = "${B}" ]'
 
-  (upgrade_to "${D}") >"${T}/up_d2" 2>&1
+  # shellcheck disable=SC2094  # reads the log the run is writing, on purpose: health must already be logged OK
+  (install_hotspot_network() { grep -q "health: OK" "${T}/up_d2" && touch "${T}/hs_after_health"; }; upgrade_to "${D}") >"${T}/up_d2" 2>&1
   rc=$?
   check "healthy retry of D succeeds" '[ "${rc}" -eq 0 ] && [ "$(basename "$(readlink -f "${DYX3_CURRENT}")")" = "${D}" ]'
+  check "the access point is configured only after the health gate passed" '[ -e "${T}/hs_after_health" ]'
+  check "a completed upgrade leaves no in-progress marker" '[ ! -e "${DYX3_VAR_LIB}/state/upgrade_in_progress" ]'
 
   (DYX3_KEEP_RELEASES=1 prune_releases) >/dev/null 2>&1
   rc=$?
@@ -645,6 +664,18 @@ F
   (upgrade_to nonexistent-ref) >"${T}/up_bad" 2>&1
   rc=$?
   check "unknown ref is refused" '[ "${rc}" -ne 0 ]'
+
+  # ---- INS-004: a run killed between the switch and the health result
+  (restart_enabled_services() { exit 9; }; upgrade_to "${B}") >"${T}/up_killed" 2>&1
+  check "a killed upgrade leaves the in-progress marker" 'grep -qx "target=${B}" "${DYX3_VAR_LIB}/state/upgrade_in_progress" && grep -qx "previous=${D}" "${DYX3_VAR_LIB}/state/upgrade_in_progress"'
+  (FAKE_NO_AGENT="${T}/no_agent" upgrade_to "${D}") >"${T}/up_after_kill" 2>&1
+  rc=$?
+  check "the next run reports it and reverts an unhealthy result" '[ "${rc}" -ne 0 ] && grep -q "interrupted upgrade was found" "${T}/up_after_kill" && grep -q "was reverted to ${D:0:10}" "${T}/up_after_kill" && [ "$(basename "$(readlink -f "${DYX3_CURRENT}")")" = "${D}" ] && [ ! -e "${DYX3_VAR_LIB}/state/upgrade_in_progress" ]'
+  printf 'kind=upgrade\ntarget=%s\nprevious=%s\nstarted=x\n' "${D}" "${B}" >"${DYX3_VAR_LIB}/state/upgrade_in_progress"
+  (upgrade_to "${D}") >"${T}/up_kill_ok" 2>&1
+  rc=$?
+  check "a healthy interrupted result is kept and the run continues" '[ "${rc}" -eq 0 ] && grep -q "is healthy: keeping it" "${T}/up_kill_ok" && grep -q "nothing to do" "${T}/up_kill_ok" && [ ! -e "${DYX3_VAR_LIB}/state/upgrade_in_progress" ]'
+  printf '%s\n' "${B}" >"${DYX3_VAR_LIB}/state/previous_release"
 
   # ---- dyx3-version / dyx3-rollback
   (print_version) >"${T}/ver" 2>&1
