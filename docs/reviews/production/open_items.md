@@ -1,0 +1,180 @@
+# Production review — open items
+
+Part-by-part production-readiness review of the 3WD stack. Each part is reviewed externally (ChatGPT, CodeRabbit
+style, one prompt per part), then **every finding is verified by Claude against the code** before it is
+recorded here. Findings are not accepted on the reviewer's word: severities are re-rated against the real
+producers, defaults and call paths.
+
+Goal the review is measured against:
+- ultra-low, deterministic latency from pose to setpoint;
+- high-rate pose input and high-rate RPP mission control;
+- no hang, stall or silent degradation; fail to STOP on any fault;
+- about 1 cm cross-track accuracy on straights and arcs.
+
+Review baseline: DYX_3WD `master` `252778e` (firmware `8279fa4be3`).
+
+## Severity
+
+| Severity | Meaning | Must be fixed before |
+|---|---|---|
+| **CRITICAL** | Unsafe or uncommanded motion or paint; hang or stall with no STOP; wrong sign or frame | any autonomous field run |
+| **HIGH** | Breaks the latency, rate or determinism goal; wrong recovery; misbehaves in plausible field conditions | production |
+| **MEDIUM** | Degraded performance, robustness or observability; contract and code disagree | V1 sign-off |
+| **LOW** | Hardening, clarity, minor efficiency, documentation | when convenient |
+
+## Verification status
+
+| Status | Meaning |
+|---|---|
+| **ACCEPTED** | Confirmed in the code at the stated severity |
+| **ACCEPTED ↓ / ↑** | Confirmed, but re-rated (the reviewer's severity is shown struck through) |
+| **DOUBT** | Plausible, not proven: needs a measurement or a decision before it is rated |
+| **REJECTED** | Does not hold against the code; the reason is recorded |
+| **FIXED** | Closed by a commit (SHA recorded) |
+
+## Part tracker
+
+| # | Part | Reviewed | Verified | Open (C/H/M/L) | Status |
+|---|---|---|---|---|---|
+| 1 | `dyx3_rpp` | 2026-10-09 | 2026-10-09 | 0 / 1 / 4 / 3 | open |
+| 2 | `dyx3_motion_guard` | — | — | — | prompt issued |
+| 3 | `dyx3_px4_link` | — | — | — | next |
+| 4 | `dyx3_interfaces` | — | — | — | |
+| 5 | `dyx3_mission` | — | — | — | |
+| 6 | `dyx3_gnss_rtk` | — | — | — | |
+| 7 | `dyx3_spray` | — | — | — | |
+| 8 | `dyx3_geometry` | — | — | — | |
+| 9 | `dyx3_bringup` + systemd (RT, CPU, restart) | — | — | — | |
+| 10 | `dyx3_system_gateway` | — | — | — | |
+| 11 | `dyx3_recorder` | — | — | — | |
+| 12 | backend | — | — | — | |
+| 13 | installer / deployment | — | — | — | |
+| 14 | tablet app (`Three_Wheel_v2` `App-Polish`) | — | — | — | |
+| 15 | PX4 firmware rover path (`dyx-3wd-production`) | — | — | — | |
+| 16 | `dyx3_rpp_legacy` | not reviewed: reference only, deleted at GATE 7 | | | |
+
+---
+
+## 1. `dyx3_rpp`
+
+Reviewer verdict: REQUEST CHANGES (2 CRITICAL, 3 HIGH, 3 MEDIUM). After verification: **0 CRITICAL, 1 HIGH,
+4 MEDIUM, 3 LOW**. The reviewer's CRITICALs do not hold against the current producer and mission flow, but the
+verification found a HIGH the reviewer missed (RPP-009).
+
+Facts used to re-rate (all at `252778e`):
+- `/dyx3/vehicle_state` has one producer, `dyx3_px4_link`. It sets `position_valid` only for finite x/y,
+  `velocity_valid` only for finite vx/vy, and `attitude_valid` only when the heading is finite
+  (`dyx3_px4_link/src/vehicle_state_assembler.cpp:11-12,32`).
+- RPP's clock is `steady_clock` (`rpp_node.cpp:33,47`): receive and tick times come from one monotonic clock.
+- `use_imu_extrapolation` defaults to **false** (`rpp_param_table.inc:102`): extrapolation is off in production.
+- A mission is loaded while it is LOADING/READY; RPP publishes STOP until RUNNING (`rpp_node.cpp:184-205,335-339`).
+
+| ID | Severity | Status | Area | Where | Item |
+|---|---|---|---|---|---|
+| RPP-009 | **HIGH** | ACCEPTED (new, found in verification) | Fail-safe / accuracy | `dyx3_px4_link/src/px4_link_node.cpp:838-860`; `rpp_core.cpp:171-176,436`; `stop_pivot_fsm.cpp:51,131` | `VehicleState.yaw_rate_radps` is never filled, so RPP always sees a yaw rate of 0 |
+| RPP-001 | MEDIUM (~~CRITICAL~~) | ACCEPTED ↓ | Stall / RT | `rpp_node.cpp:200-202,217-312,321-322` | Mission load, conditioning, hashing and disk I/O run on the FIFO-80 control thread |
+| RPP-003 | MEDIUM (~~HIGH~~) | ACCEPTED ↓ | Latency | `rpp_node.cpp:57-72`; `rpp_core.cpp:157-169,782` | Pose age is measured from RPP receipt, not the PX4 sample time |
+| RPP-005 | MEDIUM (~~HIGH~~) | DOUBT (measure) | RT | `control_graph.launch.py:34`; `main.cpp:22-36` | RPP and `motion_guard` share CPU 4 at equal FIFO 80 |
+| RPP-008 | MEDIUM | DOUBT (measure) | Latency | `rpp_node.cpp:125-127` | Free-running tick, not synchronised to pose arrival |
+| RPP-002 | LOW (~~CRITICAL~~) | ACCEPTED ↓ | Hardening | `rpp_node.cpp:57-72` | No `isfinite` check at the RPP boundary |
+| RPP-004 | LOW (~~HIGH~~) | ACCEPTED ↓ | Hardening | `rpp_core.cpp:782-797` | Negative or non-finite age is not rejected before extrapolation |
+| RPP-006 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Params | `rpp_node.cpp:116`; `docs/contracts/rpp_node.md:40` | IDLE_ONLY conditioning parameters are accepted while READY/PAUSED but take effect only at the next load |
+| RPP-007 | — | REJECTED | — | `rpp_node.cpp:317-343` | "Tick overrun has no fail-safe" |
+
+### RPP-009 — HIGH — yaw rate is never populated; stop and pivot confirmation ignore rotation
+
+- `VehicleState.yaw_rate_radps` exists (`dyx3_interfaces/msg/VehicleState.msg:18`), but `px4_link` never sets it.
+  It does not subscribe to an angular-rate topic, so the field is always 0.
+- RPP feeds it into `yaw_rate_ned_` (`rpp_node.cpp:70`; `rpp_core.cpp:174`). It reaches `StopTelemetry.yaw_rate`
+  (`rpp_core.cpp:436`).
+- `StopConfirm::satisfied` (`stop_pivot_fsm.cpp:51`) and the pivot settle test (`stop_pivot_fsm.cpp:131`) require
+  `|yaw_rate| < segment_stop_yaw_rate_threshold` (0.05 rad/s). With 0 always passed in, that check is always
+  true. A stop or pivot can be confirmed while the rover is still rotating, which means corner overshoot and a
+  mis-aligned start of the next line.
+- The prototype had a real yaw rate from MAVROS. The legacy shim maps this same field
+  (`dyx3_rpp_legacy/input_shim.py:75`), so the equivalence suites, which inject yaw rate directly, cannot catch it.
+- **Fix: owner decision needed.** `/fmu/out/vehicle_angular_velocity` is commented out in
+  `src/modules/uxrce_dds_client/dds_topics.yaml:56` at firmware `8279fa4be3`, and `VehicleLocalPosition` has no
+  yaw-rate field.
+  - (a) **Firmware:** enable `vehicle_angular_velocity` in `dds_topics.yaml`, with a rate limit of about 50 Hz.
+    This is the clean source: a real gyro rate. It is a firmware change, and V1 is frozen.
+  - (b) **Jetson only:** `px4_link` derives the yaw rate from consecutive `vehicle_attitude` quaternions,
+    using PX4 `timestamp_sample` deltas, with wrap handling and a short low-pass filter.
+    - No firmware change, but it adds noise and lag.
+  - Either way: state and test the sign (NED, clockwise positive). Add a node test: rotating at 0.2 rad/s must
+    not confirm a stop.
+- Belongs to the `px4_link` part; tracked here because RPP is where it bites.
+
+### RPP-001 — MEDIUM — blocking mission load on the control thread
+- Confirmed: `load_mission()` runs inside the mission-state callback and the `step()` retry, on the
+  single-threaded executor of a FIFO-80 process. It runs `load_artifact`, `condition_path`, SHA-256, serialise,
+  `create_directories`, write, rename.
+- Re-rated because the load happens only while the mission is LOADING/READY, or while `load_failed_` is set.
+  In those states RPP outputs STOP, and a new mission cannot start until the previous one is terminal.
+  `px4_link` still fails to zero on a stale guard command (`command_max_age_s` 0.2).
+- What remains real:
+  - RPP is on the same CPU as `motion_guard` at the **same FIFO priority**. A long CPU-bound conditioning run
+    therefore delays the guard's ticks too (see RPP-005).
+  - A failing load is retried every 1 s inside the control tick.
+- **Fix:** prepare the mission off the RT thread (worker thread or the mission node). Install it into the core
+  with a constant-time handoff. Measure `condition_path` time on the Jetson for the largest real mission first.
+
+### RPP-003 — MEDIUM — receipt time instead of sample time
+- Confirmed: `pose_recv_ns_` is the RPP callback time. `px4_link` also stamps freshness on receipt and
+  republishes on a 20 ms gate. `px4_sample_stamp` is carried in `VehicleState` but unused.
+- Re-rated: with extrapolation off by default, pose age only feeds the 0.5 s staleness test, so control
+  accuracy is not affected today. It becomes HIGH if latency compensation is turned on for the 1 cm goal.
+- **Fix (when compensation is pursued):**
+  - carry the sample age end to end;
+  - validate the clock domain (PX4 timesync offset);
+  - keep the receipt-time watchdog separate.
+
+### RPP-005 — MEDIUM — DOUBT — shared FIFO CPU
+- RPP and `motion_guard` are both `taskset -c 4 chrt -f 80`. Under equal-priority FIFO, one does not preempt
+  the other until it blocks.
+- The tick is short and `spin_once(5 ms)` blocks, so this matters mainly together with RPP-001.
+- **Measure** on the Jetson with `cyclictest`, `perf sched` or `ros2_tracing`: guard and RPP wake-up latency,
+  missed periods, RT throttling, nominal and during a mission load.
+
+### RPP-008 — MEDIUM — DOUBT — free-running tick
+- Confirmed that the tick is not tied to pose arrival.
+- The whole chain has four unsynchronised timer hops: `px4_link` state gate 20 ms → RPP 50 Hz → guard 50 Hz →
+  `px4_link` writer 100 Hz. That is about 35 ms typical and 70 ms worst of added age by phase analysis alone.
+- The fix is a chain-level design decision: phase-lock, event-driven or 100 Hz. Decide it after measuring
+  p50/p99 pose-to-PX4 latency. Tracked together with MG and PXL items X-003.
+
+### RPP-002 / RPP-004 — LOW — boundary hardening
+- The current producer cannot deliver non-finite pose, velocity or heading with the valid flags set. The
+  steady clock cannot run backwards. Extrapolation is off.
+- Still worth a one-line `isfinite` guard at the RPP boundary and `pose_age_s < 0` → STOP, so the package does
+  not depend on its producer's discipline.
+- Behaviour-neutral for valid input; re-run the equivalence suites.
+
+### RPP-006 — LOW — IDLE_ONLY while READY/PAUSED
+- The code matches the contract ("refused … IDLE_ONLY while a mission runs").
+- Conditioning parameters changed while READY or PAUSED are stored but apply only at the next load. The
+  reported `conditioned_execution_sha256` stays truthful for what is running.
+- **Fix:** document "takes effect at the next mission load", or refuse the conditioning subset while a
+  mission is loaded.
+
+### RPP-007 — REJECTED
+- A late tick still computes with the current time and re-checks pose age against `pose_max_age_s`, so a stale
+  pose stops.
+- A late tick with a fresh pose is a valid tick. Downstream, the guard (`command_max_age_s` 0.2) and
+  `px4_link` enforce command age.
+- The overrun counter is observability, which is correct. A separate control-gap fault would duplicate
+  existing protection.
+
+---
+
+## Cross-part items (raised by the RPP review; owned by later parts)
+
+| ID | Owner part | Item | Status |
+|---|---|---|---|
+| X-001 | `px4_link` | Freshness stamped on receipt; `timestamp_sample` not used for age | open, review with PXL |
+| X-002 | `px4_link` / RPP | `xy_reset_counter` and `delta_xy` are published but RPP uses its own jump heuristic | open, review with PXL |
+| X-003 | chain | Four unsynchronised timer hops pose → PX4 (about 35 ms typical / 70 ms worst) | open, measure first |
+| X-004 | `motion_guard` | Numeric input policy and response timing of the guard | in MG review |
+| X-005 | bringup / systemd | Shared FIFO CPU placement, start-up and shutdown ordering | open |
+| X-006 | `px4_link` / bringup | `px4_link`, the final 100 Hz writer to PX4, runs under **normal scheduling**, unlike RPP and the guard (`control_graph.launch.py:33-34`) | DOUBT, measure |
+| X-007 | `px4_link` | Root cause of RPP-009: no angular-rate subscription | ACCEPTED, HIGH |
