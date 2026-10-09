@@ -209,12 +209,38 @@ TEST(Offboard, LinkLossWithdrawsHeartbeatAndRestartsPrestream) {
   EXPECT_FALSE(o.send_mode_command);  // must pre-stream again first
   EXPECT_TRUE(s.step(1.2, true, false).send_mode_command);
 }
-TEST(Offboard, DisableStopsHeartbeat) {
+TEST(Offboard, DisableStreamsStopForTheWindowThenStopsHeartbeat) {  // PXL-002
   OffboardSession s{OffboardTiming{}};
   s.enable(true, 0.0);
-  s.step(0.6, true, true);
+  s.step(0.5, true, false);
+  ASSERT_EQ(s.step(0.6, true, true).state, OffboardState::Active);
   s.enable(false, 0.7);
-  EXPECT_FALSE(s.step(0.8, true, true).publish_heartbeat);
+  for (const double t : {0.7, 0.8, 0.99}) {
+    const auto o = s.step(t, true, true);
+    EXPECT_EQ(o.state, OffboardState::Disabled);
+    EXPECT_TRUE(o.publish_heartbeat) << t;
+    EXPECT_TRUE(o.stop_only) << t;
+    EXPECT_FALSE(o.send_mode_command);
+  }
+  EXPECT_FALSE(s.step(1.0, true, true).publish_heartbeat);  // 0.3 s window over: withdrawn
+  EXPECT_FALSE(s.step(5.0, true, true).publish_heartbeat);
+  s.enable(false, 6.0);  // a repeated disable does not restart the window
+  EXPECT_FALSE(s.step(6.1, true, true).publish_heartbeat);
+}
+TEST(Offboard, DisableWindowNeedsAPriorEnableAndALink) {
+  OffboardSession never{OffboardTiming{}};
+  never.enable(false, 0.0);
+  EXPECT_FALSE(never.step(0.1, true, false).publish_heartbeat);
+  OffboardSession s{OffboardTiming{}};
+  s.enable(true, 0.0);
+  s.step(0.1, true, false);
+  s.enable(false, 0.2);
+  EXPECT_FALSE(s.step(0.25, false, false).publish_heartbeat);  // no trustworthy zero without link
+  const auto o = s.step(0.3, true, false);
+  EXPECT_TRUE(o.publish_heartbeat);
+  EXPECT_TRUE(o.stop_only);
+  s.enable(true, 0.4);  // re-enable cancels the window and restarts the sequence
+  EXPECT_EQ(s.step(0.4, true, false).state, OffboardState::Prestream);
 }
 
 // --- state assembler ---------------------------------------------------------------------------

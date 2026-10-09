@@ -140,6 +140,7 @@ private:
   GateOutput last_gate_;
   StalenessReport last_rep_;
   bool last_link_ok_{false};
+  bool last_heartbeat_published_{false};
   std::string last_logged_reason_;
 
   double last_step_s_{-1.0};

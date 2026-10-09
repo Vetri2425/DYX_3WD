@@ -3,19 +3,27 @@
 namespace dyx3_px4_link {
 
 void OffboardSession::enable(bool on, double now_s) {
-  enabled_ = on;
   if (on) {
     state_ = OffboardState::Prestream;
     since_s_ = now_s;
+    stop_until_s_ = -1.0;
   } else {
+    if (enabled_) stop_until_s_ = now_s + timing_.disable_stop_s;
     state_ = OffboardState::Disabled;
   }
+  enabled_ = on;
 }
 
 OffboardStep OffboardSession::step(double now_s, bool link_ok, bool nav_state_offboard) {
   OffboardStep out;
   if (!enabled_) {
+    // Disabling never just drops the stream: PX4 would keep the last setpoint until its offboard
+    // loss timeout. A trustworthy STOP is streamed for the window first (link permitting).
     out.state = OffboardState::Disabled;
+    if (link_ok && now_s < stop_until_s_) {
+      out.publish_heartbeat = true;
+      out.stop_only = true;
+    }
     return out;
   }
   if (!link_ok) {

@@ -287,6 +287,9 @@ Px4LinkNode::Px4LinkNode(const rclcpp::NodeOptions& options, ClockFn clock, bool
         const double now = clock_();
         OffSrv::Response r;
         if (!req->enable) {
+          // OK means the link has stopped commanding motion: STOP is streamed for
+          // offboard_disable_stop_s, then the heartbeat is withdrawn. It does not mean PX4 has
+          // left OFFBOARD or the rover has stopped.
           offboard_->enable(false, now);
           r.accepted = true;
           r.reason_code = OffSrv::Response::REASON_OK;
@@ -345,7 +348,10 @@ void Px4LinkNode::declare_and_validate_params() {
   require(p_.handshake_retry_s > 0.0, "handshake_retry_s must be > 0");
   p_.offboard.prestream_s = declare_checked<double>(*this, "offboard_prestream_s", 0.5);
   p_.offboard.confirm_timeout_s = declare_checked<double>(*this, "offboard_confirm_timeout_s", 2.0);
-  require(p_.offboard.prestream_s >= 0.0 && p_.offboard.confirm_timeout_s > 0.0,
+  p_.offboard.disable_stop_s =
+      declare_checked<double>(*this, "offboard_disable_stop_s", p_.offboard.disable_stop_s);
+  require(p_.offboard.prestream_s >= 0.0 && p_.offboard.confirm_timeout_s > 0.0 &&
+              std::isfinite(p_.offboard.disable_stop_s) && p_.offboard.disable_stop_s > 0.0,
           "offboard timings");
   p_.arm_confirm_timeout_s = declare_checked<double>(*this, "arm_confirm_timeout_s", 2.0);
   require(p_.arm_confirm_timeout_s > 0.0, "arm_confirm_timeout_s must be > 0");
@@ -781,7 +787,9 @@ void Px4LinkNode::step(double now_s) {
   nav_offboard_ = nav_fresh && st_.nav_state == kNavStateOffboard;
   const OffboardStep ofb = offboard_->step(now_s, last_link_ok_, nav_offboard_);
   const uint64_t t_us = stamp_us();
-  if (ofb.publish_heartbeat) publish_setpoint_set(last_gate_.sp, t_us);
+  last_heartbeat_published_ = ofb.publish_heartbeat;
+  if (ofb.publish_heartbeat)
+    publish_setpoint_set(ofb.stop_only ? stop_setpoint() : last_gate_.sp, t_us);
   if (ofb.send_mode_command)
     publish_vehicle_command(kCmdDoSetMode, 1.0F, 6.0F, t_us);  // 6 = OFFBOARD
   start_ulog_if_due(now_s, last_link_ok_);
@@ -898,7 +906,7 @@ void Px4LinkNode::publish_status(double now_s, const StalenessReport& rep, const
   s.stamp = ros_now();
   s.session_alive = rep.session_alive;
   s.handshake_ok = handshake_->state() == HandshakeState::Ok;
-  s.offboard_heartbeat_active = offboard_->state() != OffboardState::Disabled && last_link_ok_;
+  s.offboard_heartbeat_active = last_heartbeat_published_;
   s.failing_to_zero = g.failing_to_zero;
   uint8_t fault = dyx3_interfaces::msg::Px4LinkStatus::FAULT_NONE;
   if (!rep.session_alive) {

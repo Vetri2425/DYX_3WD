@@ -109,7 +109,8 @@ setpoints* is the hole `COM_OF_LOSS_T` cannot see. The link never publishes a st
 publishes a **fresh explicit zero**, which is the strongest command available and keeps the
 vehicle in OFFBOARD instead of triggering PX4's own loss action (`COM_OBL_RC_ACT`) while the
 guard recovers. The heartbeat is withdrawn when the link itself cannot publish a trustworthy
-zero: `handshake_ok` false, `session_alive` false, or `set_offboard(false)`.
+zero: `handshake_ok` false or `session_alive` false. `set_offboard(false)` withdraws it only after
+an explicit STOP window (section 9).
 DERIVED — NOT FROM V1 SPEC: this interpretation of the F1.7 obligation. Flagged for the human.
 
 `command_max_age_s` is DERIVED from the prototype's `input_max_age_s` 0.2 (re-validate at GATE 4):
@@ -206,6 +207,18 @@ addressing; no figure exists in the spec.
 
 Arm never starts motion by itself; the heartbeat carries STOP until the guard commands otherwise.
 
+`SetOffboard(enable=false)` (PXL-002): from the next writer tick the heartbeat carries the explicit
+STOP set, whatever the guard commands, for `offboard_disable_stop_s` (default 0.3 s, validated
+> 0); then the heartbeat is withdrawn and PX4 leaves OFFBOARD through its own offboard-loss
+handling (`COM_OF_LOSS_T`, `COM_OBL_RC_ACT`) with a zero as the last setpoint. Dropping the
+stream at once would leave PX4 applying the last motion setpoint until the loss timeout. The
+window only runs while the link is healthy (otherwise there is no trustworthy zero to send), and a
+repeated disable does not restart it. The reply is immediate and unchanged: `accepted=true`,
+`REASON_OK` means "the link stopped commanding motion and started the STOP window", **not** "PX4
+left OFFBOARD" or "the rover stopped". No mode change or disarm is sent (owner policy, open).
+`Px4LinkStatus.offboard_heartbeat_active` is true while the heartbeat is actually published,
+including the STOP window.
+
 ## 10. ULog and RTCM
 
 - `ulog_stream` chunks with `FLAGS_NEED_ACK` are acknowledged immediately (a `UlogStreamAck`
@@ -239,6 +252,7 @@ negative injected timestamps.
 | `stale_*_s` (6) | section 5 | IDLE_ONLY | DERIVED, re-validate GATE 4 |
 | `handshake_timeout_s`, `handshake_retry_s` | 5.0, 1.0 | IDLE_ONLY | DERIVED |
 | `offboard_prestream_s`, `offboard_confirm_timeout_s` | 0.5, 2.0 | IDLE_ONLY | DERIVED |
+| `offboard_disable_stop_s` | 0.3 | IDLE_ONLY | DERIVED (PXL-002): ≥ 20 ticks of STOP, well inside `COM_OF_LOSS_T` 1.0 s; validated > 0 |
 | `ulog_streaming_enabled` | true | IDLE_ONLY | |
 | `spray_transaction_timeout_s` | 0.3 | RESTART | DERIVED (XR-GPX-001): pinned PX4 answers 187/183 at once; bounds how long a queued spray request can wait; validated > 0 |
 

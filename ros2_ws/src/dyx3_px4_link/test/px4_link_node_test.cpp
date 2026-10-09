@@ -597,6 +597,59 @@ TEST(Px4LinkNode, GuardSilenceFallsToExplicitZeroWithHeartbeatKept) {
   EXPECT_FLOAT_EQ(r.speed.back().speed_body_x, 0.3F);
 }
 
+// PXL-002: SetOffboard(false) while moving puts STOP on the wire at the next writer tick, keeps
+// the heartbeat with STOP for offboard_disable_stop_s, then withdraws it.
+TEST(Px4LinkNode, DisableOffboardStreamsStopBeforeWithdrawingTheHeartbeat) {
+  Rig r;
+  r.bring_up();
+  r.nav_state = 14;
+  bool acc = false;
+  uint8_t rs = 0;
+  ASSERT_TRUE(r.call_offboard(true, &acc, &rs));
+  ASSERT_TRUE(acc);
+  for (int i = 0; i < 10; ++i) {
+    r.guard(2, 0.5F, NaN, 0.1F);
+    r.tick();
+  }
+  ASSERT_FLOAT_EQ(r.speed.back().speed_body_x, 0.5F);
+  r.clear();
+  auto req = std::make_shared<dyx3_interfaces::srv::SetOffboard::Request>();
+  req->enable = false;
+  auto fut = r.cli_off->async_send_request(req);
+  ASSERT_TRUE(r.pump_until([&] { return fut.wait_for(0ms) == std::future_status::ready; }));
+  EXPECT_TRUE(fut.get()->accepted);
+  r.guard(2, 0.5F, NaN, 0.1F);  // the guard still commands motion
+  r.tick();                     // next writer tick
+  ASSERT_TRUE(r.pump_until([&] { return !r.speed.empty(); }));
+  ASSERT_EQ(r.speed.size(), 1U);
+  EXPECT_EQ(r.speed.back().speed_body_x, 0.0F);
+  EXPECT_EQ(r.rate.back().yaw_rate_setpoint, 0.0F);
+  EXPECT_TRUE(std::isnan(r.att_sp.back().yaw_setpoint));
+  for (int i = 0; i < 15; ++i) {  // 0.15 s more: still inside the 0.3 s window
+    r.guard(2, 0.5F, NaN, 0.1F);
+    r.tick();
+  }
+  EXPECT_GE(r.ocm.size(), 10U);
+  EXPECT_EQ(r.ocm.size(), r.speed.size());
+  for (const auto& sp : r.speed) EXPECT_EQ(sp.speed_body_x, 0.0F);
+  EXPECT_TRUE(r.status.offboard_heartbeat_active);
+  for (int i = 0; i < 20; ++i) {
+    r.guard(2, 0.5F, NaN, 0.1F);
+    r.tick();
+  }
+  r.pump(50);
+  const size_t after_window = r.ocm.size();
+  for (const auto& sp : r.speed) EXPECT_EQ(sp.speed_body_x, 0.0F);
+  for (int i = 0; i < 20; ++i) {
+    r.guard(2, 0.5F, NaN, 0.1F);
+    r.tick();
+  }
+  r.pump(50);
+  EXPECT_EQ(r.ocm.size(), after_window);  // heartbeat withdrawn after the window
+  EXPECT_LE(after_window, 32U);
+  EXPECT_FALSE(r.status.offboard_heartbeat_active);
+}
+
 TEST(Px4LinkNode, SilentTopicWhileSessionUpForcesZero) {  // upstream #27388
   Rig r;
   r.bring_up();
