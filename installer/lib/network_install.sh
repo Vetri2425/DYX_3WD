@@ -31,6 +31,16 @@ _ipv4_net() {
   mask=$(((0xFFFFFFFF << (32 - pfx)) & 0xFFFFFFFF))
   echo "$(($(_ipv4_int "${ip}") & mask))/${pfx}"
 }
+# _ipv4_overlap CIDR CIDR: the two networks share addresses (INS-025). The shorter prefix decides, so 10.41.0.1/16
+# overlaps the FCU link 10.41.10.0/24 although neither the strings nor the networks are equal. Invalid = no.
+_ipv4_overlap() {
+  local a="$1" b="$2" p mask
+  [ -n "$(_ipv4_net "${a}")" ] && [ -n "$(_ipv4_net "${b}")" ] || return 1
+  p="${a#*/}"
+  [ "${b#*/}" -lt "${p}" ] && p="${b#*/}"
+  mask=$(((0xFFFFFFFF << (32 - p)) & 0xFFFFFFFF))
+  [ $(($(_ipv4_int "${a%/*}") & mask)) -eq $(($(_ipv4_int "${b%/*}") & mask)) ]
+}
 # Missing file = no site LAN. Must not fail: install.sh runs under set -e and pipefail.
 _network_env() {
   [ -r "${DYX3_ETC}/network.env" ] || return 0
@@ -53,7 +63,7 @@ install_fcu_network() {
   lan_cidr="$(_network_env DYX3_LAN_ADDRESS)"
   lan_gw="$(_network_env DYX3_LAN_GATEWAY)"
   if [ -n "${lan_cidr}" ]; then
-    if [ -z "$(_ipv4_net "${lan_cidr}")" ] || [ "$(_ipv4_net "${lan_cidr}")" = "$(_ipv4_net "${FCU_JETSON_CIDR}")" ]; then
+    if [ -z "$(_ipv4_net "${lan_cidr}")" ] || _ipv4_overlap "${lan_cidr}" "${FCU_JETSON_CIDR}"; then
       warn "network.env DYX3_LAN_ADDRESS '${lan_cidr}' is invalid or on the FCU subnet; ignored"
       lan_cidr=""
     else
@@ -250,7 +260,7 @@ install_hotspot_network() {
   # the next). Blank keeps NetworkManager's shared default. It must never overlap the FCU link.
   address="${address:-10.42.0.1/24}"
   if [[ ! "${address}" =~ ^((25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])/(1[6-9]|2[0-9]|30)$ ]] ||
-     [[ "${address}" == 10.41.10.* ]] ||
+     _ipv4_overlap "${address}" "${FCU_JETSON_CIDR}" ||
      { [ -n "${want_iface}" ] && [[ ! "${want_iface}" =~ ^[A-Za-z0-9_.-]+$ ]]; }; then
     _hotspot_invalid "invalid DYX3_HOTSPOT_ADDRESS or DYX3_HOTSPOT_IFACE"
     return 0
@@ -260,7 +270,7 @@ install_hotspot_network() {
   # rtw_country_code module parameter and the proc country_code. Under that plan only 5745 MHz (149) is
   # not no-IR, so an AP on 36-48 or 153-165 fails ("Failed to start AP functionality", rover 2026-10-09).
   # 149 is legal in India (5725-5875 MHz).
-  if [ -n "$(_network_env DYX3_LAN_ADDRESS)" ] && [ "$(_ipv4_net "${address}")" = "$(_ipv4_net "$(_network_env DYX3_LAN_ADDRESS)")" ]; then
+  if [ -n "$(_network_env DYX3_LAN_ADDRESS)" ] && _ipv4_overlap "${address}" "$(_network_env DYX3_LAN_ADDRESS)"; then
     _hotspot_invalid "hotspot address ${address} is on the site LAN subnet (network.env)"
     return 0
   fi

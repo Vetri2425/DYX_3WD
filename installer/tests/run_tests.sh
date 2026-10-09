@@ -294,6 +294,9 @@ libs() {
   printf 'DYX3_LAN_ADDRESS=10.41.10.9/24\n' >"${DYX3_ETC}/network.env"
   net_lan="$(DYX3_DRY_RUN=1 install_fcu_network 2>&1)"
   check "a site LAN address on the FCU subnet is refused" 'printf "%s" "${net_lan}" | grep -q "on the FCU subnet; ignored" && printf "%s" "${net_lan}" | grep -q "ipv4.addresses 10.41.10.1/24 "'
+  printf 'DYX3_LAN_ADDRESS=10.41.0.5/16\n' >"${DYX3_ETC}/network.env"
+  net_lan="$(DYX3_DRY_RUN=1 install_fcu_network 2>&1)"
+  check "a site LAN /16 that contains the FCU link is refused" 'printf "%s" "${net_lan}" | grep -q "on the FCU subnet; ignored"'
   # INS-019: the bench setting persists in network.env; the environment still overrides it.
   printf 'FCU_KEEP_DHCP=1\n' >"${DYX3_ETC}/network.env"
   net_lan="$(DYX3_DRY_RUN=1 install_fcu_network 2>&1)"
@@ -651,7 +654,16 @@ F
   printf 'DYX3_HOTSPOT_SSID=TestRover\nDYX3_HOTSPOT_PSK=DummyBenchPass123\nDYX3_HOTSPOT_ADDRESS=192.168.3.100/24\n' >"${DYX3_ETC}/hotspot.env"
   install_hotspot_network >>"${T}/hotspot_log" 2>&1
   check "a hotspot on the site LAN subnet is refused" '[ ! -e "${hotspot_profile}" ] && grep -q "on the site LAN subnet" "${T}/hotspot_log"'
+  # INS-025: overlap, not string or network equality
+  printf 'DYX3_LAN_ADDRESS=192.168.0.150/16\n' >"${DYX3_ETC}/network.env"
+  printf 'DYX3_HOTSPOT_SSID=TestRover\nDYX3_HOTSPOT_PSK=DummyBenchPass123\nDYX3_HOTSPOT_ADDRESS=192.168.2.100/24\n' >"${DYX3_ETC}/hotspot.env"
+  install_hotspot_network >"${T}/hotspot_overlap" 2>&1
+  check "a hotspot inside a wider site LAN is refused" '[ ! -e "${hotspot_profile}" ] && grep -q "on the site LAN subnet" "${T}/hotspot_overlap"'
   rm -f "${DYX3_ETC}/network.env"
+  printf 'DYX3_HOTSPOT_SSID=TestRover\nDYX3_HOTSPOT_PSK=DummyBenchPass123\nDYX3_HOTSPOT_ADDRESS=10.41.0.1/16\n' >"${DYX3_ETC}/hotspot.env"
+  install_hotspot_network >"${T}/hotspot_overlap" 2>&1
+  check "a hotspot /16 that contains the FCU link is refused" '[ ! -e "${hotspot_profile}" ] && grep -q "invalid DYX3_HOTSPOT_ADDRESS" "${T}/hotspot_overlap"'
+  check "overlap: disjoint networks do not overlap" '! _ipv4_overlap 192.168.2.100/24 192.168.3.150/24 && ! _ipv4_overlap 10.42.0.1/24 10.41.10.1/24 && _ipv4_overlap 10.41.10.9/30 10.41.10.1/24'
   printf 'DYX3_HOTSPOT_SSID=TestRover\nDYX3_HOTSPOT_PSK=DummyBenchPass123\nDYX3_HOTSPOT_DOWNLOAD_LIMIT=1;reboot\n' >"${DYX3_ETC}/hotspot.env"
   install_hotspot_network >>"${T}/hotspot_log" 2>&1
   check "an invalid client-internet limit is refused (no shell injection into the hook)" '[ ! -e "${hotspot_profile}" ] && grep -q "invalid client-internet limit" "${T}/hotspot_log"'
