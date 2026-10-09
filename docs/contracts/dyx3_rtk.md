@@ -65,13 +65,24 @@ backoff. LoRa has stable by-id device, baud, read timeout and reopen delay. USB 
 by-id (or, for adapters without a USB serial number such as the CH340, by-path) receiver device, baud, write timeout and reopen delay. An empty device path is allowed
 so a new installation can boot and show `WAIT_SOURCE` or `WAIT_TRANSPORT` before hardware
 identity, baud and timeouts are entered. Unknown hardware values are stored as zero/unset,
-not guessed. No tty enumeration path or device auto-detection is used.
+not guessed. The worker never enumerates ttys or auto-detects devices.
+
+The installer may record one receiver identity in `/etc/dyx3/usb-receiver.env`
+(`DYX3_USB_RECEIVER_DEVICE`, `DYX3_USB_RECEIVER_BAUD`). It does so only for the 3WD hardware
+profile: the bench-proven UM982 USB port (`platform-3610000.usb-usb-0:2.1`, CH340, UM982 COM3)
+at 230400 baud, and only after a passive 3 s read sees checksum-valid NMEA including GGA. It
+sends nothing to the receiver. A port outside the profile, a silent port, or a busy port
+records nothing. The worker reads this file only when it creates a fresh config; an invalid
+recorded value fails closed (`CONFIG_INVALID`, STOPPED).
 
 On a fresh installation with no configured NTRIP seed, the first config is
-`NTRIP + USB_DIRECT + RUNNING`. The by-id receiver path and bench-confirmed baud must be
-entered before USB injection can work. On upgrade from the deployed NTRIP → DDS service,
-if no runtime config exists and `/etc/dyx3/ntrip.env` has a caster host, the worker imports
-that seed once as profile `legacy` and selects `NTRIP + PX4_DDS + RUNNING`. The runtime file
+`NTRIP + USB_DIRECT + RUNNING`, using the recorded receiver identity if one exists. Otherwise
+the receiver path and bench-confirmed baud must be entered before USB injection can work.
+A recorded identity also takes precedence over the legacy seed's transport. On upgrade from
+the deployed NTRIP → DDS service, if no runtime config exists and `/etc/dyx3/ntrip.env` has a
+caster host, the worker imports that seed once as profile `legacy`. It selects
+`NTRIP + PX4_DDS + RUNNING`, or `USB_DIRECT` when a receiver identity is recorded. The runtime
+file
 is authoritative thereafter; the service never writes back to the seed. A missing or invalid
 explicit seed security value is an error, never inferred from port 2101.
 

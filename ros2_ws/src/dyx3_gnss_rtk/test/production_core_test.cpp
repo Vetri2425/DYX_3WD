@@ -372,6 +372,36 @@ TEST(RtkConfigStore, FreshAndUpgradeDefaultsAndWriteOnlyPassword) {
   ::unsetenv("DYX3_NTRIP_SECURITY");
 }
 
+TEST(RtkConfigStore, FreshRoverUsesInstallerRecordedUsbReceiver) {
+  const std::string dev = "/dev/serial/by-path/platform-3610000.usb-usb-0:2.1:1.0-port0";
+  ::setenv("DYX3_USB_RECEIVER_DEVICE", dev.c_str(), 1);
+  ::setenv("DYX3_USB_RECEIVER_BAUD", "230400", 1);
+  auto fresh = RtkConfigStore::initial_from_environment();
+  EXPECT_EQ(fresh.at("transport"), "USB_DIRECT");
+  EXPECT_EQ(fresh.at("usb").at("receiver_device"), dev);
+  EXPECT_EQ(fresh.at("usb").at("baud"), 230400);
+  EXPECT_DOUBLE_EQ(fresh.at("usb").at("write_timeout_s").get<double>(), 0.2);
+  EXPECT_DOUBLE_EQ(fresh.at("usb").at("reopen_delay_s").get<double>(), 2.0);
+  EXPECT_NO_THROW(RtkConfigStore::validate(fresh));
+  // A seeded caster no longer forces DDS when the receiver USB identity is recorded.
+  ::setenv("DYX3_NTRIP_HOST", "caster.example", 1);
+  ::setenv("DYX3_NTRIP_USER", "worker", 1);
+  ::setenv("DYX3_NTRIP_PASSWORD", "secret", 1);
+  ::setenv("DYX3_NTRIP_MOUNTPOINT", "MOUNT", 1);
+  ::setenv("DYX3_NTRIP_SECURITY", "PLAINTEXT", 1);
+  EXPECT_EQ(RtkConfigStore::initial_from_environment().at("transport"), "USB_DIRECT");
+  // Invalid recorded identities fail closed instead of selecting a guessed port.
+  ::setenv("DYX3_USB_RECEIVER_DEVICE", "/dev/ttyUSB0", 1);
+  EXPECT_THROW(RtkConfigStore::initial_from_environment(), ConfigError);
+  ::setenv("DYX3_USB_RECEIVER_DEVICE", dev.c_str(), 1);
+  ::setenv("DYX3_USB_RECEIVER_BAUD", "123456", 1);
+  EXPECT_THROW(RtkConfigStore::initial_from_environment(), ConfigError);
+  for (const char* k :
+       {"DYX3_USB_RECEIVER_DEVICE", "DYX3_USB_RECEIVER_BAUD", "DYX3_NTRIP_HOST", "DYX3_NTRIP_USER",
+        "DYX3_NTRIP_PASSWORD", "DYX3_NTRIP_MOUNTPOINT", "DYX3_NTRIP_SECURITY"})
+    ::unsetenv(k);
+}
+
 TEST(RtkConfigStore, InterruptedSaveLeavesOldConfigIntact) {
   char pattern[] = "/tmp/dyx3-config-XXXXXX";
   const std::string directory = ::mkdtemp(pattern);

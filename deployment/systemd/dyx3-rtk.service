@@ -1,6 +1,8 @@
 [Unit]
 Description=DYX 3WD — RTK correction source and delivery
-After=dyx3-platform.service
+# After the CH341 provisioning unit, so a fresh rover's recorded receiver identity exists
+# before the RTK worker creates its first runtime config.
+After=dyx3-platform.service dyx3-usb-serial-check.service
 Wants=dyx3-platform.service
 # Deliberately a SIBLING of the backend, never a child. In PX4_DXP the NTRIP
 # client was a child process of rover-server, so any server deploy silently
@@ -14,6 +16,7 @@ Group=dyx3
 SupplementaryGroups=dialout
 EnvironmentFile=-/etc/dyx3/ros.env
 EnvironmentFile=-/etc/dyx3/ntrip.env
+EnvironmentFile=-/etc/dyx3/usb-receiver.env
 # ntrip.env is read-only first-boot seed material. Runtime RTK state is under
 # /var/lib/dyx3/rtk; keep ReadWritePaths unchanged.
 # systemd creates /var/lib/dyx3/rtk (dyx3:dyx3 0700) before every start, so the

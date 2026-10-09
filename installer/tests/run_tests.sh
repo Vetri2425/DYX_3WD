@@ -185,7 +185,7 @@ TOOL
   check "DKMS source package and provenance are staged" '[ -s "${usbroot}/usr/src/ch341-dyx3-1.0.0/ch341.c" ] && [ -f "${usbroot}/usr/src/ch341-dyx3-1.0.0/dkms.conf" ] && grep -q "Source SHA-256" "${usbroot}/usr/src/ch341-dyx3-1.0.0/PROVENANCE"'
   check "per-rover USB identity is recorded from detected ID_PATH" 'grep -qx "DYX3_CH341_EXPECTED_ID_PATH=platform-test-usb-0:2.1" "${usbroot}/etc/dyx3/ch341-adapter.env"'
   _usb_serial_write_receiver_identity platform-test-usb-0:2.1 >"${T}/usb-receiver-pending.out" 2>&1
-  check "receiver device identity waits for physical wiring confirmation" '[ ! -e "${usbroot}/etc/dyx3/usb-receiver.env" ]'
+  check "receiver identity is not recorded for a port outside the 3WD profile" '[ ! -e "${usbroot}/etc/dyx3/usb-receiver.env" ]'
   local usb_rule_hash
   usb_rule_hash="$(sha256sum "${usbroot}/etc/udev/rules.d/85-brltty.rules" | awk '{print $1}')"
   provision_usb_serial_support >"${T}/usb-provision-repeat.out" 2>&1
@@ -204,6 +204,35 @@ TOOL
   else
     bad "first install records the adapter identity under set -euo pipefail"
   fi
+  # 3WD profile port: identity (by-path link + baud) is recorded only after a passive NMEA/GGA check.
+  rxroot="${T}/usb-rx-root" rxdev="${T}/usb-rx-dev" rxtools="${T}/usb-rx-tools"
+  mkdir -p "${rxroot}" "${rxdev}" "${rxtools}"
+  : >"${rxdev}/ttyUSB0"
+  cat >"${rxtools}/udevadm" <<'TOOL'
+#!/usr/bin/env bash
+printf 'ID_PATH=platform-3610000.usb-usb-0:2.1:1.0\n'
+printf 'DEVLINKS=/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0 /dev/serial/by-path/platform-3610000.usb-usb-0:2.1:1.0-port0\n'
+TOOL
+  chmod +x "${rxtools}/udevadm"
+  if (set -euo pipefail; PATH="${rxtools}:${PATH}" DYX3_ROOT="${rxroot}" DYX3_CH341_DEV_ROOT="${rxdev}" DYX3_CH341_TEST_TTY=1
+      _usb_serial_verify_receiver_stream() { [ "$1" = /dev/serial/by-path/platform-3610000.usb-usb-0:2.1:1.0-port0 ] && [ "$2" = 230400 ]; }
+      _usb_serial_write_receiver_identity platform-3610000.usb-usb-0:2.1) >"${T}/usb-rx-ok.out" 2>&1 &&
+     grep -qx "DYX3_USB_RECEIVER_DEVICE=/dev/serial/by-path/platform-3610000.usb-usb-0:2.1:1.0-port0" "${rxroot}/etc/dyx3/usb-receiver.env" &&
+     grep -qx "DYX3_USB_RECEIVER_BAUD=230400" "${rxroot}/etc/dyx3/usb-receiver.env"; then
+    ok "3WD profile receiver identity is recorded with by-path link and baud after NMEA verification"
+  else
+    bad "3WD profile receiver identity is recorded with by-path link and baud after NMEA verification"
+  fi
+  rm -f "${rxroot}/etc/dyx3/usb-receiver.env"
+  if (set -euo pipefail; PATH="${rxtools}:${PATH}" DYX3_ROOT="${rxroot}" DYX3_CH341_DEV_ROOT="${rxdev}" DYX3_CH341_TEST_TTY=1
+      _usb_serial_verify_receiver_stream() { return 1; }
+      _usb_serial_write_receiver_identity platform-3610000.usb-usb-0:2.1) >"${T}/usb-rx-silent.out" 2>&1 &&
+     [ ! -e "${rxroot}/etc/dyx3/usb-receiver.env" ]; then
+    ok "no NMEA stream (or busy port) records no receiver identity"
+  else
+    bad "no NMEA stream (or busy port) records no receiver identity"
+  fi
+  check "RTK worker reads the recorded receiver identity and starts after provisioning" 'grep -qx "EnvironmentFile=-/etc/dyx3/usb-receiver.env" "${REPO}/deployment/systemd/dyx3-rtk.service" && grep -q "^After=.*dyx3-usb-serial-check.service" "${REPO}/deployment/systemd/dyx3-rtk.service"'
   # BRLTTY is masked (not removed) and recorded for the uninstaller; already-masked units are left alone.
   brlroot="${T}/usb-brltty-root"
   mkdir -p "${brlroot}"

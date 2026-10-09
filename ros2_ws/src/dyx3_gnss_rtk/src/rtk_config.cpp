@@ -91,10 +91,37 @@ Json RtkConfigStore::defaults() {
 
 Json RtkConfigStore::initial_from_environment() {
   Json config = defaults();
+  // Receiver USB identity recorded and verified by the installer (/etc/dyx3/usb-receiver.env:
+  // by-path link + baud, proven per rover by a passive NMEA read). Used only when no runtime config
+  // exists yet, so a fresh rover starts NTRIP -> USB_DIRECT without a manual step; an existing
+  // config.json always wins.
+  const std::string usb_device = env("DYX3_USB_RECEIVER_DEVICE");
+  const std::string usb_baud = env("DYX3_USB_RECEIVER_BAUD");
+  bool usb_recorded = false;
+  if (!usb_device.empty()) {
+    int baud = 0;
+    try {
+      size_t used = 0;
+      baud = std::stoi(usb_baud, &used);
+      need(used == usb_baud.size(), "invalid recorded USB receiver baud");
+    } catch (const std::exception&) {
+      throw ConfigError("invalid recorded USB receiver baud");
+    }
+    need(stable_serial_path(usb_device), "recorded USB receiver device is not a stable path");
+    need(supported_serial_baud(baud), "recorded USB receiver baud is not supported");
+    // DERIVED — re-validate in the field: max RTCM3 frame 1029 B = 45 ms at 230400 (4x margin);
+    // reopen cadence after unplug or write error.
+    config["usb"] = {{"receiver_device", usb_device},
+                     {"baud", baud},
+                     {"write_timeout_s", 0.2},
+                     {"reopen_delay_s", 2.0}};
+    usb_recorded = true;
+  }
   const std::string host = env("DYX3_NTRIP_HOST");
   if (!host.empty()) {
-    // Upgrade: the existing live NTRIP -> DDS installation retains its transport.
-    config["transport"] = "PX4_DDS";
+    // A seeded caster without a recorded USB receiver keeps the 2026-10-08 NTRIP -> DDS upgrade
+    // behaviour; with a recorded receiver the default USB transport is used.
+    if (!usb_recorded) config["transport"] = "PX4_DDS";
     config["ntrip"]["active_profile_id"] = "legacy";
     const std::string port = env("DYX3_NTRIP_PORT");
     int parsed_port = 2101;

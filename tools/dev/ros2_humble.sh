@@ -9,7 +9,7 @@ REPO="$(cd "${HERE}/../.." && pwd)"
 PROFILE="${DYX3_COLIMA_PROFILE:-dyx3-ros2}"
 IMAGE="dyx3-ros2-humble:local"
 VOL_MSGS="dyx3-px4-msgs"
-VOL_WS="dyx3-ws"
+VOL_WS="${DYX3_WS_VOLUME:-dyx3-ws}"  # override to run a second, isolated workspace (e.g. a parallel worktree)
 LOGDIR="${REPO}/build/local-ros2-logs"
 
 # Dedicated Docker client config + socket: independent of the user's docker contexts and of any

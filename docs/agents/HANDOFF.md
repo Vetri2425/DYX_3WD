@@ -1598,3 +1598,35 @@ If it still spins at normal priority after deploy, take a per-thread look (`top 
   (for example `taskset -c 5 chrt -f 70`). Never put it on CPU 4.
 - RTK reaches `block_reason: READY` and then `INJECTING`.
 - `systemctl restart dyx3-ros` finishes in well under 15 s.
+
+## 2026-10-09 (12:10) — Claude — new rovers select the UM982 USB receiver automatically (task 1 persistence)
+
+Branch `claude/usb-auto-select`. It makes the hand step "enter the USB receiver path and baud" unnecessary on the
+next rover. This rover's existing RTK config rev 2 is not touched: an existing `config.json` always wins.
+
+**How it works:**
+- **Installer (`installer/lib/usb_serial.sh`), CH341 provisioning:**
+  - for the 3WD hardware profile only (UM982 on USB port `platform-3610000.usb-usb-0:2.1`, CH340, UM982 COM3,
+    230400 baud);
+  - a passive, read-only 3 s read must see at least 5 checksum-valid NMEA sentences including GGA;
+  - if it does, it writes `/etc/dyx3/usb-receiver.env` with `DYX3_USB_RECEIVER_ID_PATH`, `_DEVICE` (by-path link)
+    and `_BAUD`.
+  - A port outside the profile, a silent port or a busy port records nothing; the operator then enters the
+    receiver path and baud as before.
+  - Nothing is ever sent to the receiver.
+- **`dyx3-rtk.service`:** `EnvironmentFile=-/etc/dyx3/usb-receiver.env`; starts after `dyx3-usb-serial-check`.
+- **Worker (`rtk_config.cpp` `initial_from_environment`):**
+  - Only when no runtime config exists, it uses the recorded identity, so the start is `NTRIP + USB_DIRECT`.
+    `write_timeout_s` 0.2 and `reopen_delay_s` 2.0 are DERIVED.
+  - It also overrides the legacy-seed DDS default.
+  - An invalid recorded path or baud fails closed (`CONFIG_INVALID`, STOPPED).
+- **`tools/dev/ros2_humble.sh`:** takes `DYX3_WS_VOLUME`, so parallel worktrees don't share a colcon volume.
+- **Contract:** `docs/contracts/dyx3_rtk.md` (persistent configuration section).
+
+**Verified (container):**
+- colcon build-test: 460 tests, 0 failures. New `RtkConfigStore.FreshRoverUsesInstallerRecordedUsbReceiver`.
+- Installer suite: 131 passed, 0 failed. New: profile records by-path and baud; silent or busy records nothing;
+  RTK unit reads the env file and is ordered after provisioning.
+
+**Not verified yet:** a fresh install on real hardware (the next rover, or after deleting `config.json` on a bench
+rover, which the owner must approve).

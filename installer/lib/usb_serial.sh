@@ -12,6 +12,11 @@ DYX3_CH341_KERNEL_PACKAGE_VERSION="5.15.185-tegra-36.5.0-20260115194252"
 DYX3_CH341_VID="1a86"
 DYX3_CH341_PID="7523"
 DYX3_CH341_RULE_MARKER="# Managed by DYX 3WD installer: ch341-dyx3"
+# 3WD hardware profile (Holybro Pixhawk Jetson baseboard USB port + Unicore UM982 board, USB = UM982
+# COM3), proven on the rover 2026-10-09 with UNILOGLIST. Each new rover is still verified by a passive
+# NMEA read before the identity is recorded; DYX3_UM982_USB_ID_PATH / DYX3_UM982_USB_BAUD override.
+DYX3_UM982_USB_ID_PATH_DEFAULT="platform-3610000.usb-usb-0:2.1"
+DYX3_UM982_USB_BAUD_DEFAULT="230400"
 DYX3_USB_BRLTTY_RULE_CHANGED=0
 
 _usb_serial_sysroot() {
@@ -197,16 +202,62 @@ _usb_serial_write_adapter_identity() {
   mv -f "${tmp}" "${dst}"
 }
 
+# Passive, read-only check that a GNSS receiver streams NMEA on <tty> at <baud>: at least five
+# checksum-valid sentences including a GGA within three seconds. Sends nothing to the receiver. Fails
+# (non-zero) if the port is busy, e.g. held exclusively by the running RTK worker.
+_usb_serial_verify_receiver_stream() {
+  local tty="$1" baud="$2"
+  have python3 || return 1
+  timeout 8 python3 - "${tty}" "${baud}" <<'PY'
+import os, select, sys, termios, time
+path, baud = sys.argv[1], int(sys.argv[2])
+try:
+    fd = os.open(path, os.O_RDONLY | os.O_NOCTTY | os.O_NONBLOCK)
+except OSError:
+    sys.exit(2)
+a = termios.tcgetattr(fd)
+a[0] = a[1] = a[3] = 0
+a[2] = termios.CS8 | termios.CREAD | termios.CLOCAL
+a[4] = a[5] = getattr(termios, "B%d" % baud)
+termios.tcsetattr(fd, termios.TCSANOW, a)
+termios.tcflush(fd, termios.TCIFLUSH)
+data, end = b"", time.time() + 3
+while time.time() < end:
+    if select.select([fd], [], [], 0.2)[0]:
+        try:
+            data += os.read(fd, 4096)
+        except BlockingIOError:
+            pass
+os.close(fd)
+valid = gga = 0
+for line in data.decode(errors="replace").splitlines():
+    line = line.strip()
+    if not line.startswith("$") or "*" not in line:
+        continue
+    body, _, cs = line[1:].partition("*")
+    x = 0
+    for ch in body.encode():
+        x ^= ch
+    if cs[:2].upper() == "%02X" % x:
+        valid += 1
+        gga += body[2:5] == "GGA"
+sys.exit(0 if valid >= 5 and gga >= 1 else 1)
+PY
+}
+
 _usb_serial_write_receiver_identity() {
-  local detected="$1" expected="${DYX3_UM982_USB_ID_PATH:-}" tty props tty_path links link selected="" count=0 dst tmp
-  [ -n "${expected}" ] || {
-    log "UM982 receiver identity not recorded: physical USB COM wiring confirmation is pending"
+  local detected="$1" expected="${DYX3_UM982_USB_ID_PATH:-${DYX3_UM982_USB_ID_PATH_DEFAULT}}"
+  local baud="${DYX3_UM982_USB_BAUD:-${DYX3_UM982_USB_BAUD_DEFAULT}}"
+  local tty props tty_path links link selected="" count=0 dst tmp
+  if [ "${expected}" != "${detected}" ]; then
+    if [ -n "${DYX3_UM982_USB_ID_PATH:-}" ]; then
+      die "DYX3_UM982_USB_ID_PATH does not match the detected adapter; refusing to bind a receiver identity"
+    fi
+    log "CH340 at ${detected} is not the 3WD profile port ${expected}; receiver USB not auto-selected (set DYX3_UM982_USB_ID_PATH after proving the COM)"
     return 0
-  }
-  [ "${expected}" = "${detected}" ] ||
-    die "DYX3_UM982_USB_ID_PATH does not match the detected adapter; refusing to bind a receiver identity"
+  fi
   for tty in "${DYX3_CH341_DEV_ROOT}"/ttyUSB*; do
-    [ -c "${tty}" ] || continue
+    [ -c "${tty}" ] || { [ "${DYX3_CH341_TEST_TTY:-0}" = 1 ] && [ -e "${tty}" ]; } || continue
     props="$(udevadm info --query=property --name="${tty}" 2>/dev/null)" || continue
     tty_path="$(printf '%s\n' "${props}" | sed -n 's/^ID_PATH=//p' | head -n1)"
     [[ "${tty_path}" == "${expected}"* ]] || continue
@@ -215,22 +266,31 @@ _usb_serial_write_receiver_identity() {
       case "${link}" in /dev/serial/by-path/*) selected="${link}"; count=$((count + 1)) ;; esac
     done
   done
-  [ "${count}" -eq 1 ] || die "physical UM982 wiring was confirmed for ${expected}, but exactly one matching /dev/serial/by-path identity was not found (matches=${count})"
+  [ "${count}" -eq 1 ] || die "UM982 USB port ${expected} expected exactly one /dev/serial/by-path identity (matches=${count})"
   dst="${DYX3_ROOT}/etc/dyx3/usb-receiver.env"
   if [ -f "${dst}" ] && ! grep -Fq '# Managed by DYX 3WD installer: confirmed UM982 USB identity' "${dst}"; then
     die "receiver identity file ${dst} is not installer-managed; refusing to replace it"
   fi
-  if [ -f "${dst}" ] && grep -qx "DYX3_USB_RECEIVER_DEVICE=${selected}" "${dst}"; then return 0; fi
+  if [ -f "${dst}" ] && grep -qx "DYX3_USB_RECEIVER_DEVICE=${selected}" "${dst}" &&
+    grep -qx "DYX3_USB_RECEIVER_BAUD=${baud}" "${dst}"; then
+    return 0
+  fi
   [ "${DYX3_DRY_RUN}" = 1 ] && return 0
+  if ! _usb_serial_verify_receiver_stream "${selected}" "${baud}"; then
+    warn "no valid NMEA/GGA stream on ${selected} at ${baud} (or port busy); receiver USB identity not recorded"
+    return 0
+  fi
   install -d -m 0755 "$(dirname "${dst}")"
   tmp="${dst}.tmp.$$"
   {
     printf '%s\n' '# Managed by DYX 3WD installer: confirmed UM982 USB identity'
     printf 'DYX3_USB_RECEIVER_ID_PATH=%s\n' "${expected}"
     printf 'DYX3_USB_RECEIVER_DEVICE=%s\n' "${selected}"
+    printf 'DYX3_USB_RECEIVER_BAUD=%s\n' "${baud}"
   } >"${tmp}"
   chmod 0644 "${tmp}"
   mv -f "${tmp}" "${dst}"
+  log "UM982 receiver USB identity recorded: ${selected} @ ${baud} (NMEA/GGA verified passively)"
 }
 
 # The running brltty-udev daemon auto-detects USB serial bridges on its own and keeps the CH340
@@ -318,7 +378,7 @@ provision_usb_serial_support() {
     [ "${group}" = dialout ] || die "${tty} belongs to '${group}', expected dialout; dyx3 must not be granted broad device access"
     _usb_serial_write_receiver_identity "${id_path}"
   fi
-  log "CH341 support provisioned for ${kernel}; receiver COM wiring and baud remain unverified"
+  log "CH341 support provisioned for ${kernel}"
 }
 
 # health_usb_serial: absence is a warning only when no adapter has been detected yet;
