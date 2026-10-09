@@ -84,7 +84,9 @@ std::string unique_run_path(const std::string& root, const std::string& name);
 // Atomic text write (temp + rename). Returns false on any failure.
 bool write_file_atomic(const std::string& path, const std::string& content);
 
-// True for file names that must never be copied into a run directory (credentials, tokens, keys).
+// True for file names that must never be copied into a run directory (credentials, tokens, keys):
+// *.env, *.key, *.pem, *.token, *.p12, *.pfx, *.jks; anything containing secret/token/password/
+// passwd/credential/psk; names starting with ntrip, auth (auth.json), id_rsa/id_ecdsa/id_ed25519.
 bool is_secret_name(const std::string& filename);
 struct CopyResult {
   size_t copied{0};

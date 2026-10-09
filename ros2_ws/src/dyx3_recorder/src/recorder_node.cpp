@@ -216,7 +216,10 @@ RecorderNode::~RecorderNode() {
 void RecorderNode::declare_params() {
   runs_dir_ = declare_parameter<std::string>("runs_dir", "/var/lib/dyx3/runs");
   versions_file_ = declare_parameter<std::string>("versions_file", "/etc/dyx3/versions.json");
-  config_dir_ = declare_parameter<std::string>("config_dir", "/etc/dyx3/config");
+  // REC-007: the directory the control graph actually reads its <node>.yaml from
+  // (control_graph.launch.py config_dir). Secrets there (*.env, tokens, auth stores) are excluded
+  // by is_secret_name.
+  config_dir_ = declare_parameter<std::string>("config_dir", "/etc/dyx3");
   vehicle_id_ = declare_parameter<std::string>("vehicle_id", "unknown");
   operator_ = declare_parameter<std::string>("operator", "unknown");
   // DERIVED — NOT FROM V1 SPEC: the /dyx3/** set that exists today. Raw /fmu/out/** and the

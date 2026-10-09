@@ -711,4 +711,10 @@ TEST(RecorderNode, DefaultTopicsJournalParameterChangesAndLogs) {
   EXPECT_TRUE(have.count("/rosout"));
   EXPECT_TRUE(have.count("/dyx3/rpp/status"));
   EXPECT_EQ(have.size(), 24U);
+  // REC-007: by default the config snapshot is the directory the graph reads (/etc/dyx3)
+  rclcpp::NodeOptions o;
+  o.context(r.ctx);
+  o.append_parameter_override("runs_dir", r.root + "/other_runs");
+  auto defaults = std::make_shared<RecorderNode>(o, nullptr, nullptr, nullptr, false);
+  EXPECT_EQ(defaults->get_parameter("config_dir").as_string(), "/etc/dyx3");
 }

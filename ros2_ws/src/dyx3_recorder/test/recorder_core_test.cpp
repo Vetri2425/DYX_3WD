@@ -97,10 +97,12 @@ TEST(Manifest, ContainsEveryProvenanceField) {
 TEST(ConfigSnapshot, SecretsNeverReachTheRunDirectory) {
   for (const char* n :
        {"ntrip.env", "platform.env", "ntrip_profile.json", "api_token", "wifi_psk.conf", "my.key",
-        "cert.pem", "PASSWORD.txt", "secrets.yaml", "x.token"}) {
+        "cert.pem", "PASSWORD.txt", "secrets.yaml", "x.token", "hotspot.env", "backend.env",
+        "usb-receiver.env", "auth.json", "authorized_keys", "id_ed25519", "store.jks"}) {
     EXPECT_TRUE(is_secret_name(n)) << n;
   }
-  for (const char* n : {"rpp.yaml", "spray.yaml", "guard.json", "limits.txt"})
+  for (const char* n : {"rpp.yaml", "spray.yaml", "guard.json", "limits.txt", "mission.yaml",
+                        "motion_guard.yaml", "versions.json", "mavlink-router.conf"})
     EXPECT_FALSE(is_secret_name(n)) << n;
   TmpDir src, dst;
   fs::create_directories(src.path + "/rpp");

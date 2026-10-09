@@ -212,12 +212,17 @@ bool is_secret_name(const std::string& filename) {
     return n.size() >= s.size() && n.compare(n.size() - s.size(), s.size(), s) == 0;
   };
   if (ends(".env") || ends(".key") || ends(".pem") || ends(".token") || ends(".p12") ||
-      ends(".pfx"))
+      ends(".pfx") || ends(".jks"))
     return true;
   for (const char* w : {"secret", "token", "password", "passwd", "credential", "psk"}) {
     if (n.find(w) != std::string::npos) return true;
   }
-  return n.rfind("ntrip", 0) == 0;
+  // ntrip*: caster credentials; auth*: the backend's token store (auth.json) and authorized_keys;
+  // id_*: ssh private keys
+  for (const char* prefix : {"ntrip", "auth", "id_rsa", "id_ecdsa", "id_ed25519", "id_dsa"}) {
+    if (n.rfind(prefix, 0) == 0) return true;
+  }
+  return false;
 }
 
 CopyResult copy_config_tree(const std::string& src, const std::string& dst) {
