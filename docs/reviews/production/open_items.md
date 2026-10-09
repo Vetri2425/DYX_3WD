@@ -44,7 +44,7 @@ Review baseline: DYX_3WD `master` `252778e` (firmware `8279fa4be3`).
 | 6 | `dyx3_gnss_rtk` | 2026-10-09 | 2026-10-09 | 0 / 0 / 1 / 3 | open |
 | 7 | `dyx3_spray` | 2026-10-09 | 2026-10-09 | 0 / 2 / 2 / 1 | open |
 | 8 | `dyx3_geometry` | 2026-10-09 | 2026-10-09 | 0 / 0 / 1 / 5 | open |
-| 9 | `dyx3_bringup` + systemd (RT, CPU, restart) | — | — | — | prompt issued |
+| 9 | `dyx3_bringup` + systemd (RT, CPU, restart) | 2026-10-09 | 2026-10-09 | 0 / 0 / 3 / 2 | open |
 | 10 | `dyx3_system_gateway` | — | — | — | prompt issued |
 | 11 | `dyx3_recorder` | — | — | — | prompt issued |
 | 12 | backend | — | — | — | prompt issued |
@@ -641,6 +641,76 @@ Facts used:
 
 ---
 
+## 9. `dyx3_bringup` + systemd
+
+Reviewer verdict: REQUEST CHANGES (0 CRITICAL, 1 HIGH, 3 MEDIUM, 1 LOW new; plus verdicts on the known items).
+After verification: **0 CRITICAL, 0 HIGH, 3 MEDIUM, 2 LOW**.
+
+Corrections and confirmations:
+- **Correction to the review prompt:** an XRCE agent or mavlink-router crash does **not** restart the control
+  graph. `start-platform.sh:29-47` supervises each child in its own loop, restarting after 2 s, and the platform
+  unit stays active.
+  - Only an explicit `systemctl restart/stop dyx3-platform` propagates to `dyx3-ros` through `Requires=`.
+  - During an agent restart (≥ 2 s + session recovery), the setpoints to PX4 stop, and PX4 offboard loss applies
+    (X-008).
+- **Confirmed: RPP and the guard run every thread at FIFO 80 on CPU 4**, including the DDS receive and event
+  threads, because the `taskset` + `chrt` prefix is process-wide. `px4_link` and the agent are SCHED_OTHER and
+  not pinned. No CPU isolation, IRQ affinity or RT bandwidth setting is owned by the repository.
+- **No node YAML exists anywhere in the repository.** `config/{mission,motion_guard,rpp,spray,recorder,rtk}/`
+  hold only `.gitkeep`, and the installer installs none. Every rover runs every node on its built-in, versioned
+  defaults. This re-rates BR-001.
+
+Verdicts on known items (recorded; not new):
+| Item | Verdict |
+|---|---|
+| RPP-005 / MG-002 | Structure confirmed (shared core, equal FIFO, DDS threads inherit FIFO 80); severity awaits the Jetson measurement |
+| X-006 / PXL-003 | Confirmed configuration; timing unmeasured |
+| X-005 | Open: `After=` is activation order, not agent or PX4 readiness |
+| X-010 / MG-003 | Confirmed: concurrent shutdown; `px4_link` has no final STOP. Highest-priority stop fix |
+| PC-2 | Not implemented |
+| PC-7a / PC-7b | Not enforced / bench test needed |
+| X-009 | **Satisfied at code level** (the mission FSM starts IDLE; RUNNING needs a new Start + RPP ack); fault-injection test still absent |
+
+| ID | Severity | Status | Area | Where | Item |
+|---|---|---|---|---|---|
+| BR-001 | MEDIUM (~~HIGH~~) | ACCEPTED ↓ (owner decision) | Config | `control_graph.launch.py:41-50,63`; `config/*/.gitkeep` | A missing `<stem>.yaml` silently means built-in defaults, and **no YAML exists at all**, so the code defaults are the production configuration |
+| BR-002 | MEDIUM | ACCEPTED | Restart | `dyx3-ros.service:7-13` | No progress watchdog: a live but stalled node keeps the unit "active" forever |
+| BR-004 | MEDIUM | ACCEPTED | Tests | `test_control_graph_launch.py:10-40` | Launch tests check topology only; no failure-propagation, restart or stop-while-moving tests |
+| BR-003 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Observability | `start-platform.sh:29-47` | An agent crash loop leaves `dyx3-platform` "active"; child restarts are not counted |
+| BR-005 | LOW | ACCEPTED | Security | `deployment/systemd/*.service` | Every unit shares the user `dyx3` and writes to all of `/var/lib/dyx3`, `/var/log/dyx3`, `/run/dyx3` |
+
+### BR-001 — MEDIUM — the configuration policy (owner decision)
+- Today the defaults compiled into each node, generated from `docs/tuning/parameter_registry.md`, **are** the
+  configuration. That is reproducible (rover == repo), so a missing file is the normal state, not a lost
+  approval.
+- The risk appears as soon as per-rover YAML is introduced, e.g. per-rover limits or a measured valve delay
+  (SP-003), nozzle offset or antenna geometry: then a missing or wrong-key file silently falls back.
+- **Owner decision:**
+  - (a) keep "defaults = config" for V1 and document it;
+  - (b) introduce per-rover YAML: installed by the installer, `DYX3_REQUIRE_CONFIG=1` in `dyx3-ros.service`, and
+    a post-start check of effective parameters against the manifest. (b) is needed once SP-003 / PC-5 produce
+    per-rover values.
+
+### BR-002 — MEDIUM — no progress watchdog
+- Confirmed. `on_exit=Shutdown` catches exits, not stalls. A `SIGSTOP`ped or hung `px4_link` leaves the unit
+  active. PX4 offboard loss stops the rover; the Jetson does not recover or report it.
+- **Fix:** an application heartbeat (the writer, guard and RPP progress) → `sd_notify WATCHDOG=1` from a small
+  supervisor; `Type=notify` + `WatchdogSec` set from measurements.
+- **Test:** SIGSTOP each control process → declared unhealthy within the deadline → the graph restarts → the
+  mission is IDLE.
+
+### BR-004 — MEDIUM — no runtime fault-injection tests
+- Bench-only suite on the Jetson (wheels up): kill each of the 6 nodes; agent restart keeps the graph; platform
+  restart propagation; stop while moving; missing or invalid YAML (once BR-001 (b)); a stalled process.
+
+### BR-003 / BR-005 — LOW
+- **BR-003.** Safety is unaffected: the session loss shows in `px4_link/status`, so the guard STOPs and the
+  tablet sees "PX4 link unhealthy". Log and count child restarts, and expose the agent's health in
+  `dyx3-health`.
+- **BR-005.** Least-privilege hardening after an inventory of write paths. No motion impact.
+
+---
+
 ## Cross-part items (raised by the part reviews; owned by later parts)
 
 | ID | Owner part | Item | Status |
@@ -657,3 +727,5 @@ Facts used:
 | X-010 | `px4_link` | On a graph stop every node gets SIGINT together, so only the last hop can guarantee a final STOP: `px4_link` must publish STOP and stop the offboard heartbeat cleanly before exiting | ACCEPTED: confirmed `main.cpp:15-17`; part of PXL-001 |
 | X-011 | PX4 parameter baseline | `COM_RCL_EXCEPT` = 4 (bit 2 = Offboard, firmware `commander_params.c:633-645`): **RC loss triggers no failsafe in OFFBOARD**. Carried from the prototype. The RC kill switch still works while the RC link is alive. Owner decision: keep it (the tablet link and the guard govern autonomy) or clear bit 2 so RC loss stops autonomous runs. Test it with production-readiness #5 | open, owner decision (found in PXL verification) |
 | X-012 | PX4 firmware / hardware / spray | **Physical valve close when every Jetson path is lost.** The controller and the watchdog both reach the valve only through `px4_link` → DDS → PX4. Prove on hardware what the valve output does on disarm, on offboard loss (1.0 s → disarm) and on loss of actuator commands; measure it with the valve driver. Owner decision (open since 2026-10-07): (a) a secondary UART path, (b) a PX4 companion-loss failsafe that disarms, plus a disarmed-output level that is valve-closed | **open: blocks fail-closed sign-off** |
+| X-013 | installer / health | `installer/lib/health_check.sh` (deep graph check, about line 166) lists `/dyx3_mission /motion_guard /px4_link /spray /system_gateway`, **without `/rpp`**. Missing nodes and absent `/fmu` topics are WARN, not FAIL | open, installer review (from BR review) |
+| X-014 | architecture / network | `docs/architecture/...V1.md` §4.3 says "no router, no site LAN", but the rover now runs a site LAN (`network.env`, 192.168.3.0/24) next to the hotspot by owner decision of 2026-10-09. Amend §4.3 and the operator-link reasoning (§4.3.1) | open, doc (from BR review) |
