@@ -16,8 +16,14 @@ MotionCommand command_from_tick(const TickOutput& o, bool profile_segment, doubl
     case CmdKind::Track: {
       const double speed = std::hypot(o.v_n, o.v_e);
       if (profile_segment) {
+        // XR-RPP-007: the heading of any non-zero vector is its own bearing. The core freezes its
+        // heading memory below 1 cm/s (no North snap at a stop), so for the first ticks of a ramp
+        // after a pivot track_heading_ned is still the PREVIOUS leg's heading: commanding it
+        // turns the rover back off the exit leg it has just pivoted to. Only an exactly zero
+        // vector keeps the frozen heading.
+        const double heading = speed > 1e-9 ? std::atan2(o.v_e, o.v_n) : o.track_heading_ned;
         c = segment_rate_command ? make_track_rate(speed, o.yaw_rate, max_yaw_rate)
-                                 : make_track_heading(speed, o.track_heading_ned);
+                                 : make_track_heading(speed, heading);
       } else {
         c = make_track_rate(speed, o.yaw_rate, max_yaw_rate);
       }

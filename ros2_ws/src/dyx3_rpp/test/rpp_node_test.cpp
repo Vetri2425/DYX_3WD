@@ -167,26 +167,38 @@ struct Rig {
   // A kinematic stand-in for the vehicle: it does exactly what the last MotionSetpoint asks
   // (heading follows the heading target at once, speed follows the signed body speed, a pivot turns
   // in place at the commanded rate).
+  // With accel_limit > 0 the speed moves toward the commanded speed at that rate (m/s^2) instead
+  // of at once: a body-axis brake then decelerates through zero the way a vehicle does, instead of
+  // reversing at the brake speed on the next tick.
   bool auto_drive{false};
+  double accel_limit{0.0};
+  void track_speed(double target, double dt) {
+    if (accel_limit <= 0.0) {
+      speed = target;
+      return;
+    }
+    const double dv = accel_limit * dt;
+    speed = std::max(speed - dv, std::min(speed + dv, target));
+  }
   void integrate(double dt) {
     if (!auto_drive || motion.empty()) return;
     const MotionSetpoint& m = motion.back();
     switch (m.mode) {
       case MotionSetpoint::MODE_TRACK_HEADING:
         heading = m.yaw_setpoint;
-        speed = m.speed_body_x;
+        track_speed(m.speed_body_x, dt);
         break;
       case MotionSetpoint::MODE_TRACK_RATE:
       case MotionSetpoint::MODE_CREEP:
         heading += m.yaw_rate_setpoint * dt;
-        speed = m.speed_body_x;
+        track_speed(m.speed_body_x, dt);
         break;
       case MotionSetpoint::MODE_PIVOT:
         heading += m.yaw_rate_setpoint * dt;
-        speed = 0.0;
+        track_speed(0.0, dt);
         break;
       default:
-        speed = 0.0;
+        track_speed(0.0, dt);
     }
     north += speed * std::cos(heading) * dt;
     east += speed * std::sin(heading) * dt;
@@ -504,4 +516,55 @@ TEST(RppNode, AnEndpointWithALateralMissCompletesWithoutRocking) {
   EXPECT_NEAR(r.north, 6.0, 0.02 + 1e-3);
   EXPECT_NEAR(r.east, 0.0, 0.02 + 1e-3);
   EXPECT_EQ(r.motion.back().mode, MotionSetpoint::MODE_STOP);
+}
+
+// ---- an L-shaped mission ----------------------------------------------------------------------
+namespace {
+
+// 3 m North, then a 90 degree right turn and 2 m East (TRANSIT lead and tail, MARK between): the
+// conditioner splits it at the corner into two runs with a hard boundary.
+std::vector<ArtPoint> l_path() {
+  return {{0.0, 0.0, 0}, {1.0, 0.0, 1}, {2.0, 0.0, 1}, {3.0, 0.0, 1},
+          {3.0, 1.0, 1}, {3.0, 2.0, 1}, {3.0, 3.0, 0}};
+}
+
+// Distance from (n, e) to the L polyline.
+double dist_to_l(double n, double e) {
+  const double d1 = std::hypot(std::max(0.0, n - 3.0) + std::min(0.0, n), e);  // leg 1 (e = 0)
+  const double d2 = std::hypot(n - 3.0, std::max(0.0, e - 3.0) + std::min(0.0, e));  // leg 2
+  return std::min(d1, d2);
+}
+
+double wrap(double a) { return std::atan2(std::sin(a), std::cos(a)); }
+
+}  // namespace
+
+// XR-RPP-007: after the corner pivot the ramp starts below 1 cm/s, where the core keeps its
+// previous heading memory (the first leg). The published heading must be the exit leg, or the
+// rover is turned back off the leg it has just pivoted to (with the stand-in it never left the
+// corner).
+TEST(RppNode, TheFirstHeadingAfterACornerPivotIsTheExitLeg) {
+  Rig r({}, true, l_path());
+  r.auto_drive = true;
+  r.accel_limit = 0.5;
+  r.mission_state = MissionState::STATE_RUNNING;
+  bool corner_pivot = false, checked = false;
+  for (int i = 0; i < 1500 && !checked; ++i) {
+    r.cycle();
+    const MotionSetpoint& m = r.motion.back();
+    if (m.mode == MotionSetpoint::MODE_PIVOT && r.north > 2.5) corner_pivot = true;
+    if (corner_pivot && r.status.state == RppStatus::STATE_TRACKING &&
+        m.mode == MotionSetpoint::MODE_TRACK_HEADING) {
+      EXPECT_LT(std::fabs(wrap(m.yaw_setpoint - M_PI / 2.0)), 3.0 * M_PI / 180.0)
+          << "first TRACK_HEADING after the pivot: yaw " << m.yaw_setpoint << " speed "
+          << m.speed_body_x;
+      checked = true;
+    }
+  }
+  EXPECT_TRUE(corner_pivot);
+  ASSERT_TRUE(checked) << "no tracking after the corner pivot";
+  // and the ramp leaves the corner along the exit leg
+  for (int i = 0; i < 100; ++i) r.cycle();
+  EXPECT_GT(r.east, 0.1);
+  EXPECT_LT(std::fabs(wrap(r.heading - M_PI / 2.0)), 3.0 * M_PI / 180.0);
 }

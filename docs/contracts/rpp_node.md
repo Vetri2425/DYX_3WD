@@ -24,7 +24,8 @@
   memory (`pause()`: speed memory, hard-curvature latch, stop confirmation) so a resume ramps from rest. A mission is never resumed by RPP on its own: that is `dyx3_mission`'s FSM.
 * **RUNNING:** one `RppCore::tick` per control tick, mapped by `command_from_tick` (`rpp_command.hpp`):
   STOP -> `MODE_STOP`; TRACK -> `TRACK_RATE` (smooth run: speed = |v|, rate = feed-forward + feedback) or `TRACK_HEADING` (segment run: speed = |v|,
-  heading = the aim bearing, frozen below 1 cm/s so a stop never snaps to North); BRAKE -> signed speed along the nose with the nose held (reverse is a
+  heading = the bearing of the core's velocity vector whenever it is non-zero, the core's frozen heading only for an exactly zero vector, so a stop never
+  snaps to North and the slow first ticks after a pivot never carry the previous leg's heading (XR-RPP-007)); BRAKE -> signed speed along the nose with the nose held (reverse is a
   negative speed, never a spot turn; permission is the guard's); PIVOT -> `MODE_PIVOT` with `omega = clamp(1.5 * err, +/- max_yaw_rate_body)`; CREEP -> `MODE_CREEP` along the nose, or `TRACK_HEADING` toward the precise stop's correction vector when it is more than 2° off the nose axis
   (forward ahead of the beam, reverse behind it; XR-RPP-001, `rpp_motion_output.md` section 2).
   Any non-finite value becomes the canonical STOP.
@@ -51,10 +52,11 @@ shared with motion_guard, comes from the launch prefix in `dyx3_bringup/launch/c
 
 ## 5. Proof
 
-`rpp_node_test` (in-process, private DDS domain, injected monotonic clock, a kinematic stand-in vehicle): 12 cases — startup validation; load by id and
+`rpp_node_test` (in-process, private DDS domain, injected monotonic clock, a kinematic stand-in vehicle): 13 cases — startup validation; load by id and
 acknowledgement; a missing artifact; a **whole mission driven to COMPLETE** (the line is marked where the planner says, stops on the final point within 6 cm);
 stale pose; RTK drop with the reason; pause and resume from rest; entry pivot; parameter classes; the unported feature; every emitted mode contract-conforming; a final approach 3 cm to the side of the endpoint completes within 10 s
-with at most 2 speed reversals (XR-RPP-001). `rpp_core_test` pins core behaviour the prototype did not have (the precise-stop timeout brake).
+with at most 2 speed reversals (XR-RPP-001); on an L-shaped mission the first heading after the corner pivot is the exit leg (XR-RPP-007).
+The stand-in can limit its acceleration (`accel_limit`) so a body-axis brake decelerates through zero as a vehicle does. `rpp_core_test` pins core behaviour the prototype did not have (the precise-stop timeout brake).
 The stand-in vehicle does exactly what the last command asks: it proves the wiring and the state machine, not the controller on a rover.
 
 ## 6. Open questions for the human

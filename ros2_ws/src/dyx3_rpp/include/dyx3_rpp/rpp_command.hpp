@@ -7,8 +7,9 @@
 //   STOP   -> MODE_STOP
 //   TRACK  -> smooth run: MODE_TRACK_RATE  (speed = |v|, yaw rate = the feed-forward + feedback
 //   rate)
-//             segment run: MODE_TRACK_HEADING by default, or MODE_TRACK_RATE when the explicit
-//             GATE 4 selector requests rate control
+//             segment run: MODE_TRACK_HEADING by default (heading = bearing of the velocity
+//             vector whenever it is non-zero, else the core's frozen heading; XR-RPP-007), or
+//             MODE_TRACK_RATE when the explicit GATE 4 selector requests rate control
 //   BRAKE  -> signed speed along the nose with the nose heading held (never a 180 degree spot turn)
 //   PIVOT  -> MODE_PIVOT, rate toward the exit heading
 //   CREEP  -> MODE_CREEP, signed speed along the nose, no turn, while the core's velocity vector

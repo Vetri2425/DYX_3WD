@@ -371,14 +371,14 @@ TEST(RppCommand, EveryKindMapsToAContractConformingCommand) {
   EXPECT_EQ(command_from_tick(o, true, 0.45).mode, MotionMode::Stop);
   // TRACK: segment -> heading; smooth -> rate
   o.cmd = CmdKind::Track;
-  o.v_n = 0.3;
-  o.v_e = 0.0;
+  o.v_n = 0.3 * std::cos(0.1);  // the core's vector and its heading agree above 1 cm/s
+  o.v_e = 0.3 * std::sin(0.1);
   o.track_heading_ned = 0.1;
   o.yaw_rate = 0.2;
   MotionCommand c = command_from_tick(o, true, 0.45);
   EXPECT_EQ(c.mode, MotionMode::TrackHeading);
   EXPECT_FLOAT_EQ(c.speed_body_x, 0.3F);
-  EXPECT_FLOAT_EQ(c.yaw_setpoint, 0.1F);
+  EXPECT_NEAR(c.yaw_setpoint, 0.1F, 1e-6);
   EXPECT_TRUE(std::isnan(c.yaw_rate_setpoint));
   // B3: the explicit segment rate selector uses the rate RppCore already computed from
   // segment_yaw_rate_gain * theta_e.
@@ -391,8 +391,17 @@ TEST(RppCommand, EveryKindMapsToAContractConformingCommand) {
   EXPECT_EQ(c.mode, MotionMode::TrackRate);
   EXPECT_FLOAT_EQ(c.yaw_rate_setpoint, 0.2F);
   EXPECT_TRUE(std::isnan(c.yaw_setpoint));
+  // XR-RPP-007: a slow but non-zero vector (below the core's 1 cm/s heading-memory threshold)
+  // is commanded along its own bearing, not the stale frozen heading
+  o.v_n = 0.004 * std::cos(1.5);
+  o.v_e = 0.004 * std::sin(1.5);
+  o.track_heading_ned = 0.0;  // the previous leg's heading, still in the core's memory
+  c = command_from_tick(o, true, 0.45);
+  EXPECT_EQ(c.mode, MotionMode::TrackHeading);
+  EXPECT_NEAR(c.yaw_setpoint, 1.5, 1e-5);
   // zero speed keeps the frozen heading: no snap to North
   o.v_n = 0.0;
+  o.v_e = 0.0;
   o.track_heading_ned = 1.2;
   c = command_from_tick(o, true, 0.45);
   EXPECT_EQ(c.mode, MotionMode::TrackHeading);
