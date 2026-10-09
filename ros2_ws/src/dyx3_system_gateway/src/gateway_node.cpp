@@ -346,22 +346,33 @@ void GatewayNode::call(const Inbound& in, double now_s, typename rclcpp::Client<
   fill(*req);
   const uint64_t token = next_token_++;
   pending_[token] =
-      Pending{in.client, in.pr.has_id, in.pr.id, c.kind, now_s + service_timeout_s_, what};
-  cli->async_send_request(req, [this, token, render](typename rclcpp::Client<Srv>::SharedFuture f) {
-    const auto it = pending_.find(token);
-    if (it == pending_.end()) return;  // already answered with "timeout"
-    const Pending p = it->second;
-    pending_.erase(it);
-    const auto res = f.get();
-    bool accepted = false;
-    const std::string data = render(*res, &accepted);
-    if (p.kind == CmdKind::Estop) {
-      RCLCPP_WARN(get_logger(), "%s from client %d: %s by motion_guard %s", p.what.c_str(),
-                  p.client, accepted ? "ACCEPTED" : "REJECTED", data.c_str());
-    }
-    reply(p.client, p.has_id, p.id, accepted, accepted ? "ok" : "rejected",
-          accepted ? "" : "refused by the target (see data.reason_code)", data);
-  });
+      Pending{in.client, in.pr.has_id, in.pr.id, c.kind, now_s + service_timeout_s_, what, {}};
+  const auto sent = cli->async_send_request(
+      req, [this, token, render](typename rclcpp::Client<Srv>::SharedFuture f) {
+        const auto it = pending_.find(token);
+        if (it == pending_.end()) return;  // already answered with "timeout"
+        const Pending p = it->second;
+        pending_.erase(it);
+        const auto res = f.get();
+        bool accepted = false;
+        const std::string data = render(*res, &accepted);
+        if (p.kind == CmdKind::Estop) {
+          RCLCPP_WARN(get_logger(), "%s from client %d: %s by motion_guard %s", p.what.c_str(),
+                      p.client, accepted ? "ACCEPTED" : "REJECTED", data.c_str());
+        }
+        reply(p.client, p.has_id, p.id, accepted, accepted ? "ok" : "rejected",
+              accepted ? "" : "refused by the target (see data.reason_code)", data);
+      });
+  const int64_t request_id = sent.request_id;
+  pending_[token].forget = [cli, request_id]() { cli->remove_pending_request(request_id); };
+}
+
+size_t GatewayNode::prune_rclcpp_pending_requests() {
+  return cli_start_->prune_pending_requests() + cli_abort_->prune_pending_requests() +
+         cli_pause_->prune_pending_requests() + cli_resume_->prune_pending_requests() +
+         cli_skip_->prune_pending_requests() + cli_estop_->prune_pending_requests() +
+         cli_arm_->prune_pending_requests() + cli_offboard_->prune_pending_requests() +
+         cli_spray_->prune_pending_requests();
 }
 
 void GatewayNode::process(const Inbound& in, double now_s) {
@@ -512,6 +523,9 @@ void GatewayNode::step(double now_s) {
       const Pending p = it->second;
       RCLCPP_WARN(get_logger(), "%s from client %d: no answer within %.1f s, reported as timeout",
                   p.what.c_str(), p.client, service_timeout_s_);
+      // A late answer is no longer wanted: drop it from the client as well, or every request that
+      // is never answered stays in rclcpp's pending map for the life of the node.
+      if (p.forget) p.forget();
       reply(p.client, p.has_id, p.id, false, "timeout",
             std::string(to_string(p.kind)) + " was not answered in time");
       it = pending_.erase(it);

@@ -87,12 +87,18 @@ struct Rig {
           rs->accepted = true;
           rs->skipped_point_index = 5;
         });
+    // Deferred response: with estop_answers false the guard receives the request but never
+    // answers (a hung guard), which is different from the service being absent.
     svc_keep[5] = world->create_service<srv::SetEmergencyStop>(
         "/dyx3/motion_guard/set_emergency_stop",
-        [this](const std::shared_ptr<srv::SetEmergencyStop::Request> rq,
-               std::shared_ptr<srv::SetEmergencyStop::Response> rs) {
+        [this](std::shared_ptr<rclcpp::Service<srv::SetEmergencyStop>> svc,
+               std::shared_ptr<rmw_request_id_t> hdr,
+               const std::shared_ptr<srv::SetEmergencyStop::Request> rq) {
           calls.push_back(std::string("estop:") + (rq->asserted ? "1" : "0") + ":" + rq->source);
-          rs->accepted = estop_accepts;
+          if (!estop_answers) return;
+          srv::SetEmergencyStop::Response rs;
+          rs.accepted = estop_accepts;
+          svc->send_response(*hdr, rs);
         });
     svc_keep[6] = world->create_service<srv::ArmDisarm>(
         "/dyx3/px4_link/arm", [this](const std::shared_ptr<srv::ArmDisarm::Request> rq,
@@ -241,6 +247,23 @@ TEST(GatewayNode, AnEstopThatCannotBeDeliveredIsNeverReportedAsAccepted) {
   v = r.ask(c, R"({"v":1,"id":22,"cmd":"estop","args":{"asserted":true,"source":"tablet"}})", 22);
   EXPECT_FALSE(ok_of(v));
   EXPECT_TRUE(code_of(v) == "service_unavailable" || code_of(v) == "timeout") << code_of(v);
+}
+
+TEST(GatewayNode, TimedOutRequestsAreRemovedFromTheRosClient) {
+  Rig r;
+  Sock c(r.sock);
+  ASSERT_TRUE(c.ok());
+  r.estop_answers = false;  // the guard's service exists but never answers
+  for (int i = 0; i < 3; ++i) {
+    const auto v = r.ask(c,
+                         R"({"v":1,"id":)" + std::to_string(70 + i) +
+                             R"(,"cmd":"estop","args":{"asserted":true,"source":"tablet"}})",
+                         70 + i, 3.0);
+    EXPECT_EQ(code_of(v), "timeout");
+  }
+  EXPECT_EQ(r.calls.size(), 3U);  // every request reached the guard
+  // nothing the gateway already answered with "timeout" is left pending inside rclcpp
+  EXPECT_EQ(r.gw->prune_rclcpp_pending_requests(), 0U);
 }
 
 TEST(GatewayNode, EstopIsProcessedBeforeOtherQueuedCommands) {

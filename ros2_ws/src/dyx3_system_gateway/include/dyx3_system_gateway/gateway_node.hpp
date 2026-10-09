@@ -59,6 +59,9 @@ public:
   // Order in which the most recent non-empty batch of client commands was processed: E-stops,
   // then the one (coalesced) heartbeat, then the rest in arrival order.
   const std::vector<CmdKind>& last_batch() const { return last_batch_; }
+  // Test hook: removes every request still pending inside the rclcpp clients and returns how many
+  // there were. Requests the gateway already answered (reply or timeout) must not be among them.
+  size_t prune_rclcpp_pending_requests();
 
 private:
   struct Inbound {
@@ -71,7 +74,8 @@ private:
     int64_t id;
     CmdKind kind;
     double deadline_s;
-    std::string what;  // audit label, e.g. "E-stop assert (source=tablet)"
+    std::string what;              // audit label, e.g. "E-stop assert (source=tablet)"
+    std::function<void()> forget;  // drops the request from the rclcpp client (GW-007)
   };
   void declare_params();
   void on_line(int client, const std::string& line);

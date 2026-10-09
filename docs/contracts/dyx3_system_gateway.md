@@ -40,7 +40,7 @@ wait between two batches; beyond that every command except `estop` (heartbeats i
 
 Unknown `cmd`, unknown `args` keys, missing or wrongly typed fields -> `invalid_command`. The gateway adds **no** policy of its own (no "arm only if ..."): the safety/mission authorities
 downstream decide and their `accepted` / `reason_code` are returned verbatim in `data` (`{"accepted":..,"reason_code":..}` plus service-specific fields). If the target service is not
-available the reply is `service_unavailable` at once; if it does not answer within `service_timeout_s` (2.0, DERIVED) the reply is `timeout` — **an E-stop request that could not be delivered is reported as failed, never as accepted.**
+available the reply is `service_unavailable` at once; if it does not answer within `service_timeout_s` (2.0, DERIVED) the reply is `timeout` and the request is also removed from the ROS client, so a late answer is discarded and never-answered requests do not accumulate (GW-007) — **an E-stop request that could not be delivered is reported as failed, never as accepted.**
 
 ## 3. Telemetry snapshot
 
