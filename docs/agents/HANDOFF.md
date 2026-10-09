@@ -1958,3 +1958,61 @@ What still blocks production grade, by risk. Proven so far:
 
 Installer 148/0 (new: site LAN address + gateway, FCU-subnet refusal, hotspot/LAN clash refusal). Backend pytest
 574 passed, ruff clean.
+
+## 2026-10-09 (18:00) — Claude — session state: network, app discovery, RoboClaw; what is next
+
+**Rover 01 now (release `cacc1ba` + hand-applied, repo-matching config):**
+- **Network:**
+  - Site router "DYX_4WD_PROTOTYPE" (`192.168.3.1`, the 4WD prototype's router) is cabled into the rover
+    Ethernet.
+  - Jetson `192.168.3.150/24` on `enP8p1s0` (next to FCU `10.41.10.1`), default route via the router at metric
+    200 (`/etc/dyx3/network.env`).
+  - Hotspot `DYX_3WD` at `192.168.2.100/24`, 5 GHz ch 149, still enabled as a backup path (`hotspot.env`).
+  - The 4G dongle is not present at the moment.
+  - QGC: TCP `192.168.3.150:5760`. ssh: `flash@192.168.3.150` (or `192.168.2.100` on the hotspot).
+- **RoboClaw:** `config/vehicle/roboclaw/Roboclaw_01_DYX_3WD.cfg` (serial timeout 0.5 s, battery 21.4–28.4 V,
+  QPPS 168000). FCU `RBCLW_QPPS_MAX` 151200 (saved).
+  - This closes production-readiness items 1–3 (16:20 list).
+  - Still to check: a fully charged pack must stay below 28.4 V.
+- **RC:** `RC3_TRIM 1560`, `RC1_REV -1`, mapping throttle 3 / roll 1 / pitch 2 / yaw 4; wheels-up verified
+  (log8).
+- **Tablet token:** `tablet-1` (operator) exists in `auth.json`. Delete the handover file
+  `/home/flash/tablet-1.token` once the app has it.
+- **RTK:** the base station for our mountpoint is **offline** (not in the caster source table, no RTCM). External;
+  the rover recovers by itself once it streams again.
+
+**App (`yasarbaiiiii-blip/Three_Wheel_v2`, branch `claude/app-token-memory` from `App-Polish` `d693060`):**
+- `2e75125`: token remembered (per rover); Disconnect keeps it; "Forget saved token". Also fixed the auth-runtime
+  effect that dropped the Bearer token after connect (NTRIP profiles got 401).
+- `6de4066`:
+  - UDP beacon discovery on 5003 (`src/services/roverBeacon.ts`, react-native-udp 4.1.7 as in the 4WD app);
+  - tokens keyed by `rover_id`, so one token works on the router and the hotspot;
+  - auto-connect to the last rover with a saved token; a manual Disconnect pauses it;
+  - **all hardcoded IPs removed**, and the HTTP fallback sweeps only the tablet's own subnet (it used to sweep 8
+    fixed subnets, ~2000 probes every 5 s).
+- Checks: tsc clean; vitest 1020/1021 (the only failure, roadMarkingCsvPath "never closes into a polygon ring",
+  also fails on App-Polish).
+- Signed APKs (DYX release key, cert 5eaacb96…):
+  - `App-Releases/2e75125-app-polish-token-memory/`;
+  - the `6de4066` build is installed on tablet `R5GYA14C7CY` (adb). Tablet `R5GL1016QFB` has the `2e75125`
+    build.
+  - Note: a second app, `com.dyxgcs.mobile` (older DYX-GCS), is also on the tablets.
+- **Not merged** into `App-Polish`/`main`, by owner rule, until verified on the tablet. Afterwards reconcile
+  `App-Polish` vs `main` (the same safety code under different SHAs) so a single authoritative branch remains.
+
+**Backend (DYX_3WD master):**
+- `f3bdf8a`: `/api/ping` returns `rover_id`/`rover_name`; per-network discovery beacon (contract 1a).
+- `cc3c82a`: `network.env` site LAN, and the hotspot may not share the LAN subnet.
+- `bd49374`: RoboClaw cfg + `RBCLW_QPPS_MAX`.
+- CI was running at 18:00.
+
+**Next, in order:**
+1. When CI is green, upgrade rover 01 to the latest master release (this starts the beacon). Then check the app
+   lists the rover by name at `192.168.3.150`, paste the token once, and check auto-connect on both the router
+   and the hotspot.
+2. Merge the app branch after the tablet test; reconcile `App-Polish`/`main`; archive the APK with its
+   build_info.
+3. Production-readiness list (16:20), remaining items: #4 (fail-to-zero after `dyx3-ros` dies), #5 (RC, link
+   and E-stop stops), #6 (RoboClaw fault visibility, needs a firmware decision), #8–10 (outdoors: UM982 heading,
+   RTK FIXED, Mission-mode turn bug), #12 (soak), #14 (fq_codel), #17–21.
+4. Future: QR pairing for tablet tokens.
