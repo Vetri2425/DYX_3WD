@@ -41,8 +41,15 @@ struct ArtifactResult {
 /// Parse artifact bytes. When `expected_sha256` is non-empty the bytes must hash to it.
 ArtifactResult parse_artifact(const std::string& bytes, const std::string& expected_sha256 = "");
 
-/// Read `<dir>/<sha256>.dyx3path` and verify it hashes to its own name.
-ArtifactResult load_artifact(const std::string& dir, const std::string& sha256);
+/// Largest artifact file the reader will load. A planned path is a few MB at most (the backend caps
+/// a mission at 50k points; its upload limit is 20 MiB); this bound keeps a wrong or hostile file
+/// from stalling the Start service callback in read + SHA-256 or exhausting memory. DERIVED.
+constexpr std::uintmax_t kMaxArtifactBytes = 64ULL * 1024 * 1024;
+
+/// Read `<dir>/<sha256>.dyx3path` and verify it hashes to its own name. The file must be a regular
+/// file of at most `max_bytes`; the size is checked BEFORE anything is read.
+ArtifactResult load_artifact(const std::string& dir, const std::string& sha256,
+                             std::uintmax_t max_bytes = kMaxArtifactBytes);
 
 struct ConditionedRunArtifact {
   struct Point {

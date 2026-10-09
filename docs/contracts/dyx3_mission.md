@@ -66,7 +66,7 @@ comes within `point_capture_radius_m` (default **0.10 m = prototype `point_hold_
 (Journal reports geometry; the *dwell/handshake* logic is RPP/spray's — `point_hold*` parameters are not mission parameters.)
 
 ## 7. Path artifact
-C++ reader + SHA-256 (`path_artifact.cpp`, `sha256.cpp`); must refuse everything the Python `decode()` refuses (`docs/contracts/path_artifact.md`), and compute the same hash. A mismatch is
+C++ reader + SHA-256 (`path_artifact.cpp`, `sha256.cpp`); must refuse everything the Python `decode()` refuses (`docs/contracts/path_artifact.md`), and compute the same hash. The file must be a regular file of at most `kMaxArtifactBytes` (64 MiB, DERIVED: a planned path is a few MB, the backend caps a mission at 50k points and uploads at 20 MiB); the size is checked before the file is read so the Start service callback cannot be stalled by a huge or special file. A mismatch is
 `ERROR(PATH_ERROR)` and the start response is `REASON_INVALID_ARTIFACT`.
 
 ## 8. Parameters (classes per spec §9)

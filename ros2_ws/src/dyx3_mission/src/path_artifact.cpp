@@ -4,6 +4,7 @@
 #include <cerrno>
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iterator>
@@ -119,11 +120,30 @@ ArtifactResult parse_artifact(const std::string& bytes, const std::string& expec
   return r;
 }
 
-ArtifactResult load_artifact(const std::string& dir, const std::string& sha256) {
+ArtifactResult load_artifact(const std::string& dir, const std::string& sha256,
+                             std::uintmax_t max_bytes) {
   if (!is_lower_hex64(sha256)) return fail("sha256 must be 64 lowercase hex characters");
-  std::ifstream in(dir + "/" + sha256 + ".dyx3path", std::ios::binary);
+  const std::string path = dir + "/" + sha256 + ".dyx3path";
+  // Size first, before any read: this runs inside the Start service callback.
+  std::error_code ec;
+  if (!std::filesystem::is_regular_file(path, ec) || ec) {
+    return fail("artifact " + sha256 + " is not a readable regular file in " + dir);
+  }
+  const std::uintmax_t size = std::filesystem::file_size(path, ec);
+  if (ec) return fail("cannot stat artifact " + sha256 + " in " + dir);
+  if (size > max_bytes) {
+    return fail("artifact " + sha256 + " is too large: " + std::to_string(size) + " bytes, limit " +
+                std::to_string(max_bytes));
+  }
+  std::ifstream in(path, std::ios::binary);
   if (!in) return fail("cannot open artifact " + sha256 + " in " + dir);
-  const std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  // Read at most the size we checked: a file that grows meanwhile cannot get past the limit (the
+  // truncated bytes then fail the hash check).
+  std::string bytes(static_cast<std::size_t>(size), '\0');
+  in.read(bytes.data(), static_cast<std::streamsize>(size));
+  if (static_cast<std::uintmax_t>(in.gcount()) != size) {
+    return fail("short read of artifact " + sha256 + " in " + dir);
+  }
   return parse_artifact(bytes, sha256);
 }
 

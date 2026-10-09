@@ -5,8 +5,11 @@
 #include "dyx3_mission/path_artifact.hpp"
 
 #include <gtest/gtest.h>
+#include <sys/stat.h>
 
+#include <chrono>
 #include <cmath>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <sstream>
@@ -129,6 +132,62 @@ TEST(PathArtifact, RefusesWhatTheWriterWouldRefuse) {
   EXPECT_FALSE(parse_artifact(m).ok);
   // hash mismatch
   EXPECT_FALSE(parse_artifact(good, std::string(64, '0')).ok);
+}
+
+// MS-004: the size is checked before the file is read.
+class ArtifactSizeCap : public ::testing::Test {
+protected:
+  void SetUp() override {
+    dir_ = std::filesystem::temp_directory_path() /
+           ("dyx3_artifact_cap_" +
+            std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(dir_);
+  }
+  void TearDown() override {
+    std::error_code ec;
+    std::filesystem::permissions(dir_ / file(), std::filesystem::perms::owner_all, ec);
+    std::filesystem::remove_all(dir_, ec);
+  }
+  static std::string sha() { return std::string(64, 'c'); }
+  static std::string file() { return sha() + ".dyx3path"; }
+  std::filesystem::path dir_;
+};
+
+TEST_F(ArtifactSizeCap, OversizedFileIsRefusedWithoutBeingRead) {
+  // A sparse file just over the default limit, with all permissions removed: opening or reading
+  // it would fail with a different error, so "too large" proves the size was checked first.
+  const auto p = dir_ / file();
+  {
+    std::ofstream(p, std::ios::binary) << "x";
+  }
+  std::filesystem::resize_file(p, kMaxArtifactBytes + 1);
+  chmod(p.c_str(), 0);
+  const auto res = load_artifact(dir_.string(), sha());
+  EXPECT_FALSE(res.ok);
+  EXPECT_NE(res.error.find("too large"), std::string::npos) << res.error;
+  EXPECT_NE(res.error.find(std::to_string(kMaxArtifactBytes + 1)), std::string::npos) << res.error;
+}
+
+TEST_F(ArtifactSizeCap, TheLimitIsInclusiveAndConfigurable) {
+  const auto rows = manifest();
+  const std::string bytes = read(rows[0].sha);
+  const auto p = dir_ / (rows[0].sha + ".dyx3path");
+  {
+    std::ofstream(p, std::ios::binary) << bytes;
+  }
+  EXPECT_TRUE(load_artifact(dir_.string(), rows[0].sha, bytes.size()).ok);
+  const auto res = load_artifact(dir_.string(), rows[0].sha, bytes.size() - 1);
+  EXPECT_FALSE(res.ok);
+  EXPECT_NE(res.error.find("too large"), std::string::npos) << res.error;
+  EXPECT_TRUE(load_artifact(dir_.string(), rows[0].sha).ok);  // default limit is far above a path
+  EXPECT_GE(kMaxArtifactBytes, 20ULL * 1024 * 1024);          // not below the backend upload limit
+}
+
+TEST_F(ArtifactSizeCap, NonRegularFilesAreRefused) {
+  std::filesystem::create_directory(dir_ / file());  // a directory with the artifact's name
+  const auto res = load_artifact(dir_.string(), sha());
+  EXPECT_FALSE(res.ok);
+  EXPECT_NE(res.error.find("regular file"), std::string::npos) << res.error;
 }
 
 TEST(ConditionedArtifact, DeterministicHashSourceIdentityAndStrictFailures) {
