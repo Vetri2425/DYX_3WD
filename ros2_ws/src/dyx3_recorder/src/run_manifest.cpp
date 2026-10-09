@@ -121,6 +121,7 @@ std::string summary_json(const RunSummary& s) {
       .integer("bag_bytes", static_cast<int64_t>(s.bag_bytes))
       .integer("ulog_bytes", static_cast<int64_t>(s.ulog_bytes))
       .integer("ulog_gaps", static_cast<int64_t>(s.ulog_gaps))
+      .str("ulog_header", s.ulog_header)
       .boolean("bag_healthy_throughout", s.bag_healthy_throughout)
       .boolean("provenance_complete", s.provenance_complete)
       .boolean("timesync_valid_end", s.timesync_valid_end)

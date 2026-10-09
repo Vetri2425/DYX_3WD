@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
@@ -13,6 +14,7 @@
 #include "dyx3_recorder/run_lifecycle.hpp"
 #include "dyx3_recorder/run_manifest.hpp"
 #include "dyx3_recorder/ulog_capture.hpp"
+#include "ulog_synth.hpp"
 
 using namespace dyx3_recorder;
 namespace fs = std::filesystem;
@@ -145,30 +147,125 @@ TEST(ParamSnapshot, SortedByteIdenticalAndUnreachableIsExplicit) {
   EXPECT_NE(unavailable_json("fcu", "why").find("\"status\": \"unavailable\""), std::string::npos);
 }
 
-TEST(UlogCapture, ReassemblesInOrderAndRecordsGapsDuplicatesAndWrap) {
+TEST(UlogCapture, RecordsGapsDuplicatesOutOfOrderAndWrap) {
+  using namespace ulog_synth;
   TmpDir d;
   UlogCapture u;
-  ASSERT_TRUE(u.open(d.path + "/s.ulg"));
-  const uint8_t a[3] = {1, 2, 3}, b[2] = {4, 5}, c[1] = {6}, e[2] = {7, 8};
-  EXPECT_TRUE(u.on_chunk(65534, 0, a, 3));
-  EXPECT_TRUE(u.on_chunk(65535, 0, b, 2));
-  EXPECT_FALSE(u.on_chunk(65535, 0, b, 2));  // duplicate
-  EXPECT_TRUE(u.on_chunk(0, 0, c, 1));       // wrap, no gap
+  const Stream st = make_stream(60, 65534);  // the sequence wraps after the second chunk
+  ASSERT_GE(st.chunks.size(), 10U);
+  ASSERT_TRUE(u.open(d.path + "/s.ulg"));  // open before the stream: written as it arrives
+  auto feed = [&](size_t i) {
+    const auto& c = st.chunks[i];
+    return u.on_chunk(c.seq, c.first_message_offset, c.data.data(), c.data.size());
+  };
+  EXPECT_TRUE(feed(0));
+  EXPECT_TRUE(feed(1));
+  EXPECT_FALSE(feed(1));  // duplicate
+  EXPECT_TRUE(feed(2));   // 65535 -> 0: wrap, no gap
   EXPECT_TRUE(u.gaps().empty());
-  EXPECT_TRUE(u.on_chunk(3, 7, e, 2));  // 1 and 2 missing
+  feed(3);
+  const uint64_t at_gap = u.bytes();
+  feed(6);  // 4 and 5 lost
   ASSERT_EQ(u.gaps().size(), 1U);
-  EXPECT_EQ(u.gaps()[0].expected_seq, 1);
-  EXPECT_EQ(u.gaps()[0].got_seq, 3);
+  EXPECT_EQ(u.gaps()[0].expected_seq, st.chunks[4].seq);
+  EXPECT_EQ(u.gaps()[0].got_seq, st.chunks[6].seq);
   EXPECT_EQ(u.gaps()[0].missing_chunks, 2U);
-  EXPECT_EQ(u.gaps()[0].file_offset, 6U);
-  EXPECT_EQ(u.gaps()[0].resync_offset, 7);
-  EXPECT_FALSE(u.on_chunk(2, 0, c, 1));  // late chunk from before the gap: out of order, dropped
+  EXPECT_EQ(u.gaps()[0].file_offset, at_gap);
+  EXPECT_EQ(u.gaps()[0].resync_offset, st.chunks[6].first_message_offset);
+  EXPECT_FALSE(feed(5));  // late chunk from before the gap: out of order, dropped
+  for (size_t i = 7; i < st.chunks.size(); ++i) feed(i);
   EXPECT_EQ(u.duplicates(), 1U);
   EXPECT_EQ(u.out_of_order(), 1U);
-  EXPECT_EQ(u.bytes(), 8U);
-  u.close();
-  EXPECT_EQ(slurp(d.path + "/s.ulg"), std::string("\x01\x02\x03\x04\x05\x06\x07\x08", 8));
+  EXPECT_TRUE(u.close());
+  EXPECT_EQ(u.header_status(), "complete");
+  std::string types, why;
+  EXPECT_TRUE(parse(slurp(d.path + "/s.ulg"), true, &types, &why)) << why;  // whole messages only
+  EXPECT_EQ(types.substr(0, 5), "BFIPA");
+  EXPECT_LT(std::count(types.begin(), types.end(), 'D'), 59);  // the lost chunks' messages
   EXPECT_NE(u.gaps_json().find("\"missing_chunks\": 2"), std::string::npos);
+  EXPECT_NE(u.gaps_json().find("\"header\": \"complete\""), std::string::npos);
+}
+
+// REC-005: the FCU streams the header once; a run opened mid-stream must still start with it.
+TEST(UlogCapture, EveryRunFileStartsWithTheCachedHeaderAndWholeMessages) {
+  using namespace ulog_synth;
+  TmpDir d;
+  UlogCapture u;
+  const Stream st = make_stream(200);
+  const size_t n = st.chunks.size();
+  size_t i = 0;
+  for (; i < n / 3; ++i)  // no run open: the capture only caches
+    u.on_chunk(st.chunks[i].seq, st.chunks[i].first_message_offset, st.chunks[i].data.data(),
+               st.chunks[i].data.size());
+  EXPECT_EQ(u.header_state(), UlogCapture::HeaderState::kComplete);
+  for (int run = 0; run < 2; ++run) {
+    const std::string path = d.path + "/run" + std::to_string(run) + ".ulg";
+    ASSERT_TRUE(u.open(path));
+    const size_t stop = run == 0 ? 2 * n / 3 : n;
+    for (; i < stop; ++i)
+      u.on_chunk(st.chunks[i].seq, st.chunks[i].first_message_offset, st.chunks[i].data.data(),
+                 st.chunks[i].data.size());
+    EXPECT_TRUE(u.close());
+    EXPECT_EQ(u.header_status(), "complete");
+    const std::string f = slurp(path);
+    EXPECT_EQ(f.compare(0, 16, std::string(st.bytes.begin(), st.bytes.begin() + 16)), 0);
+    std::string types, why;
+    ASSERT_TRUE(parse(f, true, &types, &why)) << run << ": " << why;
+    // definitions, then the subscription (cached), then data; the mid-stream parameter change is
+    // carried into the second run's header
+    EXPECT_EQ(types.substr(0, 5), "BFIPA") << types.substr(0, 12);
+    if (run == 1) EXPECT_EQ(types.substr(5, 1), "P");
+    EXPECT_GT(std::count(types.begin(), types.end(), 'D'), 30);
+    EXPECT_EQ(u.gaps().size(), 0U);
+  }
+}
+
+TEST(UlogCapture, NoHeaderSeenIsMarkedAndTheFileStillHoldsWholeMessages) {
+  using namespace ulog_synth;
+  TmpDir d;
+  UlogCapture u;
+  const Stream st = make_stream(100);
+  ASSERT_TRUE(u.open(d.path + "/s.ulg"));  // the recorder started after the stream did
+  for (size_t i = 3; i < st.chunks.size(); ++i)
+    u.on_chunk(st.chunks[i].seq, st.chunks[i].first_message_offset, st.chunks[i].data.data(),
+               st.chunks[i].data.size());
+  EXPECT_TRUE(u.close());
+  EXPECT_NE(u.header_status().find("incomplete: no header"), std::string::npos);
+  EXPECT_FALSE(u.run_header_complete());
+  std::string types, why;
+  EXPECT_TRUE(parse(slurp(d.path + "/s.ulg"), false, &types, &why)) << why;  // starts at a boundary
+  EXPECT_GT(types.size(), 50U);
+}
+
+TEST(UlogCapture, AGapInTheDefinitionsLosesTheHeaderAndAStreamRestartRollsTheFile) {
+  using namespace ulog_synth;
+  TmpDir d;
+  UlogCapture u;
+  const Stream st = make_stream(40);
+  const auto small = chunk(st.bytes, st.starts, 0, 32);  // the definitions span several chunks
+  ASSERT_GT(st.data_start, 64U);
+  u.on_chunk(small[0].seq, small[0].first_message_offset, small[0].data.data(), small[0].data.size());
+  for (size_t i = 2; i < small.size() / 2; ++i)  // chunk 1 (inside the definitions) lost
+    u.on_chunk(small[i].seq, small[i].first_message_offset, small[i].data.data(),
+               small[i].data.size());
+  EXPECT_EQ(u.header_state(), UlogCapture::HeaderState::kLost);
+  // a run opened now cannot have a header
+  ASSERT_TRUE(u.open(d.path + "/stream.ulg"));
+  EXPECT_NE(u.header_status().find("header lost"), std::string::npos);
+  for (size_t i = small.size() / 2; i < small.size(); ++i)
+    u.on_chunk(small[i].seq, small[i].first_message_offset, small[i].data.data(),
+               small[i].data.size());
+  // the FCU stream restarts (px4_link re-sent LOGGING_START): a file that has data rolls
+  const Stream again = make_stream(40);
+  for (const auto& c : again.chunks)
+    u.on_chunk(c.seq, c.first_message_offset, c.data.data(), c.data.size());
+  EXPECT_EQ(u.header_state(), UlogCapture::HeaderState::kComplete);
+  EXPECT_TRUE(u.close());
+  EXPECT_EQ(u.segments(), 2U);
+  std::string types, why;
+  EXPECT_TRUE(parse(slurp(d.path + "/stream_2.ulg"), true, &types, &why)) << why;
+  EXPECT_EQ(types.substr(0, 5), "BFIPA");
+  EXPECT_TRUE(u.gaps().empty());  // a restart at sequence 0 is not a gap
 }
 
 TEST(UlogCapture, ClosedCaptureWritesNothing) {

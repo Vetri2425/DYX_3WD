@@ -57,6 +57,7 @@ struct RunSummary {
   uint64_t bag_bytes{0};
   uint64_t ulog_bytes{0};
   uint64_t ulog_gaps{0};
+  std::string ulog_header;  // "complete" or "incomplete: ..." (UlogCapture::header_status)
   bool bag_healthy_throughout{true};
   bool provenance_complete{true};
   bool timesync_valid_end{false};

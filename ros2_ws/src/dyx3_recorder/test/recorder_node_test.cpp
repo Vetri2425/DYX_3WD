@@ -1,6 +1,7 @@
 // In-process tests of the recorder node: a fake world publishes MissionState and ULog chunks, the
 // bag command is a fake child, the clock is injected, DDS runs on a private domain.
 #include "dyx3_recorder/recorder_node.hpp"
+#include "ulog_synth.hpp"
 
 #include <gtest/gtest.h>
 #include <unistd.h>
@@ -128,9 +129,10 @@ struct Rig {
     p_mission->publish(m);
     pump(150);
   }
-  void chunk(uint16_t seq, std::vector<uint8_t> d) {
+  void chunk(uint16_t seq, std::vector<uint8_t> d, uint8_t first_message_offset = 0) {
     UlogChunk c;
     c.msg_sequence = seq;
+    c.first_message_offset = first_message_offset;
     c.data = std::move(d);
     p_ulog->publish(c);
     pump(30);
@@ -154,6 +156,11 @@ struct Rig {
 
 TEST(RecorderNode, FullRunProducesAnEvidenceDirectoryWithProvenance) {
   Rig r;
+  // The FCU stream starts at link-up, long before any run: header + definitions + subscriptions.
+  const ulog_synth::Stream st = ulog_synth::make_stream(40);
+  size_t ci = 0;
+  for (; ci < st.chunks.size() / 2; ++ci)
+    r.chunk(st.chunks[ci].seq, st.chunks[ci].data, st.chunks[ci].first_message_offset);
   EXPECT_EQ(r.run_count(), 0U);
   r.mission(MissionState::STATE_READY);  // pre-roll: the run and the bag open at READY
   ASSERT_EQ(r.run_count(), 1U);
@@ -176,14 +183,15 @@ TEST(RecorderNode, FullRunProducesAnEvidenceDirectoryWithProvenance) {
   EXPECT_NE(slurp(d + "/params_fcu.json").find("unavailable"), std::string::npos);
   EXPECT_NE(slurp(d + "/params_ros.json").find("max_xtrack_error_m"), std::string::npos);
 
-  r.chunk(10, {1, 2, 3});
-  r.chunk(11, {4, 5});
-  r.chunk(14, {6});  // 12 and 13 lost
+  for (; ci < st.chunks.size(); ++ci) {
+    if (ci == st.chunks.size() / 2 + 2 || ci == st.chunks.size() / 2 + 3) continue;  // 2 lost
+    r.chunk(st.chunks[ci].seq, st.chunks[ci].data, st.chunks[ci].first_message_offset);
+  }
   r.rec->step(r.now += 1.0);
   r.pump(100);
   EXPECT_EQ(r.status.state, RecorderStatus::STATE_RECORDING);
   EXPECT_TRUE(r.status.bag_healthy);
-  EXPECT_GT(r.status.bytes_written, 6U);
+  EXPECT_GT(r.status.bytes_written, 200U);
   EXPECT_GT(r.status.free_bytes, 0U);
 
   r.now += 30.0;
@@ -194,13 +202,20 @@ TEST(RecorderNode, FullRunProducesAnEvidenceDirectoryWithProvenance) {
   EXPECT_NE(summary.find("\"final_state\": \"COMPLETED\""), std::string::npos);
   EXPECT_NE(summary.find("\"running_utc\": \"2026-09-05T14:15:34Z\""), std::string::npos);
   EXPECT_NE(summary.find("\"preroll_s\": 4"), std::string::npos);
-  EXPECT_NE(summary.find("\"ulog_bytes\": 6"), std::string::npos);
   EXPECT_NE(summary.find("\"ulog_gaps\": 1"), std::string::npos);
+  EXPECT_NE(summary.find("\"ulog_header\": \"complete\""), std::string::npos);
   EXPECT_NE(summary.find("\"bag_healthy_throughout\": true"), std::string::npos);
   EXPECT_NE(summary.find("\"duration_s\": 35"), std::string::npos);
   EXPECT_NE(summary.find("\"end_utc\": \"2026-09-05T14:16:04Z\""), std::string::npos);
   EXPECT_NE(slurp(d + "/ulog/gaps.json").find("\"missing_chunks\": 2"), std::string::npos);
-  EXPECT_EQ(slurp(d + "/ulog/stream.ulg"), std::string("\x01\x02\x03\x04\x05\x06", 6));
+  {
+    // the run opened mid-stream, yet its file starts with the ULog header and decodes
+    const std::string ulg = slurp(d + "/ulog/stream.ulg");
+    std::string types, why;
+    EXPECT_TRUE(ulog_synth::parse(ulg, true, &types, &why)) << why;
+    EXPECT_EQ(types.substr(0, 5), "BFIPA");
+    EXPECT_NE(summary.find("\"ulog_bytes\": " + std::to_string(ulg.size())), std::string::npos);
+  }
   EXPECT_NE(slurp(d + "/params_ros.json").find("\"end\": {"),
             std::string::npos);  // end snapshot recorded
   EXPECT_TRUE(fs::exists(d + "/rosbag2/data"));
@@ -309,6 +324,21 @@ TEST(RecorderNode, AnUnstartableBagIsAnErrorButTheRunDirectoryAndMissionAreUntou
   EXPECT_TRUE(fs::exists(d + "/manifest.json"));  // the provenance that could be written, was
   r.mission(MissionState::STATE_COMPLETED);
   EXPECT_NE(slurp(d + "/summary.json").find("bag process could not be started"), std::string::npos);
+}
+
+TEST(RecorderNode, AULogStreamThatStartedBeforeTheRecorderIsMarkedIncomplete) {
+  Rig r;
+  const ulog_synth::Stream st = ulog_synth::make_stream(30);
+  r.mission(MissionState::STATE_READY);
+  const std::string d = r.run_dir();
+  for (size_t i = 2; i < st.chunks.size(); ++i)  // the head was sent before the recorder started
+    r.chunk(st.chunks[i].seq, st.chunks[i].data, st.chunks[i].first_message_offset);
+  r.mission(MissionState::STATE_RUNNING);
+  r.mission(MissionState::STATE_COMPLETED);
+  const std::string summary = slurp(d + "/summary.json");
+  EXPECT_NE(summary.find("\"ulog_header\": \"incomplete: no header"), std::string::npos);
+  EXPECT_NE(summary.find("cannot be decoded alone"), std::string::npos);
+  EXPECT_NE(slurp(d + "/ulog/gaps.json").find("incomplete: no header"), std::string::npos);
 }
 
 TEST(RecorderNode, MissingVersionsFileIsRecordedAsMissingNotSilentlyAbsent) {

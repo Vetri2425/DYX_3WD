@@ -9,7 +9,7 @@ recorder only observes; it publishes `RecorderStatus` and nothing else, runs as 
 ```text
 <runs_dir>/<YYYY-MM-DD_HHMMSS>_mission_<id:04d>[_run<n>]/     (UTC, from the wall clock at start)
 ├── rosbag2/                  # produced by a supervised `ros2 bag record` child (sqlite3 WAL, a split every 300 s, closed splits zstd-compressed: *.db3.zstd)
-├── ulog/stream.ulg          # reassembled from /dyx3/ulog_chunk; ulog/gaps.json lists every missing chunk range
+├── ulog/stream.ulg          # cached ULog header + whole messages from /dyx3/ulog_chunk (section 3); ulog/gaps.json: header status + every missing chunk range
 ├── manifest.json             # run id, mission id/index, path artifact sha256, vehicle, operator, host, start time, FCU timesync at start
 ├── versions.json             # copy of the installer's versions file (stack SHA, px4_msgs SHA, firmware SHA, overlay hash) or {"status":"unavailable",...}
 ├── params_ros.json           # every ROS parameter of the configured nodes: "start" and "end"
@@ -37,9 +37,18 @@ Directory names are collision-free (a numeric suffix is appended if the name exi
 
 ## 3. ULog reassembly
 
-`UlogChunk.msg_sequence` is a wrapping `uint16`. Bytes are appended in order; a chunk equal to the previous sequence is a duplicate (dropped, counted); a jump of `n` missing
-chunks (modulo 65536) is a **gap** (recorded with sequence numbers, the byte offset in the file at which it occurred, and `first_message_offset` of the chunk after it, which is where
-a reader can resync); a "negative" jump (> 32768) is out-of-order (dropped, counted). The streamed log is best-effort: MAVLink FTP / the SD card stays the recovery path (§5.4.3).
+`UlogChunk.msg_sequence` is a wrapping `uint16`. A chunk equal to the previous sequence is a duplicate (dropped, counted); a jump of `n` missing
+chunks (modulo 65536) is a **gap** (recorded with sequence numbers, the byte offset in the file at which it occurred, and `first_message_offset` of the chunk after it); a "negative" jump (> 32768) is out-of-order (dropped, counted).
+
+**Header cache (REC-005).** The FCU sends LOGGING_START's stream once (at link-up), and only its beginning carries the 16-byte ULog file header and
+the definitions section (`B`, `F`, `I`, `M`, `P`, `Q` messages, up to the first message of another type), followed by the subscriptions (`A`). A run
+opens mid-stream, so the recorder is fed **every** chunk, run or not, and keeps in memory (bounded, 8 MiB): the header + definitions, every `A` not
+removed by an `R`, and the latest data-section `P` change per parameter. A chunk with the ULog magic at `first_message_offset` 0 starts a stream
+(the cache is reset). Every run's `ulog/stream.ulg` begins with that cache and then continues with **whole messages only** (the stream is cut at the
+3-byte message headers; after a gap the parser resynchronises at the next chunk's `first_message_offset`), so it is a decodable ULog file. If the
+stream restarts during a run (px4_link re-sent LOGGING_START), the run rolls to `stream_2.ulg` with the new header. If no stream start was seen
+since the recorder started (or a gap hit the definitions), the file has no header: `summary.json` `ulog_header` and `gaps.json` `header` say
+`incomplete: no header …` / `incomplete: header lost …` with a note. The streamed log is best-effort: MAVLink FTP / the SD card stays the recovery path (§5.4.3).
 
 ## 4. Provenance sources (and what is NOT available)
 

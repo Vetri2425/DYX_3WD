@@ -167,9 +167,10 @@ RecorderNode::RecorderNode(const rclcpp::NodeOptions& options, ClockFn clock, Wa
   sub_ulog_ = create_subscription<dyx3_interfaces::msg::UlogChunk>(
       "/dyx3/ulog_chunk", rclcpp::QoS(64).reliable(),
       [this](dyx3_interfaces::msg::UlogChunk::ConstSharedPtr m) {
+        // Every chunk, run or not: the ULog header and subscriptions are cached from the start of
+        // the stream so each run's file can begin with them (REC-005).
         std::lock_guard<std::mutex> lk(mu_);
-        if (ulog_.is_open())
-          ulog_.on_chunk(m->msg_sequence, m->first_message_offset, m->data.data(), m->data.size());
+        ulog_.on_chunk(m->msg_sequence, m->first_message_offset, m->data.data(), m->data.size());
       },
       uo);
   sub_link_ = create_subscription<dyx3_interfaces::msg::Px4LinkStatus>(
@@ -498,12 +499,18 @@ void RecorderNode::stop_run(const std::string& final_state) {
     summary.bag_bytes = bag_.bytes();
     summary.ulog_bytes = ulog_.bytes();
     summary.ulog_gaps = ulog_.gaps().size();
+    summary.ulog_header = ulog_.header_status();
+    if (!ulog_.run_header_complete())
+      summary.notes.push_back("ulog " + ulog_.header_status() + ": stream.ulg cannot be decoded alone");
+    if (ulog_.segments() > 1)
+      summary.notes.push_back("ulog stream restarted during the run: " +
+                              std::to_string(ulog_.segments()) + " files");
+    ulog_.close();
     if (ulog_.write_failed()) {
       summary.notes.push_back("ulog write failed");
       summary.provenance_complete = false;
     }
     write_file_atomic(dir + "/ulog/gaps.json", ulog_.gaps_json());
-    ulog_.close();
   }
   const auto nodes = collect_params();
   for (const auto& n : nodes) {
