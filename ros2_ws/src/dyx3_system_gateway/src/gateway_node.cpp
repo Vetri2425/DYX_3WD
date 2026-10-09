@@ -19,6 +19,13 @@ void require(bool ok, const std::string& what) {
 }
 const rclcpp::QoS kRel1 = rclcpp::QoS(1).reliable();
 
+// Processing order inside one batch: E-stop strictly first, then the heartbeat, then the rest.
+int batch_rank(CmdKind k) {
+  if (k == CmdKind::Estop) return 0;
+  if (k == CmdKind::Heartbeat) return 1;
+  return 2;
+}
+
 // A telemetry callback with a concrete (non-generic) signature, as rclcpp's traits require.
 template <class Msg, class F>
 std::function<void(typename Msg::ConstSharedPtr)> upd(TelemetrySnapshot& snap, const ClockFn& clock,
@@ -275,7 +282,10 @@ void GatewayNode::on_line(int client, const std::string& line) {
     return;
   }
   std::lock_guard<std::mutex> lk(inbox_mu_);
-  if (inbox_.size() >= 256 && !is_priority(pr.cmd.kind)) {
+  // Only an E-stop may exceed the cap (it is never refused); heartbeats count against it like
+  // every other command, so a heartbeat flood cannot grow the inbox without bound (GW-005).
+  if (inbox_.size() >= kInboxCap && pr.cmd.kind != CmdKind::Estop) {
+    ++inbox_refused_;
     JsonLine r;
     r.integer("v", kProtocolVersion);
     if (pr.has_id) r.integer("id", pr.id);
@@ -298,20 +308,36 @@ void GatewayNode::reply(int client, bool has_id, int64_t id, bool ok, const std:
   ipc_.send(client, r.dump());
 }
 
+OperatorLinkState GatewayNode::link_state(double now_s) const {
+  return link_.state(now_s, ipc_.connected(link_.client()));
+}
+
 std::string GatewayNode::gateway_json(double now_s) const {
-  const OperatorLinkState s = link_.state(now_s, ipc_.clients());
+  const OperatorLinkState s = link_state(now_s);
   return JsonLine()
       .integer("schema", kProtocolVersion)
       .boolean("operator_alive", s.alive)
       .num("operator_age_s", s.age_s)
       .integer("clients", ipc_.clients())
+      .raw("ipc", JsonLine()
+                      .integer("dropped_slow", static_cast<int64_t>(ipc_.dropped_slow()))
+                      .integer("overflows", static_cast<int64_t>(ipc_.overflows()))
+                      .integer("rejected_full", static_cast<int64_t>(ipc_.rejected_full()))
+                      .dump())
       .dump();
 }
 
 template <typename Srv, typename Fill, typename Render>
 void GatewayNode::call(const Inbound& in, double now_s, typename rclcpp::Client<Srv>::SharedPtr cli,
                        const char* name, Fill fill, Render render) {
+  const Command& c = in.pr.cmd;
+  const std::string what =
+      c.kind == CmdKind::Estop
+          ? std::string("E-stop ") + (c.flag ? "assert" : "clear") + " (source=" + c.source + ")"
+          : std::string(to_string(c.kind));
   if (!cli->service_is_ready()) {
+    RCLCPP_WARN(get_logger(), "%s from client %d: %s is not available", what.c_str(), in.client,
+                name);
     reply(in.client, in.pr.has_id, in.pr.id, false, "service_unavailable",
           std::string(name) + " is not available");
     return;
@@ -320,18 +346,33 @@ void GatewayNode::call(const Inbound& in, double now_s, typename rclcpp::Client<
   fill(*req);
   const uint64_t token = next_token_++;
   pending_[token] =
-      Pending{in.client, in.pr.has_id, in.pr.id, in.pr.cmd.kind, now_s + service_timeout_s_};
-  cli->async_send_request(req, [this, token, render](typename rclcpp::Client<Srv>::SharedFuture f) {
-    const auto it = pending_.find(token);
-    if (it == pending_.end()) return;  // already answered with "timeout"
-    const Pending p = it->second;
-    pending_.erase(it);
-    const auto res = f.get();
-    bool accepted = false;
-    const std::string data = render(*res, &accepted);
-    reply(p.client, p.has_id, p.id, accepted, accepted ? "ok" : "rejected",
-          accepted ? "" : "refused by the target (see data.reason_code)", data);
-  });
+      Pending{in.client, in.pr.has_id, in.pr.id, c.kind, now_s + service_timeout_s_, what, {}};
+  const auto sent = cli->async_send_request(
+      req, [this, token, render](typename rclcpp::Client<Srv>::SharedFuture f) {
+        const auto it = pending_.find(token);
+        if (it == pending_.end()) return;  // already answered with "timeout"
+        const Pending p = it->second;
+        pending_.erase(it);
+        const auto res = f.get();
+        bool accepted = false;
+        const std::string data = render(*res, &accepted);
+        if (p.kind == CmdKind::Estop) {
+          RCLCPP_WARN(get_logger(), "%s from client %d: %s by motion_guard %s", p.what.c_str(),
+                      p.client, accepted ? "ACCEPTED" : "REJECTED", data.c_str());
+        }
+        reply(p.client, p.has_id, p.id, accepted, accepted ? "ok" : "rejected",
+              accepted ? "" : "refused by the target (see data.reason_code)", data);
+      });
+  const int64_t request_id = sent.request_id;
+  pending_[token].forget = [cli, request_id]() { cli->remove_pending_request(request_id); };
+}
+
+size_t GatewayNode::prune_rclcpp_pending_requests() {
+  return cli_start_->prune_pending_requests() + cli_abort_->prune_pending_requests() +
+         cli_pause_->prune_pending_requests() + cli_resume_->prune_pending_requests() +
+         cli_skip_->prune_pending_requests() + cli_estop_->prune_pending_requests() +
+         cli_arm_->prune_pending_requests() + cli_offboard_->prune_pending_requests() +
+         cli_spray_->prune_pending_requests();
 }
 
 void GatewayNode::process(const Inbound& in, double now_s) {
@@ -342,7 +383,7 @@ void GatewayNode::process(const Inbound& in, double now_s) {
   };
   switch (c.kind) {
     case CmdKind::Heartbeat:
-      link_.note_heartbeat(now_s);
+      link_.note_heartbeat(now_s, in.client);
       reply(in.client, in.pr.has_id, in.pr.id, true, "ok", "");
       return;
     case CmdKind::GetSnapshot:
@@ -381,6 +422,8 @@ void GatewayNode::process(const Inbound& in, double now_s) {
           });
       return;
     case CmdKind::Estop:
+      RCLCPP_WARN(get_logger(), "E-stop %s requested (source=%s, client %d)",
+                  c.flag ? "assert" : "clear", c.source.c_str(), in.client);
       call<dyx3_interfaces::srv::SetEmergencyStop>(
           in, now_s, cli_estop_, "motion_guard emergency-stop service",
           [&](auto& rq) {
@@ -409,12 +452,45 @@ void GatewayNode::process(const Inbound& in, double now_s) {
 }
 
 void GatewayNode::publish_operator_link(double now_s) {
-  const OperatorLinkState s = link_.state(now_s, ipc_.clients());
+  const OperatorLinkState s = link_state(now_s);
+  if (s.alive != link_alive_) {
+    link_alive_ = s.alive;
+    if (s.alive) {
+      RCLCPP_WARN(get_logger(), "operator link ALIVE (heartbeat from client %d)", link_.client());
+    } else {
+      const bool conn = ipc_.connected(link_.client());
+      RCLCPP_WARN(get_logger(), "operator link LOST: %s (client %d, heartbeat age %.2f s)",
+                  conn ? "heartbeat timeout" : "heartbeating connection closed", link_.client(),
+                  s.age_s);
+    }
+  }
   dyx3_interfaces::msg::OperatorLinkStatus m;
   m.stamp = get_clock()->now();
   m.alive = s.alive;
   m.age_s = static_cast<float>(s.age_s);
   pub_link_->publish(m);
+}
+
+void GatewayNode::audit_ipc(double now_s) {
+  // Checked at most once a second, so a reconnect loop cannot flood the log.
+  if (now_s - last_audit_s_ < 1.0) return;
+  last_audit_s_ = now_s;
+  const int cl = ipc_.clients();
+  if (cl != audit_clients_) {
+    RCLCPP_INFO(get_logger(), "IPC clients: %d (was %d)", cl, audit_clients_);
+    audit_clients_ = cl;
+  }
+  const auto delta = [this](uint64_t now_v, uint64_t* seen, const char* what) {
+    if (now_v == *seen) return;
+    RCLCPP_WARN(get_logger(), "IPC: %llu %s (total %llu)",
+                static_cast<unsigned long long>(now_v - *seen), what,
+                static_cast<unsigned long long>(now_v));
+    *seen = now_v;
+  };
+  delta(ipc_.dropped_slow(), &audit_dropped_, "client(s) dropped as slow consumers");
+  delta(ipc_.overflows(), &audit_overflows_, "client(s) closed for an oversize line");
+  delta(ipc_.rejected_full(), &audit_rejected_, "connection(s) refused at max_clients");
+  delta(inbox_refused_.load(), &audit_busy_, "command(s) refused as busy (inbox full)");
 }
 
 void GatewayNode::step(double now_s) {
@@ -423,18 +499,33 @@ void GatewayNode::step(double now_s) {
     std::lock_guard<std::mutex> lk(inbox_mu_);
     work.swap(inbox_);
   }
-  // E-stop and heartbeats first, then everything else in arrival order.
-  std::stable_partition(work.begin(), work.end(),
-                        [](const Inbound& i) { return is_priority(i.pr.cmd.kind); });
-  if (!work.empty()) {
-    last_batch_.clear();
-    for (const auto& in : work) last_batch_.push_back(in.pr.cmd.kind);
+  // E-stops first, then heartbeats, then everything else, each in arrival order (GW-005).
+  std::stable_sort(work.begin(), work.end(), [](const Inbound& a, const Inbound& b) {
+    return batch_rank(a.pr.cmd.kind) < batch_rank(b.pr.cmd.kind);
+  });
+  // Heartbeats are coalesced: only the most recent one in the batch refreshes (and binds) the
+  // operator link; the earlier ones are acknowledged without further effect.
+  const Inbound* last_hb = nullptr;
+  for (const auto& in : work)
+    if (in.pr.cmd.kind == CmdKind::Heartbeat) last_hb = &in;
+  if (!work.empty()) last_batch_.clear();
+  for (const auto& in : work) {
+    if (in.pr.cmd.kind == CmdKind::Heartbeat && &in != last_hb) {
+      reply(in.client, in.pr.has_id, in.pr.id, true, "ok", "");
+      continue;
+    }
+    last_batch_.push_back(in.pr.cmd.kind);
+    process(in, now_s);
   }
-  for (const auto& in : work) process(in, now_s);
 
   for (auto it = pending_.begin(); it != pending_.end();) {
     if (now_s >= it->second.deadline_s) {
       const Pending p = it->second;
+      RCLCPP_WARN(get_logger(), "%s from client %d: no answer within %.1f s, reported as timeout",
+                  p.what.c_str(), p.client, service_timeout_s_);
+      // A late answer is no longer wanted: drop it from the client as well, or every request that
+      // is never answered stays in rclcpp's pending map for the life of the node.
+      if (p.forget) p.forget();
       reply(p.client, p.has_id, p.id, false, "timeout",
             std::string(to_string(p.kind)) + " was not answered in time");
       it = pending_.erase(it);
@@ -442,6 +533,7 @@ void GatewayNode::step(double now_s) {
       ++it;
     }
   }
+  audit_ipc(now_s);
   if (now_s - last_link_pub_s_ >= 1.0 / operator_link_hz_ - 1e-9) {
     last_link_pub_s_ = now_s;
     publish_operator_link(now_s);

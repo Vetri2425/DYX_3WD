@@ -1,7 +1,7 @@
 // json — strict JSON parser and small writers for the gateway protocol. Pure C++ (std only).
 // Parser: RFC 8259 subset. Rejects duplicate object keys, trailing garbage, control characters in
-// strings, leading zeros, NaN/Infinity, nesting deeper than kMaxDepth. Numbers keep an "is integer"
-// flag so ids stay exact.
+// strings, invalid UTF-8 in strings, leading zeros, NaN/Infinity, nesting deeper than kMaxDepth.
+// Numbers keep an "is integer" flag so ids stay exact.
 #pragma once
 
 #include <cstdint>
@@ -33,6 +33,10 @@ struct JsonValue {
 
 bool parse_json(const std::string& text, JsonValue* out, std::string* err);
 
+// Strict UTF-8 (RFC 3629): no overlong forms, no surrogates, nothing above U+10FFFF.
+bool is_valid_utf8(const std::string& s);
+// JSON string escaping; an invalid UTF-8 byte is written as \ufffd, so output is always valid
+// UTF-8.
 std::string json_escape(const std::string& s);
 inline std::string json_str(const std::string& s) { return "\"" + json_escape(s) + "\""; }
 std::string json_num(double v);  // 9 significant digits (float32 fields); non-finite -> null

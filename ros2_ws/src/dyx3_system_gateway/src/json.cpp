@@ -7,6 +7,38 @@
 namespace dyx3_gateway {
 namespace {
 
+// Length of the well-formed UTF-8 sequence starting at s[i] (RFC 3629: shortest form only, no
+// surrogates, nothing above U+10FFFF), or 0 if the bytes there are not one.
+size_t utf8_seq(const std::string& s, size_t i) {
+  const unsigned char c = static_cast<unsigned char>(s[i]);
+  if (c < 0x80) return 1;
+  size_t n;
+  uint32_t cp, min;
+  if (c >= 0xC2 && c <= 0xDF) {
+    n = 2;
+    cp = c & 0x1F;
+    min = 0x80;
+  } else if (c >= 0xE0 && c <= 0xEF) {
+    n = 3;
+    cp = c & 0x0F;
+    min = 0x800;
+  } else if (c >= 0xF0 && c <= 0xF4) {
+    n = 4;
+    cp = c & 0x07;
+    min = 0x10000;
+  } else {
+    return 0;  // a continuation byte, an overlong lead (C0, C1) or F5..FF
+  }
+  if (i + n > s.size()) return 0;
+  for (size_t k = 1; k < n; ++k) {
+    const unsigned char b = static_cast<unsigned char>(s[i + k]);
+    if ((b & 0xC0) != 0x80) return 0;
+    cp = (cp << 6) | (b & 0x3F);
+  }
+  if (cp < min || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) return 0;
+  return n;
+}
+
 struct P {
   const std::string& t;
   size_t i{0};
@@ -68,6 +100,16 @@ struct P {
       const unsigned char c = static_cast<unsigned char>(t[i++]);
       if (c == '"') return true;
       if (c < 0x20) return fail("control character in string");
+      if (c >= 0x80) {
+        const size_t n = utf8_seq(t, i - 1);
+        if (n == 0) {
+          --i;
+          return fail("invalid UTF-8 in string");
+        }
+        out->append(t, i - 1, n);
+        i += n - 1;
+        continue;
+      }
       if (c != '\\') {
         *out += static_cast<char>(c);
         continue;
@@ -249,7 +291,7 @@ struct P {
 }  // namespace
 
 bool parse_json(const std::string& text, JsonValue* out, std::string* err) {
-  P p{text};
+  P p{text, 0, {}};
   JsonValue v;
   if (!p.value(&v, 0)) {
     if (err) *err = p.err;
@@ -265,9 +307,30 @@ bool parse_json(const std::string& text, JsonValue* out, std::string* err) {
   return true;
 }
 
+bool is_valid_utf8(const std::string& s) {
+  for (size_t i = 0; i < s.size();) {
+    const size_t n = utf8_seq(s, i);
+    if (n == 0) return false;
+    i += n;
+  }
+  return true;
+}
+
 std::string json_escape(const std::string& s) {
   std::string o;
-  for (const unsigned char c : s) {
+  for (size_t i = 0; i < s.size(); ++i) {
+    const unsigned char c = static_cast<unsigned char>(s[i]);
+    if (c >= 0x80) {
+      // Never pass invalid UTF-8 on (it may come from a ROS string field): replace each bad byte.
+      const size_t n = utf8_seq(s, i);
+      if (n == 0) {
+        o += "\\ufffd";
+      } else {
+        o.append(s, i, n);
+        i += n - 1;
+      }
+      continue;
+    }
     switch (c) {
       case '"':
         o += "\\\"";

@@ -3,6 +3,7 @@
 // a mutex-guarded inbox that step() drains, so no rclcpp call is ever made from the IPC thread.
 #pragma once
 
+#include <atomic>
 #include <deque>
 #include <functional>
 #include <map>
@@ -47,14 +48,20 @@ using ClockFn = std::function<double()>;
 
 class GatewayNode : public rclcpp::Node {
 public:
+  // Commands queued between two steps; beyond it every command except an E-stop is refused "busy".
+  static constexpr size_t kInboxCap = 256;
+
   explicit GatewayNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions(),
                        ClockFn clock = nullptr, bool create_timer = true);
   ~GatewayNode() override;
   void step(double now_s);  // public for deterministic tests
   const IpcServer& ipc() const { return ipc_; }
-  // Order in which the most recent non-empty batch of client commands was processed (E-stop and
-  // heartbeats first).
+  // Order in which the most recent non-empty batch of client commands was processed: E-stops,
+  // then the one (coalesced) heartbeat, then the rest in arrival order.
   const std::vector<CmdKind>& last_batch() const { return last_batch_; }
+  // Test hook: removes every request still pending inside the rclcpp clients and returns how many
+  // there were. Requests the gateway already answered (reply or timeout) must not be among them.
+  size_t prune_rclcpp_pending_requests();
 
 private:
   struct Inbound {
@@ -67,6 +74,8 @@ private:
     int64_t id;
     CmdKind kind;
     double deadline_s;
+    std::string what;              // audit label, e.g. "E-stop assert (source=tablet)"
+    std::function<void()> forget;  // drops the request from the rclcpp client (GW-007)
   };
   void declare_params();
   void on_line(int client, const std::string& line);
@@ -77,7 +86,9 @@ private:
   void call(const Inbound& in, double now_s, typename rclcpp::Client<Srv>::SharedPtr cli,
             const char* name, Fill fill, Render render);
   std::string gateway_json(double now_s) const;
+  OperatorLinkState link_state(double now_s) const;
   void publish_operator_link(double now_s);
+  void audit_ipc(double now_s);
 
   ClockFn clock_;
   std::string socket_path_;
@@ -90,10 +101,16 @@ private:
   TelemetrySnapshot snap_{1.0};
   std::mutex inbox_mu_;
   std::deque<Inbound> inbox_;
+  std::atomic<uint64_t> inbox_refused_{0};
   std::map<uint64_t, Pending> pending_;
   uint64_t next_token_{1};
   std::vector<CmdKind> last_batch_;
   double last_link_pub_s_{-1e18}, last_tel_s_{-1e18};
+  // Audit log state (XR-GW-001): last logged operator-link state and IPC counters.
+  bool link_alive_{false};
+  double last_audit_s_{-1e18};
+  int audit_clients_{0};
+  uint64_t audit_dropped_{0}, audit_overflows_{0}, audit_rejected_{0}, audit_busy_{0};
 
   rclcpp::Publisher<dyx3_interfaces::msg::OperatorLinkStatus>::SharedPtr pub_link_;
   rclcpp::Client<dyx3_interfaces::srv::StartMission>::SharedPtr cli_start_;

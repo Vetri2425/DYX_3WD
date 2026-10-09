@@ -1,7 +1,12 @@
 // ipc_server — Unix-domain-socket NDJSON server on its own thread. Contract:
 // docs/contracts/dyx3_system_gateway.md section 1. POSIX/std only. Complete lines are handed to the
 // callback ON THE IPC THREAD; send()/broadcast() are thread safe.
+// Path ownership: start() takes an exclusive flock on "<path>.lock" and refuses to start while
+// another instance holds it; stop() unlinks the socket only if it is still the one this instance
+// bound (same device and inode).
 #pragma once
+
+#include <sys/types.h>
 
 #include <atomic>
 #include <functional>
@@ -31,6 +36,8 @@ public:
   void send(int client, const std::string& line);  // appends '\n'
   void broadcast(const std::string& line);
   int clients() const { return clients_.load(); }
+  // True while this client id is connected. Ids are never reused, so once false it stays false.
+  bool connected(int client) const;
   uint64_t dropped_slow() const { return dropped_slow_.load(); }
   uint64_t rejected_full() const { return rejected_full_.load(); }
   uint64_t overflows() const { return overflows_.load(); }
@@ -43,15 +50,20 @@ private:
     bool drop{false};
   };
   void loop();
+  void release_path();
   Config cfg_;
   OnLine on_line_;
   int listen_fd_{-1};
+  int lock_fd_{-1};
+  bool own_sock_{false};
+  dev_t sock_dev_{0};
+  ino_t sock_ino_{0};
   int wake_[2]{-1, -1};
   std::thread th_;
   std::atomic<bool> run_{false};
   std::atomic<int> clients_{0};
   std::atomic<uint64_t> dropped_slow_{0}, rejected_full_{0}, overflows_{0};
-  std::mutex mu_;  // guards clients_map_ (the out buffers and drop flags)
+  mutable std::mutex mu_;  // guards clients_map_ (the out buffers and drop flags)
   std::map<int, Client> clients_map_;
   int next_id_{1};
 };

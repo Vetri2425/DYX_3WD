@@ -12,16 +12,21 @@ struct OperatorLinkState {
 class OperatorLink {
 public:
   explicit OperatorLink(double timeout_s) : timeout_s_(timeout_s) {}
-  void note_heartbeat(double now_s) {
+  // The heartbeat is bound to the connection that sent it (GW-001): when that connection goes,
+  // the heartbeat goes with it, even if another client is still connected.
+  void note_heartbeat(double now_s, int client) {
     have_ = true;
     last_ = now_s;
+    client_ = client;
   }
-  // alive iff a client is connected AND a heartbeat arrived within the timeout.
-  OperatorLinkState state(double now_s, int clients) const {
+  int client() const { return client_; }  // the client that sent the last heartbeat; -1 if none
+  // alive iff the client that sent the last heartbeat is still connected AND that heartbeat
+  // arrived within the timeout.
+  OperatorLinkState state(double now_s, bool heartbeat_client_connected) const {
     OperatorLinkState s;
     if (!have_) return s;
     s.age_s = now_s > last_ ? now_s - last_ : 0.0;
-    s.alive = clients > 0 && s.age_s <= timeout_s_;
+    s.alive = heartbeat_client_connected && s.age_s <= timeout_s_;
     return s;
   }
 
@@ -29,6 +34,7 @@ private:
   double timeout_s_;
   bool have_{false};
   double last_{0.0};
+  int client_{-1};
 };
 
 }  // namespace dyx3_gateway

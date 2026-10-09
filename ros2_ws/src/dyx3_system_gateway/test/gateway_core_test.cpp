@@ -3,11 +3,13 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <csignal>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -85,6 +87,97 @@ TEST(Json, RejectsEverythingMalformedOrAmbiguous) {
   ok += std::string(kMaxDepth, ']');
   EXPECT_TRUE(parses(ok));
   EXPECT_FALSE(parses("1e999"));
+}
+
+// GW-008: raw (unescaped) bytes inside strings must be strict UTF-8.
+TEST(Json, RawStringBytesMustBeStrictUtf8) {
+  struct Fixture {
+    const char* bytes;
+    const char* what;
+  };
+  const Fixture good[] = {
+      {"\x24", "U+0024"},
+      {"\xC2\x80", "U+0080, smallest 2-byte"},
+      {"\xC3\xA9", "U+00E9"},
+      {"\xDF\xBF", "U+07FF, largest 2-byte"},
+      {"\xE0\xA0\x80", "U+0800, smallest 3-byte"},
+      {"\xE2\x82\xAC", "U+20AC"},
+      {"\xED\x9F\xBF", "U+D7FF, just below the surrogates"},
+      {"\xEE\x80\x80", "U+E000, just above the surrogates"},
+      {"\xEF\xBF\xBF", "U+FFFF"},
+      {"\xF0\x90\x80\x80", "U+10000, smallest 4-byte"},
+      {"\xF0\x9F\x98\x80", "U+1F600"},
+      {"\xF4\x8F\xBF\xBF", "U+10FFFF, the last code point"},
+  };
+  const Fixture bad[] = {
+      {"\x80", "lone continuation byte"},
+      {"\xBF", "lone continuation byte"},
+      {"\xC0\xAF", "overlong '/' (C0)"},
+      {"\xC1\xBF", "overlong (C1)"},
+      {"\xE0\x80\xAF", "overlong 3-byte '/'"},
+      {"\xE0\x9F\xBF", "overlong 3-byte U+07FF"},
+      {"\xF0\x80\x80\xAF", "overlong 4-byte '/'"},
+      {"\xF0\x8F\xBF\xBF", "overlong 4-byte U+FFFF"},
+      {"\xED\xA0\x80", "surrogate U+D800"},
+      {"\xED\xBF\xBF", "surrogate U+DFFF"},
+      {"\xF4\x90\x80\x80", "U+110000, above U+10FFFF"},
+      {"\xF5\x80\x80\x80", "lead byte F5"},
+      {"\xFF", "byte FF"},
+      {"\xFE", "byte FE"},
+      {"\xC3", "truncated 2-byte"},
+      {"\xE2\x82", "truncated 3-byte"},
+      {"\xF0\x9F\x98", "truncated 4-byte"},
+      {"\xC3\x28", "bad continuation"},
+      {"\xE2\x28\xA1", "bad continuation"},
+  };
+  for (const auto& f : good) {
+    EXPECT_TRUE(is_valid_utf8(f.bytes)) << f.what;
+    JsonValue v;
+    std::string e;
+    ASSERT_TRUE(parse_json(std::string("\"a") + f.bytes + "b\"", &v, &e)) << f.what << ": " << e;
+    EXPECT_EQ(v.s, std::string("a") + f.bytes + "b") << f.what;
+    EXPECT_EQ(json_escape(f.bytes), f.bytes) << f.what;  // valid text passes through untouched
+  }
+  for (const auto& f : bad) {
+    EXPECT_FALSE(is_valid_utf8(f.bytes)) << f.what;
+    EXPECT_FALSE(parses(std::string("\"a") + f.bytes + "b\"")) << f.what;
+    EXPECT_FALSE(parses(std::string("{\"") + f.bytes + "\":1}")) << f.what << " in a key";
+    EXPECT_TRUE(is_valid_utf8(json_escape(f.bytes))) << f.what;
+  }
+  EXPECT_EQ(json_escape("a\xC0\xAF"
+                        "b"),
+            "a\\ufffd\\ufffdb");
+  EXPECT_EQ(json_escape("\xE2\x82"), "\\ufffd\\ufffd");
+}
+
+TEST(Json, InvalidUtf8IsRejectedAndNeverEchoed) {
+  // A command whose name or argument carries invalid bytes is refused, and the reason text (which
+  // the gateway sends back) contains no invalid UTF-8.
+  // (ordinary string literals: the \x escapes must become raw bytes, not JSON escape text)
+  const std::string lines[] = {
+      "{\"v\":1,\"id\":5,\"cmd\":\"\xC0\xAF"
+      "reboot\"}",
+      "{\"v\":1,\"id\":5,\"cmd\":\"estop\",\"args\":{\"asserted\":true,\"source\":\"tab\xFF"
+      "let\"}}",
+      "{\"v\":1,\"id\":5,\"cmd\":\"heartbeat\",\"\xED\xA0\x80\":1}",
+  };
+  for (const std::string& line : lines) {
+    ASSERT_EQ(line.find('\\'), std::string::npos);  // really raw bytes
+    const auto r = parse_command(line);
+    EXPECT_FALSE(r.ok);
+    EXPECT_EQ(r.code, "bad_message");
+    EXPECT_NE(r.reason.find("invalid UTF-8"), std::string::npos) << r.reason;
+    EXPECT_TRUE(is_valid_utf8(r.reason)) << r.reason;
+    EXPECT_TRUE(is_valid_utf8(json_str(r.reason)));
+  }
+  // and an unknown command made of valid UTF-8 is still echoed faithfully
+  const auto r = parse_command(
+      "{\"v\":1,\"id\":5,\"cmd\":\"r\xC3\xA9"
+      "boot\"}");
+  EXPECT_EQ(r.code, "invalid_command");
+  EXPECT_NE(r.reason.find("r\xC3\xA9"
+                          "boot"),
+            std::string::npos);
 }
 
 TEST(Json, WritersEscapeAndRefuseNonFinite) {
@@ -199,16 +292,19 @@ TEST(Snapshot, MissingSourcesAreNullAndOldSourcesAreNotFresh) {
 
 TEST(OperatorLink, AliveOnlyWithAClientAndAFreshHeartbeat) {
   OperatorLink l(2.0);
-  EXPECT_FALSE(l.state(1.0, 1).alive);  // never heard
-  EXPECT_EQ(l.state(1.0, 1).age_s, 0.0);
-  l.note_heartbeat(10.0);
-  EXPECT_TRUE(l.state(11.9, 1).alive);
-  EXPECT_FALSE(l.state(12.1, 1).alive);  // timeout
-  EXPECT_NEAR(l.state(12.1, 1).age_s, 2.1, 1e-9);
-  EXPECT_FALSE(
-      l.state(10.5, 0).alive);  // no client connected (backend dead) is a dead operator link
-  l.note_heartbeat(12.1);
-  EXPECT_TRUE(l.state(12.2, 1).alive);
+  EXPECT_EQ(l.client(), -1);
+  EXPECT_FALSE(l.state(1.0, true).alive);  // never heard
+  EXPECT_EQ(l.state(1.0, true).age_s, 0.0);
+  l.note_heartbeat(10.0, 3);
+  EXPECT_EQ(l.client(), 3);
+  EXPECT_TRUE(l.state(11.9, true).alive);
+  EXPECT_FALSE(l.state(12.1, true).alive);  // timeout
+  EXPECT_NEAR(l.state(12.1, true).age_s, 2.1, 1e-9);
+  // the heartbeating client is gone (backend dead): a dead operator link, however fresh
+  EXPECT_FALSE(l.state(10.5, false).alive);
+  l.note_heartbeat(12.1, 4);  // another connection takes over only by heartbeating itself
+  EXPECT_EQ(l.client(), 4);
+  EXPECT_TRUE(l.state(12.2, true).alive);
 }
 
 // ---- socket server
@@ -247,6 +343,20 @@ TEST(IpcServer, FramingRepliesBroadcastAndModeBits) {
   s.broadcast("hello");
   EXPECT_EQ(a.read_lines(1).at(0), "hello");
   EXPECT_EQ(b.read_lines(1).at(0), "hello");
+  int a_id = -1;
+  {
+    std::lock_guard<std::mutex> lk(mu);
+    ASSERT_FALSE(got.empty());
+    a_id = got[0].first;
+  }
+  EXPECT_TRUE(s.connected(a_id));
+  EXPECT_FALSE(s.connected(a_id + 100));
+  a.~Sock();
+  new (&a) Sock("/nonexistent");
+  for (int i = 0; i < 100 && s.connected(a_id); ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  EXPECT_FALSE(s.connected(a_id));  // a closed connection is gone at once
+  EXPECT_EQ(s.clients(), 1);
   s.stop();
   EXPECT_FALSE(std::filesystem::exists(c.path));
 }
@@ -297,4 +407,126 @@ TEST(IpcServer, StaleSocketFileIsReplacedAndASlowConsumerIsDropped) {
   for (int i = 0; i < 200 && s.dropped_slow() == 0; ++i)
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   EXPECT_GE(s.dropped_slow(), 1U);
+}
+
+// GW-002: a reply queued for a peer that has already closed must not raise SIGPIPE. The server runs
+// in a forked child with the DEFAULT SIGPIPE disposition (no SIG_IGN anywhere), so only the
+// server's own send path decides whether the process survives. Each client sends an invalid line
+// (answered at once, like the gateway's bad_message reply) and closes without reading.
+TEST(IpcServer, APeerThatClosesBeforeItsReplyIsWrittenDoesNotKillTheProcess) {
+  const std::string path = tmp_sock();
+  int ready[2];
+  ASSERT_EQ(pipe(ready), 0);
+  const pid_t pid = fork();
+  ASSERT_GE(pid, 0);
+  if (pid == 0) {
+    close(ready[0]);
+    std::signal(SIGPIPE, SIG_DFL);
+    std::atomic<bool> quit{false};
+    IpcServer s;
+    IpcServer::Config c;
+    c.path = path;
+    c.max_clients = 64;
+    std::string err;
+    const bool up = s.start(
+        c,
+        [&](int cl, const std::string& l) {
+          if (l == "quit") {
+            quit = true;
+            return;
+          }
+          s.send(cl, R"({"v":1,"ok":false,"code":"bad_message","reason":")" +
+                         std::string(2048, 'r') + R"(","data":{}})");
+        },
+        &err);
+    const char b = up ? 1 : 0;
+    (void)!write(ready[1], &b, 1);
+    if (!up) _exit(2);
+    for (int i = 0; i < 3000 && !quit; ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    if (!quit) _exit(3);
+    // Every closed peer must have been removed; only the control client is left.
+    for (int i = 0; i < 300 && s.clients() != 1; ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    const int left = s.clients();
+    s.stop();
+    _exit(left == 1 ? 0 : 4);
+  }
+  // The test process itself writes to the server; do not let a dead server kill the test runner.
+  const auto old_pipe = std::signal(SIGPIPE, SIG_IGN);
+  close(ready[1]);
+  char b = 0;
+  ASSERT_EQ(read(ready[0], &b, 1), 1);
+  close(ready[0]);
+  ASSERT_EQ(b, 1);
+  int alive_after = -1;
+  for (int i = 0; i < 500; ++i) {
+    Sock a(path);
+    if (!a.ok()) break;  // the server is gone
+    a.write_all("not json\n");
+    if (i % 50 == 0) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    alive_after = i;
+  }  // each Sock closes at once, without reading its reply
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  Sock ctl(path);
+  if (ctl.ok()) ctl.write_all("quit\n");
+  int st = 0;
+  ASSERT_EQ(waitpid(pid, &st, 0), pid);  // always reaped, also when the server died
+  std::signal(SIGPIPE, old_pipe);
+  ASSERT_FALSE(WIFSIGNALED(st)) << "server killed by signal " << WTERMSIG(st) << " after "
+                                << alive_after + 1 << " clients";
+  ASSERT_TRUE(WIFEXITED(st));
+  EXPECT_EQ(WEXITSTATUS(st), 0) << "2: start failed, 3: no quit, 4: closed peers not removed";
+}
+
+// XR-GW-003: a second instance on the same path must neither steal nor delete the live socket.
+TEST(IpcServer, ASecondServerOnTheSamePathIsRefusedAndTheFirstKeepsServing) {
+  const std::string path = tmp_sock();
+  IpcServer a;
+  IpcServer::Config c;
+  c.path = path;
+  std::string err;
+  ASSERT_TRUE(a.start(c, [&](int cl, const std::string& l) { a.send(cl, "a:" + l); }, &err)) << err;
+  struct stat before{};
+  ASSERT_EQ(stat(path.c_str(), &before), 0);
+  {
+    IpcServer b;
+    err.clear();
+    EXPECT_FALSE(b.start(c, [](int, const std::string&) {}, &err));
+    EXPECT_NE(err.find("another gateway"), std::string::npos) << err;
+  }  // b's destructor (stop) must not unlink a's socket either
+  struct stat after{};
+  ASSERT_EQ(stat(path.c_str(), &after), 0);
+  EXPECT_EQ(after.st_ino, before.st_ino);  // the same socket, not re-bound
+  Sock s(path);
+  ASSERT_TRUE(s.ok());
+  s.write_all("ping\n");
+  const auto r = s.read_lines(1);
+  ASSERT_EQ(r.size(), 1U);
+  EXPECT_EQ(r[0], "a:ping");
+  a.stop();
+  EXPECT_FALSE(std::filesystem::exists(path));
+  // once released, the path can be served again
+  IpcServer d;
+  EXPECT_TRUE(d.start(c, [](int, const std::string&) {}, &err)) << err;
+  d.stop();
+  std::filesystem::remove(path + ".lock");
+}
+
+TEST(IpcServer, StopLeavesASocketFileItDidNotCreate) {
+  const std::string path = tmp_sock();
+  IpcServer a;
+  IpcServer::Config c;
+  c.path = path;
+  std::string err;
+  ASSERT_TRUE(a.start(c, [](int, const std::string&) {}, &err)) << err;
+  // the path is replaced behind the server's back (e.g. by an operator's manual instance)
+  ASSERT_EQ(unlink(path.c_str()), 0);
+  {
+    std::ofstream(path) << "someone else";
+  }
+  a.stop();
+  EXPECT_TRUE(std::filesystem::exists(path));
+  std::filesystem::remove(path);
+  std::filesystem::remove(path + ".lock");
 }

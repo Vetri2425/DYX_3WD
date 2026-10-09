@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <memory>
 #include <thread>
 
 #include "dyx3_system_gateway/json.hpp"
@@ -86,12 +87,18 @@ struct Rig {
           rs->accepted = true;
           rs->skipped_point_index = 5;
         });
+    // Deferred response: with estop_answers false the guard receives the request but never
+    // answers (a hung guard), which is different from the service being absent.
     svc_keep[5] = world->create_service<srv::SetEmergencyStop>(
         "/dyx3/motion_guard/set_emergency_stop",
-        [this](const std::shared_ptr<srv::SetEmergencyStop::Request> rq,
-               std::shared_ptr<srv::SetEmergencyStop::Response> rs) {
+        [this](std::shared_ptr<rclcpp::Service<srv::SetEmergencyStop>> svc,
+               std::shared_ptr<rmw_request_id_t> hdr,
+               const std::shared_ptr<srv::SetEmergencyStop::Request> rq) {
           calls.push_back(std::string("estop:") + (rq->asserted ? "1" : "0") + ":" + rq->source);
-          rs->accepted = estop_accepts;
+          if (!estop_answers) return;
+          srv::SetEmergencyStop::Response rs;
+          rs.accepted = estop_accepts;
+          svc->send_response(*hdr, rs);
         });
     svc_keep[6] = world->create_service<srv::ArmDisarm>(
         "/dyx3/px4_link/arm", [this](const std::shared_ptr<srv::ArmDisarm::Request> rq,
@@ -222,6 +229,13 @@ TEST(GatewayNode, BadInputNeverReachesRosAndIsAnsweredWithTheId) {
   const auto lines = c.read_lines(1);
   ASSERT_EQ(lines.size(), 1U);
   EXPECT_NE(lines[0].find("bad_message"), std::string::npos);
+  // invalid UTF-8 is refused and the reply carries none of it (GW-008)
+  c.write_all("{\"v\":1,\"id\":13,\"cmd\":\"\xC0\xAF\xFF\"}\n");
+  r.pump(100);
+  const auto bad = c.read_lines(1);
+  ASSERT_EQ(bad.size(), 1U);
+  EXPECT_NE(bad[0].find("bad_message"), std::string::npos);
+  EXPECT_TRUE(is_valid_utf8(bad[0])) << bad[0];
   EXPECT_TRUE(r.calls.empty());
 }
 
@@ -229,17 +243,57 @@ TEST(GatewayNode, AnEstopThatCannotBeDeliveredIsNeverReportedAsAccepted) {
   Rig r;
   Sock c(r.sock);
   ASSERT_TRUE(c.ok());
+  const std::string assert_line = R"(,"cmd":"estop","args":{"asserted":true,"source":"tablet"}})";
   // 1. delivered and accepted
-  auto v =
-      r.ask(c, R"({"v":1,"id":21,"cmd":"estop","args":{"asserted":true,"source":"tablet"}})", 21);
+  auto v = r.ask(c, R"({"v":1,"id":21)" + assert_line, 21);
   EXPECT_TRUE(ok_of(v));
+  EXPECT_EQ(code_of(v), "ok");
   EXPECT_EQ(r.calls.back(), "estop:1:tablet");
-  // 2. the service answers late/never: a timeout, reported as failed
-  r.svc_keep[5].reset();  // the guard's service disappears
-  r.pump(300);
-  v = r.ask(c, R"({"v":1,"id":22,"cmd":"estop","args":{"asserted":true,"source":"tablet"}})", 22);
+  // 2. delivered and refused by the guard: the refusal is passed through
+  r.estop_accepts = false;
+  v = r.ask(c, R"({"v":1,"id":22)" + assert_line, 22);
   EXPECT_FALSE(ok_of(v));
-  EXPECT_TRUE(code_of(v) == "service_unavailable" || code_of(v) == "timeout") << code_of(v);
+  EXPECT_EQ(code_of(v), "rejected");
+  r.estop_accepts = true;
+  // 3. the guard's service exists and receives the request but never answers: exactly "timeout"
+  // once service_timeout_s (1.0 s here) has passed, never "ok"
+  r.estop_answers = false;
+  const size_t n_calls = r.calls.size();
+  v = r.ask(c, R"({"v":1,"id":23)" + assert_line, 23, 3.0);
+  EXPECT_FALSE(ok_of(v));
+  EXPECT_EQ(code_of(v), "timeout");
+  EXPECT_EQ(r.calls.size(), n_calls + 1);  // it was delivered, the answer never came
+  // 4. the guard's service disappears: exactly "service_unavailable", at once
+  r.svc_keep[5].reset();
+  // (by node: the plain service list also shows the name while the gateway's client exists)
+  const auto gone = [&r]() {
+    const auto names = r.gw->get_service_names_and_types_by_node("world", "/");
+    return names.find("/dyx3/motion_guard/set_emergency_stop") == names.end();
+  };
+  for (int i = 0; i < 100 && !gone(); ++i) r.pump(50);
+  ASSERT_TRUE(gone());
+  r.pump(200);
+  v = r.ask(c, R"({"v":1,"id":24)" + assert_line, 24);
+  EXPECT_FALSE(ok_of(v));
+  EXPECT_EQ(code_of(v), "service_unavailable");
+  EXPECT_EQ(r.calls.size(), n_calls + 1);
+}
+
+TEST(GatewayNode, TimedOutRequestsAreRemovedFromTheRosClient) {
+  Rig r;
+  Sock c(r.sock);
+  ASSERT_TRUE(c.ok());
+  r.estop_answers = false;  // the guard's service exists but never answers
+  for (int i = 0; i < 3; ++i) {
+    const auto v = r.ask(c,
+                         R"({"v":1,"id":)" + std::to_string(70 + i) +
+                             R"(,"cmd":"estop","args":{"asserted":true,"source":"tablet"}})",
+                         70 + i, 3.0);
+    EXPECT_EQ(code_of(v), "timeout");
+  }
+  EXPECT_EQ(r.calls.size(), 3U);  // every request reached the guard
+  // nothing the gateway already answered with "timeout" is left pending inside rclcpp
+  EXPECT_EQ(r.gw->prune_rclcpp_pending_requests(), 0U);
 }
 
 TEST(GatewayNode, EstopIsProcessedBeforeOtherQueuedCommands) {
@@ -264,6 +318,51 @@ TEST(GatewayNode, EstopIsProcessedBeforeOtherQueuedCommands) {
   EXPECT_EQ(batch[1], CmdKind::PauseMission);
   EXPECT_EQ(batch[2], CmdKind::ResumeMission);
   EXPECT_EQ(r.calls.size(), 3U);
+}
+
+TEST(GatewayNode, AnEstopBehindAHeartbeatFloodIsDispatchedFirstAndTheInboxStaysBounded) {
+  Rig r;
+  Sock c(r.sock);
+  ASSERT_TRUE(c.ok());
+  const int n = 1000;
+  std::string burst;
+  for (int i = 0; i < n; ++i)
+    burst += R"({"v":1,"id":)" + std::to_string(1000 + i) + R"(,"cmd":"heartbeat"})" + "\n";
+  burst += R"({"v":1,"id":99,"cmd":"estop","args":{"asserted":true,"source":"tablet"}})"
+           "\n";
+  c.write_all(burst);
+  r.pump(500);  // the IPC thread queues the whole burst; no step runs meanwhile
+  r.gw->step(r.now);
+  r.pump(300);
+  const auto& batch = r.gw->last_batch();
+  ASSERT_EQ(batch.size(), 2U);  // the E-stop, then ONE coalesced heartbeat
+  EXPECT_EQ(batch[0], CmdKind::Estop);
+  EXPECT_EQ(batch[1], CmdKind::Heartbeat);
+  ASSERT_FALSE(r.calls.empty());
+  EXPECT_EQ(r.calls.front(), "estop:1:tablet");
+  int hb_ok = 0, hb_busy = 0;
+  bool estop_ok = false;
+  for (const auto& l : c.read_lines(n + 1, 5000)) {
+    JsonValue j;
+    std::string e;
+    ASSERT_TRUE(parse_json(l, &j, &e)) << e;
+    if (!j.get("id")) continue;  // telemetry
+    if (j.get("id")->i == 99) {
+      estop_ok = ok_of(j);
+    } else if (ok_of(j)) {
+      ++hb_ok;
+    } else {
+      EXPECT_EQ(code_of(j), "busy");
+      ++hb_busy;
+    }
+  }
+  EXPECT_TRUE(estop_ok);
+  EXPECT_EQ(hb_ok + hb_busy, n);                               // every heartbeat is answered
+  EXPECT_LE(hb_ok, static_cast<int>(GatewayNode::kInboxCap));  // the inbox never exceeded its cap
+  EXPECT_GT(hb_busy, 0);
+  r.gw->step(r.now + 0.1);
+  r.pump(200);
+  EXPECT_TRUE(r.link.alive);  // the coalesced heartbeat still counts
 }
 
 TEST(GatewayNode, OperatorLinkFollowsTheHeartbeatAndFailsSafe) {
@@ -306,6 +405,38 @@ TEST(GatewayNode, OperatorLinkFollowsTheHeartbeatAndFailsSafe) {
   EXPECT_FALSE(r.link.alive);
 }
 
+TEST(GatewayNode, TheOperatorLinkDiesWithTheConnectionThatHeartbeated) {
+  Rig r;
+  auto a = std::make_unique<Sock>(r.sock);
+  Sock b(r.sock);  // a second client (e.g. a debug tool) that never heartbeats
+  ASSERT_TRUE(a->ok() && b.ok());
+  EXPECT_TRUE(ok_of(r.ask(*a, R"({"v":1,"id":61,"cmd":"heartbeat"})", 61)));
+  r.now += 0.1;
+  r.gw->step(r.now);
+  r.pump(200);
+  EXPECT_TRUE(r.link.alive);
+  // A (the backend) goes away while B stays connected and silent: the link must drop on the
+  // next publish, not after the heartbeat timeout.
+  a.reset();
+  r.pump(300);  // the IPC thread sees the hang-up
+  ASSERT_EQ(r.gw->ipc().clients(), 1);
+  r.now += 0.1;  // one publish period; the last heartbeat is only 0.2 s old
+  r.gw->step(r.now);
+  r.pump(200);
+  EXPECT_FALSE(r.link.alive);
+  EXPECT_LT(r.link.age_s, 1.0F);
+  // B is not the operator until it heartbeats itself
+  EXPECT_TRUE(ok_of(r.ask(b, R"({"v":1,"id":62,"cmd":"heartbeat"})", 62)));
+  r.now += 0.1;
+  r.gw->step(r.now);
+  r.pump(200);
+  EXPECT_TRUE(r.link.alive);
+  r.now += 1.0;
+  r.gw->step(r.now);
+  r.pump(200);
+  EXPECT_TRUE(r.link.alive);  // within the timeout, B still connected
+}
+
 TEST(GatewayNode, SnapshotAndTelemetryPushCarryAgeAndFreshness) {
   Rig r;
   Sock c(r.sock);
@@ -324,6 +455,21 @@ TEST(GatewayNode, SnapshotAndTelemetryPushCarryAgeAndFreshness) {
   EXPECT_EQ(d->get("vehicle_state")->type,
             JsonValue::Type::Null);  // never received: null, not a stale zero
   EXPECT_FALSE(d->get("gateway")->get("operator_alive")->b);
+  // the IPC counters are exported for the audit trail (XR-GW-001)
+  const JsonValue* ipc = d->get("gateway")->get("ipc");
+  ASSERT_NE(ipc, nullptr);
+  for (const char* k : {"dropped_slow", "overflows", "rejected_full"}) {
+    ASSERT_NE(ipc->get(k), nullptr) << k;
+    EXPECT_TRUE(ipc->get(k)->is_int) << k;
+    EXPECT_EQ(ipc->get(k)->i, 0) << k;
+  }
+  {
+    std::vector<std::unique_ptr<Sock>> extra;  // max_clients is 4: the 5th connection is refused
+    for (int i = 0; i < 4; ++i) extra.push_back(std::make_unique<Sock>(r.sock));
+    for (int i = 0; i < 100 && r.gw->ipc().rejected_full() < 1; ++i) r.pump(10);
+  }
+  v = r.ask(c, R"({"v":1,"id":52,"cmd":"get_snapshot"})", 52);
+  EXPECT_EQ(v.get("data")->get("gateway")->get("ipc")->get("rejected_full")->i, 1);
   // a telemetry push arrives without being asked; once the data is old it says so
   r.now += 5.0;
   r.gw->step(r.now);
