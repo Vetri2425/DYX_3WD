@@ -46,7 +46,7 @@ Review baseline: DYX_3WD `master` `252778e` (firmware `8279fa4be3`).
 | 8 | `dyx3_geometry` | 2026-10-09 | 2026-10-09 | 0 / 0 / 1 / 5 | open |
 | 9 | `dyx3_bringup` + systemd (RT, CPU, restart) | 2026-10-09 | 2026-10-09 | 0 / 0 / 3 / 2 | open |
 | 10 | `dyx3_system_gateway` | — | — | — | prompt issued |
-| 11 | `dyx3_recorder` | — | — | — | prompt issued |
+| 11 | `dyx3_recorder` | 2026-10-09 | 2026-10-09 | 0 / 5 / 6 / 6 | open |
 | 12 | backend | 2026-10-09 | 2026-10-09 | 0 / 1 / 3 / 6 | open |
 | 13 | installer / deployment | — | — | — | |
 | 14 | tablet app (`Three_Wheel_v2` `App-Polish`) | — | — | — | |
@@ -76,7 +76,7 @@ several are the root causes the part reviews keep hitting.
 | PC-7a | Health check: PX4 `UXRCE_DDS_DOM_ID` must equal `ROS_DOMAIN_ID` (42). Nothing enforces it | open | installer / `dyx3-health` |
 | PC-7b | Verify the `ROS_LOCALHOST_ONLY` discovery between the nodes and the XRCE agent (`dyx3-platform` does not read `ros.env`) | open | |
 | PC-7c | One installer test is not self-contained ("dry-run mentions useradd") | open | `installer/tests` |
-| PC-8 | The prototype bag manifests pair `as_run_config.rpp_params` names with the wrong values. The recorder must write correct name/value pairs | open: check in the recorder review | `dyx3_recorder` |
+| PC-8 | The prototype bag manifests pair `as_run_config.rpp_params` names with the wrong values. The recorder must write correct name/value pairs | **PASS** (REC review: pairs come from each returned Parameter); coverage gap is REC-002 | `dyx3_recorder` |
 | PC-9 | `installer/pins/firmware.pin` still pins `27a7ac9284`, but the rover runs `8279fa4be3`. `msg/`, `srv/` and `dds_topics.yaml` are identical between the two, so px4_msgs on the rover is correct. Bump the pin to `8279fa4be3` for traceability; a px4_msgs rebuild follows at the next upgrade | open (hygiene) | |
 
 Done: tcpdump in the installer (PC-7); mavlink-router template server mode; WENC timer fix in `8279fa4be3`.
@@ -708,6 +708,63 @@ Verdicts on known items (recorded; not new):
   tablet sees "PX4 link unhealthy". Log and count child restarts, and expose the agent's health in
   `dyx3-health`.
 - **BR-005.** Least-privilege hardening after an inventory of write paths. No motion impact.
+
+---
+
+## 11. `dyx3_recorder`
+
+Reviewer verdict: REQUEST CHANGES (1 CRITICAL, 7 HIGH, 9 MEDIUM). After verification: **0 CRITICAL, 5 HIGH,
+6 MEDIUM, 6 LOW**.
+- The recorder never affects motion directly. Its HIGHs are about **evidence**: runs that cannot prove what ran,
+  with which tuning, from the first second.
+- **PC-8 verdict: PASS.** Name/value pairs come from each returned `rclcpp::Parameter` (`recorder_node.cpp:61-64`),
+  so the prototype's positional mismatch cannot recur. Coverage is a separate problem (REC-002).
+
+Confirmed in code:
+- **Parameters are collected before the bag starts.** `collector_(param_nodes_, param_timeout_s_)` runs at
+  `recorder_node.cpp:245`, then `bag_.start(...)` at `:284`; plus rosbag2 discovery.
+- **Each run's `.ulg` file starts mid-stream.** `UlogCapture::open` creates a new file per run (`ulog_capture.cpp:7-15`),
+  while `px4_link` sends LOGGING_START once at link-up (`px4_link_node.cpp:716`).
+- **The running firmware is never read.** `installer/lib/release.sh:272` writes `firmware_running: "unavailable…"`,
+  and the rover is flashed by hand. Today the pin says `27a7ac9284` while the FCU runs `8279fa4be3` (PC-9), so
+  every run's `versions.json` is already wrong about the firmware.
+- No secrets were found in the topics or parameter snapshots; the NTRIP configuration is outside ROS parameters.
+
+| ID | Severity | Status | Area | Where | Item |
+|---|---|---|---|---|---|
+| REC-001 | **HIGH** (~~CRITICAL~~) | ACCEPTED ↓ | Disk | `recorder_node.cpp:155,216-219` | `min_free_bytes` defaults to 0 and only warns; no retention. Runs share `/var/lib/dyx3` with the missions, the RTK state and the spray-ACK ledger |
+| REC-002 | **HIGH** | ACCEPTED | Completeness | `recorder_node.cpp:147-149` | `param_nodes` omits **`rpp`** (119 tuning parameters) and `system_gateway` |
+| REC-004 | **HIGH** | ACCEPTED | Completeness | `recorder_node.cpp:204-284` | The bag starts only after RUNNING + up to 6 × 2 s of parameter RPCs + discovery: the first seconds of motion and spray are lost |
+| REC-005 | **HIGH** | ACCEPTED | Completeness | `ulog_capture.cpp:7-15`; `px4_link_node.cpp:716` | The per-run `.ulg` starts mid-stream with no ULog header, so it is probably unreadable |
+| REC-006 | **HIGH** | ACCEPTED | Completeness | `recorder_node.cpp:224-234`; `release.sh:272` | Runs record the **expected** firmware SHA, not the running one; overlay hash and px4_msgs source missing |
+| REC-003 | MEDIUM (~~HIGH~~) | ACCEPTED ↓ | Completeness | `recorder_node.cpp:241-254,338-341` | Parameters snapshotted at start and end only; LIVE changes mid-run are not journaled |
+| REC-008 | MEDIUM (~~HIGH~~) | ACCEPTED ↓ | Lifecycle | `run_lifecycle.cpp:28-55` | A run never closes if MissionState stops for good (a restarted graph publishes IDLE and closes it) |
+| REC-009 | MEDIUM | ACCEPTED | Lifecycle | `recorder_node.cpp:70-114` | A recorder restart leaves the interrupted run directory unmarked |
+| REC-012 | MEDIUM | ACCEPTED | Process | `recorder_node.cpp:353-365` | A dead `ros2 bag` child is reported but not restarted |
+| REC-013 | MEDIUM | ACCEPTED | Process | `recorder_node.cpp:311-312,372-388` | `bag_.running()` (waitpid) is polled from status while `stop_run` stops the child: a race on a 3-thread executor |
+| REC-016 | MEDIUM | ACCEPTED | Completeness | `recorder_node.cpp:123-146` | No raw PX4 timing topic; `conditioned_execution_sha256` is not in the manifest (ties to X-001 / PC-2) |
+| REC-007 | LOW (~~HIGH~~) | ACCEPTED ↓ | Config | `recorder_node.cpp:120` | `config_dir` default `/etc/dyx3/config`, but the launch reads `/etc/dyx3`. No node YAML exists yet (BR-001), so nothing is lost today |
+| REC-010 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Durability | `run_manifest.cpp:164-175` | Atomic rename without `fsync` of the file or directory |
+| REC-011 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Durability | `recorder_node.cpp:220-259,335-345` | Some `write_file_atomic` results are ignored |
+| REC-014 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Process | `recorder_node.cpp:311-318` | A SIGTERM/SIGKILL escalation does not clear `bag_healthy_throughout` |
+| REC-015 | LOW (~~MEDIUM~~) | DOUBT ↓ | Load | `ulog_capture.cpp:41-42` | `fwrite` + `fflush` per ULog chunk; KEEP_LAST QoS does not block the publisher, so this does not back-pressure `px4_link` |
+| REC-017 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Lifecycle | `recorder_node.cpp:204-215` | A failed directory creation leaves the lifecycle "recording" |
+
+### HIGH fixes (one recorder change set)
+- **REC-001.** Required `min_free_bytes` (e.g. 5 GB), enforced **during** recording (stop the bag, mark the run
+  degraded, never touch the shared state). Retention keeps the newest N days or GB, never the active or
+  un-offloaded runs. Best: put `/var/lib/dyx3/runs` on its own partition or quota (owner decision).
+  - Note: a full disk is fail-safe for motion (the spray-ACK ledger refuses, the RTK config cannot be saved), but
+    it stops work.
+- **REC-002.** Add `rpp`, `system_gateway` and `recorder`. Check the list against the launch graph in a test.
+- **REC-004.** Pre-roll: start the bag at **READY** (the rover is still stopped), collect the parameters
+  asynchronously, and mark the RUNNING time in the summary.
+- **REC-005.** Either keep one continuous boot-level `.ulg` and record each run's byte/time range, or restart PX4
+  logging per run so the header is included. **Owner decision** on the ULog strategy. The SD-card log on the FCU
+  remains the backup.
+- **REC-006.** Read the running firmware identity from PX4 (e.g. the `ver` / git hash via MAVLink
+  AUTOPILOT_VERSION or a DDS topic) into `versions.json`, and flag a mismatch with `firmware_expected_sha`. Bump
+  the pin (PC-9) meanwhile.
 
 ---
 
