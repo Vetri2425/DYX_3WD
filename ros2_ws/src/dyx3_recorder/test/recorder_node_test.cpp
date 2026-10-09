@@ -576,3 +576,22 @@ TEST(RecorderNode, RetentionPrunesOldCompleteRunsAtRunStart) {
   EXPECT_NE(slurp(d2 + "/summary.json").find("retention removed 1 old complete run"),
             std::string::npos);
 }
+
+// REC-008: a run whose MissionState stops for good is closed, not recorded forever.
+TEST(RecorderNode, SilentMissionStateClosesTheRunAsLost) {
+  Rig r;
+  r.mission(MissionState::STATE_READY, 3);
+  r.mission(MissionState::STATE_RUNNING, 3);
+  const std::string d = r.run_dir();
+  r.rec->step(r.now += 2.0);  // 2 s: within mission_silence_s (3 s)
+  EXPECT_TRUE(r.rec->recording());
+  r.rec->step(r.now += 2.0);  // 4 s of silence
+  EXPECT_FALSE(r.rec->recording());
+  const std::string summary = slurp(d + "/summary.json");
+  EXPECT_NE(summary.find("\"final_state\": \"MISSION_STATE_LOST\""), std::string::npos);
+  EXPECT_NE(summary.find("no MissionState for 4.0 s"), std::string::npos);
+  r.wall += 10;
+  r.mission(MissionState::STATE_RUNNING, 3);  // the mission comes back: a new run opens
+  EXPECT_TRUE(r.rec->recording());
+  EXPECT_EQ(r.run_count(), 2U);
+}

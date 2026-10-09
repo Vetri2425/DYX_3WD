@@ -28,6 +28,8 @@ Directory names are collision-free (a numeric suffix is appended if the name exi
   `COMPLETED`, `ABORTED`, `ERROR` or `IDLE`. A run that never reached `RUNNING` closes as **`NOT_STARTED`** (with a note naming the state that closed it).
   `PAUSED`, `LOADING` and `READY` of the same run do not stop it. A `READY` or `RUNNING` message with a **different `mission_id` or `run_index`**
   (DERIVED: one run directory per run of a mission) while recording closes the old run (`SUPERSEDED`, or `NOT_STARTED` if it never ran) and opens a new one.
+* **Lost MissionState (REC-008).** If no `MissionState` arrives for `mission_silence_s` (default 3 s; the mission publishes at 10 Hz) while a
+  run is open, the run is closed as **`MISSION_STATE_LOST`** with a note; when the mission comes back, its next `READY`/`RUNNING` opens a new run.
 * `record_idle` (default false) is not implemented: recording outside missions is an **open question**.
 * Start order: directory -> manifest -> versions -> config snapshot -> `params_fcu.json` -> ulog -> bag -> `params_ros.json` start **collected
   on its own thread after the bag runs** (parameter RPCs never delay the bag). Stop joins that thread first, so its notes belong to the run. A step that fails is
@@ -69,8 +71,14 @@ last split is uncompressed, and it is a valid WAL database). These options are a
 container (22 topics at production rates, 60 s, every float field noisy): default sqlite3 153 MB/h, these defaults **60 MB/h** (zstd per message: 108 MB/h).
 The payload alone compresses to ~30 MB/h; the rest is the sqlite row/index overhead. **OPEN (owner):** for < 50 MB/h install
 `ros-humble-rosbag2-storage-mcap` and set `bag_storage: mcap`, `bag_storage_preset: zstd_small`, `bag_compression_mode: none` (chunk compression; not measured here) ·
-`bag_finalize_timeout_s` 10 (DERIVED: the last split is compressed while finalising) · `param_timeout_s` 2 (DERIVED) · `status_hz` 2 (DERIVED) · `min_free_bytes` **2 GiB** (REC-001, DERIVED; 0 = off) · `max_runs_bytes` **20 GiB** (retention budget, DERIVED; 0 = off) · `bag_stall_s` **0 = off** (rosbag2's sqlite file does not grow every second; no source).
+`bag_finalize_timeout_s` 10 (DERIVED: the last split is compressed while finalising) · `param_timeout_s` 2 (DERIVED) · `status_hz` 2 (DERIVED) · `min_free_bytes` **2 GiB** (REC-001, DERIVED; 0 = off) · `max_runs_bytes` **20 GiB** (retention budget, DERIVED; 0 = off) · `mission_silence_s` 3 (REC-008, DERIVED) · `bag_stall_s` **0 = off** (rosbag2's sqlite file does not grow every second; no source).
 **OPEN:** whether to also bag the raw `/fmu/out/**` topics (default: not recorded; the `/dyx3/vehicle_state` fan-out is).
+
+## 6. Acceptance
+
+Off-target: manifest/summary JSON (escaping, determinism, non-finite -> null), run naming and collision, config snapshot secret exclusion, ULog reassembly (wrap, duplicate, gap, out-of-order),
+bag supervision against a fake child (start, finalise on SIGINT, escalation on a child that ignores SIGINT, death detected), the lifecycle table, a node test with a fake bag command and an injected clock.
+**Not provable off-target:** `ros2 bag record` itself (rosbag2 is not installed in CI), disk-full behaviour, the systemd unit, real FCU ULog bytes.
 
 ## 7. Disk safety and retention (REC-001)
 
@@ -84,9 +92,3 @@ The runs share `/var/lib/dyx3` with the missions, the RTK state and the spray-AC
   is not a directory. What was removed is a note in the new run's summary.
 * **OPEN (owner):** a separate partition or quota for `/var/lib/dyx3/runs` would make this independent of the other state; an operator warning
   for low disk / recorder ERROR belongs to the gateway (it forwards `free_bytes`).
-
-## 6. Acceptance
-
-Off-target: manifest/summary JSON (escaping, determinism, non-finite -> null), run naming and collision, config snapshot secret exclusion, ULog reassembly (wrap, duplicate, gap, out-of-order),
-bag supervision against a fake child (start, finalise on SIGINT, escalation on a child that ignores SIGINT, death detected), the lifecycle table, a node test with a fake bag command and an injected clock.
-**Not provable off-target:** `ros2 bag record` itself (rosbag2 is not installed in CI), disk-full behaviour, the systemd unit, real FCU ULog bytes.

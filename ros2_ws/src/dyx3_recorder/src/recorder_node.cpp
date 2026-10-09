@@ -236,6 +236,10 @@ void RecorderNode::declare_params() {
   bag_finalize_timeout_s_ = declare_parameter<double>("bag_finalize_timeout_s", 10.0);
   param_timeout_s_ = declare_parameter<double>("param_timeout_s", 2.0);
   status_hz_ = declare_parameter<double>("status_hz", 2.0);
+  // REC-008: dyx3_mission publishes its state at 10 Hz. If it falls silent while a run is open
+  // (the graph died and was not restarted), the run is closed as MISSION_STATE_LOST instead of
+  // recording forever.
+  mission_silence_s_ = declare_parameter<double>("mission_silence_s", 3.0);
   // REC-001: the runs share /var/lib/dyx3 with the missions, the RTK state and the spray-ACK
   // ledger. Below min_free_bytes no run starts and a running bag is stopped (checked at every
   // step); retention keeps the complete runs under max_runs_bytes. 0 disables either.
@@ -246,7 +250,8 @@ void RecorderNode::declare_params() {
   min_free_bytes_ = static_cast<uint64_t>(min_free);
   max_runs_bytes_ = static_cast<uint64_t>(max_runs);
   const auto bad = [](double v) { return !std::isfinite(v) || v <= 0.0; };
-  if (bad(bag_finalize_timeout_s_) || bad(param_timeout_s_) || bad(status_hz_)) {
+  if (bad(bag_finalize_timeout_s_) || bad(param_timeout_s_) || bad(status_hz_) ||
+      bad(mission_silence_s_)) {
     throw std::invalid_argument(
         "recorder parameter invalid: timeouts and rates must be finite and > 0");
   }
@@ -328,6 +333,7 @@ void RecorderNode::on_mission(const dyx3_interfaces::msg::MissionState& m) {
   LifecycleAction a;
   {
     std::lock_guard<std::mutex> lk(mu_);
+    last_mission_s_ = clock_();
     a = lifecycle_.on_mission(m.state, m.mission_id, m.run_index);
   }
   if (a.stop) {
@@ -594,6 +600,24 @@ void RecorderNode::stop_run(const std::string& final_state) {
   disk_stopped_ = false;
 }
 
+void RecorderNode::check_mission_silence(double now_s) {
+  // Called from step() with run_mu_ held.
+  double silent_s;
+  {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!lifecycle_.recording()) return;
+    silent_s = now_s - last_mission_s_;
+    if (silent_s <= mission_silence_s_) return;
+    lifecycle_.reset();
+    char b[96];
+    std::snprintf(b, sizeof b, "no MissionState for %.1f s (mission_silence_s %.1f)", silent_s,
+                  mission_silence_s_);
+    summary_.notes.push_back(b);
+  }
+  RCLCPP_ERROR(get_logger(), "MissionState silent for %.1f s: closing the run", silent_s);
+  stop_run("MISSION_STATE_LOST");
+}
+
 void RecorderNode::check_disk(double) {
   // Called from step() with run_mu_ held. The bag is stopped (never killed mid-write without
   // SIGINT first) and the ULog file closed; the run stays open until the mission ends so that
@@ -627,7 +651,10 @@ void RecorderNode::check_disk(double) {
 void RecorderNode::step(double now_s) {
   {
     std::unique_lock<std::mutex> tl(run_mu_, std::try_to_lock);
-    if (tl.owns_lock()) check_disk(now_s);
+    if (tl.owns_lock()) {
+      check_disk(now_s);
+      check_mission_silence(now_s);
+    }
   }
   {
     std::lock_guard<std::mutex> lk(mu_);
