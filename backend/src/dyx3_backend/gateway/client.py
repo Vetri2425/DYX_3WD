@@ -119,7 +119,9 @@ class GatewayClient:
                 await asyncio.sleep(delay)
                 delay = min(self._rmax, delay * 2)
                 continue
-            delay = self._rmin
+            # The backoff resets only once the gateway has sent a line (XR-GW-002): a peer that accepts and closes at
+            # once (the gateway at max_clients) must not make this client reconnect at 1/reconnect_min_s.
+            heard = False
             self._writer = writer
             await self._fire(self._on_state, True)
             try:
@@ -127,6 +129,9 @@ class GatewayClient:
                     line = await reader.readline()
                     if not line:
                         break
+                    if not heard:
+                        heard = True
+                        delay = self._rmin
                     self._handle(line)
             except (OSError, asyncio.LimitOverrunError, ValueError):
                 log.warning("gateway link error", exc_info=True)
@@ -137,6 +142,8 @@ class GatewayClient:
                 await self._fire(self._on_state, False)
             if not self._stop:
                 await asyncio.sleep(delay)
+                if not heard:
+                    delay = min(self._rmax, delay * 2)
 
     def _handle(self, line: bytes) -> None:
         try:
@@ -160,20 +167,26 @@ class GatewayClient:
     async def request(self, cmd: str, args: dict | None = None) -> dict:
         if not self.connected:
             raise GatewayUnavailable("gateway not connected; command NOT delivered")
+        writer = self._writer
+        assert writer is not None
         rid = self._next_id
         self._next_id += 1
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending[rid] = fut
         line = json.dumps({"v": PROTOCOL_VERSION, "id": rid, "cmd": cmd, "args": args or {}}, separators=(",", ":"))
+
+        async def send_and_wait() -> dict:
+            try:
+                writer.write(line.encode("utf-8") + b"\n")
+                await writer.drain()
+            except (OSError, ConnectionError) as exc:
+                raise GatewayUnavailable(f"gateway write failed: {exc}") from exc
+            return await fut
+
+        # One budget for the write (drain() blocks while the gateway does not read) and the reply (BE-006).
         try:
-            assert self._writer is not None
-            self._writer.write(line.encode("utf-8") + b"\n")
-            await self._writer.drain()
-        except (OSError, ConnectionError) as exc:
-            self._pending.pop(rid, None)
-            raise GatewayUnavailable(f"gateway write failed: {exc}") from exc
-        try:
-            return await asyncio.wait_for(fut, self._timeout)
+            return await asyncio.wait_for(send_and_wait(), self._timeout)
         except asyncio.TimeoutError as exc:
-            self._pending.pop(rid, None)
             raise GatewayTimeout(f"no reply to {cmd} within {self._timeout:.1f}s") from exc
+        finally:
+            self._pending.pop(rid, None)

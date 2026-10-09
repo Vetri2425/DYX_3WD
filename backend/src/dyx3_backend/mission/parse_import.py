@@ -9,13 +9,17 @@ import tempfile
 from dyx3_backend.mission.service import MissionError
 
 
-def parse_dxf_upload(filename: str, data: bytes, max_bytes: int) -> dict:
+def check_dxf_upload(filename: str, data: bytes, max_bytes: int) -> None:
     if os.path.splitext(filename)[1].lower() != ".dxf":
         raise MissionError(415, "unsupported_type", "expected a .dxf file")
     if not data:
         raise MissionError(422, "empty_file", "the uploaded file is empty")
     if len(data) > max_bytes:
         raise MissionError(413, "too_large", f"upload exceeds {max_bytes} bytes")
+
+
+def parse_dxf_upload(filename: str, data: bytes, max_bytes: int) -> dict:
+    check_dxf_upload(filename, data, max_bytes)
     from dyx3_backend.path_engine.parsers.dxf_parser import parse_dxf
 
     with tempfile.TemporaryDirectory(prefix="dyx3-parse-") as td:

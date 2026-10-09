@@ -111,3 +111,133 @@ def test_socketio_endpoint_is_mounted_and_rejects_tokenless_clients(tmp_path):
     assert c.get("/api/ping").json()["status"] == "ok"
     r = c.get("/socket.io/?EIO=4&transport=polling")
     assert r.status_code == 200 and r.text.startswith("0{")  # engine.io handshake answered by the Socket.IO app
+
+
+class FlakyGateway(FakeGateway):
+    """Raises a non-gateway error once (a bug, not a link failure), then behaves."""
+
+    def __init__(self, fail_times=1):
+        super().__init__()
+        self.fail_times = fail_times
+
+    async def request(self, cmd, args=None):
+        if self.fail_times > 0:
+            self.fail_times -= 1
+            self.calls.append((cmd, args or {}))
+            raise RuntimeError("unexpected bug in the request path")
+        return await super().request(cmd, args)
+
+
+async def test_relay_task_survives_an_unexpected_exception_and_logs_it(caplog):
+    import asyncio
+
+    gw = FlakyGateway(fail_times=1)
+    relay = OperatorLinkRelay(gw, relay_s=0.01, tablet_timeout_s=1.5)
+    relay.note_tablet()
+    assert relay.running is False and relay.operator_alive() is False
+    await relay.start()
+    try:
+        for _ in range(200):
+            await asyncio.sleep(0.01)
+            relay.note_tablet()
+            if len(gw.calls) >= 3:
+                break
+        assert len(gw.calls) >= 3  # it kept ticking after the RuntimeError
+        assert relay.running is True
+        assert relay.operator_alive() is True
+        assert any("relay tick failed" in r.getMessage() and r.exc_info for r in caplog.records)
+    finally:
+        await relay.stop()
+    assert relay.running is False and relay.operator_alive() is False
+
+
+async def test_operator_alive_needs_a_recent_acknowledged_heartbeat():
+    gw, clk = FakeGateway(), Clock()
+    relay = OperatorLinkRelay(gw, relay_s=0.5, tablet_timeout_s=1.5, clock=clk)
+    relay._task = _Running()  # pretend the loop is running; ticks are driven by hand
+    relay.note_tablet()
+    assert relay.operator_alive() is False  # nothing relayed yet
+    assert await relay.tick() is True
+    assert relay.operator_alive() is True
+    gw.replies["heartbeat"] = {"v": 1, "ok": False, "code": "rejected"}
+    clk.t += 1.0
+    relay.note_tablet()
+    assert await relay.tick() is False
+    clk.t += 0.6  # the last ack is 1.6 s old
+    relay.note_tablet()
+    assert relay.operator_alive() is False
+
+
+class _Running:
+    def done(self):
+        return False
+
+
+def test_health_reports_relay_running_and_operator_alive(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from dyx3_backend.config.settings import Settings
+    from dyx3_backend.main import create_api
+
+    class LifespanGateway(FakeGateway):
+        def on_telemetry(self, _cb):
+            pass
+
+        def on_state(self, _cb):
+            pass
+
+        async def start(self):
+            pass
+
+        async def stop(self):
+            pass
+
+    api, _, _ = create_api(Settings(data_dir=str(tmp_path)), tokens=token_store(), gateway=LifespanGateway())
+    with TestClient(api) as c:  # runs the lifespan: the relay task starts
+        h = c.get("/api/health", headers={"Authorization": "Bearer view-tok"}).json()
+        assert h["relay_running"] is True and h["operator_alive"] is False
+    h = TestClient(api).get("/api/health", headers={"Authorization": "Bearer view-tok"}).json()
+    assert h["relay_running"] is False
+
+
+async def test_heartbeats_processed_right_after_a_loop_stall_do_not_extend_the_link():
+    gw, clk = FakeGateway(), Clock()
+    relay = OperatorLinkRelay(gw, relay_s=0.5, tablet_timeout_s=1.5, clock=clk)
+    relay.note_tablet()  # t=100.0, the last heartbeat before the stall
+    await relay.step()  # t=100.0 relayed
+    clk.t += 0.5
+    await relay.step()  # t=100.5 relayed (on time: no stall)
+    assert len(gw.calls) == 2 and relay.stalls == 0
+    # The event loop blocks for 2.0 s. The tablet is gone, but heartbeats it sent before vanishing sat in the socket
+    # buffer and are processed now, stamped "now", before the relay task runs.
+    clk.t += 2.0
+    relay.note_tablet()
+    assert relay.tablet_alive() is True  # without the guard this backlog would look fresh
+    await relay.step()  # 2.0 s since the previous tick > 0.5 + 0.3: stall
+    assert relay.stalls == 1
+    assert len(gw.calls) == 2  # nothing relayed: the trusted stamp (100.0) is 2.5 s old
+    assert relay.tablet_alive() is False
+    clk.t += 0.2
+    assert relay.note_tablet() is False  # still inside the quarantine (relay_s): ignored
+    await relay.step()
+    assert len(gw.calls) == 2
+    clk.t += 0.4  # quarantine over: a live tablet re-proves itself with its next heartbeat
+    assert relay.note_tablet() is True
+    await relay.step()
+    assert len(gw.calls) == 3 and relay.tablet_alive() is True
+
+
+async def test_a_short_stall_keeps_a_truthful_heartbeat_and_on_time_ticks_change_nothing():
+    gw, clk = FakeGateway(), Clock()
+    relay = OperatorLinkRelay(gw, relay_s=0.5, tablet_timeout_s=1.5, clock=clk)
+    for _ in range(10):  # 20 Hz-ish jitter but on time: never a stall
+        relay.note_tablet()
+        await relay.step()
+        clk.t += 0.5 + 0.29
+    assert relay.stalls == 0 and len(gw.calls) == 10
+    relay.note_tablet()  # stamped before the stall: truthful
+    await relay.step()
+    clk.t += 0.9  # late by 0.4 s: a stall
+    await relay.step()
+    assert relay.stalls == 1
+    assert len(gw.calls) == 12  # the pre-stall stamp is 0.9 s old: still alive, still relayed

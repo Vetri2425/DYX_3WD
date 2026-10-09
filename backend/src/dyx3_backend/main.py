@@ -18,6 +18,7 @@ from contextlib import asynccontextmanager
 import socketio
 from fastapi import FastAPI
 
+from dyx3_backend.api.admission import AdmissionMiddleware
 from dyx3_backend.api.parse_routes import router as parse_router
 from dyx3_backend.api.routes import router
 from dyx3_backend.auth.tokens import TokenStore
@@ -97,6 +98,14 @@ def create_api(
     api.state.rtk = rtk or RtkClient(settings.rtk_socket, settings.request_timeout_s)
     api.include_router(router)
     api.include_router(parse_router)
+    # Bearer check + body cap before FastAPI reads any body (XR-BE-001). Wraps this FastAPI app only: the
+    # Socket.IO app is routed beside it by Combined and authenticates on connect.
+    api.add_middleware(
+        AdmissionMiddleware,
+        tokens=lambda: api.state.tokens,
+        upload_max_bytes=settings.upload_max_bytes,
+        json_max_bytes=settings.json_body_max_bytes,
+    )
 
     @server.event
     async def connect(sid, _environ, auth):

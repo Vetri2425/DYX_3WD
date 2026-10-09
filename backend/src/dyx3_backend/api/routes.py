@@ -8,9 +8,10 @@ from typing import Annotated, Literal
 
 import anyio
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, StrictBool
 
+from dyx3_backend.api.admission import bearer_identity
 from dyx3_backend.auth.tokens import Identity, Role
 from dyx3_backend.gateway.client import GatewayError
 from dyx3_backend.mission.service import MissionError, PlanParams, summarize
@@ -56,11 +57,11 @@ class RtkTransportBody(_Body):
 
 # ------------------------------------------------------------------------------------------------ auth
 def _identity(request: Request, authorization: str | None) -> Identity:
-    if authorization is None or not authorization.lower().startswith("bearer "):
-        raise HTTPException(401, "missing bearer token", headers={"WWW-Authenticate": "Bearer"})
-    ident = request.app.state.tokens.verify(authorization[7:].strip())
+    # AdmissionMiddleware already refused a missing or unknown token before the body was read; this repeats the
+    # same check so a route is never reachable without it (and yields the Identity for the role check).
+    ident, why = bearer_identity(request.app.state.tokens, authorization)
     if ident is None:
-        raise HTTPException(401, "invalid token", headers={"WWW-Authenticate": "Bearer"})
+        raise HTTPException(401, why, headers={"WWW-Authenticate": "Bearer"})
     return ident
 
 
@@ -124,6 +125,8 @@ async def health(request: Request, _: Identity = Viewer) -> dict:
         "telemetry_fresh": age is not None and age <= settings.telemetry_stale_s,
         "tablet_heartbeat_age_s": relay.tablet_age(),
         "tablet_alive": relay.tablet_alive(),
+        "relay_running": relay.running,
+        "operator_alive": relay.operator_alive(),
     }
 
 
@@ -198,11 +201,8 @@ async def ingest_app_plan(request: Request, _: Identity = Operator) -> JSONRespo
             return _mission_error(MissionError(413, "too_large", f"upload exceeds {limit} bytes"))
         data.extend(chunk)
     try:
-        body = json.loads(data)
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        return _mission_error(MissionError(400, "INVALID_PAYLOAD", f"invalid JSON: {exc}"))
-    try:
-        summary = await anyio.to_thread.run_sync(request.app.state.missions.ingest_app_plan, body)
+        # JSON parsing and compiling run in the planning process (BE-004), never on the event loop (BE-010).
+        summary = await anyio.to_thread.run_sync(request.app.state.missions.ingest_app_plan, bytes(data))
     except MissionError as exc:
         return _mission_error(exc)
     return JSONResponse({"ok": True, "mission": summary}, status_code=201)
@@ -237,23 +237,32 @@ async def list_missions(request: Request, _: Identity = Viewer) -> dict:
 
 @router.get("/missions/{sha}")
 async def get_mission(sha: str, request: Request, _: Identity = Viewer):
+    svc = request.app.state.missions
     try:
-        return {"mission": summarize(request.app.state.missions.get(sha))}
+        # read + hash + decode off the event loop (BE-005)
+        return {"mission": await anyio.to_thread.run_sync(lambda: summarize(svc.get(sha)))}
     except MissionError as exc:
         return _mission_error(exc)
+
+
+def _render_path(svc, sha: str) -> bytes:
+    art = svc.get(sha)
+    body = {
+        "sha256": art.sha256,
+        "frame": "local_ned",
+        "points": [[p.north_m, p.east_m, p.flags] for p in art.points],
+    }
+    # Same rendering as JSONResponse, done here so a 200 000-point body is not serialised on the event loop.
+    return json.dumps(body, ensure_ascii=False, allow_nan=False, indent=None, separators=(",", ":")).encode("utf-8")
 
 
 @router.get("/missions/{sha}/path")
 async def get_mission_path(sha: str, request: Request, _: Identity = Viewer):
     try:
-        art = request.app.state.missions.get(sha)
+        content = await anyio.to_thread.run_sync(_render_path, request.app.state.missions, sha)  # BE-005
     except MissionError as exc:
         return _mission_error(exc)
-    return {
-        "sha256": art.sha256,
-        "frame": "local_ned",
-        "points": [[p.north_m, p.east_m, p.flags] for p in art.points],
-    }
+    return Response(content=content, media_type="application/json")
 
 
 @router.post("/missions/{sha}/start")
@@ -261,7 +270,8 @@ async def start_mission(sha: str, request: Request, _: Identity = Operator) -> J
     if len(sha) != 64 or any(c not in "0123456789abcdef" for c in sha):
         return JSONResponse({"ok": False, "code": "bad_id", "reason": "sha256 must be 64 lowercase hex characters"}, status_code=400)
     try:
-        request.app.state.missions.get(sha)  # never start a mission whose artifact this side cannot read
+        # never start a mission whose artifact this side cannot read; read + verify off the event loop (BE-005)
+        await anyio.to_thread.run_sync(request.app.state.missions.get, sha)
     except MissionError as exc:
         return _mission_error(exc)
     return await send(request, "start_mission", {"path_artifact_sha256": sha})
