@@ -1692,3 +1692,29 @@ core. The Jetson is 94 % idle, load average 1.8 (about 50 this morning).
 recorded `/etc/dyx3/usb-receiver.env` = by-path `platform-3610000.usb-usb-0:2.1:1.0-port0` @ 230400 ("NMEA/GGA
 verified passively"). That is identical to the hand-entered config. The existing RTK config rev 2 was left
 untouched, as designed.
+
+## 2026-10-09 (13:10) — Claude — Task 2 DONE: 3 full power cycles pass; mavlink-router template persisted
+
+**3 full power cycles** (FCU + Jetson together, owner at the rover, USB unplugged, rover disarmed):
+
+| Cycle | Jetson booted | Agent → DDS session | Health | QGC 5760 + PX4 DDS | RTK |
+|---|---|---|---|---|---|
+| 1 | 13:00:34 | 13:00:47 → 13:00:51 | OK | heartbeat 20.4 s, DDS 26.6 s after power loss | USB INJECTING, 0 failures |
+| 2 | 13:02:37 | 13:02:50 → 13:02:55 | OK | Running, connected | USB INJECTING, 0 failures |
+| 3 | 13:04:35 | 13:04:48 → 13:04:53 | OK | Running, connected; disarmed | USB INJECTING, 0 failures |
+
+- After every boot: BRLTTY units inactive (masked), the `ch341` by-path node present, and only RPP and
+  motion_guard at FF 80 on CPU 4.
+- This also proves reboot persistence for task 1 (ch341 + RTK USB) and for the router server mode.
+
+**Persisted:** `deployment/network/mavlink-router.conf.tmpl` is now the proven server mode
+(`Mode=Server Address=0.0.0.0 Port=14550`, TCP 5760 for QGC). The comment explains why client mode and a
+10.41.10.1 bind fail. A new installer test pins the template.
+- This rover's `/etc/dyx3/mavlink-router.conf` (created once, never overwritten) already has the same endpoints;
+  only its comment text is older. No rover change is needed.
+
+**Task 2 is complete.** Next is task 3 (calibration, RoboClaw motion, PX4 mode basics). Before it:
+- check `MAV_2_MODE`/`MAV_2_RATE` (low Ethernet stream rates);
+- note upstream #27497: a differential rover doesn't turn in Mission mode on v1.17;
+- note the PX4 rover docs (v1.17): the rover modules are "experimental"; ROS 2 control should prefer the PX4
+  ROS 2 Interface (rover setpoint types) over raw Offboard.

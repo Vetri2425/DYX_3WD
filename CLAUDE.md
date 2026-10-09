@@ -103,14 +103,18 @@ PX4 "rate RTCM injection 5.77 Hz", CRC OK (indoors: no fix, expected); upgrade f
    - UM982 USB = COM3, proven with `UNILOGLIST`; COM1 goes to PX4 TELEM1.
    - The CH340 is driven by `ch341` (built directly, no DKMS; BRLTTY masked).
    - NTRIP → USB_DIRECT is live: 0 failures, `/dyx3/rtcm` silent, receiver DGPS. Procedure: installer/README.
-   - Pending: an outdoor RTK FIXED test; a reboot-persistence check; LoRa (parked: needs the radio hardware);
-     automatic USB selection on fresh rovers.
-2. **NOW: PX4↔Jetson Ethernet with no stall, plus reliable QGC.**
-   - Fix the RT-priority `mission…` CPU spin (94 % of a core, load ~50) and the 90 s `dyx3-platform` stop.
-   - Then the 60-restart stress test on firmware `8279fa4be3`, plus 3 FCU and 3 Jetson power cycles.
-   - Then the mavlink-router server-mode re-test, then fix the template.
-   - Later: the RTK PX4_DDS transport does not recover after an agent restart (not in today's path).
-3. Calibration (gyro, level-only accel, level horizon), RoboClaw motion, Acro/manual/mission/offboard basics on PX4.
+   - Reboot persistence proven (3 full power cycles, 2026-10-09). Fresh rovers record the receiver
+     automatically (installer passive NMEA check → `/etc/dyx3/usb-receiver.env`; proven at the `cacc1ba` upgrade).
+   - Pending: an outdoor RTK FIXED test; LoRa (parked: needs the radio hardware).
+2. **DONE (2026-10-09): PX4↔Jetson Ethernet with no stall, plus reliable QGC.**
+   - Only RPP and motion_guard are FIFO 80 on CPU 4; the spray/recorder busy-polls are gone; `dyx3-ros` stop is
+     bounded (15 s). Jetson load ~1.8.
+   - Firmware `8279fa4be3`: 30/30 agent restarts at `MAV_2_CONFIG 1000` and 30/30 at 0 with zero stalls, plus 3
+     full power cycles. MAVLink + DDS share the Ethernet (`MAV_2_CONFIG 1000`).
+   - mavlink-router: a UDP server on 0.0.0.0:14550 (template fixed); QGC TCP 5760 recovers in 1–2 s.
+   - TELEM2 for QGC is not usable: the Jetson `ttyTHS1` RX is corrupt on L4T 36.5 (NVIDIA DMA UART bug).
+   - Later: the RTK PX4_DDS transport recovery fix (not in today's USB path).
+3. **NOW:** Calibration (gyro, level-only accel, level horizon), RoboClaw motion, Acro/manual/mission/offboard basics on PX4.
 4. Backend → frontend (app `main` @ `dbb2ba1`), then RPP.
 
 ### Known risks carried into this repo

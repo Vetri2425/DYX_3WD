@@ -96,6 +96,7 @@ libs() {
   check "dyx3-ros lets the unprivileged chrt prefix set FIFO 80" '[ "$(sed -n "s/^LimitRTPRIO=//p" "${ru}")" -ge 80 ] && grep -q "chrt -f 80" "${REPO}/ros2_ws/src/dyx3_bringup/launch/control_graph.launch.py"'
   check "dyx3-ros lets mlockall succeed and bounds a stop hang" 'grep -qx "LimitMEMLOCK=infinity" "${ru}" && grep -qx "TimeoutStopSec=15" "${ru}" && ! grep -q "^RestrictRealtime=yes" "${ru}"'
   check "the RTK unit creates its own 0700 state directory" 'grep -qx "StateDirectory=dyx3/rtk" "${REPO}/deployment/systemd/dyx3-rtk.service" && grep -qx "StateDirectoryMode=0700" "${REPO}/deployment/systemd/dyx3-rtk.service"'
+  check "router template: PX4 endpoint is a UDP server on 0.0.0.0:14550 (survives restarts), QGC on TCP 5760" 't="${REPO}/deployment/network/mavlink-router.conf.tmpl"; grep -qx "Mode=Server" "${t}" && grep -qx "Address=0.0.0.0" "${t}" && grep -qx "Port=14550" "${t}" && grep -qx "TcpServerPort=5760" "${t}" && ! grep -qx "Mode=Normal" "${t}"'
   check "no unit or template hard-codes a secret (comments excluded)" '! grep -rEi "^[^#]*(password|token)=." "${REPO}/deployment/systemd" "${REPO}/deployment/network"'
 
   # runtime environment: never guess a ROS domain, never start without the pinned px4_msgs overlay

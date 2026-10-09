@@ -1,10 +1,14 @@
 # /etc/dyx3/mavlink-router.conf — service plane only. Created once; never overwritten.
 #
-# PX4 side: UDP CLIENT to the FCU's fixed address. PX4 only talks when MAV_2_CONFIG is enabled
-# on the FCU (proposal 2026-10-07: default is 0, so this router is idle). Until a partner talks
-# to it, PX4 only BROADCASTS to 10.41.10.255; a server socket bound to 10.41.10.1 never sees
-# broadcasts, so a Server endpoint here never connects (verified on the rover 2026-10-08).
-# As a client the router sends the first GCS message to 10.41.10.2:14550 and PX4 answers it.
+# PX4 side: UDP SERVER on 0.0.0.0:14550. PX4 only talks when MAV_2_CONFIG is enabled on the FCU
+# (1000 on the 3WD). Until a partner talks to it, PX4 BROADCASTS to 10.41.10.255:14550. A socket bound
+# to 0.0.0.0 receives that broadcast; one bound to 10.41.10.1 does not, so never narrow Address.
+# Client mode (Mode=Normal to 10.41.10.2:14550) is wrong: after a router restart PX4 keeps answering the
+# old ephemeral source port, so QGC stays dead until an FCU reboot (rover, 2026-10-08).
+# Proven on the rover 2026-10-09 with firmware 8279fa4be3: QGC regained the heartbeat in 1.0-2.3 s after
+# each of 30 dyx3-platform restarts, and after 3 full power cycles.
+# Exposure: 14550 also listens on the hotspot/LAN. That adds nothing beyond TCP 5760, which already
+# gives any client on those networks MAVLink to the FCU; keep both networks rover-local.
 # QGC side: TCP server on 5760 (reached over the hotspot / site LAN). Use TCP: a UDP-only GCS
 # never sends first after a PX4 reboot, and a UDP push would hard-code the GCS address.
 [General]
@@ -12,6 +16,6 @@ TcpServerPort=5760
 ReportStats=false
 
 [UdpEndpoint px4]
-Mode=Normal
-Address=10.41.10.2
+Mode=Server
+Address=0.0.0.0
 Port=14550
