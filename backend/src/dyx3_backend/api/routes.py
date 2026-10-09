@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Reque
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, StrictBool
 
+from dyx3_backend.api.admission import bearer_identity
 from dyx3_backend.auth.tokens import Identity, Role
 from dyx3_backend.gateway.client import GatewayError
 from dyx3_backend.mission.service import MissionError, PlanParams, summarize
@@ -56,11 +57,11 @@ class RtkTransportBody(_Body):
 
 # ------------------------------------------------------------------------------------------------ auth
 def _identity(request: Request, authorization: str | None) -> Identity:
-    if authorization is None or not authorization.lower().startswith("bearer "):
-        raise HTTPException(401, "missing bearer token", headers={"WWW-Authenticate": "Bearer"})
-    ident = request.app.state.tokens.verify(authorization[7:].strip())
+    # AdmissionMiddleware already refused a missing or unknown token before the body was read; this repeats the
+    # same check so a route is never reachable without it (and yields the Identity for the role check).
+    ident, why = bearer_identity(request.app.state.tokens, authorization)
     if ident is None:
-        raise HTTPException(401, "invalid token", headers={"WWW-Authenticate": "Bearer"})
+        raise HTTPException(401, why, headers={"WWW-Authenticate": "Bearer"})
     return ident
 
 

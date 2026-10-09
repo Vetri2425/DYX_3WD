@@ -25,6 +25,16 @@ Error mapping of a gateway verdict: `ok` -> 200; downstream `rejected` -> 409 (b
 `timeout` -> 504; gateway not connected -> 503 with `"delivered": false`. Every error body: `{"ok":false,"code":...,"reason":...,"delivered":bool,"data":...}`.
 An upload is rejected (413/415/422) for: size over `upload_max_bytes`, extension not `.dxf`/`.csv`/`.waypoints`, an engine error (message returned), or an artifact the reader would refuse. The uploaded name is never used as a path.
 
+**Admission (before any body byte is read).** Every HTTP request under `/api` except `GET /api/ping` first passes an ASGI layer
+(`api/admission.py`; it wraps the FastAPI app only, Socket.IO is not behind it):
+- a missing or unknown bearer token -> **401** (`{"detail": ...}`, `WWW-Authenticate: Bearer`) without reading the body, so a malformed body
+  from an unauthenticated client is 401, not 422. The role check (403) stays in the route;
+- a body over the route's cap -> **413** `{"ok":false,"code":"too_large",...}`, from `Content-Length` before reading, or as soon as the
+  streamed byte count passes the cap (chunked bodies). Caps: `POST /missions/plan` = `upload_max_bytes`; the multipart uploads
+  `POST /missions` and `POST /path/parse-dxf` = `upload_max_bytes` + 64 KiB multipart envelope (the route still checks the file
+  against `upload_max_bytes` exactly); every other route = `json_body_max_bytes` (`DYX3_JSON_BODY_MAX_BYTES`, default 64 KiB, DERIVED);
+- a non-numeric `Content-Length` -> 400.
+
 
 ## 1a. Rover identity and LAN discovery
 
