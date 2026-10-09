@@ -33,14 +33,18 @@ the DDS topic when the version is above 0:
 | out | `/fmu/out/vehicle_attitude` | VehicleAttitude (v0) | best effort | q is FRD to NED |
 | out | `/fmu/out/estimator_status_flags` | EstimatorStatusFlags | best effort | only estimator topic on DDS |
 | out | `/fmu/out/vehicle_gps_position` | SensorGps | best effort | |
-| out | `/fmu/out/message_format_response` | MessageFormatResponse | reliable | handshake |
-| out | `/fmu/out/ulog_stream` | UlogStream | reliable, depth 16 | no firmware rate limit |
+| out | `/fmu/out/vehicle_command_ack` | VehicleCommandAck | best effort | spray ACK matching (section 14) |
+| out | `/fmu/out/message_format_response` | MessageFormatResponse | best effort, depth 10 | handshake; a lost response is re-requested |
+| out | `/fmu/out/ulog_stream` | UlogStream | best effort, depth 16 | no firmware rate limit |
 
 **QoS of `/fmu/in`:** reliable. DERIVED — NOT FROM V1 SPEC: the XRCE agent's reader is reliable (the
 stock PX4 offboard examples publish with the default reliable QoS); a best-effort writer would not
-match it. Not provable off-target: confirm with `ros2 topic info -v` at GATE 1. `/fmu/out`
-subscriptions are best effort (match either), except `ulog_stream` (reliable: a dropped chunk
-corrupts the log).
+match it. Not provable off-target: confirm with `ros2 topic info -v` at GATE 1. Every `/fmu/out`
+subscription is best effort: the firmware's uXRCE-DDS writers are all best effort
+(`src/modules/uxrce_dds_client/utilities.hpp:80,137` at the flashed firmware), and a reliable
+reader never matches a best-effort writer (XR-GPX-004: `ulog_stream` used to be reliable and no
+chunk was ever received). A lost `ulog_stream` chunk shows as a `msg_sequence` gap to the
+consumer; the fake FCU in the tests publishes best effort so it cannot hide a mismatch.
 
 `estimator_status` (test ratios) and `estimator_aid_src_*` are **not** exposed over DDS at the
 flashed firmware. `EstimatorHealth.test_ratios_valid` is therefore always false until a firmware

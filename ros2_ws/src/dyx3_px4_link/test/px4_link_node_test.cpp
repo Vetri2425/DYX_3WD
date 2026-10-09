@@ -145,8 +145,10 @@ struct Rig {
         fcu->create_publisher<px4_msgs::msg::SensorGps>("/fmu/out/vehicle_gps_position", sensor);
     p_resp = fcu->create_publisher<px4_msgs::msg::MessageFormatResponse>(
         "/fmu/out/message_format_response", rclcpp::QoS(10).best_effort());
+    // Every /fmu/out writer of the FCU is best effort (uxrce_dds_client/utilities.hpp): the fake
+    // FCU must be too, or a reliable-only subscription would pass here and never match on target.
     p_ulog = fcu->create_publisher<px4_msgs::msg::UlogStream>("/fmu/out/ulog_stream",
-                                                              rclcpp::QoS(16).reliable());
+                                                              rclcpp::QoS(16).best_effort());
     p_ack = fcu->create_publisher<px4_msgs::msg::VehicleCommandAck>("/fmu/out/vehicle_command_ack",
                                                                     sensor);
     p_spray = fcu->create_publisher<dyx3_interfaces::msg::SprayActuatorCommand>(
@@ -764,6 +766,9 @@ TEST(Px4LinkNode, UlogChunksAreAckedThenRepublished) {
   Rig r;
   r.bring_up();
   r.run(0.1);
+  ASSERT_TRUE(r.pump_until([&] { return r.fcu->count_subscribers("/fmu/out/ulog_stream") > 0; }));
+  // A best-effort FCU writer must actually match the link's reader (XR-GPX-004).
+  ASSERT_TRUE(r.pump_until([&] { return r.p_ulog->get_subscription_count() > 0; }));
   px4_msgs::msg::UlogStream u;
   u.msg_sequence = 7;
   u.flags = px4_msgs::msg::UlogStream::FLAGS_NEED_ACK;

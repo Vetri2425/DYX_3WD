@@ -178,8 +178,10 @@ Px4LinkNode::Px4LinkNode(const rclcpp::NodeOptions& options, ClockFn clock, bool
         handshake_->on_response(std::string(m->topic_name.begin(), m->topic_name.begin() + n),
                                 m->success, m->message_hash);
       });
+  // Best effort: the FCU's uXRCE-DDS writers are all best effort, and a reliable reader never
+  // matches a best-effort writer (no chunk would ever arrive). Loss shows as a msg_sequence gap.
   sub_ulog_ = create_subscription<px4_msgs::msg::UlogStream>(
-      "/fmu/out/ulog_stream", rclcpp::QoS(16).reliable(),
+      "/fmu/out/ulog_stream", rclcpp::QoS(16).best_effort(),
       [this](px4_msgs::msg::UlogStream::ConstSharedPtr m) {
         // The FCU blocks its stream on the ack, so ack first, always, regardless of link state.
         if ((m->flags & px4_msgs::msg::UlogStream::FLAGS_NEED_ACK) != 0) {
