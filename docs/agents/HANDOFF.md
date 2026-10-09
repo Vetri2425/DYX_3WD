@@ -2016,3 +2016,54 @@ Installer 148/0 (new: site LAN address + gateway, FCU-subnet refusal, hotspot/LA
    and E-stop stops), #6 (RoboClaw fault visibility, needs a firmware decision), #8–10 (outdoors: UM982 heading,
    RTK FIXED, Mission-mode turn bug), #12 (soak), #14 (fq_codel), #17–21.
 4. Future: QR pairing for tablet tokens.
+
+## 2026-10-09 (18:25) — Claude — rover on bd49374 (beacon live); app auto-connect verified; upgrade lessons
+
+**Rover 01 is on release `bd49374`.** Health OK, 7/7 services.
+- Discovery beacon live on both networks: router `192.168.3.150`, hotspot `192.168.2.100`; never on the FCU link.
+- `/api/ping` → `rover_id dyx3-916baa908b`, `rover_name dyx-3wd` (a nicer name via `DYX3_ROVER_NAME` in
+  backend.env is optional).
+
+**Upgrade lessons (do this every time):**
+1. **Run upgrades detached:**
+   `sudo systemd-run --unit=dyx3-upgrade-<sha> --setenv=DYX3_ARTIFACTS=prebuilt /opt/dyx3/bin/dyx3-upgrade <sha>`,
+   then follow `journalctl -u dyx3-upgrade-<sha>`.
+   - An upgrade piped through an ssh session dies on SIGPIPE at its next log line when the session ends, possibly
+     mid-activation.
+   - Today a killed run left `current` switched but un-activated, and its `nmcli` child held
+     `/run/dyx3/install.lock`. Recovery: wait for the lock holder to exit, then re-activate with `DYX3_FORCE=1`.
+2. **The upgrade runs the *old* release's installer.**
+   - From `cacc1ba`, that rewrote the hotspot to 10.42.0.1 / ch 36 (dead). The forced re-activation with the new
+     release fixed it.
+   - From `bd49374` onward the installer knows `DYX3_HOTSPOT_ADDRESS`, ch 149 and `network.env`, so this does not
+     recur.
+3. **`dyx3-usb-serial-check` fails closed with two CH340s.** The owner had plugged in a **LoRa radio** (CH340, USB
+   port 2.3, 115200 baud, valid RTCM 1005/1074/1084/1094/1124/1230 from a base).
+   - That failed health and auto-rolled back the first attempt (`cc3c82a`). The LoRa is unplugged and parked by
+     the owner.
+   - TODO: the installer should select the UM982 by its profile port (2.1) and leave other CH340s (LoRa) alone.
+     The test stub must return a per-device ID_PATH.
+
+**App:**
+- Tablet `R5GYA14C7CY` had a **debug-signed** dev build (no beacon code), which is why discovery was slow, and
+  DYX-signed updates were rejected (`INSTALL_FAILED_UPDATE_INCOMPATIBLE`). Uninstalled with the owner's OK.
+- **The "release crashes" report was the missing Mapbox token:** `.env` is gitignored, and a build without it
+  crashes with `MapboxConfigurationException` when the map mounts after connect.
+  - New `plugins/withRequiredMapboxToken.js` makes prebuild fail without a `pk.` token.
+  - Build worktrees need `cp ../Three_Wheel_v2/.env .`.
+- Verified 18:16 on `R5GYA14C7CY` (router):
+  - beacon heard 2 s after launch;
+  - **auto-connect** with the saved token (by rover_id);
+  - connected about 3 s from launch;
+  - map OK, no crash.
+- APK: `App-Releases/4891a3d-app-polish-beacon-autoconnect/`.
+- Branch `claude/app-token-memory` (`2e75125`, `6de4066`, `4891a3d`) merged into `App-Polish` on the owner's
+  instruction.
+
+**App cleanup list:**
+- After connect, App-Polish still calls the prototype routes `/api/healthz`, `/api/telemetry/latest` and
+  `/api/mission/loaded-path` (404 on the production backend). Move them to production routes.
+- Mission start/stop still guesses production vs prototype from the URL port (see the 16:50 entry).
+- Reconcile `App-Polish` and `main` into one authoritative branch.
+- Update tablet `R5GL1016QFB` (it has `2e75125`).
+- Hands-on owner test pending: Disconnect/Connect, relaunch, and the hotspot path.
