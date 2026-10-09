@@ -43,8 +43,8 @@ Review baseline: DYX_3WD `master` `252778e` (firmware `8279fa4be3`).
 | 5 | `dyx3_mission` | 2026-10-09 | 2026-10-09 | 0 / 0 / 3 / 4 | open |
 | 6 | `dyx3_gnss_rtk` | 2026-10-09 | 2026-10-09 | 0 / 0 / 1 / 3 | open |
 | 7 | `dyx3_spray` | 2026-10-09 | 2026-10-09 | 0 / 2 / 2 / 1 | open |
-| 8 | `dyx3_geometry` | — | — | — | prompt issued |
-| 9 | `dyx3_bringup` + systemd (RT, CPU, restart) | — | — | — | |
+| 8 | `dyx3_geometry` | 2026-10-09 | 2026-10-09 | 0 / 0 / 1 / 5 | open |
+| 9 | `dyx3_bringup` + systemd (RT, CPU, restart) | — | — | — | prompt issued |
 | 10 | `dyx3_system_gateway` | — | — | — | |
 | 11 | `dyx3_recorder` | — | — | — | |
 | 12 | backend | — | — | — | |
@@ -584,6 +584,60 @@ Confirmed good:
 The reviewer's cross-part notes: "GNSS report freshness" is X-001. "Guard interpretation of unknown accuracy" is
 closed by the gate above. "DDS RTCM chunk acceptance in PX4" is still to be checked when the PX4_DDS transport is
 used; the rover uses USB_DIRECT today.
+
+---
+
+## 7. `dyx3_geometry`
+
+Reviewer verdict: REQUEST CHANGES pending verification (0 CRITICAL, 1 HIGH, 4 MEDIUM, 1 LOW). After
+verification: **0 CRITICAL, 0 HIGH, 1 MEDIUM, 5 LOW**.
+- The reviewer's HIGH depends on a 30 m curvature baseline; the real default is **0.15 m**.
+- No wrong NED heading or cross-track sign was found. The CMake setup disables FP contraction and has no
+  `-ffast-math`.
+- At 5 km, double precision is about 1e-12 m, so site scale is not a precision risk.
+
+Facts used:
+- `curvature_baseline_m` defaults to 0.15, LIVE, bound `[0, HUGE_VAL)` (`rpp_param_table.inc:50`).
+- `path_resample_spacing_m` defaults to 0.08 (`:51`).
+- Per tick, RPP calls `curvature_at` (`rpp_core.cpp:942`) and `project_onto_path` (`:864`, smooth profile).
+- `line_intersection` and `resample` run only at path conditioning (`path_conditioner.cpp:315,513`).
+
+| ID | Severity | Status | Area | Where | Item |
+|---|---|---|---|---|---|
+| GEO-004 | MEDIUM | DOUBT (test) | RT / Hint | `project_onto_path.cpp:28-35`; `rpp_core.cpp:864-865` | A valid hint on the last 1–2 segments widens to a **full-path scan every tick**; ties go to the lowest index |
+| GEO-001 | LOW (~~HIGH~~) | ACCEPTED ↓ | RT | `curvature.cpp:30-44`; `rpp_param_table.inc:50` | Baseline walk is linear in `baseline / spacing`: about 2 steps at the defaults, but the LIVE parameter has no upper bound |
+| GEO-002 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Correctness | `project_onto_path.cpp:43-78`; header `:21,29` | An all-degenerate window returns `valid=true` with cross-track 0 (only the hint is invalidated); RPP never reads `.valid` |
+| GEO-003 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Numeric | `line_intersection.cpp:13-17` | Absolute determinant threshold 1e-9 m² (load time only; matches Python) |
+| GEO-005 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | API | `resample.cpp:21` | `spacing <= 0` lets NaN through to a float → long conversion |
+| GEO-006 | LOW | ACCEPTED | API | `point.hpp:14-23` | `PathView` lifetime and bounds are the caller's discipline |
+
+### GEO-004 — MEDIUM — DOUBT — full scan at the end of every run
+- Confirmed mechanism. For `hint.seg ≥ n − 3`, the window `[seg − 2, min(n − 1, seg + 4))` is narrower than 3, so
+  it widens to `[0, n − 1]`. During the final 1–2 segments of every smooth run, each tick scans the whole run.
+  - At 0.08 m spacing, a 1 km run is about 12,500 segments, roughly 50–100 µs per tick on the Orin.
+  - That is within 10 ms, but it is pure waste and grows with the run length.
+- **Correctness question:** on a **closed run** (end = start, which the conditioner detects at
+  `path_conditioner.cpp:461,526`), the full scan can tie between the last segment and segment 0, and the strict
+  `<` picks segment 0. `update_path_progress` could then regress near the finish. The Python ancestor behaves the
+  same, so GATE 3 cannot catch it.
+- **Test:**
+  - a closed square run driven to the end → progress is monotonic and COMPLETE is reached;
+  - a 12,500-point run at the end → count the segments scanned.
+- **Fix:** clamp a fixed-width window inside `[0, n − 1]` instead of widening to a full scan; full scans only for
+  an invalid hint. This changes GATE 3 output at run ends only.
+
+### GEO-001 / GEO-002 / GEO-003 / GEO-005 / GEO-006 — LOW
+- **GEO-001.** At 0.15 m / 0.08 m the walk is about 2 segments each way. Give `curvature_baseline_m` a sane upper
+  bound (e.g. 2 m) in the parameter table, or precompute cumulative lengths if the bound must stay large.
+- **GEO-002.** The behaviour matches its documented contract ("valid false only for an empty path"), and
+  conditioning removes duplicates and resamples at 0.08 m, so a 6-segment all-degenerate window cannot occur on
+  an installed run. Hardening: return `valid=false` when nothing was scanned, and make RPP stop on
+  `!valid`.
+- **GEO-003.** The determinant is about 1e-6 even for 1 cm segments at 1°, so it is far above 1e-9 for real
+  corners. A scale-aware threshold changes GATE 3; leave it unless a real path fails.
+- **GEO-005.** The parameter comes from validated ROS parameters. Add `!std::isfinite(spacing)` and an output-size
+  cap anyway (one line).
+- **GEO-006.** Document the lifetime rule in the header.
 
 ---
 
