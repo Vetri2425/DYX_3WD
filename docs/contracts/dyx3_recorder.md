@@ -30,6 +30,10 @@ Directory names are collision-free (a numeric suffix is appended if the name exi
   (DERIVED: one run directory per run of a mission) while recording closes the old run (`SUPERSEDED`, or `NOT_STARTED` if it never ran) and opens a new one.
 * **Lost MissionState (REC-008).** If no `MissionState` arrives for `mission_silence_s` (default 3 s; the mission publishes at 10 Hz) while a
   run is open, the run is closed as **`MISSION_STATE_LOST`** with a note; when the mission comes back, its next `READY`/`RUNNING` opens a new run.
+* **Interrupted runs (REC-009).** At startup, before any new run, every run directory without `summary.json` (recorder crash, power cut,
+  SIGKILL) gets a minimal `summary.json` with `final_state` **`INTERRUPTED`**, `bag_healthy_throughout`/`provenance_complete` false, the bag/ULog
+  bytes found, and a note (plus "metadata.yaml missing … `ros2 bag reindex`" when the bag was not finalised). Such runs then count as complete for
+  retention.
 * `record_idle` (default false) is not implemented: recording outside missions is an **open question**.
 * Start order: directory -> manifest -> versions -> config snapshot -> `params_fcu.json` -> ulog -> bag -> `params_ros.json` start **collected
   on its own thread after the bag runs** (parameter RPCs never delay the bag). Stop joins that thread first, so its notes belong to the run. A step that fails is

@@ -3,7 +3,10 @@
 #include <sys/statvfs.h>
 
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
+
+#include "dyx3_recorder/run_manifest.hpp"
 
 namespace dyx3_recorder {
 
@@ -72,6 +75,46 @@ PruneResult prune_runs(const std::string& root, uint64_t max_bytes, const std::s
   }
   r.bytes_after = total;
   return r;
+}
+
+std::vector<std::string> mark_interrupted_runs(const std::string& root, const std::string& now_utc) {
+  std::vector<std::string> marked;
+  std::error_code ec;
+  if (!fs::is_directory(root, ec)) return marked;
+  std::vector<fs::path> dirs;
+  for (auto it = fs::directory_iterator(root, ec); !ec && it != fs::directory_iterator();
+       it.increment(ec)) {
+    std::error_code e2;
+    if (it->is_directory(e2) && !it->is_symlink(e2) &&
+        !fs::exists(it->path() / "summary.json", e2))
+      dirs.push_back(it->path());
+  }
+  std::sort(dirs.begin(), dirs.end());
+  for (const fs::path& d : dirs) {
+    RunSummary s;
+    s.final_state = "INTERRUPTED";
+    s.duration_s = NAN;
+    s.bag_healthy_throughout = false;
+    s.provenance_complete = false;
+    s.ulog_bytes = dir_bytes((d / "ulog").string());
+    bool bag_finalised = false;
+    for (auto it = fs::directory_iterator(d, ec); !ec && it != fs::directory_iterator();
+         it.increment(ec)) {
+      const std::string n = it->path().filename().string();
+      if (n.rfind("rosbag2", 0) != 0) continue;
+      s.bag_bytes += dir_bytes(it->path().string());
+      std::error_code e2;
+      bag_finalised = bag_finalised || fs::exists(it->path() / "metadata.yaml", e2);
+    }
+    s.notes.push_back("run directory had no summary.json when the recorder started at " + now_utc +
+                      ": the recorder or the host stopped during the run");
+    if (!bag_finalised)
+      s.notes.push_back("rosbag2 metadata.yaml missing: the bag was not finalised (ros2 bag reindex "
+                        "may recover it)");
+    if (write_file_atomic((d / "summary.json").string(), summary_json(s)))
+      marked.push_back(d.filename().string());
+  }
+  return marked;
 }
 
 }  // namespace dyx3_recorder

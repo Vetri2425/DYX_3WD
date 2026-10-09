@@ -28,4 +28,10 @@ struct PruneResult {
 // directory. Oldest = lexicographic order of the names (they start with the UTC start stamp).
 PruneResult prune_runs(const std::string& root, uint64_t max_bytes, const std::string& keep = "");
 
+// REC-009: a run directory without summary.json at recorder start belongs to a run that was cut
+// short (recorder crash, power cut, SIGKILL). Each gets a minimal summary.json with final_state
+// INTERRUPTED, so it is visibly incomplete (and becomes prunable). `now_utc` goes into the note.
+// Returns the names of the directories marked.
+std::vector<std::string> mark_interrupted_runs(const std::string& root, const std::string& now_utc);
+
 }  // namespace dyx3_recorder

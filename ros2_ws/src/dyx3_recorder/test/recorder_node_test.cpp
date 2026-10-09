@@ -41,6 +41,7 @@ struct Rig {
   double now{100.0};
   time_t wall{1788617730};
   std::shared_ptr<RecorderNode> rec;
+  rclcpp::NodeOptions opts;
   std::shared_ptr<rclcpp::Node> world;
   std::shared_ptr<rclcpp::executors::SingleThreadedExecutor> exec;
   rclcpp::Publisher<MissionState>::SharedPtr p_mission;
@@ -76,6 +77,7 @@ struct Rig {
     // the test machine's /tmp may have less than the 2 GiB production default
     o.append_parameter_override("min_free_bytes", int64_t{1} << 20);
     for (const auto& p : extra) o.append_parameter_override(p.get_name(), p.get_parameter_value());
+    opts = o;
     rec = std::make_shared<RecorderNode>(
         o, [this]() { return now; }, [this]() { return wall; },
         [](const std::vector<std::string>&, double) {
@@ -594,4 +596,17 @@ TEST(RecorderNode, SilentMissionStateClosesTheRunAsLost) {
   r.mission(MissionState::STATE_RUNNING, 3);  // the mission comes back: a new run opens
   EXPECT_TRUE(r.rec->recording());
   EXPECT_EQ(r.run_count(), 2U);
+}
+
+// REC-009: a recorder that starts after a crash marks the run it finds without summary.json.
+TEST(RecorderNode, StartupMarksALeftOpenRunInterrupted) {
+  Rig r;
+  const std::string cut = r.root + "/runs/2026-09-05_120000_mission_0007";
+  fs::create_directories(cut + "/rosbag2");
+  auto second = std::make_shared<RecorderNode>(
+      r.opts, [&r]() { return r.now; }, [&r]() { return r.wall; },
+      [](const std::vector<std::string>&, double) { return std::vector<NodeParams>{}; }, false);
+  const std::string summary = slurp(cut + "/summary.json");
+  EXPECT_NE(summary.find("\"final_state\": \"INTERRUPTED\""), std::string::npos);
+  second.reset();
 }

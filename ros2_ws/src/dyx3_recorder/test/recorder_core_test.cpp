@@ -381,6 +381,29 @@ TEST(RunStore, PruneDeletesOldestCompleteRunsOnly) {
   EXPECT_GT(fs_free_bytes(d.path + "/not/yet/created"), 0U);  // nearest existing parent
 }
 
+TEST(RunStore, RunsWithoutSummaryAreMarkedInterrupted) {
+  TmpDir d;
+  fs::create_directories(d.path + "/a_done/rosbag2");
+  std::ofstream(d.path + "/a_done/summary.json") << "{\"final_state\": \"COMPLETED\"}";
+  fs::create_directories(d.path + "/b_cut/rosbag2");
+  std::ofstream(d.path + "/b_cut/rosbag2/b_cut_0.db3") << std::string(500, 'x');
+  fs::create_directories(d.path + "/c_cut_finalised/rosbag2");
+  std::ofstream(d.path + "/c_cut_finalised/rosbag2/metadata.yaml") << "m";
+  const auto marked = mark_interrupted_runs(d.path, "2026-09-05T14:15:30Z");
+  ASSERT_EQ(marked.size(), 2U);
+  EXPECT_EQ(marked[0], "b_cut");
+  EXPECT_EQ(slurp(d.path + "/a_done/summary.json"), "{\"final_state\": \"COMPLETED\"}");
+  const std::string b = slurp(d.path + "/b_cut/summary.json");
+  EXPECT_NE(b.find("\"final_state\": \"INTERRUPTED\""), std::string::npos);
+  EXPECT_NE(b.find("\"bag_bytes\": 500"), std::string::npos);
+  EXPECT_NE(b.find("metadata.yaml missing"), std::string::npos);
+  EXPECT_NE(b.find("2026-09-05T14:15:30Z"), std::string::npos);
+  EXPECT_NE(b.find("\"provenance_complete\": false"), std::string::npos);
+  EXPECT_EQ(slurp(d.path + "/c_cut_finalised/summary.json").find("metadata.yaml missing"),
+            std::string::npos);
+  EXPECT_TRUE(mark_interrupted_runs(d.path, "x").empty());  // idempotent
+}
+
 // ---- bag supervision against a fake child
 // -------------------------------------------------------------------------
 TEST(BagWriter, ExecFailureIsReported) {

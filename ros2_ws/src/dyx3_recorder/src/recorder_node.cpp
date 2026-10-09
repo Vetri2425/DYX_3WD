@@ -147,6 +147,9 @@ RecorderNode::RecorderNode(const rclcpp::NodeOptions& options, ClockFn clock, Wa
                              })),
       free_fn_(fs_free_bytes) {
   declare_params();
+  // REC-009: before any new run, mark what a previous recorder left open.
+  for (const auto& n : mark_interrupted_runs(runs_dir_, iso_utc(wall_())))
+    RCLCPP_WARN(get_logger(), "run %s had no summary.json: marked INTERRUPTED", n.c_str());
   cb_mission_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
   cb_ulog_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
   pub_status_ =
