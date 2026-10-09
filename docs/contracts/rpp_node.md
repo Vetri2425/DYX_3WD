@@ -21,7 +21,9 @@
   `RppStatus.conditioned_execution_sha256`. Spray uses that artifact for projection. A **new mission id** loads again even for the same source file.
   A missing or corrupt file, or a path that conditions to nothing, is `STATE_ERROR` (STOP) and is retried once a second.
 * **Not RUNNING** (loaded and waiting, or paused): STOP every tick, `STATE_LOADED`. On the RUNNING to not-RUNNING edge the core forgets its motion
-  memory (`pause()`: speed memory, hard-curvature latch, stop confirmation) so a resume ramps from rest. A mission is never resumed by RPP on its own: that is `dyx3_mission`'s FSM.
+  memory (`pause()`: speed memory, hard-curvature latch, stop confirmation; and, XR-RPP-008, the jump-guard position, the tick period,
+  the projection hint of an open run, the precise-stop engagement and its timer, the stop latch: a resume is a fresh start of the same run, so a
+  coast while paused is neither a JumpSkip nor an EKF offset) so a resume ramps from rest. A mission is never resumed by RPP on its own: that is `dyx3_mission`'s FSM.
 * **RUNNING:** one `RppCore::tick` per control tick, mapped by `command_from_tick` (`rpp_command.hpp`):
   STOP -> `MODE_STOP`; TRACK -> `TRACK_RATE` (smooth run: speed = |v|, rate = feed-forward + feedback) or `TRACK_HEADING` (segment run: speed = |v|,
   heading = the bearing of the core's velocity vector whenever it is non-zero, the core's frozen heading only for an exactly zero vector, so a stop never

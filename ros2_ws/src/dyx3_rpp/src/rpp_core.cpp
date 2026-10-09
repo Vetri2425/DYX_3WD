@@ -1338,6 +1338,28 @@ void RppCore::pause() {
   last_speed_cmd_ = 0.0;
   kappa_hard_latched_ = false;
   reset_corner_pivot_state();
+  // XR-RPP-008: a resume is a fresh start of the same run from wherever the rover came to rest.
+  // - jump guard: the rover may coast while paused (no command), so the first pose after a resume
+  //   is not a jump. Without this the coast was a JumpSkip (a STOP tick and a lost hint) or, with
+  //   ekf_reset_compensation, a PERMANENT EKF offset equal to the coast.
+  have_last_pos_ = false;
+  // - tick period: the first tick after the pause uses the nominal period, not the pause length
+  //   (clamped to 0.1 s) for the speed slew.
+  have_last_tick_ = false;
+  // - projection hint: the coast can leave the hint window; search the whole open run once, as
+  //   after a JumpSkip. A closed run keeps its hint: a full scan near the closure point can tie
+  //   with segment 0 or the last segment, and the windowed search follows a coast within a few
+  //   ticks.
+  if (run_ != nullptr && !run_->closed) {
+    hint_.seg = 0;
+    hint_.valid = false;
+  }
+  // - endpoint precise stop: its timeout counted through the pause. Disengage it; it re-engages
+  //   from the trigger test with a fresh start time.
+  segment_endpoint_stop_active_ = false;
+  endpoint_stop_started_ = false;
+  // - stop latch: re-evaluated from the rest position.
+  stop_latched_ = false;
 }
 
 CoreState RppCore::snapshot() const {

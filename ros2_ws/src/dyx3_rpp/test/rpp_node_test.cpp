@@ -666,6 +666,7 @@ TEST(RppNode, APauseWithACoastResumesAlongTheLineFromRest) {
     r.cycle();
     const MotionSetpoint& m = r.motion.back();
     if (first_speed < 0.0F && m.mode != MotionSetpoint::MODE_STOP) first_speed = m.speed_body_x;
+    EXPECT_NE(r.status.tick_state, 5) << "XR-RPP-008: the coast is not a position jump";
     if (m.mode == MotionSetpoint::MODE_TRACK_HEADING && m.speed_body_x >= 0.05F)
       EXPECT_LT(std::fabs(m.yaw_setpoint), 0.2F) << "along the line";
   }

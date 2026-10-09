@@ -102,3 +102,50 @@ TEST(RppCore, ThePreciseStopReportsCrossTrackRightPositive) {
   EXPECT_NEAR(o.cross_track_right, 0.03, 1e-9);
   EXPECT_DOUBLE_EQ(o.cross_track_right, o.debug.cross_track);
 }
+
+// XR-RPP-008: pause, the rover coasts 0.2 m, resume. The coast is not a position jump: no
+// JumpSkip, and with EKF reset compensation on, no permanent offset equal to the coast.
+TEST(RppCore, AResumeAfterACoastIsAFreshStartNotAJump) {
+  for (const bool comp : {false, true}) {
+    CoreRig r({north_run(6.0, Profile::Segment, 6.0)},
+              {{"ekf_reset_compensation", comp ? 1.0 : 0.0, ""}});
+    r.vn = 0.5;
+    for (int i = 0; i < 50; ++i) {  // 1 s at 0.5 m/s
+      r.n += 0.5 * 0.02;
+      const TickOutput& o = r.step();
+      ASSERT_NE(o.state, StateCode::JumpSkip) << "tick " << i;
+    }
+    r.core->pause();
+    for (int i = 0; i < 20; ++i) {  // the node does not tick while paused; poses keep arriving
+      r.n += 0.01;
+      r.now += kTickNs;
+      r.core->on_pose(NedPose{r.n, r.e, r.yaw}, r.now);
+      r.core->on_velocity(0.5, 0.0, 0.0, r.now);
+    }
+    r.vn = 0.0;
+    for (int i = 0; i < 10; ++i) {
+      const TickOutput& o = r.step();
+      EXPECT_NE(o.state, StateCode::JumpSkip) << "comp " << comp << " tick " << i;
+    }
+    const CoreState st = r.core->snapshot();
+    EXPECT_EQ(st.ekf_reset_count, 0) << "comp " << comp;
+    EXPECT_DOUBLE_EQ(st.ekf_offset_n, 0.0) << "comp " << comp;
+    EXPECT_DOUBLE_EQ(st.ekf_offset_e, 0.0) << "comp " << comp;
+    EXPECT_NEAR(st.tick_dt, 0.02, 1e-9);
+  }
+}
+
+// XR-RPP-008: the precise-stop timeout does not count through a pause.
+TEST(RppCore, APauseRestartsThePreciseStopTimer) {
+  CoreRig r({north_run(6.0, Profile::Segment, 6.0)});
+  r.n = 5.99;
+  r.vn = 0.05;  // never settles: only the timeout can end the precise stop
+  for (int i = 0; i < 300; ++i) r.step();  // 6 s of the 8 s budget
+  ASSERT_TRUE(r.core->snapshot().endpoint_stop_active);
+  r.core->pause();
+  r.now += 10'000'000'000;       // a 10 s pause
+  for (int i = 0; i < 150; ++i)  // 3 s after the resume: still inside a fresh 8 s budget
+    EXPECT_NE(r.step().cmd, CmdKind::Brake) << "tick " << i;
+  for (int i = 0; i < 300; ++i) r.step();  // past 8 s since the re-engagement
+  EXPECT_EQ(r.step().cmd, CmdKind::Brake);
+}

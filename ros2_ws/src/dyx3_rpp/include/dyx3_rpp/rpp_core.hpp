@@ -184,7 +184,10 @@ public:
   void test_set_last_speed_cmd(double v) { last_speed_cmd_ = v; }
 
   // Not running (paused, waiting): forget the motion memory exactly as a zero publish does, and
-  // restart the stop confirmation. The node calls this instead of ticking.
+  // restart the stop confirmation. The node calls this instead of ticking. Also forgets what makes
+  // a resume differ from a fresh start of the same run (XR-RPP-008): the jump-guard position, the
+  // tick period, the projection hint (open runs), the precise-stop engagement and its timer, and
+  // the stop latch.
   void pause();
   bool path_done() const { return path_done_; }
   bool profile_segment() const { return profile_segment_; }
