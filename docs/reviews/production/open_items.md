@@ -39,7 +39,7 @@ Review baseline: DYX_3WD `master` `252778e` (firmware `8279fa4be3`).
 | 1 | `dyx3_rpp` | 2026-10-09 | 2026-10-09 | 0 / 1 / 4 / 3 | open |
 | 2 | `dyx3_motion_guard` | 2026-10-09 | 2026-10-09 | 0 / 0 / 3 / 4 | open |
 | 3 | `dyx3_px4_link` | 2026-10-09 | 2026-10-09 | 0 / 3 / 1 / 3 | open |
-| 4 | `dyx3_interfaces` (+ px4_msgs pin) | — | — | — | prompt issued |
+| 4 | `dyx3_interfaces` (+ px4_msgs pin) | 2026-10-09 | 2026-10-09 | 0 / 0 / 1 / 6 | open |
 | 5 | `dyx3_mission` | 2026-10-09 | 2026-10-09 | 0 / 0 / 3 / 4 | open |
 | 6 | `dyx3_gnss_rtk` | 2026-10-09 | 2026-10-09 | 0 / 0 / 1 / 3 | open |
 | 7 | `dyx3_spray` | 2026-10-09 | 2026-10-09 | 0 / 2 / 2 / 1 | open |
@@ -49,8 +49,8 @@ Review baseline: DYX_3WD `master` `252778e` (firmware `8279fa4be3`).
 | 11 | `dyx3_recorder` | 2026-10-09 (×2) | 2026-10-09 | 0 / 5 / 10 / 9 | open |
 | 12 | backend | 2026-10-09 | 2026-10-09 | 0 / 1 / 3 / 6 | open |
 | 13 | installer / deployment | — | — | — | prompt issued |
-| 14 | tablet app (`Three_Wheel_v2` `App-Polish`) | — | — | — | |
-| 15 | PX4 firmware rover path (`dyx-3wd-production`) | — | — | — | |
+| 14 | tablet app (`Three_Wheel_v2` `App-Polish`) | — | — | — | deferred (not this session) |
+| 15 | PX4 firmware rover path (`dyx-3wd-production`) | — | — | — | deferred (not this session) |
 | 16 | `dyx3_rpp_legacy` | not reviewed: reference only, deleted at GATE 7 | | | |
 
 ---
@@ -934,6 +934,44 @@ Confirmed good:
   with QR pairing.
 - **BE-008.** Update the contract to "operator".
 - **BE-009.** Retention policy together with the recorder (REC review) and the RTK state on `/var/lib/dyx3`.
+
+---
+
+## `dyx3_interfaces` + px4_msgs pin (tracker #4)
+
+Reviewer verdict: changes required (0 CRITICAL, 1 HIGH, 5 MEDIUM, 1 LOW). After verification: **0 CRITICAL,
+0 HIGH, 1 MEDIUM, 6 LOW**.
+- No interface default can cause unsafe motion or paint.
+- **The px4_msgs pin is safe:** the pin `27a7ac9284` and the flashed `8279fa4be3` have identical `msg/`, `srv/` and
+  `dds_topics.yaml`. `px4_link` hash-checks 16 message formats and fails closed on a mismatch. PC-9 stays a
+  traceability clean-up.
+
+Confirmed good:
+- **The default `MotionSetpoint` is safe** (`valid=false`, `mode=STOP`).
+- **The NaN rules are documented.**
+- **Every service has a defined 0 = OK result**, and ExecuteMission sets its terminal result explicitly.
+- **The installer builds px4_msgs from the firmware's own `msg/` + `srv/`** (both plain and versioned).
+- Float32 local positions are about 0.5 mm resolution at 5 km, which is not a precision risk at site scale.
+
+| ID | Severity | Status | Area | Where | Item |
+|---|---|---|---|---|---|
+| IF-003 | MEDIUM | ACCEPTED | Time | `MotionSetpoint.msg:5-15`; `rpp_node.cpp:382-390`; `motion_guard_node.cpp:232-240` | The source-pose sample time is not carried through RPP → guard → px4_link, so pose-to-command age cannot be measured from the data (the latency acceptance gates need it; ties to X-001 / X-003 / PC-2) |
+| IF-001 | LOW (~~HIGH~~) | ACCEPTED ↓ | Hot-path | `RppStatus.msg:46-48`; `rpp_node.cpp:398` | A 64-char `string` SHA is copied into `RppStatus` on every 50 Hz tick (one heap allocation; a non-loaned `publish` serialises anyway). Fold into PC-2's bounded, loanable hot-path types (`uint8[32]` digest) |
+| IF-002 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Time | `EstimatorHealth.msg:10-11`; `px4_link_node.cpp` (only `VehicleState` sets `px4_sample_stamp`, line 836) | `EstimatorHealth.px4_sample_stamp` is never filled, so it is always 0 |
+| IF-004 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Safety | `VehicleState.msg:7-18`; `vehicle_state_assembler.cpp:11-12` | `position_valid` / `velocity_valid` reflect XY only; `down_m` / `velocity_down_mps` have no validity flag (no control consumer uses them on a 2D rover) |
+| IF-005 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Doc | `docs/contracts/topics.md:14` | The contract says `/dyx3/vehicle_state` is published "on each FCU sample"; it is a 20 ms timer republishing the latest cached sample |
+| IF-006 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Tests | `interface_abi_test.cpp` | `conditioned_execution_sha256`, `heading_evidence_valid` and `path_travel_m` (0.9 / 0.10 additions) are not pinned; there is no schema fingerprint test |
+| IF-007 | LOW | ACCEPTED | Doc | `SetEmergencyStop.srv:1-2` | The accepted E-stop sources (`tablet`, `backend`, `ble`, `physical`) are not documented in the `.srv` |
+
+### Grouping
+- **One breaking interface release, 0.14.0, with PC-2:**
+  - IF-003: `source_pose_sample_stamp` in `MotionSetpoint`, preserved by the guard;
+  - IF-001: a fixed `uint8[32]` digest;
+  - IF-004: vertical validity flags;
+  - plus RPP-009's yaw-rate source.
+  Build and migrate all consumers together.
+- **Non-breaking now:** IF-002 (fill the stamp from `EstimatorStatusFlags.timestamp_sample`); IF-005, IF-006 and
+  IF-007 (docs and tests).
 
 ---
 
