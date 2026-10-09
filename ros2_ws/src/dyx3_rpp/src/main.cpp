@@ -21,7 +21,8 @@ int main(int argc, char** argv) {
   std::signal(SIGTERM, on_signal);
   // Real-time discipline (CLAUDE.md section 7): no page faults on the control path. Best effort: a
   // container without the capability keeps running and says so. Scheduling priority and CPU
-  // affinity are an open item (systemd unit).
+  // affinity come from the launch prefix (dyx3_bringup control_graph.launch.py): FIFO 80 on CPU 4,
+  // shared with motion_guard at the same priority.
   if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0)
     std::fprintf(stderr, "rpp_node: mlockall failed (continuing unlocked)\n");
   int rc = 0;
@@ -29,7 +30,10 @@ int main(int argc, char** argv) {
     auto node = std::make_shared<dyx3_rpp::RppNode>();
     rclcpp::executors::SingleThreadedExecutor ex;
     ex.add_node(node);
-    while (rclcpp::ok() && !g_stop.load()) ex.spin_some(std::chrono::milliseconds(5));
+    // spin_once blocks until work is ready (at most 5 ms, so a stop request is seen within 5 ms).
+    // spin_some never waits for work: in this loop it polled about 14 000 times a second, and at
+    // SCHED_FIFO on the core shared with motion_guard a poll loop delays the guard on every pass.
+    while (rclcpp::ok() && !g_stop.load()) ex.spin_once(std::chrono::milliseconds(5));
     for (int i = 0; i < 5;
          ++i) {  // a bounded burst of STOPs so the guard sees the last word before we go
       node->shutdown_stop();

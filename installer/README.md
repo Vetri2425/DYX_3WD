@@ -194,7 +194,8 @@ the store at startup and a restart interrupts the tablet connection.
 * **`/etc/dyx3/versions.json`** is rewritten on every switch/rollback; the recorder copies it into every run.
 * **Backend venv** (`<release>/venv`) is built with the release; a failed `pip install` (no WAN) is a warning, not a failed upgrade.
 * **Health**: gateway socket, backend ping (both only for ENABLED services), data-volume report (FAIL only when completely full: no threshold invented), `--deep` lists the graph's nodes (WARN).
-* **OPEN**: per-node real-time priority/affinity (the `dyx3-ros` unit applies FIFO 80 / CPU 4 to the whole tree), DDS scoping (loopback-only vs an eth0 whitelist), the backend port (8000, DERIVED), and the ROS domain number.
+* **Real-time allocation** (DERIVED, 2026-10-09): only `rpp` and `motion_guard` run SCHED_FIFO 80 on CPU 4, through a `taskset`/`chrt` launch prefix in `control_graph.launch.py`; the `dyx3-ros` unit no longer sets a policy or affinity for the whole tree. The unit must keep `LimitRTPRIO` >= 80 (it runs as `dyx3` without CAP_SYS_NICE) and `LimitMEMLOCK=infinity` (mlockall).
+* **OPEN**: DDS scoping (loopback-only vs an eth0 whitelist), the backend port (8000, DERIVED), and the ROS domain number.
 
 Tested against a staged root (`installer/tests/run_tests.sh`, 80 checks); **never run on a Jetson**.
 

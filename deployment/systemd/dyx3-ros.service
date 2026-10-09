@@ -23,8 +23,18 @@ ProtectControlGroups=yes
 
 LimitNOFILE=65536
 # The launcher and non-control nodes must be scheduled normally. The launch file gives only
-# the RPP and motion-guard control executors FIFO priority and CPU affinity.
+# the RPP and motion-guard control executors FIFO priority and CPU affinity, through a
+# `taskset -c 4 chrt -f 80` prefix that runs as User=dyx3 without CAP_SYS_NICE. The kernel
+# allows that only up to RLIMIT_RTPRIO, so LimitRTPRIO must stay >= 80. If it is lowered,
+# chrt fails, the node exits and the whole graph restarts: loud, never silently non-RT.
 LimitRTPRIO=99
+# rpp, motion_guard and px4_link call mlockall(MCL_CURRENT|MCL_FUTURE) (CLAUDE.md section 7).
+# Under the default RLIMIT_MEMLOCK it fails ("mlockall failed (continuing unlocked)").
+LimitMEMLOCK=infinity
+# DERIVED — NOT FROM V1 SPEC: ros2 launch escalates SIGINT -> SIGTERM -> SIGKILL after 5 s + 5 s
+# (its defaults), so a healthy graph is down in well under 15 s. A hang now costs 15 s, not the
+# 90 s systemd default that every dyx3-platform restart paid on 2026-10-09.
+TimeoutStopSec=15
 
 StandardOutput=journal
 StandardError=journal

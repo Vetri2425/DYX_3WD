@@ -44,8 +44,9 @@ Node-level: `tick_hz` (50, in [20, 100]; DERIVED from the prototype's `CONTROL_H
 ## 4. Real-time discipline
 
 `main` calls `mlockall` (best effort: a container without the capability continues and says so). The core allocates nothing in `tick()`; the node's publishes
-use the middleware's normal path (small fixed-size messages, no strings on the hot path); logging happens only on a state transition. **Not done:** SCHED_FIFO
-priority and CPU affinity (OPEN, expressed in the systemd unit when decided), and the measurement of any of this (timing is not provable off-target).
+use the middleware's normal path (small fixed-size messages, no strings on the hot path); logging happens only on a state transition. SCHED_FIFO 80 on CPU 4,
+shared with motion_guard, comes from the launch prefix in `dyx3_bringup/launch/control_graph.launch.py` (DERIVED, 2026-10-09). The main loop blocks in
+`spin_once(5 ms)`: it must never poll, because it shares a FIFO core with the guard. **Not done:** the measurement of any of this (timing is not provable off-target).
 
 ## 5. Proof
 

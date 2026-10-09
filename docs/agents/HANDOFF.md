@@ -1565,3 +1565,36 @@ The previous 53% `polkitd` snapshot was transient (later `ps` showed 0.6% and
 not the exact Fast DDS thread behavior or a successful rover recovery. The RTK status
 was stale; `/dyx3/rtcm` match could not be observed while the graph was starved.
 The field stress test and PX4 RTCM rate are required before accepting this fix.
+
+---
+
+## 2026-10-09 — Claude — review and merge of Codex T2 (`codex/t2-dds-rtk-and-rt-cpu`)
+
+Merged the three Codex commits onto `0f0eb4f`, plus one Claude fix commit. Nothing on the rover was touched.
+
+**Reviewed, off-target (Humble container):**
+- The launch prefix `taskset -c 4 chrt -f 80` runs as an unprivileged user with RLIMIT_RTPRIO=99. Every thread of
+  rpp_node and motion_guard_node is FF/80, affinity 4. Mission, px4_link, spray and gateway are TS on all cores.
+- With RLIMIT_RTPRIO=0, chrt fails with EPERM. The node exits and the graph shuts down, so the failure is loud.
+- RTK `block_reason` uses the same order as the DdsSink readiness predicate. It adds no secret.
+  Injection semantics are unchanged.
+
+**Fixed (Claude commit):**
+- `rpp_node` polled with `spin_some` in a tight loop (14 % of a core, 14 k wakeups/s). It now uses `spin_once(5 ms)`
+  (0.75 %). This matters because rpp shares the FIFO core with the guard.
+- `LimitMEMLOCK=infinity`: mlockall now succeeds.
+- `TimeoutStopSec=15`: the graph stopped in 0.2 s off-target. The rover paid 90 s.
+- spray_node, spray_watchdog and recorder still poll the same way, at about 14 % of a core each. They are not
+  real-time, so this costs CPU but does not cause starvation. Fix them separately.
+
+**Still unexplained:** what was spinning in mission TID 14275 at 87 %. Off-target, mission idles at 0.4 % of a core.
+If it still spins at normal priority after deploy, take a per-thread look (`top -H -p`, `/proc/<pid>/task/*/comm`).
+
+**Rover checks after deploy:**
+- `ps -eLo pid,tid,cls,rtprio,psr,pcpu,comm`: only rpp_node and motion_guard threads FF 80, PSR 4; every other
+  node TS. `systemctl show dyx3-ros -p LimitRTPRIO,LimitMEMLOCK,TimeoutStopUSec`.
+- No "mlockall failed" in the journal.
+- `px4_link` `loop_overrun_count` stays flat at normal priority. If it rises, give px4_link its own core
+  (for example `taskset -c 5 chrt -f 70`). Never put it on CPU 4.
+- RTK reaches `block_reason: READY` and then `INJECTING`.
+- `systemctl restart dyx3-ros` finishes in well under 15 s.

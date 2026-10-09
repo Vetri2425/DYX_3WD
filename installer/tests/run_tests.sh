@@ -90,6 +90,11 @@ libs() {
   check "fresh installer provisions the kernel driver before release setup" 'grep -q "provision_usb_serial_support" "${REPO}/installer/install.sh"'
   check "upgrade enables the provisioning unit before restarting rover services" 'sed -n "/^\[enabled_services\]/,/^\[/p" "${REPO}/installer/manifests/production.manifest" | sed -n "2p" | grep -qx dyx3-usb-serial-check'
   check "the spray watchdog unit is not tied to dyx3-ros" '! grep -E "^(Requires|BindsTo|PartOf)=.*dyx3-ros" "${REPO}/deployment/systemd/dyx3-spray-watchdog.service"'
+  # Only rpp and motion_guard get FIFO 80 / CPU 4, via the launch prefix running as User=dyx3.
+  local ru="${REPO}/deployment/systemd/dyx3-ros.service"
+  check "dyx3-ros sets no tree-wide RT policy or affinity" '! grep -Eq "^(CPUSchedulingPolicy|CPUSchedulingPriority|CPUAffinity)=" "${ru}"'
+  check "dyx3-ros lets the unprivileged chrt prefix set FIFO 80" '[ "$(sed -n "s/^LimitRTPRIO=//p" "${ru}")" -ge 80 ] && grep -q "chrt -f 80" "${REPO}/ros2_ws/src/dyx3_bringup/launch/control_graph.launch.py"'
+  check "dyx3-ros lets mlockall succeed and bounds a stop hang" 'grep -qx "LimitMEMLOCK=infinity" "${ru}" && grep -qx "TimeoutStopSec=15" "${ru}" && ! grep -q "^RestrictRealtime=yes" "${ru}"'
   check "the RTK unit creates its own 0700 state directory" 'grep -qx "StateDirectory=dyx3/rtk" "${REPO}/deployment/systemd/dyx3-rtk.service" && grep -qx "StateDirectoryMode=0700" "${REPO}/deployment/systemd/dyx3-rtk.service"'
   check "no unit or template hard-codes a secret (comments excluded)" '! grep -rEi "^[^#]*(password|token)=." "${REPO}/deployment/systemd" "${REPO}/deployment/network"'
 
