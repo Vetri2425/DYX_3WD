@@ -78,6 +78,11 @@ void IpcServer::stop() {
   unlink(cfg_.path.c_str());
 }
 
+bool IpcServer::connected(int client) const {
+  std::lock_guard<std::mutex> lk(mu_);
+  return clients_map_.count(client) != 0;
+}
+
 void IpcServer::send(int client, const std::string& line) {
   {
     std::lock_guard<std::mutex> lk(mu_);

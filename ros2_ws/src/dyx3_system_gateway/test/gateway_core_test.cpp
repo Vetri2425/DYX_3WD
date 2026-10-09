@@ -201,16 +201,19 @@ TEST(Snapshot, MissingSourcesAreNullAndOldSourcesAreNotFresh) {
 
 TEST(OperatorLink, AliveOnlyWithAClientAndAFreshHeartbeat) {
   OperatorLink l(2.0);
-  EXPECT_FALSE(l.state(1.0, 1).alive);  // never heard
-  EXPECT_EQ(l.state(1.0, 1).age_s, 0.0);
-  l.note_heartbeat(10.0);
-  EXPECT_TRUE(l.state(11.9, 1).alive);
-  EXPECT_FALSE(l.state(12.1, 1).alive);  // timeout
-  EXPECT_NEAR(l.state(12.1, 1).age_s, 2.1, 1e-9);
-  EXPECT_FALSE(
-      l.state(10.5, 0).alive);  // no client connected (backend dead) is a dead operator link
-  l.note_heartbeat(12.1);
-  EXPECT_TRUE(l.state(12.2, 1).alive);
+  EXPECT_EQ(l.client(), -1);
+  EXPECT_FALSE(l.state(1.0, true).alive);  // never heard
+  EXPECT_EQ(l.state(1.0, true).age_s, 0.0);
+  l.note_heartbeat(10.0, 3);
+  EXPECT_EQ(l.client(), 3);
+  EXPECT_TRUE(l.state(11.9, true).alive);
+  EXPECT_FALSE(l.state(12.1, true).alive);  // timeout
+  EXPECT_NEAR(l.state(12.1, true).age_s, 2.1, 1e-9);
+  // the heartbeating client is gone (backend dead): a dead operator link, however fresh
+  EXPECT_FALSE(l.state(10.5, false).alive);
+  l.note_heartbeat(12.1, 4);  // another connection takes over only by heartbeating itself
+  EXPECT_EQ(l.client(), 4);
+  EXPECT_TRUE(l.state(12.2, true).alive);
 }
 
 // ---- socket server
@@ -249,6 +252,20 @@ TEST(IpcServer, FramingRepliesBroadcastAndModeBits) {
   s.broadcast("hello");
   EXPECT_EQ(a.read_lines(1).at(0), "hello");
   EXPECT_EQ(b.read_lines(1).at(0), "hello");
+  int a_id = -1;
+  {
+    std::lock_guard<std::mutex> lk(mu);
+    ASSERT_FALSE(got.empty());
+    a_id = got[0].first;
+  }
+  EXPECT_TRUE(s.connected(a_id));
+  EXPECT_FALSE(s.connected(a_id + 100));
+  a.~Sock();
+  new (&a) Sock("/nonexistent");
+  for (int i = 0; i < 100 && s.connected(a_id); ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  EXPECT_FALSE(s.connected(a_id));  // a closed connection is gone at once
+  EXPECT_EQ(s.clients(), 1);
   s.stop();
   EXPECT_FALSE(std::filesystem::exists(c.path));
 }

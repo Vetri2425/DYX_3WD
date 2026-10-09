@@ -31,6 +31,8 @@ public:
   void send(int client, const std::string& line);  // appends '\n'
   void broadcast(const std::string& line);
   int clients() const { return clients_.load(); }
+  // True while this client id is connected. Ids are never reused, so once false it stays false.
+  bool connected(int client) const;
   uint64_t dropped_slow() const { return dropped_slow_.load(); }
   uint64_t rejected_full() const { return rejected_full_.load(); }
   uint64_t overflows() const { return overflows_.load(); }
@@ -51,7 +53,7 @@ private:
   std::atomic<bool> run_{false};
   std::atomic<int> clients_{0};
   std::atomic<uint64_t> dropped_slow_{0}, rejected_full_{0}, overflows_{0};
-  std::mutex mu_;  // guards clients_map_ (the out buffers and drop flags)
+  mutable std::mutex mu_;  // guards clients_map_ (the out buffers and drop flags)
   std::map<int, Client> clients_map_;
   int next_id_{1};
 };

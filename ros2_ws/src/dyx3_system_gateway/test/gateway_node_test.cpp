@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <memory>
 #include <thread>
 
 #include "dyx3_system_gateway/json.hpp"
@@ -304,6 +305,38 @@ TEST(GatewayNode, OperatorLinkFollowsTheHeartbeatAndFailsSafe) {
   r.gw->step(r.now);
   r.pump(200);
   EXPECT_FALSE(r.link.alive);
+}
+
+TEST(GatewayNode, TheOperatorLinkDiesWithTheConnectionThatHeartbeated) {
+  Rig r;
+  auto a = std::make_unique<Sock>(r.sock);
+  Sock b(r.sock);  // a second client (e.g. a debug tool) that never heartbeats
+  ASSERT_TRUE(a->ok() && b.ok());
+  EXPECT_TRUE(ok_of(r.ask(*a, R"({"v":1,"id":61,"cmd":"heartbeat"})", 61)));
+  r.now += 0.1;
+  r.gw->step(r.now);
+  r.pump(200);
+  EXPECT_TRUE(r.link.alive);
+  // A (the backend) goes away while B stays connected and silent: the link must drop on the
+  // next publish, not after the heartbeat timeout.
+  a.reset();
+  r.pump(300);  // the IPC thread sees the hang-up
+  ASSERT_EQ(r.gw->ipc().clients(), 1);
+  r.now += 0.1;  // one publish period; the last heartbeat is only 0.2 s old
+  r.gw->step(r.now);
+  r.pump(200);
+  EXPECT_FALSE(r.link.alive);
+  EXPECT_LT(r.link.age_s, 1.0F);
+  // B is not the operator until it heartbeats itself
+  EXPECT_TRUE(ok_of(r.ask(b, R"({"v":1,"id":62,"cmd":"heartbeat"})", 62)));
+  r.now += 0.1;
+  r.gw->step(r.now);
+  r.pump(200);
+  EXPECT_TRUE(r.link.alive);
+  r.now += 1.0;
+  r.gw->step(r.now);
+  r.pump(200);
+  EXPECT_TRUE(r.link.alive);  // within the timeout, B still connected
 }
 
 TEST(GatewayNode, SnapshotAndTelemetryPushCarryAgeAndFreshness) {

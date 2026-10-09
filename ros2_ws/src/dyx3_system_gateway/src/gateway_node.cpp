@@ -298,8 +298,12 @@ void GatewayNode::reply(int client, bool has_id, int64_t id, bool ok, const std:
   ipc_.send(client, r.dump());
 }
 
+OperatorLinkState GatewayNode::link_state(double now_s) const {
+  return link_.state(now_s, ipc_.connected(link_.client()));
+}
+
 std::string GatewayNode::gateway_json(double now_s) const {
-  const OperatorLinkState s = link_.state(now_s, ipc_.clients());
+  const OperatorLinkState s = link_state(now_s);
   return JsonLine()
       .integer("schema", kProtocolVersion)
       .boolean("operator_alive", s.alive)
@@ -342,7 +346,7 @@ void GatewayNode::process(const Inbound& in, double now_s) {
   };
   switch (c.kind) {
     case CmdKind::Heartbeat:
-      link_.note_heartbeat(now_s);
+      link_.note_heartbeat(now_s, in.client);
       reply(in.client, in.pr.has_id, in.pr.id, true, "ok", "");
       return;
     case CmdKind::GetSnapshot:
@@ -409,7 +413,7 @@ void GatewayNode::process(const Inbound& in, double now_s) {
 }
 
 void GatewayNode::publish_operator_link(double now_s) {
-  const OperatorLinkState s = link_.state(now_s, ipc_.clients());
+  const OperatorLinkState s = link_state(now_s);
   dyx3_interfaces::msg::OperatorLinkStatus m;
   m.stamp = get_clock()->now();
   m.alive = s.alive;

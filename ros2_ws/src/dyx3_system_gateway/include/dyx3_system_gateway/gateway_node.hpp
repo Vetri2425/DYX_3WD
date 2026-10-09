@@ -77,6 +77,7 @@ private:
   void call(const Inbound& in, double now_s, typename rclcpp::Client<Srv>::SharedPtr cli,
             const char* name, Fill fill, Render render);
   std::string gateway_json(double now_s) const;
+  OperatorLinkState link_state(double now_s) const;
   void publish_operator_link(double now_s);
 
   ClockFn clock_;

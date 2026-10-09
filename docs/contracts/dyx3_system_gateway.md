@@ -48,8 +48,10 @@ The existing `ntrip_status` subset includes the selected security mode, verified
 
 ## 4. Operator link (R13)
 
-`OperatorLinkStatus` is published at 10 Hz regardless of connected clients. `alive == true` iff **a client is connected AND a valid `heartbeat` command arrived within `operator_link_timeout_s`**.
-Never heard, no client, or timeout -> `alive == false`, `age_s` = time since the last heartbeat (0 when never). A dead backend therefore also reads as a dead operator link (fail-safe).
+`OperatorLinkStatus` is published at 10 Hz regardless of connected clients. `alive == true` iff **the connection that sent the last valid `heartbeat` is still connected AND that heartbeat arrived within `operator_link_timeout_s`**.
+The heartbeat is bound to its connection (GW-001): when that connection closes, `alive` drops at the next publish, even if other clients stay connected; another client counts only after it sends its own `heartbeat`.
+Never heard, heartbeating client gone, or timeout -> `alive == false`, `age_s` = time since the last heartbeat (0 when never). A dead backend therefore also reads as a dead operator link (fail-safe).
+**TODO (GW-001):** the socket does not authenticate its peer. Every service runs as the same `dyx3` uid, so `SO_PEERCRED` cannot tell the backend from any other `dyx3` process; a peer-uid check needs a dedicated backend uid first (BR-005). Until then file mode 0660 / group `dyx3` is the only access control.
 The backend must send `heartbeat` only while the *tablet* is heartbeating to it, so a tablet WiFi dropout propagates through.
 **`operator_link_timeout_s` default 2.0 is DERIVED — NOT FROM V1 SPEC** (§4.3.1 says "design explicitly in Stage E", no number exists). **OPEN (human):** the value; too short stops the rover on WiFi
 jitter, too long drives on after a dropout (at 0.35 m/s, 2 s = 70 cm). Boot behaviour: `alive == false` until the first heartbeat, so the guard blocks motion until a tablet is present.
