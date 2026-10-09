@@ -192,7 +192,10 @@ system clock in microseconds and never applies `TimesyncStatus.estimated_offset`
 Jetson system-clock domain.
 All freshness decisions use the link's own steady clock and the local arrival time, never message
 timestamps, so a clock step on either side cannot make a stale sample look fresh.
-`VehicleState.px4_sample_stamp` carries `timestamp_sample` of the local-position sample.
+`VehicleState.px4_sample_stamp` carries `timestamp_sample` of the local-position sample, and
+`EstimatorHealth.px4_sample_stamp` carries `timestamp_sample` of the `estimator_status_flags`
+sample (IF-002), both converted from microseconds with no offset applied, and both zero while
+their source is stale.
 
 ## 8. State fan-out
 

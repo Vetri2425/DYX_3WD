@@ -286,6 +286,7 @@ struct Rig {
         p_att->publish(a);
       }
       px4_msgs::msg::EstimatorStatusFlags fl;
+      fl.timestamp_sample = static_cast<uint64_t>(std::llround(now * 1e6));
       p_fl->publish(fl);
       px4_msgs::msg::SensorGps g;
       g.fix_type = 6;
@@ -1719,10 +1720,17 @@ TEST(Px4LinkNode, EstimatorHealthDefaultsUnhealthyUntilFlagsArrive) {
   r.bring_up();
   r.run(0.3);
   EXPECT_TRUE(r.health.flags_valid);
-  EXPECT_FALSE(r.health.test_ratios_valid);  // estimator_status is not on DDS
+  // IF-002: the PX4 sample time of the flags, same convention as VehicleState.px4_sample_stamp.
+  const double stamp_s = r.health.px4_sample_stamp.sec + r.health.px4_sample_stamp.nanosec * 1e-9;
+  EXPECT_GT(stamp_s, r.now - 0.15);
+  EXPECT_LE(stamp_s, r.now + 1e-6);
+  EXPECT_EQ(r.health.px4_sample_stamp.nanosec % 1000U, 0U);  // microsecond source
+  EXPECT_FALSE(r.health.test_ratios_valid);                  // estimator_status is not on DDS
   r.alive = false;
   r.run(3.5);  // beyond the 3.0 s session limit (stale_timesync_s / stale_estimator_flags_s)
   EXPECT_FALSE(r.health.flags_valid);
+  EXPECT_EQ(r.health.px4_sample_stamp.sec, 0);  // stale: no sample time is presented
+  EXPECT_EQ(r.health.px4_sample_stamp.nanosec, 0U);
 }
 
 // RPP-009: yaw rate from attitude deltas on the PX4 sample clock; 0 when the attitude is stale.

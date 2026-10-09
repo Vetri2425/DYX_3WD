@@ -47,6 +47,15 @@ const UsedTopic kUsedTopics[] = {
     {"/fmu/out/vehicle_command_ack", "VehicleCommandAck"},
 };
 
+// PX4 timestamps already arrive in the system-clock domain (contract section 7): no offset to
+// apply, only the unit conversion.
+builtin_interfaces::msg::Time px4_stamp(uint64_t us) {
+  builtin_interfaces::msg::Time t;
+  t.sec = static_cast<int32_t>(us / 1000000ULL);
+  t.nanosec = static_cast<uint32_t>((us % 1000000ULL) * 1000ULL);
+  return t;
+}
+
 double steady_now_s() {
   return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
@@ -877,10 +886,7 @@ void Px4LinkNode::publish_state_and_health(double now_s) {
     const auto o = assemble(lp_, att_, st_, f);
     dyx3_interfaces::msg::VehicleState s;
     s.stamp = ros_now();
-    // PX4 timestamps already arrive in the system-clock domain (contract section 7): no offset to
-    // apply.
-    s.px4_sample_stamp.sec = static_cast<int32_t>(o.px4_sample_us / 1000000ULL);
-    s.px4_sample_stamp.nanosec = static_cast<uint32_t>((o.px4_sample_us % 1000000ULL) * 1000ULL);
+    s.px4_sample_stamp = px4_stamp(o.px4_sample_us);
     s.position_valid = o.position_valid;
     s.velocity_valid = o.velocity_valid;
     s.attitude_valid = o.attitude_valid;
@@ -913,6 +919,7 @@ void Px4LinkNode::publish_state_and_health(double now_s) {
     h.stamp = ros_now();
     const bool fresh = (now_s - flags_t_) <= p_.stale.max_age_s[kEstimatorFlags];
     if (fresh) {
+      h.px4_sample_stamp = px4_stamp(flags_.timestamp_sample);  // same convention as VehicleState
       h.flags_valid = true;
       h.gnss_yaw_fusion_intended = flags_.cs_gnss_yaw;
       h.gnss_yaw_fault = flags_.cs_gnss_yaw_fault;
