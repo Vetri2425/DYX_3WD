@@ -111,3 +111,90 @@ def test_socketio_endpoint_is_mounted_and_rejects_tokenless_clients(tmp_path):
     assert c.get("/api/ping").json()["status"] == "ok"
     r = c.get("/socket.io/?EIO=4&transport=polling")
     assert r.status_code == 200 and r.text.startswith("0{")  # engine.io handshake answered by the Socket.IO app
+
+
+class FlakyGateway(FakeGateway):
+    """Raises a non-gateway error once (a bug, not a link failure), then behaves."""
+
+    def __init__(self, fail_times=1):
+        super().__init__()
+        self.fail_times = fail_times
+
+    async def request(self, cmd, args=None):
+        if self.fail_times > 0:
+            self.fail_times -= 1
+            self.calls.append((cmd, args or {}))
+            raise RuntimeError("unexpected bug in the request path")
+        return await super().request(cmd, args)
+
+
+async def test_relay_task_survives_an_unexpected_exception_and_logs_it(caplog):
+    import asyncio
+
+    gw = FlakyGateway(fail_times=1)
+    relay = OperatorLinkRelay(gw, relay_s=0.01, tablet_timeout_s=1.5)
+    relay.note_tablet()
+    assert relay.running is False and relay.operator_alive() is False
+    await relay.start()
+    try:
+        for _ in range(200):
+            await asyncio.sleep(0.01)
+            relay.note_tablet()
+            if len(gw.calls) >= 3:
+                break
+        assert len(gw.calls) >= 3  # it kept ticking after the RuntimeError
+        assert relay.running is True
+        assert relay.operator_alive() is True
+        assert any("relay tick failed" in r.getMessage() and r.exc_info for r in caplog.records)
+    finally:
+        await relay.stop()
+    assert relay.running is False and relay.operator_alive() is False
+
+
+async def test_operator_alive_needs_a_recent_acknowledged_heartbeat():
+    gw, clk = FakeGateway(), Clock()
+    relay = OperatorLinkRelay(gw, relay_s=0.5, tablet_timeout_s=1.5, clock=clk)
+    relay._task = _Running()  # pretend the loop is running; ticks are driven by hand
+    relay.note_tablet()
+    assert relay.operator_alive() is False  # nothing relayed yet
+    assert await relay.tick() is True
+    assert relay.operator_alive() is True
+    gw.replies["heartbeat"] = {"v": 1, "ok": False, "code": "rejected"}
+    clk.t += 1.0
+    relay.note_tablet()
+    assert await relay.tick() is False
+    clk.t += 0.6  # the last ack is 1.6 s old
+    relay.note_tablet()
+    assert relay.operator_alive() is False
+
+
+class _Running:
+    def done(self):
+        return False
+
+
+def test_health_reports_relay_running_and_operator_alive(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from dyx3_backend.config.settings import Settings
+    from dyx3_backend.main import create_api
+
+    class LifespanGateway(FakeGateway):
+        def on_telemetry(self, _cb):
+            pass
+
+        def on_state(self, _cb):
+            pass
+
+        async def start(self):
+            pass
+
+        async def stop(self):
+            pass
+
+    api, _, _ = create_api(Settings(data_dir=str(tmp_path)), tokens=token_store(), gateway=LifespanGateway())
+    with TestClient(api) as c:  # runs the lifespan: the relay task starts
+        h = c.get("/api/health", headers={"Authorization": "Bearer view-tok"}).json()
+        assert h["relay_running"] is True and h["operator_alive"] is False
+    h = TestClient(api).get("/api/health", headers={"Authorization": "Bearer view-tok"}).json()
+    assert h["relay_running"] is False

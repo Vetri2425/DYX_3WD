@@ -124,6 +124,8 @@ async def health(request: Request, _: Identity = Viewer) -> dict:
         "telemetry_fresh": age is not None and age <= settings.telemetry_stale_s,
         "tablet_heartbeat_age_s": relay.tablet_age(),
         "tablet_alive": relay.tablet_alive(),
+        "relay_running": relay.running,
+        "operator_alive": relay.operator_alive(),
     }
 
 

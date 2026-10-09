@@ -10,7 +10,7 @@ or tablet E-stop is a **request** to `dyx3_motion_guard`. If the gateway is not 
 | Route | Role | Notes |
 |---|---|---|
 | `GET /ping` | none | liveness, plus `rover_id` and `rover_name` (identity, no secret; see 1a) |
-| `GET /health` | viewer | backend, gateway connection, age of the last telemetry, tablet heartbeat |
+| `GET /health` | viewer | backend, gateway connection, age of the last telemetry, tablet heartbeat, `relay_running` (the relay task is alive), `operator_alive` (relay running, tablet fresh, and a relayed heartbeat acknowledged by the gateway within `tablet_heartbeat_timeout_s`; the gateway's own timer stays authoritative) |
 | `POST /missions` (multipart: `file` + optional `origin_n`, `origin_e`, `rotation_deg`, `unit_scale`, `close_loop`, `anchor`) | operator | upload -> path engine -> `DYX3PATH 1` artifact stored by sha256 (idempotent) -> summary |
 | `GET /missions`, `GET /missions/{sha}`, `GET /missions/{sha}/path` | viewer | stored artifacts, summary, points |
 | `POST /missions/{sha}/start` | operator | gateway `start_mission` |
@@ -71,7 +71,8 @@ adds its hash. Socket.IO connects with `auth={"token": ...}`. A user/password mo
 
 The tablet sends `POST /api/heartbeat` or the Socket.IO event `heartbeat`. The backend relays a gateway `heartbeat` every `heartbeat_relay_s` **only while the tablet heartbeat is younger than `tablet_heartbeat_timeout_s`**,
 and the gateway turns that into `OperatorLinkStatus` (its own `operator_link_timeout_s`). The last authenticated Socket.IO connection closing clears the tablet heartbeat at once. A tablet WiFi dropout
-therefore stops the relay and `dyx3_motion_guard` stops the rover. `heartbeat_relay_s` 0.5 and `tablet_heartbeat_timeout_s` 1.5 are **DERIVED — NOT FROM V1 SPEC**; the worst-case delay is
+therefore stops the relay and `dyx3_motion_guard` stops the rover. The relay task never ends on an error: an unexpected exception in a tick is
+logged and that tick relays nothing (fail to STOP), and the next tick runs as usual. `heartbeat_relay_s` 0.5 and `tablet_heartbeat_timeout_s` 1.5 are **DERIVED — NOT FROM V1 SPEC**; the worst-case delay is
 `tablet_heartbeat_timeout_s + gateway operator_link_timeout_s` (3.5 s with the defaults = 1.2 m at 0.35 m/s). **OPEN (human):** the numbers.
 
 ## 4. Socket.IO
