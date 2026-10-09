@@ -1179,3 +1179,26 @@ field task.
   00:37 APK is DEBUG-signed: watch only.
 - The next session starts from `~/Vetri/3WD_PROD/HANDOFF_PROMPT_2026-10-09.md`, which includes the app review
   checklist and the ready signing task for Agy.
+
+---
+
+## 2026-10-09 (08:30) — Claude — operator app merged and signed
+
+Three_Wheel_v2 `main` was fast-forwarded to **`dbb2ba1`** (`agy/prod-transport`), after Claude's review:
+- single AppTransportService (socket, REST, heartbeat, secure storage);
+- fixed-rate 500 ms heartbeat with a 350 ms timeout;
+- honest disconnect, and a 401 stops retrying;
+- AppState handling;
+- one telemetry store with staleness;
+- dual-path E-stop;
+- mission builder obeying R1–R3, with 422 mapping;
+- spray locked out;
+- the prototype port only behind an explicit option;
+- release signing from the committed Expo plugin `plugins/withAndroidReleaseSigning.js`.
+
+Checks: tsc passes; vitest 984/985. The one failure (`roadMarkingCsvPath` "never closes into a polygon ring") is
+identical on `Runtime_Path`, so it pre-exists.
+
+Signed APK: `~/Vetri/3WD_PROD/App-Releases/dbb2ba1-agy-prod-transport/app-release.apk`. Certificate is the DYX
+release key (`5eaacb96…`); APK sha256 `730c6111…`. Tablets must uninstall the old debug-signed build first.
+No `agy/*` branches were deleted.

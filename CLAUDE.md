@@ -65,7 +65,7 @@ calibration, no motion, no field RTK. Bench runbook: `~/Vetri/3WD_PROD/BENCH_202
 |---|---|
 | This repo | `Vetri2425/DYX_3WD`, **`master` = `8af2595` is the deploy target for 2026-10-09** (release `rover-8af2595…`): production RTK, app-planned missions `/api/missions/plan`, parse-only DXF, optional hotspot, Socket.IO ping 5/5 s. Later commits are docs only |
 | Firmware | `Vetri2425/PX4-Autopilot-3WD-Prod` `dyx-3wd-production` = **`8279fa4be3`, the V1 final candidate** (stall fix, XRCE fd, RTCM writes, WENC timers). **Flashed: still `9ab2ad3162`**. NuttX from the fork `Vetri2425/NuttX` `dyx-3wd-production` @ `e462af8eb3`. Installer pin `27a7ac9284` = same `msg/` set |
-| Operator app | `yasarbaiiiii-blip/Three_Wheel_v2` (push rights for Vetri2425); authoritative branch **`main`** after review. Work in progress: `agy/prod-transport`. Today's APK is signed with the DEBUG key: watch only, never drive with it |
+| Operator app | `yasarbaiiiii-blip/Three_Wheel_v2` (push rights for Vetri2425); **`main` = `dbb2ba1`**, reviewed. Signed APK: `3WD_PROD/App-Releases/dbb2ba1-agy-prod-transport/` (DYX release key) |
 | Rover hardware | Holybro Pixhawk Jetson Baseboard: Pixhawk 6X + Jetson Orin Nano 8 GB, UM982 on TELEM1, RoboClaw on GPS2, spray on FMU PWM OUT 1, 8S LiFePO4 24 Ah |
 | Rover release | `/opt/dyx3/current` → `84518cd`, `build_origin` = CI prebuilt; all six services **enabled at boot**, health OK |
 | Artifact archive | firmware: `3WD_PROD/PX4-Firmware/3WD/<short-sha>-<slug>/`; stack: GitHub Releases `rover-<sha>` (last 20) |
