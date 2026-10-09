@@ -176,6 +176,27 @@ TEST(StopPivot, StaleVelocityTimesOutAfterTheCapOnly) {
   EXPECT_FALSE(c.satisfied(1900 * kMs, t, p));
   EXPECT_TRUE(c.satisfied(2000 * kMs, t, p));
 }
+// XR-RPP-011: the stale cap counts from when the velocity went stale, not from the hold entry.
+TEST(StopPivot, TheStaleCapCountsFromTheStalenessNotFromTheHoldEntry) {
+  const StopPivotParams p;
+  StopConfirm c;
+  StopTelemetry moving_fresh;
+  moving_fresh.vel_fresh = true;
+  moving_fresh.speed = 0.3;  // braking, still above the threshold
+  for (int t = 0; t <= 2500; t += 20) EXPECT_FALSE(c.satisfied(t * kMs, moving_fresh, p)) << t;
+  StopTelemetry stale;
+  stale.vel_fresh = false;
+  EXPECT_FALSE(c.satisfied(2520 * kMs, stale, p)) << "one stale tick after 2.5 s of braking";
+  EXPECT_FALSE(c.satisfied(4500 * kMs, stale, p)) << "1.98 s stale";
+  EXPECT_TRUE(c.satisfied(4520 * kMs, stale, p)) << "2.0 s stale";
+  // a fresh sample restarts the stale count
+  StopConfirm d;
+  EXPECT_FALSE(d.satisfied(0, stale, p));
+  EXPECT_FALSE(d.satisfied(1900 * kMs, stale, p));
+  EXPECT_FALSE(d.satisfied(1920 * kMs, moving_fresh, p));
+  EXPECT_FALSE(d.satisfied(3000 * kMs, stale, p));
+  EXPECT_TRUE(d.satisfied(5000 * kMs, stale, p));
+}
 TEST(StopPivot, DwellAndItsReset) {
   StopPivotParams p;  // dwell 0.30 s
   StopConfirm c;

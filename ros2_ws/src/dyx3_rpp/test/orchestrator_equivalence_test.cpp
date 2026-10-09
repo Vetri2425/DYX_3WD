@@ -35,8 +35,30 @@ bool same(double a, double b) {
   return std::fabs(a - b) <= 1e-9 * std::max(1e-3, std::max(std::fabs(a), std::fabs(b)));
 }
 
+// DOCUMENTED DEVIATIONS from the carried node: (scenario, first tick, last tick, reason). A
+// mismatch inside a window is counted as a deviation, not a failure; the total is pinned below so
+// a window can neither hide a new difference nor outlive the change that needs it.
+struct Deviation {
+  const char* scen;
+  int first_tick, last_tick;
+  const char* why;
+};
+constexpr Deviation kDeviations[] = {
+    // Velocity fresh at the corner-stop entry (tick 44), stale from the next tick: the ancestor
+    // confirms the stop 2 s after the ENTRY (tick 85), the C++ 2 s after the velocity went stale
+    // (tick 86). The pivot starts one tick later; ticks 85 and 86 differ, then the streams agree.
+    {"seg_square_nohold_vel", 85, 86,
+     "XR-RPP-011: stale-velocity stop cap counted from the first stale tick"},
+};
+constexpr int kExpectedDeviations = 10;
+bool in_deviation(const std::string& scen, int tick) {
+  for (const auto& d : kDeviations)
+    if (scen == d.scen && tick >= d.first_tick && tick <= d.last_tick) return true;
+  return false;
+}
+
 struct Stats {
-  int scenarios{0}, ticks{0}, compared{0}, handoffs{0}, failures{0};
+  int scenarios{0}, ticks{0}, compared{0}, handoffs{0}, failures{0}, deviations{0};
   std::map<std::string, int> handoff_names;
   std::map<int, int> states;
   std::map<std::string, int> cmds;
@@ -50,7 +72,9 @@ struct Stats {
   do {                                                                                     \
     const double e_ = (exp);                                                               \
     const double g_ = (got);                                                               \
-    if (!same(e_, g_)) {                                                                   \
+    if (!same(e_, g_) && in_deviation(scen, tick_no)) {                                    \
+      ++(stats).deviations;                                                                \
+    } else if (!same(e_, g_)) {                                                            \
       ++(stats).failures;                                                                  \
       if ((stats).shown++ < 40)                                                            \
         ADD_FAILURE() << scen << " tick " << tick_no << " " << what << ": expected " << e_ \
@@ -62,7 +86,9 @@ struct Stats {
   do {                                                                                     \
     const auto e_ = (exp);                                                                 \
     const auto g_ = (got);                                                                 \
-    if (!(e_ == g_)) {                                                                     \
+    if (!(e_ == g_) && in_deviation(scen, tick_no)) {                                      \
+      ++(stats).deviations;                                                                \
+    } else if (!(e_ == g_)) {                                                              \
       ++(stats).failures;                                                                  \
       if ((stats).shown++ < 40)                                                            \
         ADD_FAILURE() << scen << " tick " << tick_no << " " << what << ": expected " << e_ \
@@ -287,8 +313,11 @@ TEST(OrchestratorEquivalence, TickByTickAgainstTheCarriedNode) {
   }
 
   std::printf(
-      "orchestrator: %d scenarios, %d ticks (%d compared, %d ended at a handoff), %d mismatches\n",
-      st.scenarios, st.ticks, st.compared, st.handoffs, st.failures);
+      "orchestrator: %d scenarios, %d ticks (%d compared, %d ended at a handoff), %d mismatches, "
+      "%d documented deviations\n",
+      st.scenarios, st.ticks, st.compared, st.handoffs, st.failures, st.deviations);
+  for (const auto& d : kDeviations)
+    std::printf("  deviation %s ticks %d-%d: %s\n", d.scen, d.first_tick, d.last_tick, d.why);
   for (auto& kv : st.handoff_names) std::printf("  handoff %s x%d\n", kv.first.c_str(), kv.second);
   for (auto& kv : st.states) std::printf("  state %d x%d\n", kv.first, kv.second);
   for (auto& kv : st.cmds) std::printf("  cmd %s x%d\n", kv.first.c_str(), kv.second);
@@ -299,6 +328,7 @@ TEST(OrchestratorEquivalence, TickByTickAgainstTheCarriedNode) {
     EXPECT_GT(st.ticks, 0);
     return;
   }
+  EXPECT_EQ(st.deviations, kExpectedDeviations);
   EXPECT_GE(st.scenarios, 50);
   EXPECT_GE(st.compared, 9000);
   // the gates and every tracked state must actually have been exercised

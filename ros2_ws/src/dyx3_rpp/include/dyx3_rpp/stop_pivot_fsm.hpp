@@ -11,7 +11,7 @@
 //   I3  "stopped" = measured speed AND yaw rate below their thresholds continuously for the dwell;
 //   a FRESH
 //       velocity above the threshold NEVER times out into a pivot, only a STALE one does (after 2.0
-//       s).
+//       s of continuous staleness inside the hold; XR-RPP-011).
 #pragma once
 
 #include <cstdint>
@@ -63,6 +63,7 @@ public:
   void reset() {
     entered_ = false;
     settle_ = false;
+    stale_ = false;
   }
   bool entered() const { return entered_; }
 
@@ -71,6 +72,8 @@ private:
   int64_t entered_ns_{0};
   bool settle_{false};
   int64_t settle_ns_{0};
+  bool stale_{false};  // the velocity has been stale since stale_ns_ (XR-RPP-011)
+  int64_t stale_ns_{0};
 };
 
 // Angle-aware pivot watchdog. The turn angle is captured on the first call.

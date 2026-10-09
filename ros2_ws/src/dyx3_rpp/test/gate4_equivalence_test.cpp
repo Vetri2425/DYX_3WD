@@ -113,6 +113,13 @@ TEST(Gate4Equivalence, AgainstVerbatimAncestors) {
         const int n = h.i();
         StopConfirm sc;
         const auto p = stop_params(thr, ythr, dwell);
+        // DOCUMENTED DEVIATION (XR-RPP-011): the ancestor counts the stale-velocity cap from the
+        // hold entry; the C++ counts it from the first stale tick of the hold. The expected value
+        // is the ancestor's, except that a stale tick confirms only after the velocity has been
+        // stale for the cap. Every such tick is counted ("STOP seq XR-RPP-011"); no other
+        // difference is allowed.
+        bool stale_run = false;
+        int64_t stale_since = 0;
         for (int k = 0; k < n; ++k) {
           std::getline(f, line);
           std::string rhs;
@@ -127,7 +134,20 @@ TEST(Gate4Equivalence, AgainstVerbatimAncestors) {
           // The Python freshness is (now - vel_time) from ns integers; recompute it the same way.
           const int64_t vns = std::llround((t - age) * 1e9);
           tel.vel_fresh = static_cast<double>(ns - vns) * 1e-9 < 0.3;
-          const bool want = Tok(rhs).b();
+          const bool ancestor = Tok(rhs).b();
+          bool want = ancestor;
+          if (tel.vel_fresh) {
+            stale_run = false;
+          } else {
+            if (!stale_run) {
+              stale_run = true;
+              stale_since = ns;
+            }
+            if (ancestor && static_cast<double>(ns - stale_since) * 1e-9 < p.stale_vel_hold_s) {
+              want = false;
+              ++g_stats["STOP seq XR-RPP-011"].cases;
+            }
+          }
           EXPECT_EQ(sc.satisfied(ns, tel, p), want) << "STOP seq line: " << line;
           ++g_stats["STOP seq"].cases;
         }
@@ -277,7 +297,7 @@ TEST(Gate4Equivalence, AgainstVerbatimAncestors) {
   }
   size_t total = 0;
   for (const auto& kv : g_stats) {
-    total += kv.second.cases;
+    if (kv.first != "STOP seq XR-RPP-011") total += kv.second.cases;  // a subset of "STOP seq"
     std::printf("  %-14s cases %6zu  worst abs err %.3g\n", kv.first.c_str(), kv.second.cases,
                 kv.second.worst);
   }

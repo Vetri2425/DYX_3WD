@@ -42,6 +42,11 @@ First call latches `_corner_stop_entered`. Fresh velocity (< 0.3 s old): require
 `|ω| < segment_stop_yaw_rate_threshold`, continuously for `segment_stop_dwell_s` (any violation resets the dwell; `dwell ≤ 0` ⇒
 immediate). Stale velocity: after `_CORNER_STOP_MAX_HOLD_S = 2.0 s` return True (log warn); before that False. **Never** time out on fresh
 data above the threshold.
+**C++ deviation (XR-RPP-011, BEHAVIOUR CHANGE):** the prototype counts the 2.0 s from the hold entry, so after 2 s of braking on a fresh
+velocity a single stale tick confirmed the stop on a frozen measurement. The C++ counts it from the first stale tick of the hold (a fresh
+sample restarts the count). `gate4_equivalence_test` applies exactly that rule to the ancestor's STOP sequences and counts the ticks it
+changes (2199 of 10093); `orchestrator_equivalence_test` pins one documented window (`seg_square_nohold_vel` ticks 85-86, the stop is
+confirmed one tick later).
 
 ### 3.2 Hard-corner execution (segment profile), at the corner within `segment_corner_acceptance_radius`
 1. `path_corner_deg < segment_corner_threshold_deg` ⇒ advance immediately (collinear junction keeps momentum; only a real corner zeroes `_last_speed_cmd`).

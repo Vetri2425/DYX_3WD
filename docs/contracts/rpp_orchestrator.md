@@ -85,7 +85,8 @@ All inputs and outputs are recorded; the C++ replays the **same inputs** and com
 fifth) 26 state fields. Episodes run to `DONE` (or the tick budget).
 
 `test/fixtures/gate4_orchestrator_vectors_{1,2,3}.txt` (each under the repository's 5 MB limit):
-**101 episodes, 13 905 ticks, 0 mismatches**. States reached: STALE, IDLE, TRACKING, APPROACH, DONE, RTK_WAIT, JUMP_SKIP; segment states:
+**101 episodes, 13 905 ticks, 0 mismatches** outside the documented deviations, which the test pins by scenario, tick window and
+count: `seg_square_nohold_vel` ticks 85-86 (10 values), XR-RPP-011 (`rpp_stop_pivot_fsm.md` section 3.1). States reached: STALE, IDLE, TRACKING, APPROACH, DONE, RTK_WAIT, JUMP_SKIP; segment states:
 TRACK, PRE_CORNER, CORNER_ALIGN, DONE, CORNER_STOP; commands STOP / TRACK / BRAKE / PIVOT (about 740 brake and 830 pivot ticks).
 Episodes include a full square (four hard corners), entry alignments (large, small, stale velocity, smooth profile, the
 `entry_prealign_enabled` pivot), two runs with a hard boundary, the endpoint precise stop with several parameter sets, and the
