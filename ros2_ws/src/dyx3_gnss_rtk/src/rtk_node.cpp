@@ -546,8 +546,10 @@ Json RtkNode::status_json(double now_s) {
     } else {
       receiver["receiver_readback"] = "UNAVAILABLE";
     }
-    if (have_link_status_ && now_s >= link_status_at_s_ &&
-        now_s - link_status_at_s_ <= gnss_report_max_age_s_) {
+    const bool link_fresh = have_link_status_ && now_s >= link_status_at_s_ &&
+                            now_s - link_status_at_s_ <= gnss_report_max_age_s_;
+    const size_t subscribers = pub_rtcm_->get_subscription_count();
+    if (link_fresh) {
       transport = {{"px4_rtcm_chunks_accepted", link_status_.rtcm_chunks_accepted},
                    {"px4_rtcm_chunks_dropped", link_status_.rtcm_chunks_dropped},
                    {"dds_session_alive", link_status_.session_alive},
@@ -558,6 +560,18 @@ Json RtkNode::status_json(double now_s) {
                    {"dds_session_alive", false},
                    {"dds_handshake_ok", false}};
     }
+    transport["link_status_age_s"] = have_link_status_ && now_s >= link_status_at_s_
+                                         ? Json(now_s - link_status_at_s_)
+                                         : Json(nullptr);
+    transport["rtcm_subscribers"] = subscribers;
+    transport["block_reason"] = config.at("transport") != "PX4_DDS" ? "NOT_DDS"
+                                : !start_client_                    ? "TEST_BYPASS"
+                                : !have_link_status_                ? "NO_LINK_STATUS"
+                                : !link_fresh                       ? "LINK_STATUS_STALE"
+                                : !link_status_.session_alive       ? "SESSION_DOWN"
+                                : !link_status_.handshake_ok        ? "HANDSHAKE_PENDING"
+                                : subscribers == 0                  ? "NO_RTCM_SUBSCRIBER"
+                                                                    : "READY";
   }
   transport["selected"] = config.at("transport");
   transport["ready"] = active;

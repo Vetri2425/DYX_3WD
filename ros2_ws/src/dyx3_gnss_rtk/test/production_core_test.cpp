@@ -242,6 +242,53 @@ TEST(InjectionAuthority, FailedSelectedTransportNeverFallsBack) {
   EXPECT_TRUE(dds.received.empty());
 }
 
+TEST(InjectionAuthority, DdsRecoversAfterLinkRestartAndSubscriberRematchWithoutReplay) {
+  FakeSink usb;
+  bool status_fresh = false;
+  bool session_alive = false;
+  bool handshake_ok = false;
+  bool subscriber_matched = false;
+  std::vector<uint8_t> published;
+  DdsSink dds(
+      [&](const Chunk& chunk) {
+        published.push_back(chunk.data[3]);
+        return true;
+      },
+      [&] { return status_fresh && session_alive && handshake_ok && subscriber_matched; });
+  InjectionAuthority authority(usb, dds);
+  const auto generation =
+      authority.switch_to(CorrectionSource::Ntrip, CorrectionTransport::Px4Dds, 10);
+
+  // The previous px4_link exits, its status ages out, and its subscriber disappears.
+  EXPECT_FALSE(authority.deliver(generation, valid(1), 10));
+  status_fresh = true;
+  session_alive = true;
+  EXPECT_FALSE(authority.deliver(generation, valid(2), 11));  // handshake still pending
+  handshake_ok = true;
+  EXPECT_FALSE(authority.deliver(generation, valid(3), 12));  // discovery still pending
+  subscriber_matched = true;
+  EXPECT_TRUE(authority.deliver(generation, valid(4), 13));
+  EXPECT_EQ(published, (std::vector<uint8_t>{4}));
+  EXPECT_TRUE(usb.received.empty());
+
+  // A second restart interrupts an already active sink. It reopens on a new frame only.
+  status_fresh = false;
+  subscriber_matched = false;
+  EXPECT_FALSE(authority.deliver(generation, valid(5), 14));
+  EXPECT_FALSE(authority.active());
+  status_fresh = true;
+  EXPECT_FALSE(authority.deliver(generation, valid(6), 15));
+  subscriber_matched = true;
+  EXPECT_TRUE(authority.deliver(generation, valid(7), 16));
+  EXPECT_EQ(published, (std::vector<uint8_t>{4, 7}));
+  EXPECT_EQ(dds.counters().frames_delivered, 2U);
+  EXPECT_TRUE(usb.received.empty());
+
+  authority.stop();
+  EXPECT_FALSE(authority.deliver(generation, valid(8), 17));
+  EXPECT_EQ(published, (std::vector<uint8_t>{4, 7}));
+}
+
 TEST(InjectionAuthority, SwitchWaitsForInFlightPartialWriteThenClosesOldSink) {
   class PausingSink final : public FakeSink {
   public:
