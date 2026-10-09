@@ -148,7 +148,7 @@ private:
   StalenessReport last_rep_;
   bool last_link_ok_{false};
   bool last_heartbeat_published_{false};
-  std::string last_logged_reason_;
+  std::optional<Reason> logged_zero_reason_;  // empty while not failing to zero
 
   double last_step_s_{-1.0};
   double last_overrun_s_{-1.0};

@@ -804,11 +804,13 @@ void Px4LinkNode::step(double now_s) {
   service_spray_transactions(now_s);
 
   last_gate_ = gate_->step({now_s, hs_ok, last_rep_.session_alive, last_rep_.mask});
-  const std::string reason_key = std::to_string(static_cast<int>(last_gate_.reason));
-  if (last_gate_.failing_to_zero && reason_key != last_logged_reason_) {
-    RCLCPP_WARN(get_logger(), "failing to zero: reason code %s", reason_key.c_str());
+  // Logged once per fail-to-zero reason change; the enum is compared, no per-tick string.
+  if (last_gate_.failing_to_zero && logged_zero_reason_ != last_gate_.reason) {
+    RCLCPP_WARN(get_logger(), "failing to zero: reason code %d",
+                static_cast<int>(last_gate_.reason));
   }
-  last_logged_reason_ = last_gate_.failing_to_zero ? reason_key : std::string();
+  logged_zero_reason_ =
+      last_gate_.failing_to_zero ? std::optional<Reason>(last_gate_.reason) : std::nullopt;
 
   const bool nav_fresh = (now_s - st_t_) <= p_.stale.max_age_s[kVehicleStatus];
   nav_offboard_ = nav_fresh && st_.nav_state == kNavStateOffboard;
