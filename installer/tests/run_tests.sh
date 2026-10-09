@@ -851,6 +851,30 @@ handoff() {
   check "handoff: the target refuses a SHA other than the one handed over" 'printf "%s" "${out}" | grep -q "parent resolved"'
 }
 
+# ---------------------------------------------------------------- INS-009: the lock is not inherited by children
+locking() {
+  local fb="${T}/lk_bin" lk="${T}/lk/run/dyx3/install.lock" i
+  make_fakebin "${fb}"
+  export PATH="${fb}:${PATH}" INSTALLER_DIR="${REPO}/installer" DYX3_ROOT="${T}/lk"
+  # shellcheck disable=SC1091
+  . "${INSTALLER_DIR}/lib/common.sh"
+  set +e
+  holder() {
+    echo "${BASHPID}" >"${T}/lk_holder"
+    sleep 297 &
+    echo $! >"${T}/lk_child"
+    wait
+  }
+  (with_lock "${lk}" holder) >/dev/null 2>&1 &
+  local outer=$!
+  for i in $(seq 50); do [ -s "${T}/lk_child" ] && break; sleep 0.1; done
+  check "lock: a second run is refused while the first is alive" '! (with_lock "${lk}" true) 2>/dev/null'
+  kill -9 "$(cat "${T}/lk_holder")" "${outer}" 2>/dev/null
+  wait "${outer}" 2>/dev/null
+  check "lock: a killed run's long-lived child does not keep the lock" 'kill -0 "$(cat "${T}/lk_child")" 2>/dev/null && (with_lock "${lk}" true) 2>/dev/null'
+  kill "$(cat "${T}/lk_child")" 2>/dev/null
+}
+
 # ---------------------------------------------------------------- prebuilt artifacts
 prebuilt() {
   if ! tar --zstd -cf /dev/null --files-from /dev/null 2>/dev/null; then
@@ -933,6 +957,7 @@ sup
 (libs)
 (lifecycle)
 (handoff)
+(locking)
 (prebuilt)
 pass="$(grep -c '^ok' "${RESULTS}")"
 fail="$(grep -c '^bad' "${RESULTS}")"

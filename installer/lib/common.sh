@@ -128,6 +128,9 @@ with_lock() {
   mkdir -p "$(dirname "${lock}")"
   (
     flock -n 9 || die "another dyx3 install/upgrade is running (${lock})"
-    "$@"
+    # INS-009: run the command with fd 9 CLOSED. Bash keeps a close-on-exec copy of it for the duration, so this
+    # subshell still holds the lock, but no program it executes (nmcli, systemctl, a daemon they spawn) inherits it.
+    # Before, a child that outlived a killed upgrade kept install.lock held (rover 01: nmcli).
+    "$@" 9>&-
   ) 9>"${lock}"
 }
