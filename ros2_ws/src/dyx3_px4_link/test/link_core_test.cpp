@@ -326,6 +326,25 @@ TEST(Assembler, AttitudeNeedsHeadingGoodAndFreshPosition) {
   att.q[2] = std::numeric_limits<float>::quiet_NaN();
   EXPECT_FALSE(assemble(lp, att, st, Freshness{true, true, true}).attitude_valid);
 }
+TEST(Assembler, GlobalReferenceValidNeedsFiniteLatLonAlt) {  // PXL-006
+  LocalPositionSample lp;
+  lp.xy_global = true;
+  lp.ref_lat = 52.1;
+  lp.ref_lon = 4.3;
+  lp.ref_alt = 3.0F;
+  const Freshness f{true, true, true};
+  EXPECT_TRUE(assemble(lp, AttitudeSample{}, StatusSample{}, f).global_reference_valid);
+  EXPECT_FALSE(assemble(lp, AttitudeSample{}, StatusSample{}, Freshness{}).global_reference_valid);
+  for (int i = 0; i < 3; ++i) {
+    LocalPositionSample bad = lp;
+    if (i == 0) bad.ref_lat = std::numeric_limits<double>::quiet_NaN();
+    if (i == 1) bad.ref_lon = std::numeric_limits<double>::infinity();
+    if (i == 2) bad.ref_alt = std::numeric_limits<float>::quiet_NaN();
+    EXPECT_FALSE(assemble(bad, AttitudeSample{}, StatusSample{}, f).global_reference_valid) << i;
+  }
+  lp.xy_global = false;
+  EXPECT_FALSE(assemble(lp, AttitudeSample{}, StatusSample{}, f).global_reference_valid);
+}
 TEST(Assembler, NonFinitePositionIsInvalid) {
   LocalPositionSample lp;
   lp.xy_valid = true;

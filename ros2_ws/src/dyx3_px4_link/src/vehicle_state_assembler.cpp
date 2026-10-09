@@ -23,7 +23,9 @@ VehicleStateOut assemble(const LocalPositionSample& lp, const AttitudeSample& at
     o.xy_reset_counter = lp.xy_reset_counter;
     o.delta_north = lp.delta_x;
     o.delta_east = lp.delta_y;
-    o.global_reference_valid = lp.xy_global;
+    // The gateway and the map consume the reference: a non-finite one is never presented as valid.
+    o.global_reference_valid = lp.xy_global && std::isfinite(lp.ref_lat) &&
+                               std::isfinite(lp.ref_lon) && std::isfinite(lp.ref_alt);
     o.ref_lat = lp.ref_lat;
     o.ref_lon = lp.ref_lon;
     o.ref_alt = lp.ref_alt;

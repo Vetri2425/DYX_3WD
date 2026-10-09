@@ -205,7 +205,8 @@ their source is stale.
 `attitude_valid = heading_good_for_control` and an attitude sample is fresh. Dead reckoning and
 estimator faults are *not* folded into these flags; the guard owns those gates through
 `EstimatorHealth`. A stale source clears its validity flags in the same tick. `xy_reset_counter`
-and `delta_*` are copied unchanged.
+and `delta_*` are copied unchanged. `global_reference_valid = xy_global` and finite
+`ref_lat`, `ref_lon`, `ref_alt` (PXL-006); the reference values are copied unchanged.
 
 `yaw_rate_radps` (RPP-009, interim Jetson-side source; `vehicle_angular_velocity` is not on DDS at
 the flashed firmware and enabling it is an owner decision): derived from consecutive
