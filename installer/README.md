@@ -216,7 +216,7 @@ the store at startup and a restart interrupts the tablet connection.
 * **Real-time allocation** (DERIVED, 2026-10-09): only `rpp` and `motion_guard` run SCHED_FIFO 80 on CPU 4, through a `taskset`/`chrt` launch prefix in `control_graph.launch.py`; the `dyx3-ros` unit no longer sets a policy or affinity for the whole tree. The unit must keep `LimitRTPRIO` >= 80 (it runs as `dyx3` without CAP_SYS_NICE) and `LimitMEMLOCK=infinity` (mlockall).
 * **OPEN**: DDS scoping (loopback-only vs an eth0 whitelist), the backend port (8000, DERIVED), and the ROS domain number.
 
-Tested against a staged root (`installer/tests/run_tests.sh`, 246 checks at the 2026-10-10 hardening).
+Tested against a staged root (`installer/tests/run_tests.sh`, 248 checks at the 2026-10-10 hardening).
 
 ## Operating rules (2026-10-10 hardening, production review section 13)
 

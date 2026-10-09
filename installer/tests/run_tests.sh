@@ -967,6 +967,17 @@ handoff() {
   up "${root}/opt/dyx3/current/installer" "${B}" >"${T}/ho_b" 2>&1
   check "handoff: A -> B runs B's install_hotspot_network, not A's" 'grep -q "upgrade complete" "${T}/ho_b" && [ "$(cur)" = "${B}" ] && [ "$(cat "${root}/hotspot_marker")" = B ]'
 
+  # The interlock answers in the operator's terminal, before the detach and before any fetch.
+  gw_state "${T}/ho_gw" 2 true 3 true
+  fake_gateway_start "${root}/run/dyx3/gateway.sock" "${T}/ho_gw"
+  up "${root}/opt/dyx3/current/installer" "${A}" >"${T}/ho_armed" 2>&1
+  check "upgrade.sh refuses while ARMED before detaching or fetching" 'grep -q "refusing upgrade to ${A}" "${T}/ho_armed" && ! grep -q "handing over" "${T}/ho_armed" && [ "$(cur)" = "${B}" ]'
+  out="$(env -u INSTALLER_DIR PATH="${fb}:${PATH}" DYX3_ROOT="${root}" bash "${root}/opt/dyx3/current/installer/rollback.sh" 2>&1)"
+  check "rollback.sh refuses while ARMED before detaching" 'printf "%s" "${out}" | grep -q "refusing rollback" && [ "$(cur)" = "${B}" ]'
+  kill "${FAKE_GW_PID}" 2>/dev/null
+  wait "${FAKE_GW_PID}" 2>/dev/null
+  rm -f "${root}/run/dyx3/gateway.sock"
+
   # C changes the firmware pin: px4_msgs must be built and expected for C's pin, from C's pin file.
   local fw="${T}/ho_fw" sk="${T}/ho_px4msgs" fwsha sksha
   mkdir -p "${fw}/msg/versioned" "${fw}/srv" "${sk}/msg"
