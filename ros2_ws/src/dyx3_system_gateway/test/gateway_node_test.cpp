@@ -267,6 +267,51 @@ TEST(GatewayNode, EstopIsProcessedBeforeOtherQueuedCommands) {
   EXPECT_EQ(r.calls.size(), 3U);
 }
 
+TEST(GatewayNode, AnEstopBehindAHeartbeatFloodIsDispatchedFirstAndTheInboxStaysBounded) {
+  Rig r;
+  Sock c(r.sock);
+  ASSERT_TRUE(c.ok());
+  const int n = 1000;
+  std::string burst;
+  for (int i = 0; i < n; ++i)
+    burst += R"({"v":1,"id":)" + std::to_string(1000 + i) + R"(,"cmd":"heartbeat"})" + "\n";
+  burst += R"({"v":1,"id":99,"cmd":"estop","args":{"asserted":true,"source":"tablet"}})"
+           "\n";
+  c.write_all(burst);
+  r.pump(500);  // the IPC thread queues the whole burst; no step runs meanwhile
+  r.gw->step(r.now);
+  r.pump(300);
+  const auto& batch = r.gw->last_batch();
+  ASSERT_EQ(batch.size(), 2U);  // the E-stop, then ONE coalesced heartbeat
+  EXPECT_EQ(batch[0], CmdKind::Estop);
+  EXPECT_EQ(batch[1], CmdKind::Heartbeat);
+  ASSERT_FALSE(r.calls.empty());
+  EXPECT_EQ(r.calls.front(), "estop:1:tablet");
+  int hb_ok = 0, hb_busy = 0;
+  bool estop_ok = false;
+  for (const auto& l : c.read_lines(n + 1, 5000)) {
+    JsonValue j;
+    std::string e;
+    ASSERT_TRUE(parse_json(l, &j, &e)) << e;
+    if (!j.get("id")) continue;  // telemetry
+    if (j.get("id")->i == 99) {
+      estop_ok = ok_of(j);
+    } else if (ok_of(j)) {
+      ++hb_ok;
+    } else {
+      EXPECT_EQ(code_of(j), "busy");
+      ++hb_busy;
+    }
+  }
+  EXPECT_TRUE(estop_ok);
+  EXPECT_EQ(hb_ok + hb_busy, n);                               // every heartbeat is answered
+  EXPECT_LE(hb_ok, static_cast<int>(GatewayNode::kInboxCap));  // the inbox never exceeded its cap
+  EXPECT_GT(hb_busy, 0);
+  r.gw->step(r.now + 0.1);
+  r.pump(200);
+  EXPECT_TRUE(r.link.alive);  // the coalesced heartbeat still counts
+}
+
 TEST(GatewayNode, OperatorLinkFollowsTheHeartbeatAndFailsSafe) {
   Rig r;
   r.gw->step(r.now);

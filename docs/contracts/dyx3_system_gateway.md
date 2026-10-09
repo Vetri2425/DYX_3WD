@@ -29,10 +29,14 @@ is the **operator-link heartbeat** (§4.3.1): it publishes `OperatorLinkStatus`,
 | `start_mission` | `{"path_artifact_sha256": "<64 lowercase hex>"}` | `StartMission` | |
 | `abort_mission` | `{"reason": "operator"\|"safety"\|"unspecified"}` | `AbortMission` | |
 | `pause_mission` / `resume_mission` / `skip_point` | `{}` | `PauseMission` / `ResumeMission` / `SkipPoint` | |
-| `estop` | `{"asserted": bool, "source": "tablet"\|"backend"\|"ble"\|"physical"}` | `SetEmergencyStop` (motion_guard) | **never queued behind other commands, never rate limited** |
+| `estop` | `{"asserted": bool, "source": "tablet"\|"backend"\|"ble"\|"physical"}` | `SetEmergencyStop` (motion_guard) | **never queued behind other commands, never rate limited, never refused `busy`** |
 | `arm` | `{"arm": bool}` | `ArmDisarm` (px4_link) | |
 | `offboard` | `{"enable": bool}` | `SetOffboard` (px4_link) | |
 | `spray_manual` | `{"on": bool}` | `SetSprayManual` (spray) | |
+
+Commands are queued from the socket thread and processed in batches by the node's 10 ms timer. Within a batch an `estop` is processed strictly first, then the heartbeat,
+then the rest in arrival order. Heartbeats in one batch are coalesced: only the most recent one refreshes the operator link, every one is answered `ok`. At most 256 commands
+wait between two batches; beyond that every command except `estop` (heartbeats included) is answered `busy` (GW-005).
 
 Unknown `cmd`, unknown `args` keys, missing or wrongly typed fields -> `invalid_command`. The gateway adds **no** policy of its own (no "arm only if ..."): the safety/mission authorities
 downstream decide and their `accepted` / `reason_code` are returned verbatim in `data` (`{"accepted":..,"reason_code":..}` plus service-specific fields). If the target service is not

@@ -19,6 +19,13 @@ void require(bool ok, const std::string& what) {
 }
 const rclcpp::QoS kRel1 = rclcpp::QoS(1).reliable();
 
+// Processing order inside one batch: E-stop strictly first, then the heartbeat, then the rest.
+int batch_rank(CmdKind k) {
+  if (k == CmdKind::Estop) return 0;
+  if (k == CmdKind::Heartbeat) return 1;
+  return 2;
+}
+
 // A telemetry callback with a concrete (non-generic) signature, as rclcpp's traits require.
 template <class Msg, class F>
 std::function<void(typename Msg::ConstSharedPtr)> upd(TelemetrySnapshot& snap, const ClockFn& clock,
@@ -275,7 +282,10 @@ void GatewayNode::on_line(int client, const std::string& line) {
     return;
   }
   std::lock_guard<std::mutex> lk(inbox_mu_);
-  if (inbox_.size() >= 256 && !is_priority(pr.cmd.kind)) {
+  // Only an E-stop may exceed the cap (it is never refused); heartbeats count against it like
+  // every other command, so a heartbeat flood cannot grow the inbox without bound (GW-005).
+  if (inbox_.size() >= kInboxCap && pr.cmd.kind != CmdKind::Estop) {
+    ++inbox_refused_;
     JsonLine r;
     r.integer("v", kProtocolVersion);
     if (pr.has_id) r.integer("id", pr.id);
@@ -469,6 +479,7 @@ void GatewayNode::audit_ipc(double now_s) {
   delta(ipc_.dropped_slow(), &audit_dropped_, "client(s) dropped as slow consumers");
   delta(ipc_.overflows(), &audit_overflows_, "client(s) closed for an oversize line");
   delta(ipc_.rejected_full(), &audit_rejected_, "connection(s) refused at max_clients");
+  delta(inbox_refused_.load(), &audit_busy_, "command(s) refused as busy (inbox full)");
 }
 
 void GatewayNode::step(double now_s) {
@@ -477,14 +488,24 @@ void GatewayNode::step(double now_s) {
     std::lock_guard<std::mutex> lk(inbox_mu_);
     work.swap(inbox_);
   }
-  // E-stop and heartbeats first, then everything else in arrival order.
-  std::stable_partition(work.begin(), work.end(),
-                        [](const Inbound& i) { return is_priority(i.pr.cmd.kind); });
-  if (!work.empty()) {
-    last_batch_.clear();
-    for (const auto& in : work) last_batch_.push_back(in.pr.cmd.kind);
+  // E-stops first, then heartbeats, then everything else, each in arrival order (GW-005).
+  std::stable_sort(work.begin(), work.end(), [](const Inbound& a, const Inbound& b) {
+    return batch_rank(a.pr.cmd.kind) < batch_rank(b.pr.cmd.kind);
+  });
+  // Heartbeats are coalesced: only the most recent one in the batch refreshes (and binds) the
+  // operator link; the earlier ones are acknowledged without further effect.
+  const Inbound* last_hb = nullptr;
+  for (const auto& in : work)
+    if (in.pr.cmd.kind == CmdKind::Heartbeat) last_hb = &in;
+  if (!work.empty()) last_batch_.clear();
+  for (const auto& in : work) {
+    if (in.pr.cmd.kind == CmdKind::Heartbeat && &in != last_hb) {
+      reply(in.client, in.pr.has_id, in.pr.id, true, "ok", "");
+      continue;
+    }
+    last_batch_.push_back(in.pr.cmd.kind);
+    process(in, now_s);
   }
-  for (const auto& in : work) process(in, now_s);
 
   for (auto it = pending_.begin(); it != pending_.end();) {
     if (now_s >= it->second.deadline_s) {

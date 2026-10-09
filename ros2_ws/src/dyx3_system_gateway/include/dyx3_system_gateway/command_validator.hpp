@@ -44,7 +44,8 @@ struct ParseResult {
 constexpr int kProtocolVersion = 1;
 ParseResult parse_command(const std::string& line);
 
-// E-stop is never queued behind other work and never rate limited.
+// E-stop and heartbeat are processed ahead of other work; the gateway node orders E-stop strictly
+// first, coalesces heartbeats and never refuses an E-stop.
 inline bool is_priority(CmdKind k) { return k == CmdKind::Estop || k == CmdKind::Heartbeat; }
 
 }  // namespace dyx3_gateway
