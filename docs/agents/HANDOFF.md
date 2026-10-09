@@ -1221,3 +1221,38 @@ No `agy/*` branches were deleted.
   `docs/bench/2026-10-09_bench_runbook.md`; the helpers are `tools/bench/nsh.py` (PX4 MAVLink shell over USB) and
   `tools/bench/rtkstat.py` (RTK worker status). The next-session brief is
   `docs/agents/handoff_2026-10-09_next_session.md`.
+
+---
+
+## 2026-10-09 (09:35) — Claude — local branch cleanup; every repo on its authoritative branch
+
+At the owner's request, all essential local work was merged first. Then merged or superseded local branches were
+removed, **locally only**; nothing was deleted on GitHub.
+
+| Repo | Checked out (local = GitHub) | Local branches kept |
+|---|---|---|
+| DYX_3WD | `master` @ `5226a16` | `codex/phase-a-stall-validation` (Codex is running the bench in this clone) |
+| PX4-Autopilot-3WD-Prod | `dyx-3wd-production` @ `8279fa4be3` (NuttX `e462af8eb3` from `Vetri2425/NuttX`) | `dyx-4wd-production` (the 4WD product line) |
+| Three_Wheel_v2 | `main` @ `dbb2ba1` | none |
+
+- **Merged:** two docs commits that existed only on local `master`, now on `master` as `25a642c` and `5226a16`:
+  - `docs/migration/ab_arm_audit.md` (prototype A/B arms audit; input for the production cleanup);
+  - `docs/architecture/proposals/2026-10-08_rtk_correction_upgrade_plan.md` (early RTK plan, superseded by
+    `docs/plans/2026-10-08_production_rtk_plan.md`).
+- **Superseded, not merged:** `codex/phase-f-closure`.
+  - Its px4_link F4 fix is already on `master` in equivalent form: explicit STOP on an invalid clock in
+    `Px4LinkNode::step`.
+  - Its F6 mutation tests are `47796ad`; F2 was already in.
+  - Backup of all local-only branches: `~/Vetri/3WD_PROD/Patches/dyx3_local_branches_backup_2026-10-09.bundle`.
+- **Firmware checkout:** the uncommitted WENC edit was byte-identical to `8279fa4be3` and was discarded, then the
+  branch fast-forwarded. The worktree `PX4-3WD-ethfix` and the branches `fw/eth-stall-rtcm`,
+  `codex/eth-ring-guard-rtcm` and `codex/fw-eth-rtcm-v2` were removed; their content is in `dyx-3wd-production`.
+- **App:** `agy/debug-client`, `agy/prod-contract-plan` and `agy/prod-transport` were removed locally; all are
+  contained in `main`. The remote `agy/prod-transport` is kept.
+- **Codex:** the DYX_3WD clone is now on `master`. **Run `git switch codex/phase-a-stall-validation` before
+  committing.** Its untracked `tools/bench/phaseA_executor.py` is untouched.
+- **Not touched:** the `.kilo/worktrees/tourmaline-basketball` worktree, and old-session GATE-2 scratch worktrees
+  registered in the firmware repo.
+
+Live on the rover (unchanged): firmware `8279fa4be3`, stack `8af2595` (code identical to `master`; later commits
+are docs only), app `dbb2ba1`.

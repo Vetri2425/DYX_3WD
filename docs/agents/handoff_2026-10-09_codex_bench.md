@@ -39,6 +39,9 @@ The owner is at the rover. Saturday 2026-10-10 is the field demo: driving only, 
 | App | Three_Wheel_v2 `main` @ `dbb2ba1`; signed APK `~/Vetri/3WD_PROD/App-Releases/dbb2ba1-agy-prod-transport/app-release.apk`. Uninstall the old debug-signed build first. A tablet token must be created (command below) |
 | Stall skipped | The "before" reproduction on old firmware was skipped (owner chose to flash first) |
 
+## Git state (09:35)
+The DYX_3WD clone is on `master` (= GitHub). **Switch to your branch before committing:** `git switch codex/phase-a-stall-validation`. Merge into `master` only with the owner's OK. The firmware checkout is on `dyx-3wd-production` @ `8279fa4be3`; the app is on `main` @ `dbb2ba1`. The bench helpers are also in this repo at `tools/bench/`.
+
 ## Access and tools
 - Jetson: `ssh dyx-3wd` (user `flash`, NOPASSWD sudo).
   - IP 192.168.1.32 on the office LAN. If ssh hangs, run `echo 192.168.1.32 > ~/.ssh/.dyx-3wd.lastip`; mDNS returns
