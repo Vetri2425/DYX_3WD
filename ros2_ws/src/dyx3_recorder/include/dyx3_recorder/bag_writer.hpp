@@ -10,11 +10,16 @@
 #include <sys/types.h>
 
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <vector>
 
 namespace dyx3_recorder {
 
+// Thread-safe (REC-013): the status timer polls running()/bytes() while the mission callback
+// stops the child on another executor thread. Process state is guarded by a mutex, and while a
+// stop() is in progress it is the only caller of waitpid (running() then reports the child as
+// running without reaping it), so the child is reaped exactly once and its exit code is never lost.
 class BagWriter {
 public:
   ~BagWriter() { stop(0.0, 0.0); }
@@ -22,18 +27,24 @@ public:
   // argv[0] is looked up in PATH. `dir` is the bag output directory being watched for size. False
   // if fork/exec failed.
   bool start(const std::vector<std::string>& argv, const std::string& dir);
-  bool running();  // reaps the child if it exited
+  bool running();  // reaps the child if it exited (unless a stop() owns the child)
   // Graceful stop; returns the number of escalation steps used (0 = exited on SIGINT, 1 = needed
-  // SIGTERM, 2 = SIGKILL).
+  // SIGTERM, 2 = SIGKILL). A concurrent second stop() waits for the first and returns 0.
   int stop(double sigint_wait_s, double sigterm_wait_s);
-  int last_exit_code() const { return exit_code_; }
-  bool exited_abnormally() const { return exited_ && exit_code_ != 0; }
+  int last_exit_code() const;
+  bool exited_abnormally() const;
   uint64_t bytes() const;  // recursive size of `dir`
-  const std::string& dir() const { return dir_; }
+  std::string dir() const;
 
 private:
-  bool wait_exit(double seconds);
+  int stop_locked(double sigint_wait_s, double sigterm_wait_s);  // stop_mu_ held
+  bool reap_locked();                                             // m_ held; true = still running
+  bool wait_exit(double seconds);                                 // stop owner only
+
+  std::mutex stop_mu_;    // one start()/stop() at a time
+  mutable std::mutex m_;  // everything below
   pid_t pid_{-1};
+  bool stopping_{false};
   bool exited_{false};
   int exit_code_{0};
   std::string dir_;

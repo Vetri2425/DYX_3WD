@@ -2,6 +2,7 @@
 // docs/contracts/dyx3_recorder.md sections 1 and 4. Pure C++ (std only), no ROS.
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 #include <ctime>
 #include <string>
@@ -33,7 +34,11 @@ struct RunInfo {
   uint32_t mission_id{0};
   uint32_t run_index{0};
   std::string path_artifact_sha256;
+  // RPP's id of the conditioned execution geometry (RppStatus) at run start, when RPP reported one
+  // for this mission; empty otherwise (REC-016).
+  std::string conditioned_execution_sha256;
   std::string start_utc;
+  std::string start_state;  // mission state that opened the run: READY (pre-roll) or RUNNING
   std::string vehicle_id;
   std::string operator_name;
   std::string hostname;
@@ -48,9 +53,15 @@ struct RunSummary {
   std::string end_utc;
   std::string final_state;
   double duration_s{0.0};
+  // When the mission reached RUNNING (motion allowed) and how long the bag had been recording by
+  // then. Empty / NaN (-> null) when the run never reached RUNNING.
+  std::string running_utc;
+  double preroll_s{NAN};
   uint64_t bag_bytes{0};
   uint64_t ulog_bytes{0};
   uint64_t ulog_gaps{0};
+  std::string ulog_header;
+  std::string conditioned_execution_sha256;  // the one RPP reported for this mission during the run  // "complete" or "incomplete: ..." (UlogCapture::header_status)
   bool bag_healthy_throughout{true};
   bool provenance_complete{true};
   bool timesync_valid_end{false};
@@ -73,7 +84,9 @@ std::string unique_run_path(const std::string& root, const std::string& name);
 // Atomic text write (temp + rename). Returns false on any failure.
 bool write_file_atomic(const std::string& path, const std::string& content);
 
-// True for file names that must never be copied into a run directory (credentials, tokens, keys).
+// True for file names that must never be copied into a run directory (credentials, tokens, keys):
+// *.env, *.key, *.pem, *.token, *.p12, *.pfx, *.jks; anything containing secret/token/password/
+// passwd/credential/psk; names starting with ntrip, auth (auth.json), id_rsa/id_ecdsa/id_ed25519.
 bool is_secret_name(const std::string& filename);
 struct CopyResult {
   size_t copied{0};

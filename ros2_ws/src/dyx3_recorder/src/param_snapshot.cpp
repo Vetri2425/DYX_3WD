@@ -23,7 +23,9 @@ std::string params_ros_snapshot_json(const std::string& captured_utc,
       params.raw(name, e.dump(2, 4));
     }
     JsonObject one;
-    one.boolean("reachable", n->reachable).raw("params", params.dump(2, 3));
+    one.boolean("reachable", n->reachable);
+    if (!n->note.empty()) one.str("note", n->note);
+    one.raw("params", params.dump(2, 3));
     nodes_obj.raw(n->node, one.dump(2, 2));
   }
   JsonObject top;

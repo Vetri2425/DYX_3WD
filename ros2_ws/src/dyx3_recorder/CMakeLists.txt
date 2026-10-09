@@ -15,7 +15,8 @@ add_library(dyx3_recorder_core STATIC
   src/ulog_capture.cpp
   src/param_snapshot.cpp
   src/bag_writer.cpp
-  src/run_lifecycle.cpp)
+  src/run_lifecycle.cpp
+  src/run_store.cpp)
 target_include_directories(dyx3_recorder_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
@@ -40,6 +41,9 @@ if(BUILD_TESTING)
   ament_add_gtest(recorder_node_test test/recorder_node_test.cpp TIMEOUT 300)
   target_link_libraries(recorder_node_test dyx3_recorder_node_lib)
   ament_target_dependencies(recorder_node_test rclcpp dyx3_interfaces)
+  # REC-002: the default param_nodes list is checked against the launch graph in the source tree.
+  target_compile_definitions(recorder_node_test PRIVATE
+    DYX3_CONTROL_GRAPH_LAUNCH="${CMAKE_CURRENT_SOURCE_DIR}/../dyx3_bringup/launch/control_graph.launch.py")
 endif()
 
 ament_package()

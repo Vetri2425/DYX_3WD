@@ -19,9 +19,10 @@ struct NodeParams {
   std::string node;
   bool reachable{true};
   std::vector<ParamEntry> params;
+  std::string note;  // why the node is unreachable (empty when reachable)
 };
 
-// {"captured_utc": ..., "nodes": {"<node>": {"reachable": true, "params": {"<name>":
+// {"captured_utc": ..., "nodes": {"<node>": {"reachable": true, ["note": ...,] "params": {"<name>":
 // {"type":..,"value":..}}}}} Nodes and parameters are sorted by name so two snapshots of the same
 // state are byte-identical.
 std::string params_ros_snapshot_json(const std::string& captured_utc,
