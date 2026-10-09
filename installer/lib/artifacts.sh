@@ -192,9 +192,11 @@ install_prebuilt() {
       warn "px4_msgs artifact did not install (unsafe, broken or incomplete archive)"
       return 2
     fi
+    sync_fs "${inc}"
     touch "${inc}/.complete"
     rm -rf "${pm}"
     mv -T "${inc}" "${pm}"
+    sync_fs "${DYX3_PX4_MSGS_DIR}"
   fi
   rm -rf "${rel}"
   _artifact_extract "${dir}/${rel_f}" "opt/dyx3/releases/${sha}" && [ -d "${rel}" ] || {

@@ -88,5 +88,6 @@ build_px4_msgs() {
     MAKEFLAGS='-j${DYX3_BUILD_JOBS}' nice -n 10 colcon build \
       --base-paths src --parallel-workers 1 --cmake-args -DCMAKE_BUILD_TYPE=Release" ||
     die "px4_msgs colcon build failed"
+  sync_fs "${root}"
   run touch "${root}/.complete"
 }

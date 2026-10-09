@@ -109,6 +109,10 @@ install_dir() {
   run install -d -m "${mode}" "${own[@]}" "$@"
 }
 
+# sync_fs <path>: flush the filesystem that holds <path> (INS-008). Without it a power cut right after an upgrade can
+# leave `current` -> a release whose files, or whose .complete, are not on disk yet. Falls back to a global sync.
+sync_fs() { run sync -f "$1" 2>/dev/null || run sync; }
+
 # atomic_symlink <target> <link>: replace a symlink without a window where it is missing.
 atomic_symlink() {
   local target="$1" link="$2" tmp

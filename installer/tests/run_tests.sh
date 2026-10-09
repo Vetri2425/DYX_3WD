@@ -494,6 +494,13 @@ F
 #!/usr/bin/env bash
 exit 0
 F
+  # sync -f <path>: record the path, whether its .complete exists yet, and what current points at.
+  cat >"${fakebin}/sync" <<'F'
+#!/usr/bin/env bash
+[ "${1:-}" = -f ] || exit 0
+printf '%s complete=%s current=%s\n' "$2" "$([ -e "$2/.complete" ] && echo 1 || echo 0)" \
+  "$(basename "$(readlink -f "${DYX3_ROOT}/opt/dyx3/current" 2>/dev/null)" 2>/dev/null)" >>"${SYNC_LOG:-/dev/null}"
+F
   chmod +x "${fakebin}"/*
   : >"${T}/ros_setup.bash"
 
@@ -656,8 +663,10 @@ F
   check "reinstall preserves spray correlation ledger" '[ "$(cat "${DYX3_VAR_LIB}/state/px4_link_spray_ack_next")" = "v2 12345" ]'
 
   echo "EDITED=1" >>"${DYX3_ETC}/platform.env"
-  (upgrade_to "${B}") >"${T}/up_b" 2>&1
+  (SYNC_LOG="${T}/sync_log" upgrade_to "${B}") >"${T}/up_b" 2>&1
   rc=$?
+  check "the release is flushed to disk before .complete is written" 'grep -qx "${DYX3_RELEASES}/${B} complete=0 current=${A}" "${T}/sync_log"'
+  check "the switch is flushed to disk" 'grep -qx "${DYX3_PREFIX} complete=0 current=${B}" "${T}/sync_log"'
   check "upgrade to B (rc=0)" '[ "${rc}" -eq 0 ]'
   check "current -> B, previous recorded as A" '[ "$(basename "$(readlink -f "${DYX3_CURRENT}")")" = "${B}" ] && [ "$(cat "${DYX3_VAR_LIB}/state/previous_release")" = "${A}" ]'
   check "upgrade never overwrites edited /etc config" 'grep -q "EDITED=1" "${DYX3_ETC}/platform.env"'

@@ -291,6 +291,7 @@ finish_interrupted_switch() {
   warn "current ${cur:0:10} is unhealthy: reverting the interrupted ${kind} to ${previous:0:10}"
   atomic_symlink "${DYX3_RELEASES}/${previous}" "${DYX3_CURRENT}"
   if [ -n "${cur}" ]; then printf '%s\n' "${cur}" >"${DYX3_VAR_LIB}/state/previous_release"; fi
+  sync_fs "${DYX3_PREFIX}"
   install_units "${DYX3_CURRENT}"
   install_operator_shims
   write_versions_file "${DYX3_CURRENT}"
@@ -346,6 +347,7 @@ upgrade_to() {
     die "release ${sha:0:10} failed verification; current is unchanged"
   fi
   run rm -f "${DYX3_RELEASES}/${sha}/.failed"
+  sync_fs "${DYX3_RELEASES}/${sha}"
   # .verified outlives a failed health gate (INS-016): a retry of the same SHA reuses the build instead of an hour of
   # colcon. .complete (eligible to be switched to) does not.
   run touch "${DYX3_RELEASES}/${sha}/.verified" "${DYX3_RELEASES}/${sha}/.complete"
@@ -362,6 +364,7 @@ upgrade_to() {
   require_rover_idle "the switch to ${sha:0:10}"
   mark_switch_in_progress upgrade "${sha}" "${prev}"
   switch_release "${sha}"
+  sync_fs "${DYX3_PREFIX}"
   install_units "${DYX3_CURRENT}"
   install_config_templates "${DYX3_CURRENT}"
   install_no_auto_updates
@@ -388,6 +391,7 @@ upgrade_to() {
     warn "post-switch health FAILED: reverting to ${prev:0:10}"
     stop_enabled_services "${DYX3_RELEASES}/${sha}"
     atomic_symlink "${DYX3_RELEASES}/${prev}" "${DYX3_CURRENT}"
+    sync_fs "${DYX3_PREFIX}"
     install_units "${DYX3_CURRENT}"
     install_operator_shims
     write_versions_file "${DYX3_CURRENT}"
@@ -503,6 +507,7 @@ rollback_release() {
   mark_switch_in_progress rollback "${prev}" "${cur}"
   atomic_symlink "${DYX3_RELEASES}/${prev}" "${DYX3_CURRENT}"
   printf '%s\n' "${cur}" >"${DYX3_VAR_LIB}/state/previous_release"
+  sync_fs "${DYX3_PREFIX}"
   install_units "${DYX3_CURRENT}"
   install_operator_shims
   write_versions_file "${DYX3_CURRENT}"
@@ -517,6 +522,7 @@ rollback_release() {
   warn "post-rollback health FAILED: restoring ${cur:0:10}"
   atomic_symlink "${DYX3_RELEASES}/${cur}" "${DYX3_CURRENT}"
   printf '%s\n' "${prev}" >"${DYX3_VAR_LIB}/state/previous_release"
+  sync_fs "${DYX3_PREFIX}"
   install_units "${DYX3_CURRENT}"
   install_operator_shims
   write_versions_file "${DYX3_CURRENT}"
