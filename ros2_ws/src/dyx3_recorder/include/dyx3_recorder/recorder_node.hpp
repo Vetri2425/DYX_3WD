@@ -12,6 +12,7 @@
 #include "dyx3_interfaces/msg/mission_state.hpp"
 #include "dyx3_interfaces/msg/px4_link_status.hpp"
 #include "dyx3_interfaces/msg/recorder_status.hpp"
+#include "dyx3_interfaces/msg/rpp_status.hpp"
 #include "dyx3_interfaces/msg/ulog_chunk.hpp"
 #include "dyx3_recorder/bag_writer.hpp"
 #include "dyx3_recorder/param_snapshot.hpp"
@@ -117,12 +118,16 @@ private:
   int64_t ts_offset_us_{0};
   uint32_t ts_rtt_us_{0};
   double ts_stamp_s_{-1e18};
+  // newest non-empty conditioned_execution_sha256 from RPP and its mission (guarded by mu_)
+  std::string rpp_sha_;
+  uint32_t rpp_sha_mission_{0};
 
   rclcpp::CallbackGroup::SharedPtr cb_mission_, cb_ulog_;
   rclcpp::Publisher<dyx3_interfaces::msg::RecorderStatus>::SharedPtr pub_status_;
   rclcpp::Subscription<dyx3_interfaces::msg::MissionState>::SharedPtr sub_mission_;
   rclcpp::Subscription<dyx3_interfaces::msg::UlogChunk>::SharedPtr sub_ulog_;
   rclcpp::Subscription<dyx3_interfaces::msg::Px4LinkStatus>::SharedPtr sub_link_;
+  rclcpp::Subscription<dyx3_interfaces::msg::RppStatus>::SharedPtr sub_rpp_;
   rclcpp::TimerBase::SharedPtr timer_;
 };
 

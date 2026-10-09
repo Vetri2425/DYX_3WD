@@ -179,6 +179,25 @@ RecorderNode::RecorderNode(const rclcpp::NodeOptions& options, ClockFn clock, Wa
         ts_rtt_us_ = m->timesync_round_trip_us;
         ts_stamp_s_ = clock_();
       });
+  // REC-016: the id of the conditioned geometry RPP actually executes (X-001 / PC-2), so a run
+  // proves which geometry ran, not only which artifact was loaded.
+  sub_rpp_ = create_subscription<dyx3_interfaces::msg::RppStatus>(
+      "/dyx3/rpp/status", rclcpp::QoS(1).reliable(),
+      [this](dyx3_interfaces::msg::RppStatus::ConstSharedPtr m) {
+        if (m->conditioned_execution_sha256.empty()) return;
+        std::lock_guard<std::mutex> lk(mu_);
+        rpp_sha_ = m->conditioned_execution_sha256;
+        rpp_sha_mission_ = m->mission_id;
+        if (run_dir_.empty() || finalizing_ || m->mission_id != info_.mission_id) return;
+        std::string& have = summary_.conditioned_execution_sha256;
+        if (have.empty()) {
+          have = m->conditioned_execution_sha256;
+        } else if (have != m->conditioned_execution_sha256) {
+          summary_.notes.push_back("conditioned_execution_sha256 changed during the run: " + have +
+                                   " -> " + m->conditioned_execution_sha256);
+          have = m->conditioned_execution_sha256;
+        }
+      });
   if (create_timer) {
     timer_ = create_wall_timer(
         std::chrono::duration<double>(0.5 / status_hz_), [this]() { step(clock_()); },
@@ -397,9 +416,11 @@ void RecorderNode::start_run(uint32_t mission_id, uint32_t run_index, const std:
     info.timesync_valid = fresh;
     info.timesync_offset_us = fresh ? ts_offset_us_ : 0;
     info.timesync_round_trip_us = fresh ? ts_rtt_us_ : 0U;
+    if (rpp_sha_mission_ == mission_id) info.conditioned_execution_sha256 = rpp_sha_;
   }
   fs::create_directories(runs_dir_, ec);
   RunSummary summary;
+  summary.conditioned_execution_sha256 = info.conditioned_execution_sha256;
   // Retention first (no run is open here: stop_run came before): it may free the space we need.
   if (max_runs_bytes_ > 0) {
     const PruneResult pr = prune_runs(runs_dir_, max_runs_bytes_);
@@ -593,6 +614,11 @@ void RecorderNode::stop_run(const std::string& final_state) {
     summary.ulog_bytes = ulog_.bytes();
     summary.ulog_gaps = ulog_.gaps().size();
     summary.ulog_header = ulog_.header_status();
+    if (summary.conditioned_execution_sha256.empty()) {
+      summary.notes.push_back(
+          "conditioned_execution_sha256 not reported by RPP for this mission during the run");
+      summary.provenance_complete = false;
+    }
     if (!ulog_.run_header_complete())
       summary.notes.push_back("ulog " + ulog_.header_status() + ": stream.ulg cannot be decoded alone");
     if (ulog_.segments() > 1)

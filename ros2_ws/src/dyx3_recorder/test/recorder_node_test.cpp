@@ -662,3 +662,42 @@ TEST(RecorderNode, EscalationOrMissingMetadataClearsBagHealth) {
     EXPECT_NE(summary.find("\"bag_healthy_throughout\": false"), std::string::npos);
   }
 }
+
+// REC-016: the conditioned execution geometry id RPP reports is part of the run's provenance.
+TEST(RecorderNode, ConditionedExecutionShaIsRecorded) {
+  Rig r;
+  auto p_rpp = r.world->create_publisher<dyx3_interfaces::msg::RppStatus>(
+      "/dyx3/rpp/status", rclcpp::QoS(1).reliable());
+  const auto until = std::chrono::steady_clock::now() + 10s;
+  while (p_rpp->get_subscription_count() == 0 && std::chrono::steady_clock::now() < until)
+    r.pump(10);
+  auto rpp = [&](uint32_t mission, const std::string& sha) {
+    dyx3_interfaces::msg::RppStatus m;
+    m.mission_id = mission;
+    m.conditioned_execution_sha256 = sha;
+    p_rpp->publish(m);
+    r.pump(80);
+  };
+  const std::string a(64, 'c'), b(64, 'd');
+  rpp(42, a);  // RPP has loaded the geometry for mission 42 (state LOADED)
+  r.mission(MissionState::STATE_READY);
+  const std::string d = r.run_dir();
+  EXPECT_NE(slurp(d + "/manifest.json").find("\"conditioned_execution_sha256\": \"" + a),
+            std::string::npos);
+  r.mission(MissionState::STATE_RUNNING);
+  rpp(41, b);  // another mission's id is not this run's
+  rpp(42, "");
+  r.mission(MissionState::STATE_COMPLETED);
+  std::string summary = slurp(d + "/summary.json");
+  EXPECT_NE(summary.find("\"conditioned_execution_sha256\": \"" + a), std::string::npos);
+  EXPECT_EQ(summary.find("changed during the run"), std::string::npos);
+
+  r.wall += 100;
+  r.mission(MissionState::STATE_RUNNING, 43);  // RPP never reports one for 43
+  std::string d2;
+  for (const auto& e : fs::directory_iterator(r.root + "/runs"))
+    if (e.path().string().find("mission_0043") != std::string::npos) d2 = e.path().string();
+  r.mission(MissionState::STATE_COMPLETED, 43);
+  summary = slurp(d2 + "/summary.json");
+  EXPECT_NE(summary.find("conditioned_execution_sha256 not reported"), std::string::npos);
+}
