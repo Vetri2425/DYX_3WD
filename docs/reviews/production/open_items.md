@@ -45,7 +45,7 @@ Review baseline: DYX_3WD `master` `252778e` (firmware `8279fa4be3`).
 | 7 | `dyx3_spray` | 2026-10-09 | 2026-10-09 | 0 / 2 / 2 / 1 | open |
 | 8 | `dyx3_geometry` | 2026-10-09 | 2026-10-09 | 0 / 0 / 1 / 5 | open |
 | 9 | `dyx3_bringup` + systemd (RT, CPU, restart) | 2026-10-09 | 2026-10-09 | 0 / 0 / 3 / 2 | open |
-| 10 | `dyx3_system_gateway` | — | — | — | prompt issued |
+| 10 | `dyx3_system_gateway` | 2026-10-09 | 2026-10-09 | 0 / 2 / 1 / 5 | open |
 | 11 | `dyx3_recorder` | 2026-10-09 | 2026-10-09 | 0 / 5 / 6 / 6 | open |
 | 12 | backend | 2026-10-09 | 2026-10-09 | 0 / 1 / 3 / 6 | open |
 | 13 | installer / deployment | — | — | — | |
@@ -708,6 +708,75 @@ Verdicts on known items (recorded; not new):
   tablet sees "PX4 link unhealthy". Log and count child restarts, and expose the agent's health in
   `dyx3-health`.
 - **BR-005.** Least-privilege hardening after an inventory of write paths. No motion impact.
+
+---
+
+## 10. `dyx3_system_gateway`
+
+Reviewer verdict: REQUEST CHANGES (2 CRITICAL, 3 HIGH, 3 MEDIUM). After verification: **0 CRITICAL, 2 HIGH,
+1 MEDIUM, 5 LOW**.
+- The "rogue local socket client" findings need code already running on the rover as `dyx3`. At that point the
+  backend is already compromised, so they are defence-in-depth, not CRITICAL.
+- The SIGPIPE finding is confirmed, and it is worse than "the gateway exits".
+
+Confirmed good:
+- **Validation is strict:** the JSON parser has depth, duplicate-key, number and line-size limits, and every
+  command is validated (`command_validator.cpp`).
+- **The IPC thread hands commands to the ROS timer** through a mutex inbox.
+- **E-stop and heartbeat are processed first in each batch** (`gateway_node.cpp:426-433`).
+- **Service calls are asynchronous with a 2 s deadline.**
+- **The operator link uses a steady clock;** `alive` requires a client AND a heartbeat younger than 2.0 s.
+- A hung backend holding the socket open ends in a STOP after about 2.1 s.
+
+| ID | Severity | Status | Area | Where | Item |
+|---|---|---|---|---|---|
+| GW-002 | **HIGH** (~~CRITICAL~~) | ACCEPTED | Lifecycle | `ipc_server.cpp:169-175`; `main.cpp` | `write()` to a closed peer raises **SIGPIPE** (no `MSG_NOSIGNAL`, no `SIG_IGN`) → the gateway dies → `on_exit=Shutdown` **takes down the whole control graph** |
+| GW-004 | **HIGH** | ACCEPTED (owner decision) | Link | `gateway_node.cpp:254-258`; `docs/contracts/backend.md` §3 | Operator-loss budget ≈ 1.5 + 2.0 + 0.1 + 0.02 = **3.62 s** before the guard STOP: 1.27 m at 0.35 m/s, 3.6 m at 1 m/s. Not approved |
+| GW-001 | MEDIUM (~~CRITICAL~~) | ACCEPTED ↓ | Auth | `ipc_server.cpp:138`; `operator_link.hpp:15-25`; every unit `User=dyx3` | Any process running as `dyx3` can connect, heartbeat and send commands; there is no `SO_PEERCRED`, and all services share one UID |
+| GW-003 | LOW (~~HIGH~~) | DOUBT ↓ | Command | `gateway_node.cpp:311-365` | Abort could overtake an in-flight Start, because they go through separate services |
+| GW-005 | LOW (~~HIGH~~) | ACCEPTED ↓ | Command | `ipc_server.cpp:136-149`; `gateway_node.cpp:277-289` | No reserved slot for E-stop at `max_clients` 4; priority commands bypass the 256 inbox cap |
+| GW-006 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Command | `command_validator.cpp:76-94` | The request id is correlation only; a manual retry of `skip_point` after a timeout can skip twice |
+| GW-007 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Stall | `gateway_node.cpp:319-335,435-443` | Timed-out rclcpp requests are never `remove_pending_request`ed |
+| GW-008 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | JSON | `json.cpp:63-74` | Raw invalid UTF-8 is accepted in strings |
+
+### GW-002 — HIGH — SIGPIPE kills the control graph
+- Confirmed. There is no `MSG_NOSIGNAL`, `SIG_IGN` or `sigaction` in the gateway (only `dyx3_gnss_rtk` ignores
+  SIGPIPE). `write()` runs before the `POLLHUP` check (`ipc_server.cpp:165-175`).
+- **Trigger:** any backend restart (crash, `Restart=always`, upgrade) while telemetry is queued, at 5 Hz, i.e.
+  usually. The gateway dies, the launch `on_exit=Shutdown` stops all 6 nodes, and PX4 goes into offboard loss
+  → disarm.
+- **A backend restart can therefore abort a running mission and stop the rover through the failsafe, not under
+  control.**
+- **Fix (two lines):** `send(..., MSG_NOSIGNAL)` in the IPC writer, and `std::signal(SIGPIPE, SIG_IGN)` in
+  `main.cpp` (also worth adding to `px4_link` and the others).
+- **Test:** a subprocess with default SIGPIPE, pending output, the peer closes → the gateway survives and the
+  client is removed. Plus a bench test: `systemctl restart dyx3-backend` during a run → `dyx3-ros` is not
+  restarted.
+
+### GW-004 — HIGH — the operator-loss budget (owner decision)
+- The arithmetic is confirmed and the contract already marks it OPEN. The 0.5 s relay does not add to the worst
+  case; the last relay can land just before the 1.5 s expiry.
+- **Owner decision:** the approved loss-to-STOP time at the production speed.
+  - Example: tablet 1.0 s + gateway 1.0 s ≈ 2.1 s → 0.7 m at 0.35 m/s.
+  - Validate against real field Wi-Fi (false stops) before lowering.
+  - Decide together with BE-001 (which tablet's heartbeat counts).
+- Note: the gateway stamps a heartbeat when the ROS timer drains it, not when the IPC thread receives it. The
+  difference is at most one 10 ms timer under normal load; include it in the measurement.
+
+### GW-001 — MEDIUM — the socket trust boundary
+- The socket is 0660 owned by `dyx3`, and every service runs as `dyx3`. Only root or a `dyx3` process can
+  connect.
+- The realistic risk is a debug tool or a second backend instance heartbeating, not an outside attacker.
+- **Fix:** a dedicated `dyx3-backend` UID + `SO_PEERCRED` check, and associate the heartbeat with that
+  connection. This goes together with BR-005 (per-service identities).
+
+### LOW items
+- **GW-003.** Both requests go through one participant to one single-threaded mission node, so a reorder needs
+  transport skew between two local services. If it happens, the rover shows RUNNING and the operator aborts
+  again. A mission command epoch would close it fully.
+- **GW-005.** Reserve a slot for the backend (follows GW-001) and coalesce heartbeats.
+- **GW-006.** The backend does not auto-retry. Add an operation id only if `skip_point` double-skips are seen.
+- **GW-007 / GW-008.** Focused hardening with regression tests.
 
 ---
 
