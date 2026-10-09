@@ -1792,3 +1792,24 @@ Owner plan:
   `cdc_ether`, `rndis_host`, `cdc_ncm`, `option`, usb-modeswitch and ModemManager. `qmi_wwan`, `cdc_mbim` and
   `huawei_cdc_ncm` are missing, which matters only if the dongle is a QMI/MBIM modem.
 - Installer suite 143/0.
+
+## 2026-10-09 (14:00) — Claude — running on hotspot + 4G dongle (no Ethernet); automatic OS updates off
+
+**Field access path proven** (office cable removed, dongle plugged, power-cycled):
+- The 4G dongle is plug and play: Qualcomm `05c6:90b4` as `usb2` (`cdc_ether`/RNDIS), 192.168.8.199/24 by DHCP
+  through NM's automatic "Wired connection 1". It is the only default route; HTTP 200 in 0.4 s, ping ~34 ms.
+- ssh `flash@192.168.3.100` over the hotspot works. Mac ↔ rover ping 3.0 ms average, 0/30 loss.
+- QGC on TCP `192.168.3.100:5760`: ATTITUDE 15 Hz, GPS 5 Hz (same as over the office cable).
+- Backend `/api/ping` 200 in 10 ms. Health OK. DDS connected. FCU static 10.41.10.1.
+- RTK: NTRIP over 4G → USB_DIRECT INJECTING, 0 failures.
+- The Mac's internet runs through the rover NAT; the cap dropped 0 packets.
+
+**Fix: automatic OS updates disabled** (`install_no_auto_updates`, runs on every install and upgrade):
+- After boot, PackageKit, fwupd and update-notifier pulled ~20 MB over 4G in 4 minutes, with apt-daily-upgrade
+  14 minutes away. QGC felt slow.
+- Now: `/etc/apt/apt.conf.d/99dyx3-no-auto-updates` (periodic all 0), and these units masked: apt-daily(-upgrade),
+  update-notifier-download/motd, fwupd-refresh, packagekit. After that the 4G rx is 1.7 KB/s (NTRIP only).
+- Manual `apt` still works. Installer tests 145/0.
+
+GPS indoors after the power cycle: fix 0, 4 satellites (expected). Next: outdoor RTK/heading and a line-of-sight
+Wi-Fi range walk.

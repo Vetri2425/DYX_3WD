@@ -467,6 +467,9 @@ F
   check "no hotspot credential appears in argv or installer logs" '! grep -q "DummyBenchPass123" "${T}/hotspot_log" "${T}/nmcli_argv" 2>/dev/null'
   install_config_templates "${DYX3_CURRENT}" >/dev/null 2>&1
   check "existing hotspot.env is never overwritten" 'grep -q "DummyBenchPass123" "${DYX3_ETC}/hotspot.env"'
+  install_no_auto_updates >/dev/null 2>&1
+  check "field rover never updates itself (apt periodic off)" 'c="${DYX3_ROOT}/etc/apt/apt.conf.d/99dyx3-no-auto-updates"; grep -qx "APT::Periodic::Unattended-Upgrade \"0\";" "${c}" && grep -qx "APT::Periodic::Update-Package-Lists \"0\";" "${c}"'
+  check "release activation disables automatic updates" 'grep -q "^  install_no_auto_updates$" "${REPO}/installer/lib/release.sh"'
   check "versions.json written for the recorder" 'grep -q "\"stack_sha\": \"${A}\"" "${DYX3_ETC}/versions.json" && grep -q firmware_expected_sha "${DYX3_ETC}/versions.json"'
   check "systemd units copied" '[ -f "${DYX3_ROOT}/etc/systemd/system/dyx3-platform.service" ]'
 

@@ -195,6 +195,7 @@ upgrade_to() {
   install_units "${DYX3_CURRENT}"
   install_config_templates "${DYX3_CURRENT}"
   install_hotspot_network
+  install_no_auto_updates
   install_operator_shims
   write_versions_file "${DYX3_CURRENT}"
   restart_enabled_services "${DYX3_CURRENT}"

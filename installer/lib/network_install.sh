@@ -354,3 +354,35 @@ EOF
   fi
   log "hotspot profile configured on ${iface} at ${address} (credentials redacted)"
 }
+
+# Field rovers must not update themselves. Over the 4G uplink, Ubuntu's background updaters
+# (apt-daily, unattended-upgrades, PackageKit, fwupd, update-notifier) compete with NTRIP and QGC
+# for bandwidth and CPU, and an unattended upgrade can replace system packages under the running
+# stack. On the rover (2026-10-09), the dongle pulled ~20 MB in 4 minutes after boot, with
+# apt-daily-upgrade 14 minutes away. Manual `apt` (used by this installer) keeps working;
+# updates are an operator action.
+DYX3_AUTO_UPDATE_UNITS=(apt-daily.timer apt-daily-upgrade.timer update-notifier-download.timer
+  update-notifier-motd.timer fwupd-refresh.timer packagekit.service)
+install_no_auto_updates() {
+  local conf="${DYX3_ROOT}/etc/apt/apt.conf.d/99dyx3-no-auto-updates" unit
+  if [ "${DYX3_DRY_RUN}" = "1" ]; then
+    log "would disable automatic OS updates"
+    return 0
+  fi
+  install -d -m 0755 "$(dirname "${conf}")"
+  cat >"${conf}" <<'APT'
+// Managed by the DYX 3WD installer: no background package activity on a field rover.
+APT::Periodic::Update-Package-Lists "0";
+APT::Periodic::Download-Upgradeable-Packages "0";
+APT::Periodic::Unattended-Upgrade "0";
+APT::Periodic::AutocleanInterval "0";
+APT
+  chmod 0644 "${conf}"
+  if [ -z "${DYX3_ROOT}" ] && have systemctl; then
+    for unit in "${DYX3_AUTO_UPDATE_UNITS[@]}"; do
+      systemctl stop "${unit}" >/dev/null 2>&1 || true
+      systemctl mask "${unit}" >/dev/null 2>&1 || true
+    done
+  fi
+  log "automatic OS updates disabled (manual apt still works)"
+}
