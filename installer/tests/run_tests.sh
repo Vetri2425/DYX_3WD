@@ -638,6 +638,17 @@ F
   check "release activation disables automatic updates" 'grep -q "^  install_no_auto_updates$" "${REPO}/installer/lib/release.sh"'
   check "versions.json written for the recorder" 'grep -q "\"stack_sha\": \"${A}\"" "${DYX3_ETC}/versions.json" && grep -q firmware_expected_sha "${DYX3_ETC}/versions.json"'
   check "systemd units copied" '[ -f "${DYX3_ROOT}/etc/systemd/system/dyx3-platform.service" ]'
+  # INS-011: units the release does not ship are removed; the network code's regdom unit is not the release's.
+  local sd="${DYX3_ROOT}/etc/systemd/system"
+  mkdir -p "${sd}/multi-user.target.wants"
+  printf '[Service]\nExecStart=/bin/true\n' >"${sd}/dyx3-retired.service"
+  ln -sfn ../dyx3-retired.service "${sd}/multi-user.target.wants/dyx3-retired.service"
+  install_units "${DYX3_CURRENT}" >"${T}/units_out" 2>&1
+  check "a dyx3 unit the release does not ship is removed with its enablement" '[ ! -e "${sd}/dyx3-retired.service" ] && [ ! -L "${sd}/multi-user.target.wants/dyx3-retired.service" ] && grep -q "removing dyx3-retired.service" "${T}/units_out"'
+  check "the Wi-Fi regdom unit and the shipped units are kept" '[ -f "${sd}/dyx3-wifi-regdom.service" ] && [ -L "${sd}/multi-user.target.wants/dyx3-wifi-regdom.service" ] && [ -f "${sd}/dyx3-platform.service" ] && [ -f "${sd}/dyx3-ros.service" ]'
+  (systemd_available() { return 0; }; systemctl() { printf '%s\n' "$*" >>"${T}/units_calls"; }
+    printf '[Service]\n' >"${sd}/dyx3-retired.service"; install_units "${DYX3_CURRENT}") >/dev/null 2>&1
+  check "under systemd the retired unit is stopped and disabled" 'grep -qx "stop dyx3-retired.service" "${T}/units_calls" && grep -qx "disable dyx3-retired.service" "${T}/units_calls" && ! grep -q "dyx3-wifi-regdom" "${T}/units_calls"'
 
   # This ledger belongs to the PX4 correlation epoch, not a software release.
   printf 'v2 12345\n' >"${DYX3_VAR_LIB}/state/px4_link_spray_ack_next"

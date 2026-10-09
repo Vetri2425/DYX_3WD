@@ -7,6 +7,15 @@
 
 SYSTEMD_DIR="${DYX3_ROOT}/etc/systemd/system"
 
+# dyx3-* units under /etc/systemd/system that no release ships: the network code writes them, and a release switch
+# must leave them alone. The detached upgrade/rollback units are transient (/run), listed for safety.
+_non_release_unit() {
+  case "$1" in
+    dyx3-wifi-regdom.service | dyx3-upgrade-*.service | dyx3-rollback-*.service) return 0 ;;
+  esac
+  return 1
+}
+
 systemd_available() {
   [ "${DYX3_SKIP_SYSTEMD:-0}" != "1" ] && [ -z "${DYX3_ROOT}" ] && have systemctl
 }
@@ -16,6 +25,21 @@ install_units() {
   local rel="$1" unit name
   log "installing systemd units"
   run install -d -m 0755 "${SYSTEMD_DIR}"
+  # INS-011: a dyx3 unit this release does not ship (rollback to an older release, a renamed service) is stopped,
+  # disabled and removed, so it cannot keep running another release's code or be restarted at boot.
+  for unit in "${SYSTEMD_DIR}"/dyx3-*.service; do
+    [ -e "${unit}" ] || continue
+    name="$(basename "${unit}")"
+    [ -e "${rel}/deployment/systemd/${name}" ] && continue
+    _non_release_unit "${name}" && continue
+    log "removing ${name}: this release does not ship it"
+    if systemd_available; then
+      run systemctl stop "${name}" || warn "could not stop ${name}"
+      run systemctl disable "${name}" 2>/dev/null || true
+    fi
+    run rm -f "${unit}"
+    run find "${SYSTEMD_DIR}" -mindepth 2 -maxdepth 2 -path '*.wants/*' -name "${name}" -delete
+  done
   for unit in "${rel}"/deployment/systemd/*.service; do
     run install -m 0644 "${unit}" "${SYSTEMD_DIR}/$(basename "${unit}")"
   done
