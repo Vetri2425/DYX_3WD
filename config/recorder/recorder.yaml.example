@@ -1,0 +1,16 @@
+# Per-rover parameters for dyx3-recorder (REC-022).
+#
+# Install (optional): copy to /etc/dyx3/recorder.yaml and edit, then `sudo systemctl restart dyx3-recorder`.
+#   sudo install -m 0644 -o root -g dyx3 /opt/dyx3/current/config/recorder/recorder.yaml.example /etc/dyx3/recorder.yaml
+# The file is OPTIONAL. start-recorder.sh passes it as `--ros-args --params-file` only when it exists (override the path with
+# DYX3_RECORDER_PARAMS in /etc/dyx3/ros.env); without it the recorder runs on its built-in defaults and every run records
+# vehicle_id and operator as "unknown". An upgrade never creates, overwrites or deletes it.
+#
+# A malformed file, or a value of the wrong type, stops the recorder from starting (the unit restarts loudly): fix or remove it.
+# The top-level key must be the node name, `recorder`. Only the keys below are meant to be set per rover; every other recorder
+# parameter (runs_dir, topics, bag_*, retention) keeps its default unless the contract says otherwise.
+recorder:
+  ros__parameters:
+    # Recorded in each run's manifest.json.
+    vehicle_id: "CHANGE-ME"  # e.g. the rover's name
+    operator: "CHANGE-ME"

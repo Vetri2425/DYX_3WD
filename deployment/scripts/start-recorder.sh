@@ -26,4 +26,16 @@ if [ -z "${recorder_bin}" ]; then
   exit 1
 fi
 
-exec "${recorder_bin}"
+# REC-022: optional per-rover parameters (vehicle_id, operator; template config/recorder/recorder.yaml.example). Never mandatory:
+# no file means the built-in defaults. A file that exists but cannot be read is an error, not a silent fall back to "unknown".
+params_file="${DYX3_RECORDER_PARAMS:-/etc/dyx3/recorder.yaml}"
+args=()
+if [ -e "${params_file}" ]; then
+  if [ ! -r "${params_file}" ]; then
+    echo "dyx3-recorder: ${params_file} exists but is not readable by $(id -un)" >&2
+    exit 1
+  fi
+  args=(--ros-args --params-file "${params_file}")
+fi
+
+exec "${recorder_bin}" "${args[@]}"
