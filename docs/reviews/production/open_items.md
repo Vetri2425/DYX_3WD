@@ -48,7 +48,7 @@ Review baseline: DYX_3WD `master` `252778e` (firmware `8279fa4be3`).
 | 10 | `dyx3_system_gateway` | 2026-10-09 | 2026-10-09 | 0 / 2 / 1 / 5 | open |
 | 11 | `dyx3_recorder` | 2026-10-09 (×2) | 2026-10-09 | 0 / 5 / 10 / 9 | open |
 | 12 | backend | 2026-10-09 | 2026-10-09 | 0 / 1 / 3 / 6 | open |
-| 13 | installer / deployment | — | — | — | prompt issued |
+| 13 | installer / deployment | 2026-10-09 | 2026-10-09 | 0 / 5 / 13 / 7 | open |
 | 14 | tablet app (`Three_Wheel_v2` `App-Polish`) | — | — | — | deferred (not this session) |
 | 15 | PX4 firmware rover path (`dyx-3wd-production`) | — | — | — | deferred (not this session) |
 | 16 | `dyx3_rpp_legacy` | not reviewed: reference only, deleted at GATE 7 | | | |
@@ -77,7 +77,7 @@ several are the root causes the part reviews keep hitting.
 | PC-7b | Verify the `ROS_LOCALHOST_ONLY` discovery between the nodes and the XRCE agent (`dyx3-platform` does not read `ros.env`) | open | |
 | PC-7c | One installer test is not self-contained ("dry-run mentions useradd") | open | `installer/tests` |
 | PC-8 | The prototype bag manifests pair `as_run_config.rpp_params` names with the wrong values. The recorder must write correct name/value pairs | **Pairing PASS; precision FAIL** (doubles stored with 6 decimals, REC-020); coverage gap REC-002 | `dyx3_recorder` |
-| PC-9 | `installer/pins/firmware.pin` still pins `27a7ac9284`, but the rover runs `8279fa4be3`. `msg/`, `srv/` and `dds_topics.yaml` are identical between the two, so px4_msgs on the rover is correct. Bump the pin to `8279fa4be3` for traceability; a px4_msgs rebuild follows at the next upgrade | open (hygiene) | |
+| PC-9 | `installer/pins/firmware.pin` still pins `27a7ac9284`, but the rover runs `8279fa4be3`. `msg/`, `srv/` and `dds_topics.yaml` are identical between the two, so px4_msgs on the rover is correct. Bump the pin to `8279fa4be3` for traceability; a px4_msgs rebuild follows at the next upgrade | open (hygiene); **blocked by INS-003**: install via a fresh install, or after the INS-002 re-exec fix | |
 
 Done: tcpdump in the installer (PC-7); mavlink-router template server mode; WENC timer fix in `8279fa4be3`.
 
@@ -975,6 +975,68 @@ Confirmed good:
 
 ---
 
+## 13. installer / deployment
+
+Reviewer verdict: REQUEST CHANGES (1 CRITICAL, 6 HIGH, 11 MEDIUM, 7 LOW). After verification: **0 CRITICAL,
+5 HIGH, 13 MEDIUM, 7 LOW**.
+- Three of the HIGHs are field-proven on rover 01: INS-002 (old installer), INS-004 (killed ssh upgrade) and
+  INS-006 (two CH340s).
+- No secret was found in the repository or in a world-readable file.
+
+Confirmed in code at `109ec39`:
+- No arming or mission check anywhere in `installer/`.
+- No `trap` / `systemd-run` / `setsid`.
+- `upgrade.sh:8-15` sources every `lib/*.sh` from the **running** release.
+- `flock` on fd 9 inherited by children (`common.sh:113-116`).
+- `usb_serial.sh:47` dies unless exactly one CH340.
+- `ros.env.tmpl:6` `#ROS_DOMAIN_ID=` commented out.
+- `network_install.sh:199-204` deletes the hotspot profile on invalid input.
+- No `sync` in `release.sh`.
+
+Confirmed good:
+- Releases keyed by full SHA, with a `.complete` marker.
+- An **atomic** symlink switch (`ln -sfn` temp + `mv -T`).
+- Digest-checked artifacts.
+- XRCE agent and mavlink-router pinned by commit and verified.
+- Secrets 0640 `root:dyx3`, the NetworkManager keyfile 0600, and the PSK never in argv or logs.
+
+| ID | Severity | Status | Area | Where | Item |
+|---|---|---|---|---|---|
+| INS-001 | **HIGH** (~~CRITICAL~~) | ACCEPTED ↓ | Interlock | `release.sh:201,218,315,325` | Install, upgrade and rollback restart `dyx3-platform` + `dyx3-ros` with **no armed or mission check**. During a mission → offboard loss → disarm (same outcome as GW-002) |
+| INS-002 | **HIGH** | ACCEPTED (field-proven) | Origin | `upgrade.sh:8-15` | The upgrade runs the **running** release's installer and pins; only units, templates and the manifest come from the target |
+| INS-004 | **HIGH** | ACCEPTED (field-proven) | Atomicity | `release.sh:194-203` | No detach or signal handling; the hotspot is re-activated right after the switch (it drops the ssh session that runs the upgrade); no boot-time finish or revert |
+| INS-006 | **HIGH** | ACCEPTED (field-proven) | Health | `usb_serial.sh:47`; `release.sh:203,316` | A fault already present before the upgrade (a LoRa CH340, an unplugged UM982) fails **every upgrade and every rollback**; no health baseline before the switch |
+| INS-007 | **HIGH** | ACCEPTED | Fresh | `ros.env.tmpl:6`; `start-backend.sh:13`; `release.sh:221-225` | A fresh install cannot pass its own health gate: `ROS_DOMAIN_ID` is commented out, the backend binds the hotspot address, the hotspot SSID is empty. It then reverts with no actionable message |
+| INS-003 | MEDIUM | ACCEPTED | Origin | `release.sh:163,178`; `artifacts.sh:86-90`; `dyx3-env.sh:18-19` | **A firmware-pin change cannot be installed by `dyx3-upgrade`:** px4_msgs is built for the old pin while the target's launchers want the new one. **Blocks PC-9 by upgrade** (same fix as INS-002) |
+| INS-005 | MEDIUM (~~HIGH~~) | ACCEPTED ↓ | Health | `health_check.sh:41-42,80` | One `is-active` sample right after restart, and the gateway check is a socket-file test: a crash-looping release can pass. `dyx3-rollback` still works |
+| INS-008 | MEDIUM (~~HIGH~~) | DOUBT (bench) | Atomicity | `release.sh:192-194` | No `sync` before `.complete` and the switch: a power cut right after an upgrade can leave `current` → files not yet written |
+| INS-009 | MEDIUM | ACCEPTED (field-proven) | Atomicity | `common.sh:113-116` | Lock fd 9 is inherited: `nmcli` held `install.lock` after the killed upgrade. Fix: `"$@" 9>&-` |
+| INS-010 | MEDIUM | ACCEPTED | Network | `network_install.sh:199-204,215-266` | Any `hotspot.env` validation failure **deletes** the working access point (the operator's only link without a router) |
+| INS-011 | MEDIUM | ACCEPTED | Atomicity | `systemd_install.sh:19-37` | Unit files are never removed; a rollback keeps the newer release's units |
+| INS-012 | MEDIUM | ACCEPTED | Supply | `artifacts.sh:146-153`; `release.sh:174-177` | A digest mismatch in `auto` mode silently falls back to a source build (tampered looks like missing) |
+| INS-013 | MEDIUM | ACCEPTED | Supply | `artifacts.sh:79-106` | The artifact's `rclcpp` version is recorded but never compared with the rover's |
+| INS-014 | MEDIUM | DOUBT | Atomicity | `artifacts.sh:156-158` | The px4_msgs archive contains its own `.complete`; an interrupted extraction can look complete |
+| INS-015 | MEDIUM | ACCEPTED | Fresh | `dependencies.sh:36-74`; `usb_serial.sh:124-131` | A fresh install compiles the XRCE agent, mavlink-router and the ch341 module and needs the internet (the goal says zero compiles, < 15 min); the module is unsigned |
+| INS-016 | MEDIUM | ACCEPTED | Atomicity | `release.sh:209-219,320-326` | Revert and restore are never health-checked; a failed gate discards a good source build |
+| INS-017 | MEDIUM | DOUBT (rover) | Network | `network_install.sh:412-434` | No-auto-updates does not cover snapd, and the L4T kernel packages are not held (a kernel move breaks ch341 → INS-006) |
+| INS-018 | MEDIUM | ACCEPTED | Tests | `installer/tests/run_tests.sh` | No interruption, origin, interlock, two-CH340, archive-escape or fresh-install tests |
+| INS-019…025 | LOW | ACCEPTED | various | see the review | `FCU_KEEP_DHCP` not persisted; tar member check is a string prefix; README disagrees (hotspot on 192.168.3.x); `dyx3-health` without root; shims written in place; unpinned pip / ROS key from a branch / CI `--clobber`; the hotspot/FCU overlap check is a string match |
+
+### Fix order (installer change set)
+1. **INS-001:** `require_rover_idle` before every switch or restart; unknown state = refuse; bench override.
+   Needs X-016.
+2. **INS-002 + INS-003:** re-exec the **target's** installer after the fetch, with an installer API version.
+   The first upgrade carrying it still runs the old one. **Do the PC-9 pin bump after this lands**, or by a
+   fresh install.
+3. **INS-004 + INS-009:** self-detach with `systemd-run`; `9>&-`; skip the hotspot re-activation when the keyfile
+   is unchanged and move it after health; mark `upgrade_in_progress` for a boot-time finish or revert.
+4. **INS-006 + INS-016:** a health baseline before the switch (an already-failing check cannot blame the new
+   release); a health check after the revert.
+5. **INS-007:** `ROS_DOMAIN_ID=42` in the template (decided), and refuse early with a list of missing per-rover
+   inputs.
+
+---
+
 ## Cross-part items (raised by the part reviews; owned by later parts)
 
 | ID | Owner part | Item | Status |
@@ -994,3 +1056,5 @@ Confirmed good:
 | X-013 | installer / health | `installer/lib/health_check.sh` (deep graph check, about line 166) lists `/dyx3_mission /motion_guard /px4_link /spray /system_gateway`, **without `/rpp`**. Missing nodes and absent `/fmu` topics are WARN, not FAIL | open, installer review (from BR review) |
 | X-014 | architecture / network | `docs/architecture/...V1.md` §4.3 says "no router, no site LAN", but the rover now runs a site LAN (`network.env`, 192.168.3.0/24) next to the hotspot by owner decision of 2026-10-09. Amend §4.3 and the operator-link reasoning (§4.3.1) | open, doc (from BR review) |
 | X-015 | backend / app / network | On the site LAN, tablet Bearer tokens travel over **plain HTTP**, and the UDP beacon cannot prove rover identity, so a LAN attacker can sniff tokens or spoof a rover. Owner decision: TLS (self-signed, pinned per rover at pairing, fits QR pairing), a VPN, or the hotspot only for production | open, owner decision (from BE review) |
+| X-016 | installer / gateway / mission | The installer needs an authoritative, root-readable "rover idle" state (disarmed AND mission not RUNNING; unknown ≠ idle) to refuse install, upgrade or rollback mid-run (INS-001) | open (from INS review) |
+| X-017 | installer / gnss_rtk / USB | CH340 provisioning counts adapters instead of selecting by `ID_PATH`, and re-enumeration de-authorises every CH340 (`usb_serial.sh:315-326`): this blocks the LoRa radio next to the UM982 (field history; owner: LoRa after the app is solid) | open (from INS review) |
