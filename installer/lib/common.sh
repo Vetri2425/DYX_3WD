@@ -14,6 +14,13 @@ DYX3_DRY_RUN="${DYX3_DRY_RUN:-0}"
 INSTALLER_DIR="${INSTALLER_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 PINS_DIR="${INSTALLER_DIR}/pins"
 
+# Installer API (INS-002). An upgrade is carried out by the TARGET release's own installer: the running one fetches,
+# extracts the target's installer/ + deployment/ and re-executes its upgrade.sh with DYX3_REEXEC=1. Both sides refuse
+# a target whose API is older than the running one unless DYX3_FORCE=1. Raise it whenever an older installer would
+# drop a protection or misread the hand-over contract (DYX3_REEXEC, DYX3_TARGET_SHA, DYX3_PARENT_API).
+# Absent (installers before this line) = 0. Keep this line's format: other releases read it with sed.
+DYX3_INSTALLER_API=1
+
 DYX3_PREFIX="${DYX3_ROOT}/opt/dyx3"
 DYX3_ETC="${DYX3_ROOT}/etc/dyx3"
 DYX3_VAR_LIB="${DYX3_ROOT}/var/lib/dyx3"
@@ -62,6 +69,15 @@ load_pin() {
   . "$f"
 }
 
+# _pins_dir_of <release-dir>: that release's own pins. Health and versions.json for a release (a revert or rollback
+# across a firmware-pin change) must use its pin, not the running installer's. Callers assign it to a `local PINS_DIR` AFTER calling this
+# (the fallback reads the outer PINS_DIR).
+_pins_dir_of() {
+  local d
+  d="$(readlink -f "$1" 2>/dev/null)/installer/pins"
+  if [ -f "${d}/firmware.pin" ]; then printf '%s' "${d}"; else printf '%s' "${PINS_DIR}"; fi
+}
+
 # manifest_section <section> [manifest]: print the non-comment lines of a section.
 manifest_section() {
   local section="$1" manifest="${2:-${INSTALLER_DIR}/manifests/production.manifest}"
@@ -93,6 +109,10 @@ install_dir() {
   run install -d -m "${mode}" "${own[@]}" "$@"
 }
 
+# sync_fs <path>: flush the filesystem that holds <path> (INS-008). Without it a power cut right after an upgrade can
+# leave `current` -> a release whose files, or whose .complete, are not on disk yet. Falls back to a global sync.
+sync_fs() { run sync -f "$1" 2>/dev/null || run sync; }
+
 # atomic_symlink <target> <link>: replace a symlink without a window where it is missing.
 atomic_symlink() {
   local target="$1" link="$2" tmp
@@ -112,6 +132,9 @@ with_lock() {
   mkdir -p "$(dirname "${lock}")"
   (
     flock -n 9 || die "another dyx3 install/upgrade is running (${lock})"
-    "$@"
+    # INS-009: run the command with fd 9 CLOSED. Bash keeps a close-on-exec copy of it for the duration, so this
+    # subshell still holds the lock, but no program it executes (nmcli, systemctl, a daemon they spawn) inherits it.
+    # Before, a child that outlived a killed upgrade kept install.lock held (rover 01: nmcli).
+    "$@" 9>&-
   ) 9>"${lock}"
 }

@@ -22,7 +22,8 @@ usage: install.sh --production [--ref <git-ref>] [--skip-deps] [--dry-run]
   --ref <ref>    release to install (default: the commit of this checkout)
   --skip-deps    skip apt / XRCE agent / mavlink-router / ROS (already provisioned)
   --dry-run      print what would run
-env: DYX3_BUILD_JOBS (default 1), FCU_IFACE (default enP8p1s0), FCU_KEEP_DHCP=1 (bench only)
+env: DYX3_BUILD_JOBS (default 1), FCU_IFACE (default enP8p1s0),
+     FCU_KEEP_DHCP=1 (bench only; or FCU_KEEP_DHCP=1 in /etc/dyx3/network.env to keep it on later runs)
 USAGE
 }
 
@@ -56,9 +57,17 @@ done
 
 main() {
   require_root
+  # A reinstall re-applies the FCU link, the Wi-Fi access point and USB provisioning before any release work:
+  # all of them can cut a moving rover off. Refuse unless it is known to be idle (INS-001).
+  require_rover_idle "install"
   os_check
-  create_user
+  # A staged root (tests) has no service user to create.
+  if [ -z "${DYX3_ROOT}" ] || [ "${DYX3_DRY_RUN}" = "1" ]; then create_user; fi
   create_directories
+  # The per-rover files first, so they exist to be edited, then refuse early if they lack what the release needs
+  # to pass its own health gate (INS-007).
+  install_config_templates "${checkout_root}"
+  preflight_rover_inputs "${checkout_root}"
   install_tmpfiles
   if [ "${skip_deps}" -eq 0 ]; then
     install_apt_packages
@@ -70,19 +79,26 @@ main() {
   # this kernel, its headers, or its USB identity cannot be provisioned safely.
   provision_usb_serial_support
   install_fcu_network
-
-  # Bootstrap the release from this checkout's origin so the release has real provenance.
-  local checkout_root origin
-  checkout_root="$(cd "${INSTALLER_DIR}/.." && pwd)"
-  if [ -z "${DYX3_REPO_URL:-}" ] && origin="$(git -C "${checkout_root}" remote get-url origin 2>/dev/null)"; then
-    export DYX3_REPO_URL="${origin}"
-  fi
-  if [ -z "${ref}" ]; then
-    ref="$(git -C "${checkout_root}" rev-parse HEAD 2>/dev/null)" ||
-      die "not in a git checkout; pass --ref"
-  fi
-  DYX3_FORCE=1 upgrade_to "${ref}"
-  log "install complete"
 }
 
+# Bootstrap the release from this checkout's origin so the release has real provenance.
+checkout_root="$(cd "${INSTALLER_DIR}/.." && pwd)"
+if [ -z "${DYX3_REPO_URL:-}" ] && origin="$(git -C "${checkout_root}" remote get-url origin 2>/dev/null)"; then
+  export DYX3_REPO_URL="${origin}"
+fi
+if [ -z "${ref}" ]; then
+  ref="$(git -C "${checkout_root}" rev-parse HEAD 2>/dev/null)" ||
+    die "not in a git checkout; pass --ref"
+fi
+
 with_lock "${DYX3_RUN}/install.lock" main
+# The release itself is installed by ITS OWN installer and pins (INS-002), exactly like an upgrade. DYX3_FORCE=1:
+# an install converges (rebuilds markers, restarts) even when current already is that release.
+export DYX3_FORCE=1
+if [ "${DYX3_DRY_RUN}" = "1" ]; then
+  log "dry-run: would hand over to the installer of ${ref}; showing this installer's plan"
+  with_lock "${DYX3_RUN}/install.lock" upgrade_to "${ref}"
+  log "install complete (dry-run)"
+  exit 0
+fi
+handoff_to_target "${ref}"

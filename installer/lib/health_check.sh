@@ -6,6 +6,9 @@
 # WARN is for things that can legitimately be off during an upgrade (FCU powered down).
 # Deep checks (DDS topics) need the ROS environment and a live FCU.
 
+# shellcheck source=rover_state.sh
+. "${INSTALLER_DIR}/lib/rover_state.sh"
+
 _health_fail=0
 _pass() { printf 'PASS  %s\n' "$*"; }
 _warn() { printf 'WARN  %s\n' "$*"; }
@@ -32,15 +35,49 @@ health_release() {
   fi
 }
 
+_svc_prop() { systemctl show -p "$2" --value "$1.service" 2>/dev/null || true; }
+_svc_active() { [ "$(_svc_prop "$1" ActiveState)" = active ]; }
+
+# health_services <release-dir>: INS-005. One is-active sample right after a restart let a crash-looping release pass.
+# Every enabled unit must reach active (within DYX3_HEALTH_SETTLE_S), then STAY active for DYX3_HEALTH_HOLD_S (default
+# 10, sampled every second) with NRestarts unchanged.
+health_services() {
+  local rel="$1" hold="${DYX3_HEALTH_HOLD_S:-10}" name i
+  local -a names=()
+  local -A restarts=() gone=()
+  mapfile -t names < <(manifest_section enabled_services "${rel}/installer/manifests/production.manifest" | grep .)
+  for name in "${names[@]}"; do
+    if _settle _svc_active "${name}"; then
+      restarts[${name}]="$(_svc_prop "${name}" NRestarts)"
+    else
+      _fail "${name}.service is '$(_svc_prop "${name}" ActiveState)'"
+    fi
+  done
+  [ "${#restarts[@]}" -gt 0 ] || return 0
+  for ((i = 0; i < hold; i++)); do
+    sleep 1
+    for name in "${!restarts[@]}"; do
+      [ -z "${gone[${name}]:-}" ] && ! _svc_active "${name}" && gone[${name}]="$(_svc_prop "${name}" ActiveState)"
+    done
+  done
+  for name in "${names[@]}"; do
+    [ -n "${restarts[${name}]+x}" ] || continue
+    if [ -n "${gone[${name}]:-}" ]; then
+      _fail "${name}.service went '${gone[${name}]}' during the ${hold} s hold"
+    elif [ "$(_svc_prop "${name}" NRestarts)" != "${restarts[${name}]}" ]; then
+      _fail "${name}.service restarted during the ${hold} s hold (NRestarts ${restarts[${name}]} -> $(_svc_prop "${name}" NRestarts))"
+    elif ! _svc_active "${name}"; then
+      _fail "${name}.service is '$(_svc_prop "${name}" ActiveState)' after the hold"
+    else
+      _pass "${name}.service active for ${hold} s with no restart"
+    fi
+  done
+}
+
 health_platform() {
   local rel="${1:-${DYX3_CURRENT}}"
   if systemd_available; then
-    local name state
-    while IFS= read -r name; do
-      [ -n "${name}" ] || continue
-      state="$(systemctl is-active "${name}.service" 2>/dev/null || true)"
-      if [ "${state}" = "active" ]; then _pass "${name}.service active"; else _fail "${name}.service is '${state}'"; fi
-    done < <(manifest_section enabled_services "${rel}/installer/manifests/production.manifest")
+    health_services "${rel}"
   else
     _warn "systemd checks skipped"
   fi
@@ -77,7 +114,11 @@ _settle() {
   done
 }
 
-_gateway_up() { [ -S "${DYX3_RUN}/gateway.sock" ]; }
+# INS-005: the socket file outlives a dead gateway; ask it for a snapshot instead.
+_gateway_up() {
+  [ -S "${DYX3_GATEWAY_SOCK}" ] && have python3 &&
+    DYX3_GATEWAY_QUERY_TIMEOUT_S="${DYX3_GATEWAY_PING_TIMEOUT_S:-2}" _gateway_query ping >/dev/null 2>&1
+}
 _backend_up() { curl -fsS --max-time 3 "http://$1:$2/api/ping" >/dev/null 2>&1; }
 _rtk_up() {
   [ -S "${DYX3_RUN}/rtk-control.sock" ] || return 1
@@ -124,7 +165,7 @@ health_extras() {
   health_wifi
   if declare -F health_usb_serial >/dev/null 2>&1; then health_usb_serial; fi
   if _enabled dyx3-ros "${m}"; then
-    if _settle _gateway_up; then _pass "gateway socket present"; else _fail "gateway socket ${DYX3_RUN}/gateway.sock missing (dyx3-ros / system_gateway down?)"; fi
+    if _settle _gateway_up; then _pass "gateway answers get_snapshot on ${DYX3_GATEWAY_SOCK}"; else _fail "gateway does not answer on ${DYX3_GATEWAY_SOCK} (dyx3-ros / system_gateway down?)"; fi
   fi
   if _enabled dyx3-rtk "${m}"; then
     if _settle _rtk_up; then _pass "dyx3-rtk control socket answers GET_STATUS"; else _fail "dyx3-rtk control socket unavailable"; fi
@@ -163,7 +204,8 @@ health_graph() {
   pm="$(px4_msgs_dir)"
   nodes="$(bash -c "set +u; . '${ROS_SETUP}'; . '${pm}/install/setup.bash'; . '${rel}/ros2_ws/install/setup.bash' 2>/dev/null; timeout 15 ros2 node list 2>/dev/null" || true)"
   local n
-  for n in /dyx3_mission /motion_guard /px4_link /spray /system_gateway; do
+  # Every node control_graph.launch.py starts, /rpp included (X-013).
+  for n in /dyx3_mission /motion_guard /px4_link /rpp /spray /system_gateway; do
     if printf '%s\n' "${nodes}" | grep -qx "${n}"; then _pass "node ${n} up"; else _warn "node ${n} not visible"; fi
   done
 }
@@ -180,6 +222,52 @@ health_dds() {
   if [ "${n:-0}" -gt 0 ]; then _pass "DDS: ${n} /fmu topics visible"; else _warn "DDS: no /fmu topics visible (FCU session not up?)"; fi
 }
 
+# ---- baseline (INS-006): a check that already fails on the running release (a second CH340, an unplugged receiver)
+# must not fail the next release, or every upgrade and every rollback reverts.
+# health_capture <release-dir> <file>: health_run, its PASS/WARN/FAIL lines also saved to <file>.
+health_capture() {
+  local rc=0
+  mkdir -p "$(dirname "$2")"
+  health_run "$1" | tee "$2" || rc=$?
+  return "${rc}"
+}
+
+# _health_fail_keys <file>: the FAIL lines, release SHAs masked, sorted.
+_health_fail_keys() {
+  sed -n 's/^FAIL  //p' "$1" 2>/dev/null | sed -E 's/[0-9a-f]{40}/<sha>/g; s/\b[0-9a-f]{10}\b/<sha>/g' | LC_ALL=C sort -u
+}
+
+# health_verdict <baseline-file> <after-file>: 0 when every FAIL in <after-file> already failed in the baseline.
+# Reports both kinds.
+health_verdict() {
+  local old new l
+  old="$(LC_ALL=C comm -12 <(_health_fail_keys "$1") <(_health_fail_keys "$2"))"
+  new="$(LC_ALL=C comm -13 <(_health_fail_keys "$1") <(_health_fail_keys "$2"))"
+  if [ -n "${old}" ]; then
+    warn "already failing before the switch (a fault of the rover, not of the release):"
+    while IFS= read -r l; do warn "  ${l}"; done <<<"${old}"
+  fi
+  [ -z "${new}" ] && return 0
+  warn "failing only since the switch:"
+  while IFS= read -r l; do warn "  ${l}"; done <<<"${new}"
+  return 1
+}
+
+# health_judge <release-dir> <baseline-file> <after-file>: health of the release now, against the baseline (if any).
+# Sets HEALTH_RESULT to OK, "OK apart from failures present before the switch", or FAILED.
+health_judge() {
+  if health_capture "$1" "$3"; then
+    HEALTH_RESULT=OK
+    return 0
+  fi
+  if [ -s "$2" ] && health_verdict "$2" "$3"; then
+    HEALTH_RESULT="OK apart from failures present before the switch"
+    return 0
+  fi
+  HEALTH_RESULT=FAILED
+  return 1
+}
+
 # health_run [--deep] [release-dir]
 health_run() {
   local deep=0
@@ -187,7 +275,10 @@ health_run() {
     deep=1
     shift
   fi
-  local rel="${1:-${DYX3_CURRENT}}"
+  local rel="${1:-${DYX3_CURRENT}}" pins
+  # The release's own pin (INS-003): a revert or rollback across a firmware-pin change checks its own px4_msgs.
+  pins="$(_pins_dir_of "${rel}")"
+  local PINS_DIR="${pins}"
   _health_fail=0
   load_pin firmware
   health_release "$(readlink -f "${rel}")"

@@ -1,16 +1,16 @@
 # installer — Phase 11a minimal deployment slice
 
-**Status:** code only. Tested against a staged root with fake tools (`installer/tests/run_tests.sh`);
-**never run on a Jetson.** The local Claude verifies on the rover.
+**Status:** in use on rover 01 since 2026-10-08. Tested against a staged root with fake tools
+(`installer/tests/run_tests.sh`); what those tests cannot prove is listed under "What the staged tests do not prove".
 
 ## Commands
 
 | Command | Implemented | What it does |
 |---|---|---|
-| `installer/install.sh --production [--ref R] [--skip-deps] [--dry-run]` (`dyx3-install`) | 11a | OS check → `dyx3` user → `/opt/dyx3`,`/etc/dyx3`,`/var/lib/dyx3`,`/var/log/dyx3` → tmpfiles for `/run/dyx3` → apt deps → pinned MicroXRCEAgent → pinned mavlink-router → ROS 2 Humble → FCU Ethernet profile → first release (same path as upgrade). Idempotent. |
-| `installer/upgrade.sh <git-ref>` (`dyx3-upgrade`) | 11a | fetch → `releases/<sha>` → colcon build (manifest packages) → static verification → `.complete` → atomic `current` symlink → install units → restart enabled services → health. Failed health removes `.complete` and records `.failed`; an upgrade restores the previous release and a first install stops its services and removes `current`. |
-| `installer/verify.sh [--deep]` (`dyx3-health`) | 11a (platform only) | release complete, px4_msgs built for the pinned firmware, enabled units active, XRCE agent listening, FCU ping (WARN only), `--deep`: live `/fmu` topics. Phase 11 extends it to the rest of the graph. |
-| `installer/rollback.sh` (`dyx3-rollback`) | 11 | switch back to the release recorded at the last switch → verify it first → units, shims, `versions.json` → restart → health; an unhealthy rollback restores the release it started from; running it twice undoes it. Refuses when nothing is recorded or the previous release was pruned. |
+| `installer/install.sh --production [--ref R] [--skip-deps] [--dry-run]` (`dyx3-install`) | 11a | rover-idle check → OS check → `dyx3` user → `/opt/dyx3`,`/etc/dyx3`,`/var/lib/dyx3`,`/var/log/dyx3` → `/etc/dyx3` files from the templates → **per-rover input check** (stops here, before any build, listing what to edit) → tmpfiles for `/run/dyx3` → apt deps → pinned MicroXRCEAgent → pinned mavlink-router → ROS 2 Humble → FCU Ethernet profile → first release, handed over to that release's own installer (same path as upgrade). Idempotent. |
+| `installer/upgrade.sh <git-ref>` (`dyx3-upgrade`) | 11a | continues in the background as `dyx3-upgrade-<utc>` → rover-idle check → fetch → **hand-over to the target release's own installer** → `releases/<sha>` → colcon build (manifest packages) → static verification → `.verified` + `.complete` → health baseline of the running release → rover-idle check → atomic `current` symlink → install units → restart enabled services → health (held, judged against the baseline) → access point. Failed health removes `.complete` and records `.failed` (the build is kept); an upgrade restores the previous release and health-checks it, and a first install stops its services and removes `current`. |
+| `installer/verify.sh [--deep]` (`dyx3-health`) | 11a (platform only) | root only. Release complete, px4_msgs built for the pinned firmware, enabled units active and held active with no restart, XRCE agent listening, gateway answers, FCU ping (WARN only), `--deep`: live `/fmu` topics and the graph's nodes (WARN). |
+| `installer/rollback.sh` (`dyx3-rollback`) | 11 | continues in the background as `dyx3-rollback-<utc>` → switch back to the release recorded at the last switch → verify it first → health baseline → rover-idle check → units, shims, `versions.json` → restart → health; an unhealthy rollback restores the release it started from and health-checks it; running it twice undoes it. Refuses when nothing is recorded or the previous release was pruned. |
 | `installer/version.sh` (`dyx3-version`) | 11 | `key=value` lines: stack SHA, previous release, **pinned** firmware SHA, `px4_msgs` message-set sha256, profile. The running FCU's own identity is reported as `unavailable` (no FCU read path yet; architecture 3.8's overlay hash is OPEN). |
 | `dyx3-param get\|set\|save` | not built | needs `dyx3_rpp`'s parameter authority (P5) |
 
@@ -48,7 +48,7 @@ the build for the `dyx3_px4_link` handshake and the run manifest.
 ```
 /opt/dyx3/releases/<sha>/        git archive + ros2_ws/{build,install} + bin/dyx3-<service> + .complete
 /opt/dyx3/current -> releases/<sha>
-/opt/dyx3/bin/dyx3-{install,upgrade,health}   shims exec'ing the CURRENT release's scripts
+/opt/dyx3/bin/dyx3-{install,upgrade,health,rollback,version}   shims exec'ing the CURRENT release's scripts
 /opt/dyx3/px4_msgs/<firmware-sha>/            shared by all releases; built once, -j1 by default
 /etc/dyx3/{platform.env,mavlink-router.conf}  created once, NEVER overwritten by an upgrade
 /var/lib/dyx3/state/{repo.git,previous_release}
@@ -133,7 +133,8 @@ owner approval and hardware validation recorded in the bench runbook.
 
 The optional NetworkManager profile `dyx3-hotspot` uses the onboard Wi-Fi device as an access
 point at the per-rover `DYX3_HOTSPOT_ADDRESS`.
-- Fleet plan (2026-10-09): `192.168.3.100/24` for the first 3WD, `192.168.3.101/24` for the next.
+- Fleet plan (2026-10-09): `192.168.2.100/24` for the first 3WD, `192.168.2.101/24` for the next. The site LAN
+  (`network.env`) is `192.168.3.0/24`; an access point that overlaps it or the FCU link is refused.
 - A blank address falls back to `10.42.0.1/24`. An address on the FCU subnet `10.41.10.0/24` is refused.
 
 The device is `DYX3_HOTSPOT_IFACE`, or, when that is blank, the first Wi-Fi device that is not on USB.
@@ -152,7 +153,10 @@ forward to other default routes, such as LTE; the FCU link is explicitly blocked
 `/etc/dyx3/hotspot.env` is created once from an empty template (`root:dyx3`, mode `0640`) and
 never overwritten. Set unquoted `DYX3_HOTSPOT_SSID` (1–32 ASCII letters, digits, `.`, `_`, `-`)
 and `DYX3_HOTSPOT_PSK` (8–63 characters from the template's supported ASCII punctuation and
-letters/digits). Leave either blank to disable the access point. The installer skips profile
+letters/digits). Set both blank to remove the access point. A `hotspot.env` that fails validation (one of the
+two blank, a bad channel or address) never removes a working access point: the installer warns and keeps it.
+An unchanged profile is neither rewritten nor re-activated, and an upgrade configures it only after its
+health gate passed (re-activating drops every Wi-Fi client, an ssh session included). The installer skips profile
 creation when no Wi-Fi device is present. It writes the secret only to a root-owned `0600`
 NetworkManager keyfile; it never sends the passphrase in a command argument or log.
 Set `DYX3_WIFI_COUNTRY` to the operating country's two-letter code (template: `IN`).
@@ -175,7 +179,7 @@ Bench check after filling the env file and rerunning the installer or upgrading:
 nmcli device
 sudo nmcli connection up dyx3-hotspot
 # Connect the tablet to the configured SSID, then from the tablet:
-curl http://<hotspot address>:8000/api/ping   # e.g. 192.168.3.100
+curl http://<hotspot address>:8000/api/ping   # e.g. 192.168.2.100
 iw reg get
 iw dev <if> get power_save
 ```
@@ -200,19 +204,47 @@ The first command prints the token once; record it privately for the tablet. The
 contains only its hash and has mode `0600`. Run this before a mission because the backend loads
 the store at startup and a restart interrupts the tablet connection.
 
-* **Services** (`[services]` in the manifest): `dyx3-platform`, `dyx3-ros` (mission, motion_guard, px4_link, spray, system_gateway via `dyx3_bringup/control_graph.launch.py`),
+* **Services** (`[services]` in the manifest): `dyx3-platform`, `dyx3-ros` (mission, motion_guard, px4_link, rpp, spray, system_gateway via `dyx3_bringup/control_graph.launch.py`),
   `dyx3-rtk`, `dyx3-backend`, `dyx3-recorder`, and **`dyx3-spray-watchdog` as its own unit** (not tied to `dyx3-ros`, so it survives the graph dying).
   `[enabled_services]` lists **all six** since 2026-10-08, when each was verified running on the 3WD rover. An enabled service that fails its environment
   makes the post-upgrade health check revert the whole upgrade, so a new service joins the list only after it has run on the rover.
-* **Environment**: `/etc/dyx3/{ros,backend,ntrip}.env` templates are created once and never overwritten (`ntrip.env` is `root:dyx3 0640`). `ROS_DOMAIN_ID` has no default: the launchers refuse to start without it. `dyx3-env.sh` also refuses to start without the px4_msgs overlay built for the pinned firmware.
+* **Environment**: `/etc/dyx3/{ros,backend,ntrip}.env` templates are created once and never overwritten (`ntrip.env` is `root:dyx3 0640`). `ros.env` ships `ROS_DOMAIN_ID=42` (the fleet domain); the launchers still refuse to start without one, and a fresh install refuses early. `dyx3-env.sh` also refuses to start without the px4_msgs overlay built for the pinned firmware.
   Existing `ntrip.env` files must be migrated explicitly to set `DYX3_NTRIP_SECURITY=PLAINTEXT` or `TLS`; no port-based or legacy default is applied. Optional `DYX3_NTRIP_CA_FILE` supplies a private TLS CA PEM. TLS uses system trust paths when that value is absent.
 * **`/etc/dyx3/versions.json`** is rewritten on every switch/rollback; the recorder copies it into every run.
 * **Backend venv** (`<release>/venv`) is built with the release; a failed `pip install` (no WAN) is a warning, not a failed upgrade.
-* **Health**: gateway socket, backend ping (both only for ENABLED services), data-volume report (FAIL only when completely full: no threshold invented), `--deep` lists the graph's nodes (WARN).
+* **Health**: enabled units active for `DYX3_HEALTH_HOLD_S` (10 s) with no restart, the gateway answers `get_snapshot`, backend ping (both only for ENABLED services), data-volume report (FAIL only when completely full: no threshold invented), `--deep` lists the graph's nodes including `/rpp` (WARN).
 * **Real-time allocation** (DERIVED, 2026-10-09): only `rpp` and `motion_guard` run SCHED_FIFO 80 on CPU 4, through a `taskset`/`chrt` launch prefix in `control_graph.launch.py`; the `dyx3-ros` unit no longer sets a policy or affinity for the whole tree. The unit must keep `LimitRTPRIO` >= 80 (it runs as `dyx3` without CAP_SYS_NICE) and `LimitMEMLOCK=infinity` (mlockall).
 * **OPEN**: DDS scoping (loopback-only vs an eth0 whitelist), the backend port (8000, DERIVED), and the ROS domain number.
 
-Tested against a staged root (`installer/tests/run_tests.sh`, 80 checks); **never run on a Jetson**.
+Tested against a staged root (`installer/tests/run_tests.sh`, 248 checks at the 2026-10-10 hardening).
+
+## Operating rules (2026-10-10 hardening, production review section 13)
+
+* **Upgrades and rollbacks run in the background.** `dyx3-upgrade` and `dyx3-rollback` re-run themselves as a
+  transient unit (`systemd-run --unit=dyx3-upgrade-<utc> --collect`) and return at once. Follow with
+  `journalctl -fu dyx3-upgrade-<utc>` (the command is printed). It ends with `upgrade complete` / `rollback complete`
+  or a `FATAL` line. A dropped ssh session no longer kills it. `DYX3_NO_DETACH=1` runs attached.
+* **Never while the rover is moving.** Install, upgrade and rollback ask `dyx3_system_gateway` (`/run/dyx3/gateway.sock`)
+  and refuse unless the rover is known idle: dyx3-ros not running, or a fresh DISARMED vehicle state and a mission
+  that is not RUNNING. ARMED, RUNNING, a silent gateway, stale data or no FCU session (arming state 0) all refuse.
+  Asked again right before the switch. Bench override, with nobody near the rover: `DYX3_FORCE_UNSAFE=1` (logged).
+* **The target installs itself.** The running installer only fetches the ref and hands over to the target commit's
+  own `installer/upgrade.sh` (staged in `/var/lib/dyx3/state/installer-stage/<sha>`), so the target's libraries and
+  pins apply (a firmware-pin change builds the right px4_msgs). A target whose `DYX3_INSTALLER_API` is older than the
+  running one is refused unless `DYX3_FORCE=1`. The first upgrade to a release carrying this still runs the old
+  installer.
+* **Pre-existing faults do not revert.** Health runs on the running release before the switch
+  (`state/health_baseline`); after the switch only checks that were not already failing cause a revert. Both are
+  reported. A revert or restore is health-checked and its result is in the final message.
+* **Interrupted runs are finished.** `state/upgrade_in_progress` exists between the switch and the health result. The
+  next upgrade or rollback reports it, keeps a healthy result, and otherwise reverts to the release it replaced and
+  stops (re-run the command); `DYX3_FORCE=1` keeps the unhealthy result and continues.
+* **Invalid artifacts stop the upgrade.** A digest mismatch or an unsafe archive (member outside its prefix, a `..`
+  component, an escaping symlink) is fatal in every `DYX3_ARTIFACTS` mode; only a missing artifact falls back to a
+  source build in `auto`.
+* **Units follow the release.** `dyx3-*.service` files the release does not ship are stopped, disabled and removed
+  (`dyx3-wifi-regdom.service` belongs to the network code and stays).
+* **Bench DHCP persists.** `FCU_KEEP_DHCP=1` can live in `/etc/dyx3/network.env`; the environment overrides it.
 
 
 ### Selecting the UM982 USB link (USB_DIRECT) on a new rover

@@ -12,7 +12,9 @@ FCU_JETSON_CIDR="${FCU_JETSON_CIDR:-10.41.10.1/24}"
 # DERIVED — NOT FROM V1 SPEC (HANDOFF 2026-10-07). Production is static-only.
 # On the bench the site router behind the FCU switch is the Jetson's only WAN, so its DHCP
 # default route is kept too; otherwise the release fetch from GitHub fails (seen 2026-10-08).
-FCU_KEEP_DHCP="${FCU_KEEP_DHCP:-0}"
+# The environment wins; otherwise FCU_KEEP_DHCP in /etc/dyx3/network.env (INS-019: a later reinstall or
+# re-apply without the variable used to silently drop the bench WAN); otherwise 0.
+FCU_KEEP_DHCP="${FCU_KEEP_DHCP:-}"
 
 # Per-rover site LAN on the same Ethernet port (/etc/dyx3/network.env, created once, never overwritten).
 # The Jetson baseboard has one Ethernet port behind an internal switch shared with the Pixhawk, so a site
@@ -29,6 +31,16 @@ _ipv4_net() {
   mask=$(((0xFFFFFFFF << (32 - pfx)) & 0xFFFFFFFF))
   echo "$(($(_ipv4_int "${ip}") & mask))/${pfx}"
 }
+# _ipv4_overlap CIDR CIDR: the two networks share addresses (INS-025). The shorter prefix decides, so 10.41.0.1/16
+# overlaps the FCU link 10.41.10.0/24 although neither the strings nor the networks are equal. Invalid = no.
+_ipv4_overlap() {
+  local a="$1" b="$2" p mask
+  [ -n "$(_ipv4_net "${a}")" ] && [ -n "$(_ipv4_net "${b}")" ] || return 1
+  p="${a#*/}"
+  [ "${b#*/}" -lt "${p}" ] && p="${b#*/}"
+  mask=$(((0xFFFFFFFF << (32 - p)) & 0xFFFFFFFF))
+  [ $(($(_ipv4_int "${a%/*}") & mask)) -eq $(($(_ipv4_int "${b%/*}") & mask)) ]
+}
 # Missing file = no site LAN. Must not fail: install.sh runs under set -e and pipefail.
 _network_env() {
   [ -r "${DYX3_ETC}/network.env" ] || return 0
@@ -40,8 +52,10 @@ install_fcu_network() {
     warn "nmcli not found: skipping FCU network profile"
     return 0
   fi
-  local method="manual" never_default="yes"
-  if [ "${FCU_KEEP_DHCP}" = "1" ]; then
+  local method="manual" never_default="yes" keep_dhcp="${FCU_KEEP_DHCP}"
+  [ -n "${keep_dhcp}" ] || keep_dhcp="$(_network_env FCU_KEEP_DHCP)"
+  if [ "${keep_dhcp}" = "1" ]; then
+    warn "FCU_KEEP_DHCP=1: DHCP and its default route stay on the FCU port (bench only)"
     method="auto"
     never_default="no"
   fi
@@ -49,7 +63,7 @@ install_fcu_network() {
   lan_cidr="$(_network_env DYX3_LAN_ADDRESS)"
   lan_gw="$(_network_env DYX3_LAN_GATEWAY)"
   if [ -n "${lan_cidr}" ]; then
-    if [ -z "$(_ipv4_net "${lan_cidr}")" ] || [ "$(_ipv4_net "${lan_cidr}")" = "$(_ipv4_net "${FCU_JETSON_CIDR}")" ]; then
+    if [ -z "$(_ipv4_net "${lan_cidr}")" ] || _ipv4_overlap "${lan_cidr}" "${FCU_JETSON_CIDR}"; then
       warn "network.env DYX3_LAN_ADDRESS '${lan_cidr}' is invalid or on the FCU subnet; ignored"
       lan_cidr=""
     else
@@ -116,10 +130,11 @@ _hotspot_driver_powersave() {
 }
 
 _hotspot_install_regdom() {
-  local country="$1" unit dir
+  local country="$1" unit dir before=""
   unit="${DYX3_ROOT}/etc/systemd/system/dyx3-wifi-regdom.service"
   dir="${DYX3_ROOT}/etc/systemd/system/multi-user.target.wants"
   install -d -m 0755 "$(dirname "${unit}")" "${dir}"
+  [ -f "${unit}" ] && before="$(cat "${unit}")"
   cat >"${unit}" <<EOF
 [Unit]
 Description=Set DYX3 Wi-Fi regulatory country
@@ -135,6 +150,8 @@ WantedBy=multi-user.target
 EOF
   chmod 0644 "${unit}"
   ln -sfn ../dyx3-wifi-regdom.service "${dir}/dyx3-wifi-regdom.service"
+  # Unchanged: leave the running Wi-Fi alone (INS-004).
+  [ "${before}" = "$(cat "${unit}")" ] && return 0
   if [ -z "${DYX3_ROOT}" ]; then
     systemctl daemon-reload
     systemctl restart dyx3-wifi-regdom.service || warn "could not apply Wi-Fi country now; check iw reg get"
@@ -150,6 +167,16 @@ _hotspot_drop_profile() {
   rm -f "${profile}"
   if [ -z "${DYX3_ROOT}" ] && have nmcli; then
     nmcli connection delete dyx3-hotspot >/dev/null 2>&1 || true
+  fi
+}
+
+# _hotspot_invalid <reason>: INS-010. A hotspot.env that fails validation never removes a working access point: it is
+# often the operator's only link to the rover. Only SSID and PSK both deliberately empty remove it.
+_hotspot_invalid() {
+  if [ -f "${DYX3_ROOT}/etc/NetworkManager/system-connections/dyx3-hotspot.nmconnection" ]; then
+    warn "hotspot.env: $1; keeping the existing access point unchanged. Fix ${DYX3_ETC}/hotspot.env (SSID and PSK both empty remove the access point)"
+  else
+    warn "hotspot.env: $1; access point not configured"
   fi
 }
 
@@ -175,13 +202,19 @@ _hotspot_pick_iface() {
 install_hotspot_network() {
   local env_file="${DYX3_ETC}/hotspot.env" ssid="" psk="" key value iface profile dir tmp dispatcher old_umask
   local country="IN" band="a" channel="" width="20" nm_ver major minor width_setting="" address="" want_iface=""
-  local dl_limit="2mb/s" dl_burst="4mb" ul_limit="1mb/s" ul_burst="2mb" txqlen="100" qos
+  local dl_limit="2mb/s" dl_burst="4mb" ul_limit="1mb/s" ul_burst="2mb" txqlen="100" qos ssid_set=0 psk_set=0
   profile="${DYX3_ROOT}/etc/NetworkManager/system-connections/dyx3-hotspot.nmconnection"
   if [ -r "${env_file}" ]; then
     while IFS='=' read -r key value || [ -n "${key:-}" ]; do
       case "${key}" in
-        DYX3_HOTSPOT_SSID) ssid="${value}" ;;
-        DYX3_HOTSPOT_PSK) psk="${value}" ;;
+        DYX3_HOTSPOT_SSID)
+          ssid="${value}"
+          ssid_set=1
+          ;;
+        DYX3_HOTSPOT_PSK)
+          psk="${value}"
+          psk_set=1
+          ;;
         DYX3_WIFI_COUNTRY) country="${value}" ;;
         DYX3_WIFI_BAND) band="${value}" ;;
         DYX3_WIFI_CHANNEL) channel="${value}" ;;
@@ -196,11 +229,19 @@ install_hotspot_network() {
       esac
     done <"${env_file}"
   fi
-  if [ -z "${ssid}" ] || [ -z "${psk}" ]; then
-    log "hotspot not configured; leaving access point disabled"
-    if [ -f "${profile}" ]; then
-      _hotspot_drop_profile "${profile}"
+  if [ -z "${ssid}" ] && [ -z "${psk}" ]; then
+    if [ "${ssid_set}" = 1 ] && [ "${psk_set}" = 1 ]; then
+      log "hotspot disabled in hotspot.env (SSID and PSK both empty)"
+      if [ -f "${profile}" ]; then
+        _hotspot_drop_profile "${profile}"
+      fi
+    else
+      log "hotspot.env has no SSID/PSK lines; access point left as it is"
     fi
+    return 0
+  fi
+  if [ -z "${ssid}" ] || [ -z "${psk}" ]; then
+    _hotspot_invalid "only one of DYX3_HOTSPOT_SSID and DYX3_HOTSPOT_PSK is set"
     return 0
   fi
   # DERIVED — NOT FROM V1 SPEC: accept an unquoted ASCII subset so keyfile
@@ -212,22 +253,16 @@ install_hotspot_network() {
      [[ ! "${country}" =~ ^[A-Z]{2}$ ]] ||
      [[ ! "${band}" =~ ^(a|bg)$ ]] ||
      [[ ! "${width}" =~ ^(20|40)$ ]]; then
-    warn "hotspot.env has an invalid SSID or passphrase format; access point disabled"
-    if [ -f "${profile}" ]; then
-      _hotspot_drop_profile "${profile}"
-    fi
+    _hotspot_invalid "invalid SSID, passphrase, country, band or width format"
     return 0
   fi
   # Per-rover access-point address (fleet plan 2026-10-09: 192.168.3.100/24 for the first 3WD, .101 for
   # the next). Blank keeps NetworkManager's shared default. It must never overlap the FCU link.
   address="${address:-10.42.0.1/24}"
   if [[ ! "${address}" =~ ^((25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])/(1[6-9]|2[0-9]|30)$ ]] ||
-     [[ "${address}" == 10.41.10.* ]] ||
+     _ipv4_overlap "${address}" "${FCU_JETSON_CIDR}" ||
      { [ -n "${want_iface}" ] && [[ ! "${want_iface}" =~ ^[A-Za-z0-9_.-]+$ ]]; }; then
-    warn "hotspot.env has an invalid DYX3_HOTSPOT_ADDRESS or DYX3_HOTSPOT_IFACE; access point disabled"
-    if [ -f "${profile}" ]; then
-      _hotspot_drop_profile "${profile}"
-    fi
+    _hotspot_invalid "invalid DYX3_HOTSPOT_ADDRESS or DYX3_HOTSPOT_IFACE"
     return 0
   fi
   # 5 GHz default is 149, not 36. The Jetson's vendor rtl8822ce driver is self-managed for regulatory
@@ -235,11 +270,8 @@ install_hotspot_network() {
   # rtw_country_code module parameter and the proc country_code. Under that plan only 5745 MHz (149) is
   # not no-IR, so an AP on 36-48 or 153-165 fails ("Failed to start AP functionality", rover 2026-10-09).
   # 149 is legal in India (5725-5875 MHz).
-  if [ -n "$(_network_env DYX3_LAN_ADDRESS)" ] && [ "$(_ipv4_net "${address}")" = "$(_ipv4_net "$(_network_env DYX3_LAN_ADDRESS)")" ]; then
-    warn "hotspot address ${address} is on the site LAN subnet (network.env); access point disabled"
-    if [ -f "${profile}" ]; then
-      _hotspot_drop_profile "${profile}"
-    fi
+  if [ -n "$(_network_env DYX3_LAN_ADDRESS)" ] && _ipv4_overlap "${address}" "$(_network_env DYX3_LAN_ADDRESS)"; then
+    _hotspot_invalid "hotspot address ${address} is on the site LAN subnet (network.env)"
     return 0
   fi
   if [ -z "${channel}" ]; then
@@ -248,22 +280,17 @@ install_hotspot_network() {
   if [[ ! "${dl_limit}" =~ ^[0-9]{1,6}[km]?b/s$ ]] || [[ ! "${ul_limit}" =~ ^[0-9]{1,6}[km]?b/s$ ]] ||
      [[ ! "${dl_burst}" =~ ^[0-9]{1,6}[km]?b$ ]] || [[ ! "${ul_burst}" =~ ^[0-9]{1,6}[km]?b$ ]] ||
      [[ ! "${txqlen}" =~ ^[0-9]{2,4}$ ]]; then
-    warn "hotspot.env has an invalid client-internet limit or txqueuelen; access point disabled"
-    if [ -f "${profile}" ]; then
-      _hotspot_drop_profile "${profile}"
-    fi
+    _hotspot_invalid "invalid client-internet limit or txqueuelen"
     return 0
   fi
   if [ "${band}" = "a" ]; then
-    case "${channel}" in 36 | 40 | 44 | 48 | 149 | 153 | 157 | 161 | 165) ;; *) warn "5 GHz DFS or invalid channel refused; hotspot disabled"; _hotspot_drop_profile "${profile}"; return 0 ;; esac
+    case "${channel}" in 36 | 40 | 44 | 48 | 149 | 153 | 157 | 161 | 165) ;; *) _hotspot_invalid "5 GHz DFS or invalid channel refused"; return 0 ;; esac
     if [ "${channel}" = 165 ] && [ "${width}" = 40 ]; then
-      warn "channel 165 cannot use 40 MHz; hotspot disabled"
-      _hotspot_drop_profile "${profile}"
+      _hotspot_invalid "channel 165 cannot use 40 MHz"
       return 0
     fi
   elif ! [[ "${channel}" =~ ^([1-9]|10|11)$ ]]; then
-    warn "invalid 2.4 GHz channel; hotspot disabled"
-    _hotspot_drop_profile "${profile}"
+    _hotspot_invalid "invalid 2.4 GHz channel"
     return 0
   fi
   if ! have nmcli; then
@@ -291,8 +318,7 @@ install_hotspot_network() {
   if [ -n "${major}" ] && { [ "${major}" -gt 1 ] || { [ "${major}" -eq 1 ] && [ "${minor}" -ge 50 ]; }; }; then
     width_setting="channel-width=${width}"
   elif [ "${width}" = 40 ]; then
-    warn "NetworkManager 1.50+ is required for 40 MHz AP width; hotspot disabled"
-    _hotspot_drop_profile "${profile}"
+    _hotspot_invalid "NetworkManager 1.50+ is required for 40 MHz AP width"
     return 0
   fi
   dir="$(dirname "${profile}")"
@@ -384,9 +410,19 @@ never-default=true
 method=disabled
 EOF
   chmod 0600 "${tmp}"
+  umask "${old_umask}"
+  # Byte-identical to the installed profile: do not reload or re-activate the access point (INS-004). Re-activating
+  # drops every Wi-Fi client, including an operator's ssh session. Only bring it up if it is not active.
+  if [ -f "${profile}" ] && cmp -s "${tmp}" "${profile}"; then
+    rm -f "${tmp}"
+    if [ -z "${DYX3_ROOT}" ] && ! nmcli -t -f NAME connection show --active 2>/dev/null | grep -qx dyx3-hotspot; then
+      nmcli connection up dyx3-hotspot >/dev/null 2>&1 || warn "hotspot could not start now (Wi-Fi AP support unverified)"
+    fi
+    log "hotspot profile unchanged on ${iface}; access point left as it is (credentials redacted)"
+    return 0
+  fi
   if [ -z "${DYX3_ROOT}" ]; then chown root:root "${tmp}"; fi
   mv -f "${tmp}" "${profile}"
-  umask "${old_umask}"
   if [ -z "${DYX3_ROOT}" ]; then
     # A disabled Wi-Fi radio (persisted as WirelessEnabled=false) leaves the device "unavailable".
     nmcli radio wifi on >/dev/null 2>&1 || warn "could not enable the Wi-Fi radio (rfkill?)"

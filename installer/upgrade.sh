@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # dyx3-upgrade <git-ref>
-#   fetch -> releases/<sha> -> build -> verify -> switch symlink -> restart -> health.
+#   fetch -> hand over to the TARGET's own installer -> releases/<sha> -> build -> verify -> switch symlink
+#   -> restart -> health.
 # A release that fails verification never becomes current. A release that fails the
 # post-switch health check is reverted automatically to the previous one.
+# The running installer only resolves the ref and extracts the target's installer/ + deployment/; the target's
+# upgrade.sh (DYX3_REEXEC=1) does the rest with its own libraries and pins (INS-002/INS-003).
 set -euo pipefail
 
 INSTALLER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -24,4 +27,20 @@ esac
 [ "${2:-}" = "--dry-run" ] && DYX3_DRY_RUN=1
 
 require_root
-with_lock "${DYX3_RUN}/install.lock" upgrade_to "${ref}"
+
+if [ "${DYX3_REEXEC:-0}" = "1" ]; then
+  # We are the target release's installer, started by the previous one.
+  reexec_contract "${ref}"
+  with_lock "${DYX3_RUN}/install.lock" upgrade_to "${ref}"
+  exit 0
+fi
+# Refuse in the operator's terminal, not only in the journal of the background unit (asked again there).
+require_rover_idle "upgrade to ${ref}"
+# A dropped ssh session must not kill the upgrade half-way (INS-004): continue as a transient systemd unit.
+detach_or_continue upgrade "${BASH_SOURCE[0]}" "${ref}"
+if [ "${DYX3_DRY_RUN}" = "1" ]; then
+  log "dry-run: would hand over to the installer of ${ref}; showing this installer's plan"
+  with_lock "${DYX3_RUN}/install.lock" upgrade_to "${ref}"
+  exit 0
+fi
+handoff_to_target "${ref}"

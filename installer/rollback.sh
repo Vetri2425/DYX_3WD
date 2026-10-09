@@ -21,4 +21,7 @@ case "${1:-}" in
 esac
 
 require_root
+# Refuse in the operator's terminal, not only in the journal of the background unit (asked again there).
+require_rover_idle "rollback"
+detach_or_continue rollback "${BASH_SOURCE[0]}"
 with_lock "${DYX3_RUN}/install.lock" rollback_release
