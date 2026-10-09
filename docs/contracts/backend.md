@@ -17,7 +17,7 @@ or tablet E-stop is a **request** to `dyx3_motion_guard`. If the gateway is not 
 | `POST /mission/abort` `{reason}` / `pause` / `resume` / `skip_point` | operator | gateway |
 | `POST /estop` `{asserted}` | **assert: any authenticated role; clear: operator** | gateway `estop` with `source = "tablet"` |
 | `POST /vehicle/arm` `{arm}`, `POST /vehicle/offboard` `{enable}`, `POST /spray/manual` `{on}` | operator | gateway |
-| `POST /heartbeat` | any authenticated | the tablet heartbeat (section 3) |
+| `POST /heartbeat` | **operator** | the tablet heartbeat (section 3) |
 | `GET /telemetry` | viewer | the latest gateway snapshot, with its age |
 | `GET /runs`, `GET /runs/{id}` | viewer | the recorder's `summary.json` / `manifest.json` (read-only) |
 
@@ -74,21 +74,27 @@ adds its hash. Socket.IO connects with `auth={"token": ...}`. A user/password mo
 
 ## 3. Tablet heartbeat -> operator link (R13)
 
-The tablet sends `POST /api/heartbeat` or the Socket.IO event `heartbeat`. The backend relays a gateway `heartbeat` every `heartbeat_relay_s` **only while the tablet heartbeat is younger than `tablet_heartbeat_timeout_s`**,
-and the gateway turns that into `OperatorLinkStatus` (its own `operator_link_timeout_s`). The last authenticated Socket.IO connection closing clears the tablet heartbeat at once. A tablet WiFi dropout
-therefore stops the relay and `dyx3_motion_guard` stops the rover. The relay task never ends on an error: an unexpected exception in a tick is
-logged and that tick relays nothing (fail to STOP), and the next tick runs as usual.
+The tablet sends `POST /api/heartbeat` or the Socket.IO event `heartbeat`; **both require the operator role** (a viewer cannot keep the
+operator link alive: REST answers 403, the Socket.IO ack is `{"ok": false, "code": "forbidden"}`). The backend relays a gateway `heartbeat`
+every `heartbeat_relay_s` **only while the tablet heartbeat is younger than `tablet_heartbeat_timeout_s`**, and the gateway turns that into
+`OperatorLinkStatus` (its own `operator_link_timeout_s`). When the last **operator** Socket.IO session closes, the tablet heartbeat is cleared
+at once (a viewer session closing changes nothing). A tablet WiFi dropout therefore stops the relay and `dyx3_motion_guard` stops the rover.
+`heartbeat_relay_s` 0.5 and `tablet_heartbeat_timeout_s` 1.5 are **DERIVED — NOT FROM V1 SPEC**; the worst-case delay is
+`tablet_heartbeat_timeout_s + gateway operator_link_timeout_s` (3.5 s with the defaults = 1.2 m at 0.35 m/s). **OPEN (human):** the numbers.
+
+The relay task never ends on an error: an unexpected exception in a tick is logged and that tick relays nothing (fail to STOP), and the next
+tick runs as usual.
+
 **Stall guard (XR-BE-002).** A tablet heartbeat is stamped when the event loop processes it, so after a loop stall the queued heartbeats would
 look fresh. The relay measures the gap between its own ticks; when it exceeds `heartbeat_relay_s` + 0.3 s (DERIVED), heartbeats stamped since
 the previous tick are discarded (the stamp held at that tick is kept) and heartbeats stamped within the next `heartbeat_relay_s` are ignored
 (the REST/Socket.IO answer is unchanged). A live tablet re-proves itself with its next heartbeat; a slow gateway reply trips the same guard,
-in the fail-to-STOP direction. `heartbeat_relay_s` 0.5 and `tablet_heartbeat_timeout_s` 1.5 are **DERIVED — NOT FROM V1 SPEC**; the worst-case delay is
-`tablet_heartbeat_timeout_s + gateway operator_link_timeout_s` (3.5 s with the defaults = 1.2 m at 0.35 m/s). **OPEN (human):** the numbers.
+in the fail-to-STOP direction.
 
 ## 4. Socket.IO
 
 `/socket.io`, connect requires a valid token. Server -> client: `telemetry` (every gateway push, same body as `GET /telemetry`), `gateway` (`{"connected": bool}` on change).
-Client -> server: `heartbeat` (as above), `estop` `{asserted}` (same rules as REST; the ack carries the verdict). Anything else is ignored.
+Client -> server: `heartbeat` (operator only, as above), `estop` `{asserted}` (same rules as REST; the ack carries the verdict). Anything else is ignored.
 
 ## 5. Not in this package / OPEN
 
