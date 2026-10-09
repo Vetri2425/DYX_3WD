@@ -192,6 +192,7 @@ RecorderNode::RecorderNode(const rclcpp::NodeOptions& options, ClockFn clock, Wa
 
 RecorderNode::~RecorderNode() {
   if (lifecycle_.recording()) stop_run("RECORDER_SHUTDOWN");
+  join_param_job();
 }
 
 void RecorderNode::declare_params() {
@@ -273,11 +274,32 @@ void RecorderNode::on_mission(const dyx3_interfaces::msg::MissionState& m) {
     std::lock_guard<std::mutex> lk(mu_);
     a = lifecycle_.on_mission(m.state, m.mission_id, m.run_index);
   }
-  if (a.stop) stop_run(a.final_state);
-  if (a.start) start_run(m.mission_id, m.run_index, m.path_artifact_sha256);
+  if (a.stop) {
+    if (!a.stop_note.empty()) {
+      std::lock_guard<std::mutex> lk(mu_);
+      summary_.notes.push_back(a.stop_note);
+    }
+    stop_run(a.final_state);
+  }
+  if (a.start) start_run(m.mission_id, m.run_index, m.path_artifact_sha256, a.start_running);
+  if (a.running) mark_running();
 }
 
-void RecorderNode::start_run(uint32_t mission_id, uint32_t run_index, const std::string& sha) {
+void RecorderNode::mark_running() {
+  std::lock_guard<std::mutex> lk(mu_);
+  if (run_dir_.empty()) return;
+  summary_.running_utc = iso_utc(wall_());
+  summary_.preroll_s = clock_() - run_start_s_;
+  RCLCPP_INFO(get_logger(), "mission RUNNING after %.1f s of pre-roll", summary_.preroll_s);
+}
+
+void RecorderNode::join_param_job() {
+  if (param_thread_.joinable()) param_thread_.join();
+}
+
+void RecorderNode::start_run(uint32_t mission_id, uint32_t run_index, const std::string& sha,
+                             bool running) {
+  join_param_job();  // normally already joined by stop_run
   std::error_code ec;
   const time_t now = wall_();
   RunInfo info;
@@ -285,6 +307,7 @@ void RecorderNode::start_run(uint32_t mission_id, uint32_t run_index, const std:
   info.run_index = run_index;
   info.path_artifact_sha256 = sha;
   info.start_utc = iso_utc(now);
+  info.start_state = running ? "RUNNING" : "READY";
   info.vehicle_id = vehicle_id_;
   info.operator_name = operator_;
   info.hostname = hostname();
@@ -333,26 +356,16 @@ void RecorderNode::start_run(uint32_t mission_id, uint32_t run_index, const std:
     for (const auto& e : cr.errors) summary.notes.push_back(e);
     summary.provenance_complete = false;
   }
-  // ROS parameters (start) and FCU parameters
-  const std::string stamp = iso_utc(now);
-  std::string start_snapshot;
-  {
-    const auto nodes = collect_params();
-    start_snapshot = params_ros_snapshot_json(stamp, nodes);
-    for (const auto& n : nodes) {
-      if (!n.reachable) {
-        summary.notes.push_back("parameters unreachable at start: " + n.node +
-                                (n.note.empty() ? "" : " (" + n.note + ")"));
-        summary.provenance_complete = false;
-      }
-    }
-    write_file_atomic(dir + "/params_ros.json", params_ros_file_json(start_snapshot, ""));
-  }
   write_file_atomic(
       dir + "/params_fcu.json",
       unavailable_json("fcu_parameters", "no FCU parameter read path in this stack yet (OPEN)"));
   summary.notes.push_back("params_fcu.json: unavailable (no FCU parameter read path yet)");
   summary.provenance_complete = false;
+  if (running) {
+    summary.running_utc = info.start_utc;
+    summary.preroll_s = 0.0;
+    summary.notes.push_back("run opened at RUNNING: no pre-roll");
+  }
 
   // ulog + bag
   fs::create_directories(dir + "/ulog", ec);
@@ -364,30 +377,52 @@ void RecorderNode::start_run(uint32_t mission_id, uint32_t run_index, const std:
   }
   for (const auto& t : topics_) argv.push_back(t);
 
-  std::lock_guard<std::mutex> lk(mu_);
-  run_dir_ = dir;
-  info_ = info;
-  summary_ = summary;
-  params_start_ = start_snapshot;
-  run_start_s_ = clock_();
-  error_ = false;
-  bag_died_ = false;
-  finalizing_ = false;
-  if (!ulog_.open(dir + "/ulog/stream.ulg")) {
-    summary_.notes.push_back("ulog file could not be created");
-    summary_.provenance_complete = false;
+  {
+    std::lock_guard<std::mutex> lk(mu_);
+    run_dir_ = dir;
+    info_ = info;
+    summary_ = summary;
+    params_start_.clear();
+    run_start_s_ = clock_();
+    error_ = false;
+    bag_died_ = false;
+    finalizing_ = false;
+    if (!ulog_.open(dir + "/ulog/stream.ulg")) {
+      summary_.notes.push_back("ulog file could not be created");
+      summary_.provenance_complete = false;
+    }
+    bag_ok = bag_.start(argv, dir + "/rosbag2");
+    if (!bag_ok) {
+      error_ = true;
+      summary_.notes.push_back("bag process could not be started");
+      summary_.bag_healthy_throughout = false;
+      RCLCPP_ERROR(get_logger(), "bag process could not be started (%s)", argv.front().c_str());
+    }
   }
-  bag_ok = bag_.start(argv, dir + "/rosbag2");
-  if (!bag_ok) {
-    error_ = true;
-    summary_.notes.push_back("bag process could not be started");
-    summary_.bag_healthy_throughout = false;
-    RCLCPP_ERROR(get_logger(), "bag process could not be started (%s)", argv.front().c_str());
-  }
-  RCLCPP_INFO(get_logger(), "run started: %s", info.run_id.c_str());
+  RCLCPP_INFO(get_logger(), "run started: %s (%s)", info.run_id.c_str(), info.start_state.c_str());
+
+  // ROS parameters (start): after the bag is running, on their own thread. Up to
+  // |param_nodes| x 3 RPCs x param_timeout_s must never delay the first second of the bag.
+  const std::string stamp = iso_utc(now);
+  param_thread_ = std::thread([this, dir, stamp]() {
+    const auto nodes = collect_params();
+    const std::string snapshot = params_ros_snapshot_json(stamp, nodes);
+    write_file_atomic(dir + "/params_ros.json", params_ros_file_json(snapshot, ""));
+    std::lock_guard<std::mutex> lk(mu_);
+    if (run_dir_ != dir) return;
+    params_start_ = snapshot;
+    for (const auto& n : nodes) {
+      if (!n.reachable) {
+        summary_.notes.push_back("parameters unreachable at start: " + n.node +
+                                 (n.note.empty() ? "" : " (" + n.note + ")"));
+        summary_.provenance_complete = false;
+      }
+    }
+  });
 }
 
 void RecorderNode::stop_run(const std::string& final_state) {
+  join_param_job();  // the start snapshot (and its notes) belongs to this run
   std::string dir, params_start;
   RunSummary summary;
   RunInfo info;

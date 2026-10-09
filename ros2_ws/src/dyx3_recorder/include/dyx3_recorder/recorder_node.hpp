@@ -6,6 +6,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "dyx3_interfaces/msg/mission_state.hpp"
@@ -55,7 +56,9 @@ private:
   void declare_params();
   std::vector<NodeParams> collect_params() const;
   void on_mission(const dyx3_interfaces::msg::MissionState& m);
-  void start_run(uint32_t mission_id, uint32_t run_index, const std::string& sha);
+  void start_run(uint32_t mission_id, uint32_t run_index, const std::string& sha, bool running);
+  void mark_running();
+  void join_param_job();
   void stop_run(const std::string& final_state);
   void publish_status(double now_s);
 
@@ -75,6 +78,8 @@ private:
   RunInfo info_;
   RunSummary summary_;
   std::string params_start_;
+  // Start-of-run parameter snapshot, collected on its own thread once the bag runs (REC-004).
+  std::thread param_thread_;
   double run_start_s_{0.0};
   bool error_{false};
   bool finalizing_{false};

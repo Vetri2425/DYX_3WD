@@ -155,11 +155,15 @@ struct Rig {
 TEST(RecorderNode, FullRunProducesAnEvidenceDirectoryWithProvenance) {
   Rig r;
   EXPECT_EQ(r.run_count(), 0U);
-  r.mission(MissionState::STATE_READY);
-  EXPECT_EQ(r.run_count(), 0U);
+  r.mission(MissionState::STATE_READY);  // pre-roll: the run and the bag open at READY
+  ASSERT_EQ(r.run_count(), 1U);
+  EXPECT_TRUE(r.rec->recording());
+  r.now += 4.0;
+  r.wall += 4;
   r.mission(MissionState::STATE_RUNNING);
   ASSERT_EQ(r.run_count(), 1U);
   const std::string d = r.run_dir();
+  EXPECT_NE(slurp(d + "/manifest.json").find("\"start_state\": \"READY\""), std::string::npos);
   EXPECT_NE(d.find("2026-09-05_141530_mission_0042"), std::string::npos);
   for (const char* f : {"manifest.json", "versions.json", "params_ros.json", "params_fcu.json",
                         "config_snapshot/rpp/params.yaml"}) {
@@ -188,11 +192,13 @@ TEST(RecorderNode, FullRunProducesAnEvidenceDirectoryWithProvenance) {
   EXPECT_FALSE(r.rec->recording());
   const std::string summary = slurp(d + "/summary.json");
   EXPECT_NE(summary.find("\"final_state\": \"COMPLETED\""), std::string::npos);
+  EXPECT_NE(summary.find("\"running_utc\": \"2026-09-05T14:15:34Z\""), std::string::npos);
+  EXPECT_NE(summary.find("\"preroll_s\": 4"), std::string::npos);
   EXPECT_NE(summary.find("\"ulog_bytes\": 6"), std::string::npos);
   EXPECT_NE(summary.find("\"ulog_gaps\": 1"), std::string::npos);
   EXPECT_NE(summary.find("\"bag_healthy_throughout\": true"), std::string::npos);
-  EXPECT_NE(summary.find("\"duration_s\": 31"), std::string::npos);
-  EXPECT_NE(summary.find("\"end_utc\": \"2026-09-05T14:16:00Z\""), std::string::npos);
+  EXPECT_NE(summary.find("\"duration_s\": 35"), std::string::npos);
+  EXPECT_NE(summary.find("\"end_utc\": \"2026-09-05T14:16:04Z\""), std::string::npos);
   EXPECT_NE(slurp(d + "/ulog/gaps.json").find("\"missing_chunks\": 2"), std::string::npos);
   EXPECT_EQ(slurp(d + "/ulog/stream.ulg"), std::string("\x01\x02\x03\x04\x05\x06", 6));
   EXPECT_NE(slurp(d + "/params_ros.json").find("\"end\": {"),
@@ -240,6 +246,22 @@ TEST(RecorderNode, TimesyncAtStartAndEndIsRecordedAndAStaleSampleIsNotPassedOffA
   ASSERT_FALSE(second.empty());
   EXPECT_NE(slurp(second + "/manifest.json").find("\"timesync_valid\": false"), std::string::npos);
   EXPECT_NE(slurp(second + "/summary.json").find("timesync not available"), std::string::npos);
+}
+
+TEST(RecorderNode, AMissionThatNeverRunsClosesAsNotStarted) {
+  Rig r;
+  r.mission(MissionState::STATE_READY, 9);
+  ASSERT_EQ(r.run_count(), 1U);
+  const std::string d = r.run_dir();
+  r.now += 2.0;
+  r.mission(MissionState::STATE_IDLE, 0);
+  EXPECT_FALSE(r.rec->recording());
+  const std::string summary = slurp(d + "/summary.json");
+  EXPECT_NE(summary.find("\"final_state\": \"NOT_STARTED\""), std::string::npos);
+  EXPECT_NE(summary.find("\"running_utc\": \"\""), std::string::npos);
+  EXPECT_NE(summary.find("\"preroll_s\": null"), std::string::npos);
+  EXPECT_NE(summary.find("without RUNNING"), std::string::npos);
+  EXPECT_TRUE(fs::exists(d + "/params_ros.json"));  // collected asynchronously, still recorded
 }
 
 TEST(RecorderNode, PauseKeepsRecordingAndANewMissionSplitsTheRun) {

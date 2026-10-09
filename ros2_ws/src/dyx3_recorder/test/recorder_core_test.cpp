@@ -180,14 +180,14 @@ TEST(UlogCapture, ClosedCaptureWritesNothing) {
 
 TEST(Lifecycle, StartsOnRunningStopsOnTerminalAndSplitsRuns) {
   RunLifecycle l;
-  EXPECT_FALSE(l.on_mission(kMissionReady, 1, 0).start);
-  auto a = l.on_mission(kMissionRunning, 1, 0);
+  auto a = l.on_mission(kMissionRunning, 1, 0);  // RUNNING without READY (recorder restarted)
   EXPECT_TRUE(a.start);
+  EXPECT_TRUE(a.start_running);
   EXPECT_FALSE(a.stop);
   EXPECT_TRUE(l.recording());
   for (uint8_t s : {kMissionPaused, kMissionRunning, kMissionReady, kMissionLoading}) {
     a = l.on_mission(s, 1, 0);
-    EXPECT_FALSE(a.start || a.stop) << int(s);
+    EXPECT_FALSE(a.start || a.stop || a.running) << int(s);
   }
   a = l.on_mission(kMissionRunning, 2, 0);  // a different mission while recording
   EXPECT_TRUE(a.stop && a.start);
@@ -200,10 +200,50 @@ TEST(Lifecycle, StartsOnRunningStopsOnTerminalAndSplitsRuns) {
   EXPECT_EQ(a.final_state, "ABORTED");
   EXPECT_FALSE(l.recording());
   EXPECT_FALSE(l.on_mission(kMissionCompleted, 2, 1).stop);  // nothing open: nothing to stop
+  EXPECT_FALSE(l.on_mission(kMissionLoading, 3, 0).start);   // LOADING does not open a run
   l.on_mission(kMissionRunning, 3, 0);
   EXPECT_EQ(l.on_mission(kMissionError, 3, 0).final_state, "ERROR");
   l.on_mission(kMissionRunning, 4, 0);
   EXPECT_EQ(l.on_mission(kMissionIdle, 0, 0).final_state, "IDLE");
+}
+
+TEST(Lifecycle, PreRollOpensAtReadyAndMarksRunning) {
+  RunLifecycle l;
+  auto a = l.on_mission(kMissionReady, 7, 0);  // the rover is still stopped: the bag starts now
+  EXPECT_TRUE(a.start);
+  EXPECT_FALSE(a.start_running);
+  EXPECT_FALSE(l.running_seen());
+  EXPECT_FALSE(l.on_mission(kMissionReady, 7, 0).start);  // repeated READY: nothing
+  a = l.on_mission(kMissionRunning, 7, 0);
+  EXPECT_TRUE(a.running);
+  EXPECT_FALSE(a.start || a.stop);
+  EXPECT_TRUE(l.running_seen());
+  EXPECT_FALSE(l.on_mission(kMissionRunning, 7, 0).running);  // marked once
+  a = l.on_mission(kMissionCompleted, 7, 0);
+  EXPECT_TRUE(a.stop);
+  EXPECT_EQ(a.final_state, "COMPLETED");
+  EXPECT_FALSE(l.recording());
+}
+
+TEST(Lifecycle, ReadyThenIdleClosesAsNotStarted) {
+  RunLifecycle l;
+  EXPECT_TRUE(l.on_mission(kMissionReady, 8, 0).start);
+  auto a = l.on_mission(kMissionIdle, 0, 0);
+  EXPECT_TRUE(a.stop);
+  EXPECT_EQ(a.final_state, "NOT_STARTED");
+  EXPECT_NE(a.stop_note.find("IDLE"), std::string::npos);
+  EXPECT_FALSE(l.recording());
+  // READY of another mission while pre-rolling: the old pre-roll closes NOT_STARTED
+  l.on_mission(kMissionReady, 9, 0);
+  a = l.on_mission(kMissionReady, 10, 0);
+  EXPECT_TRUE(a.stop && a.start);
+  EXPECT_EQ(a.final_state, "NOT_STARTED");
+  // RUNNING of another mission after a real run: SUPERSEDED
+  l.on_mission(kMissionRunning, 10, 0);
+  a = l.on_mission(kMissionReady, 10, 1);
+  EXPECT_TRUE(a.stop && a.start);
+  EXPECT_EQ(a.final_state, "SUPERSEDED");
+  EXPECT_EQ(l.on_mission(kMissionAborted, 10, 1).final_state, "NOT_STARTED");
 }
 
 // ---- bag supervision against a fake child

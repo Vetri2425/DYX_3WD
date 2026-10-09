@@ -2,6 +2,7 @@
 // docs/contracts/dyx3_recorder.md sections 1 and 4. Pure C++ (std only), no ROS.
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 #include <ctime>
 #include <string>
@@ -34,6 +35,7 @@ struct RunInfo {
   uint32_t run_index{0};
   std::string path_artifact_sha256;
   std::string start_utc;
+  std::string start_state;  // mission state that opened the run: READY (pre-roll) or RUNNING
   std::string vehicle_id;
   std::string operator_name;
   std::string hostname;
@@ -48,6 +50,10 @@ struct RunSummary {
   std::string end_utc;
   std::string final_state;
   double duration_s{0.0};
+  // When the mission reached RUNNING (motion allowed) and how long the bag had been recording by
+  // then. Empty / NaN (-> null) when the run never reached RUNNING.
+  std::string running_utc;
+  double preroll_s{NAN};
   uint64_t bag_bytes{0};
   uint64_t ulog_bytes{0};
   uint64_t ulog_gaps{0};

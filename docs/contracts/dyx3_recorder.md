@@ -22,10 +22,15 @@ Directory names are collision-free (a numeric suffix is appended if the name exi
 
 ## 2. Lifecycle (driven only by `MissionState`)
 
-* **Start** when `state == RUNNING` and no run is open. **Stop** when a run is open and the state is `COMPLETED`, `ABORTED`, `ERROR` or `IDLE`
-  (`final_state` recorded). `PAUSED` and `READY` do not stop a run. A `RUNNING` message with a **different `mission_id` or `run_index`** (DERIVED: one run directory per run of a mission) while recording closes the old run (`final_state` SUPERSEDED) and opens a new one.
+* **Pre-roll (REC-004).** A run **opens at `READY`** (the rover is still stopped), so the bag is already writing when motion is allowed; a `RUNNING`
+  message with no open run (e.g. the recorder restarted mid-mission) also opens one (`start_state` RUNNING, note "no pre-roll"). The first `RUNNING`
+  of the open run is recorded in `summary.json` as `running_utc` and `preroll_s` (bag time before motion). **Stop** when a run is open and the state is
+  `COMPLETED`, `ABORTED`, `ERROR` or `IDLE`. A run that never reached `RUNNING` closes as **`NOT_STARTED`** (with a note naming the state that closed it).
+  `PAUSED`, `LOADING` and `READY` of the same run do not stop it. A `READY` or `RUNNING` message with a **different `mission_id` or `run_index`**
+  (DERIVED: one run directory per run of a mission) while recording closes the old run (`SUPERSEDED`, or `NOT_STARTED` if it never ran) and opens a new one.
 * `record_idle` (default false) is not implemented: recording outside missions is an **open question**.
-* Start order: directory -> manifest -> versions -> config snapshot -> `params_ros.json` start -> `params_fcu.json` -> bag -> ulog. A step that fails is
+* Start order: directory -> manifest -> versions -> config snapshot -> `params_fcu.json` -> ulog -> bag -> `params_ros.json` start **collected
+  on its own thread after the bag runs** (parameter RPCs never delay the bag). Stop joins that thread first, so its notes belong to the run. A step that fails is
   recorded in `summary.notes` and clears `provenance_complete`; only a bag that cannot be started sets `RecorderStatus.state = ERROR`.
   The recorder never blocks, delays or gates the mission: if it is dead or in ERROR the mission runs on, and the absence of evidence is itself visible (`RecorderStatus`, summary).
 * Stop order: bag finalised (SIGINT to its process group, wait `bag_finalize_timeout_s`, then SIGTERM, then SIGKILL) -> ulog closed (`gaps.json`) -> `params_ros.json` end -> `summary.json`.
