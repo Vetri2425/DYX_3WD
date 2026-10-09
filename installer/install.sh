@@ -60,8 +60,13 @@ main() {
   # all of them can cut a moving rover off. Refuse unless it is known to be idle (INS-001).
   require_rover_idle "install"
   os_check
-  create_user
+  # A staged root (tests) has no service user to create.
+  if [ -z "${DYX3_ROOT}" ] || [ "${DYX3_DRY_RUN}" = "1" ]; then create_user; fi
   create_directories
+  # The per-rover files first, so they exist to be edited, then refuse early if they lack what the release needs
+  # to pass its own health gate (INS-007).
+  install_config_templates "${checkout_root}"
+  preflight_rover_inputs "${checkout_root}"
   install_tmpfiles
   if [ "${skip_deps}" -eq 0 ]; then
     install_apt_packages

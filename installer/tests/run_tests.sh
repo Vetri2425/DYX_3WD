@@ -254,6 +254,26 @@ libs() {
     check "install dry-run mentions: ${s}" 'printf "%s" "${out}" | grep -q -- "${s}"'
   done
   check "install without --production is refused" '! "${REPO}/installer/install.sh" >/dev/null 2>&1'
+
+  # INS-007: a fresh install stops before any build with the per-rover inputs it lacks and the files to edit.
+  check "ros.env template ships the fleet ROS domain 42" 'grep -qx "ROS_DOMAIN_ID=42" "${REPO}/deployment/network/ros.env.tmpl"'
+  local fresh="${T}/fresh" ffb="${T}/fresh-bin"
+  make_fakebin "${ffb}"
+  for s2 in useradd usermod apt-get; do printf '#!/usr/bin/env bash\necho "%s $*" >>"%s/forbidden"\nexit 1\n' "${s2}" "${T}" >"${ffb}/${s2}"; done
+  chmod +x "${ffb}"/*
+  out="$(PATH="${ffb}:${PATH}" DYX3_ROOT="${fresh}" DYX3_ALLOW_ANY_OS=1 "${REPO}/installer/install.sh" --production 2>&1)"
+  rc=$?
+  check "fresh install without a hotspot or backend address refuses early" '[ "${rc}" -ne 0 ] && printf "%s" "${out}" | grep -q "per-rover inputs are missing" && printf "%s" "${out}" | grep -q "${fresh}/etc/dyx3/hotspot.env" && printf "%s" "${out}" | grep -q "${fresh}/etc/dyx3/backend.env"'
+  check "the refusal comes before any package, user or build work" '[ ! -e "${T}/forbidden" ] && [ -z "$(ls -A "${fresh}/opt/dyx3/releases" 2>/dev/null)" ]'
+  check "the files to edit exist after the refusal; the domain is not reported missing" '[ -f "${fresh}/etc/dyx3/hotspot.env" ] && [ -f "${fresh}/etc/dyx3/ros.env" ] && ! printf "%s" "${out}" | grep -q "ROS_DOMAIN_ID ("'
+  pf() { (DYX3_ETC="${fresh}/etc/dyx3" preflight_rover_inputs "${REPO}") >"${T}/pf" 2>&1; }
+  printf 'DYX3_HOTSPOT_SSID=Rover01\nDYX3_HOTSPOT_PSK=DummyBenchPass123\n' >"${fresh}/etc/dyx3/hotspot.env"
+  check "preflight: a configured hotspot satisfies the backend address" 'pf'
+  printf 'DYX3_HOTSPOT_SSID=Rover01\nDYX3_HOTSPOT_PSK=DummyBenchPass123\nDYX3_HOTSPOT_ADDRESS=192.168.2.100/24\n' >"${fresh}/etc/dyx3/hotspot.env"
+  check "preflight: a hotspot address the backend does not bind is named" '! pf && grep -q "DYX3_BACKEND_HOST=192.168.2.100" "${T}/pf"'
+  echo "DYX3_BACKEND_HOST=192.168.2.100" >>"${fresh}/etc/dyx3/backend.env"
+  sed -i.bak "s/^ROS_DOMAIN_ID=.*/#ROS_DOMAIN_ID=/" "${fresh}/etc/dyx3/ros.env" && rm -f "${fresh}/etc/dyx3/ros.env.bak"
+  check "preflight: a missing ROS domain is named with its file" '! pf && grep -q "ROS_DOMAIN_ID (0-232) in ${fresh}/etc/dyx3/ros.env" "${T}/pf"'
   # FCU profile: production is static with no default route; the bench (FCU_KEEP_DHCP=1) keeps the
   # site router's DHCP route, its only WAN, or the release fetch fails (2026-10-08 on the rover).
   local net_prod net_bench

@@ -50,7 +50,7 @@ create_directories() {
     else
       local token_tmp="${token_state}.tmp.$$"
       printf '2\n' >"${token_tmp}"
-      chown "${DYX3_USER}:${DYX3_GROUP}" "${token_tmp}"
+      if [ -z "${DYX3_ROOT}" ]; then chown "${DYX3_USER}:${DYX3_GROUP}" "${token_tmp}"; fi
       chmod 0600 "${token_tmp}"
       mv "${token_tmp}" "${token_state}"
     fi
@@ -85,4 +85,44 @@ install_config_templates() {
       install_file 0644 "root:root" "${rel}/deployment/network/${f}.tmpl" "${DYX3_ETC}/${f}"
     fi
   done
+}
+
+# _env_value <file> <KEY>: the last uncommented KEY=value of an env file (empty when absent). Never executed.
+_env_value() { sed -n "s/^$2=//p" "$1" 2>/dev/null | tail -n1; }
+
+# _preflight_file <src> <name>: /etc/dyx3/<name>, or the template it will be created from.
+_preflight_file() {
+  if [ -e "${DYX3_ETC}/$2" ]; then printf '%s' "${DYX3_ETC}/$2"; else printf '%s' "$1/deployment/network/$2.tmpl"; fi
+}
+
+# preflight_rover_inputs <checkout-or-release-dir>: INS-007. The per-rover inputs an install cannot guess. Without them
+# the release cannot pass its own health gate and reverts with no useful message. Stops with the list and the files to
+# edit, before anything is built.
+preflight_rover_inputs() {
+  local src="$1" missing=() m domain host ssid psk addr
+  domain="$(_env_value "$(_preflight_file "${src}" ros.env)" ROS_DOMAIN_ID)"
+  if [[ ! "${domain}" =~ ^([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-2][0-9]|23[0-2])$ ]]; then
+    missing+=("ROS_DOMAIN_ID (0-232) in ${DYX3_ETC}/ros.env; the fleet uses ROS_DOMAIN_ID=42")
+  fi
+  if _enabled dyx3-backend "${src}/installer/manifests/production.manifest"; then
+    host="$(_env_value "$(_preflight_file "${src}" backend.env)" DYX3_BACKEND_HOST)"
+    ssid="$(_env_value "$(_preflight_file "${src}" hotspot.env)" DYX3_HOTSPOT_SSID)"
+    psk="$(_env_value "$(_preflight_file "${src}" hotspot.env)" DYX3_HOTSPOT_PSK)"
+    addr="$(_env_value "$(_preflight_file "${src}" hotspot.env)" DYX3_HOTSPOT_ADDRESS)"
+    if [ -z "${host}" ] && { [ -z "${ssid}" ] || [ -z "${psk}" ]; }; then
+      missing+=("where the backend listens: by default it binds the hotspot address 10.42.0.1, and no hotspot is configured. Set DYX3_HOTSPOT_SSID and DYX3_HOTSPOT_PSK in ${DYX3_ETC}/hotspot.env, or DYX3_BACKEND_HOST in ${DYX3_ETC}/backend.env (the site-LAN address from network.env; 0.0.0.0 on the bench only)")
+    elif [ -z "${host}" ] && [ -n "${addr}" ] && [ "${addr%/*}" != 10.42.0.1 ]; then
+      missing+=("DYX3_BACKEND_HOST=${addr%/*} in ${DYX3_ETC}/backend.env: the hotspot is at ${addr}, but the backend binds 10.42.0.1 unless told otherwise")
+    fi
+  fi
+  [ "${#missing[@]}" -eq 0 ] && return 0
+  local tag="FATAL"
+  [ "${DYX3_DRY_RUN}" = "1" ] && tag="WARN"
+  {
+    printf '[dyx3 %s] per-rover inputs are missing; nothing has been built yet:\n' "${tag}"
+    for m in "${missing[@]}"; do printf '  - %s\n' "${m}"; done
+    printf '  Edit the files named above (created from deployment/network/*.tmpl), then run the installer again.\n'
+  } >&2
+  [ "${DYX3_DRY_RUN}" = "1" ] && return 0
+  exit 1
 }
