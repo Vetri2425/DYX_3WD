@@ -134,6 +134,136 @@ TEST(PathArtifact, RefusesWhatTheWriterWouldRefuse) {
   EXPECT_FALSE(parse_artifact(good, std::string(64, '0')).ok);
 }
 
+// MS-005: the reader must refuse what the Python decode() refuses. Every vector below was run
+// through backend/src/dyx3_backend/mission/path_artifact.py decode(): the accepted ones are
+// accepted there, the refused ones are refused there.
+namespace {
+std::string artifact(const std::string& meta, const std::vector<std::string>& points,
+                     const std::string& head = "DYX3PATH 1", long count = -2) {
+  const long n = count == -2 ? static_cast<long>(points.size()) : count;
+  std::string s = head + "\nframe local_ned\nengine abcd\nmeta " + meta + "\npoints " +
+                  std::to_string(n) + "\n";
+  for (const auto& p : points) s += p + "\n";
+  return s + "end " + std::to_string(n) + "\n";
+}
+const std::vector<std::string> kOnePoint = {"1.5 2.5 3"};
+}  // namespace
+
+TEST(PathArtifactCanonical, PythonSpellingsOfCoordinatesAreAccepted) {
+  for (const char* t : {"1e-05", "1e+16", "100.0", "-0.0", "0.0001", "5e-324",
+                        "1.7976931348623157e+308", "1000000000000000.0", "1.2345678901234568e+17",
+                        "0.30000000000000004", "-2.5e-07", "12345.678"}) {
+    const auto r = parse_artifact(artifact("{}", {std::string(t) + " 2.5 1"}));
+    EXPECT_TRUE(r.ok) << t << ": " << r.error;
+  }
+}
+
+TEST(PathArtifactCanonical, NonCanonicalOrNonFiniteCoordinatesAreRefused) {
+  for (const char* t : {"1",
+                        "1.50",
+                        "+1.0",
+                        "1e0",
+                        "1.0E5",
+                        "1e5",
+                        "1e+5",
+                        "0x10",
+                        "0x1p3",
+                        "inf",
+                        "-inf",
+                        "nan",
+                        "1e400",
+                        ".5",
+                        "5.",
+                        "-0",
+                        "00.5",
+                        "1e-5",
+                        "1e+016",
+                        "0.00001",
+                        "1_0.0",
+                        "1e16",
+                        "10000000000000000.0"}) {
+    EXPECT_FALSE(parse_artifact(artifact("{}", {std::string(t) + " 2.5 1"})).ok) << t;
+    EXPECT_FALSE(parse_artifact(artifact("{}", {"2.5 " + std::string(t) + " 1"})).ok) << t;
+  }
+}
+
+TEST(PathArtifactCanonical, CanonicalMetaIsAccepted) {
+  for (const char* m :
+       {"{}", "{\"a\":1.0,\"b\":[1,2.5,null,true,\"\\u00e9\"],\"c\":{\"d\":5e-324}}", "{\"\":1}",
+        "{\"\\uffff\":1,\"\\ud83d\\ude00\":2}", "{\"a\":\"\\u007f\\u0001\\n\\\"\\\\\"}",
+        "{\"a\":-0.0,\"b\":1e+16,\"c\":1e-05,\"d\":12345678901234567890}",
+        "{\"a\":\"\\ud83d\\ude00\"}", "{\"z\":1,\"\\u00e9\":2}"}) {
+    const auto r = parse_artifact(artifact(m, kOnePoint));
+    EXPECT_TRUE(r.ok) << m << ": " << r.error;
+    EXPECT_EQ(r.artifact.meta_json, m);
+  }
+}
+
+TEST(PathArtifactCanonical, NonCanonicalOrInvalidMetaIsRefused) {
+  for (const char* m :
+       {"{\"b\":1,\"a\":2}",                     // keys not sorted
+        "{\"a\":1,\"a\":2}",                     // duplicate key
+        "{\"\\ud83d\\ude00\":1,\"\\uffff\":2}",  // sorted by UTF-16 unit, not by code point
+        "{\"\\u00e9\":1,\"z\":2}",               // sorted by UTF-16 unit, not by code point
+        "{ \"a\":1}",
+        "{\"a\": 1}",
+        "{\"a\":1 }",  // whitespace
+        "{\"a\":1,}",
+        "[]",
+        "\"x\"",
+        "1",
+        "",
+        "null",  // not a JSON object
+        "{\"a\":1.0e2}",
+        "{\"a\":1E2}",
+        "{\"a\":1.50}",
+        "{\"a\":-0}",  // number spelling
+        "{\"a\":01}",
+        "{\"a\":.5}",
+        "{\"a\":1.}",
+        "{\"a\":+1}",  // not JSON
+        "{\"a\":NaN}",
+        "{\"a\":Infinity}",
+        "{\"a\":-Infinity}",
+        "{\"a\":1e400}",
+        "{\"a\":\"\\/\"}",
+        "{\"a\":\"\\u0041\"}",
+        "{\"a\":\"\\u00E9\"}",
+        "{\"a\":\"\\u000a\"}",
+        "{\"a\":\"\\x\"}",
+        "{\"a\":tru}",
+        "{\"a\":1}x",
+        "{\"a\":[1,2}",
+        "{\"a\":\"abc}"}) {
+    EXPECT_FALSE(parse_artifact(artifact(m, kOnePoint)).ok) << m;
+  }
+  EXPECT_FALSE(parse_artifact(artifact("{\"a\":\"\xc3\xa9\"}", kOnePoint)).ok);  // raw non-ASCII
+  std::string deep;  // nesting beyond the reader's bound is refused rather than recursed into
+  for (int i = 0; i < 200; ++i) deep += "[";
+  for (int i = 0; i < 200; ++i) deep += "]";
+  EXPECT_FALSE(parse_artifact(artifact("{\"a\":" + deep + "}", kOnePoint)).ok);
+}
+
+TEST(PathArtifactCanonical, HeaderAndCountDeviationsAreRefused) {
+  ASSERT_TRUE(parse_artifact(artifact("{}", kOnePoint)).ok);
+  EXPECT_FALSE(parse_artifact(artifact("{}", kOnePoint, "DYX3PATH 2")).ok);  // unknown version
+  EXPECT_FALSE(parse_artifact(artifact("{}", kOnePoint, "DYX3PATH 01")).ok);
+  EXPECT_FALSE(parse_artifact(artifact("{}", kOnePoint, "DYX3PATH 1 ")).ok);
+  EXPECT_FALSE(parse_artifact(artifact("{}", kOnePoint, "DYX3PATH 1", -1)).ok);  // negative count
+  EXPECT_FALSE(parse_artifact(artifact("{}", {}, "DYX3PATH 1", 0)).ok);
+  EXPECT_FALSE(parse_artifact(artifact("{}", kOnePoint, "DYX3PATH 1", 2)).ok);
+  std::string plus = artifact("{}", kOnePoint);
+  plus.replace(plus.find("points 1"), 8, "points +1");
+  EXPECT_FALSE(parse_artifact(plus).ok);
+  const std::string good = artifact("{}", kOnePoint);
+  EXPECT_FALSE(parse_artifact(good + "extra\n").ok);  // trailing bytes
+  EXPECT_FALSE(parse_artifact(good + "\n").ok);
+  EXPECT_FALSE(parse_artifact(artifact("{}", {"1.5 2.5 4"})).ok);   // flags out of range
+  EXPECT_FALSE(parse_artifact(artifact("{}", {"1.5 2.5 -1"})).ok);  // negative flags
+  EXPECT_FALSE(parse_artifact(artifact("{}", {"1.5 2.5"})).ok);
+  EXPECT_FALSE(parse_artifact(artifact("{}", {"1.5  2.5 3"})).ok);
+}
+
 // MS-004: the size is checked before the file is read.
 class ArtifactSizeCap : public ::testing::Test {
 protected:

@@ -1,7 +1,7 @@
 // path_artifact — see docs/contracts/path_artifact.md
 #include "dyx3_mission/path_artifact.hpp"
 
-#include <cerrno>
+#include <charconv>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
@@ -49,10 +49,11 @@ std::vector<std::string> split(const std::string& s, char sep) {
 
 bool parse_double(const std::string& tok, double& out) {
   if (tok.empty()) return false;
-  errno = 0;
   char* end = nullptr;
   out = std::strtod(tok.c_str(), &end);
-  return end == tok.c_str() + tok.size() && errno != ERANGE && std::isfinite(out);
+  // ERANGE is not checked: overflow is infinite (refused here), and an underflow to zero spells
+  // differently from "0.0" and is refused by the canonical-spelling check. A denormal is valid.
+  return end == tok.c_str() + tok.size() && std::isfinite(out);
 }
 
 bool parse_uint(const std::string& tok, unsigned long& out) {
@@ -63,6 +64,234 @@ bool parse_uint(const std::string& tok, unsigned long& out) {
   out = std::strtoul(tok.c_str(), nullptr, 10);
   return true;
 }
+
+// Python repr(float) of a finite double: the shortest digits that round-trip, positional notation
+// for 1e-4 <= |v| < 1e16, otherwise d[.ddd]e+XX with at least two exponent digits. This is the
+// spelling the Python writer emits and its decoder requires (`repr(x) == token`).
+std::string python_repr(double v) {
+  char buf[64];
+  const auto r = std::to_chars(buf, buf + sizeof(buf), v, std::chars_format::scientific);
+  if (r.ec != std::errc()) return {};
+  const std::string sci(buf, r.ptr);  // [-]d[.ddd]e[+-]XX, shortest round-trip digits
+  std::size_t i = 0;
+  const bool neg = sci[i] == '-';
+  if (neg) ++i;
+  const std::size_t epos = sci.find('e');
+  if (epos == std::string::npos) return {};
+  std::string digits;
+  for (std::size_t k = i; k < epos; ++k) {
+    if (sci[k] != '.') digits += sci[k];
+  }
+  const int exp10 = std::atoi(sci.c_str() + epos + 1);
+  std::string out = neg ? "-" : "";
+  if (digits == "0") return out + "0.0";
+  const int decpt = exp10 + 1;  // value = 0.DIGITS x 10^decpt
+  const int nd = static_cast<int>(digits.size());
+  if (decpt > -4 && decpt <= 16) {
+    if (decpt <= 0) {
+      out += "0." + std::string(static_cast<std::size_t>(-decpt), '0') + digits;
+    } else if (decpt >= nd) {
+      out += digits + std::string(static_cast<std::size_t>(decpt - nd), '0') + ".0";
+    } else {
+      out += digits.substr(0, static_cast<std::size_t>(decpt)) + "." +
+             digits.substr(static_cast<std::size_t>(decpt));
+    }
+    return out;
+  }
+  out += digits.substr(0, 1);
+  if (nd > 1) out += "." + digits.substr(1);
+  const int e = decpt - 1;
+  const int ae = e < 0 ? -e : e;
+  out += e < 0 ? "e-" : "e+";
+  if (ae < 10) out += '0';
+  return out + std::to_string(ae);
+}
+
+// A coordinate token is accepted only in the spelling Python's repr() produces ("1", "1e0",
+// "1.50", "+1.0", hex floats and the like parse with strtod but are refused by the decoder).
+bool parse_canonical_double(const std::string& tok, double& out) {
+  return parse_double(tok, out) && python_repr(out) == tok;
+}
+
+// Strict check of the `meta` line against what Python's decode() enforces: valid JSON, an object,
+// and byte-identical to json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+// allow_nan=False). The metadata itself stays opaque to C++; nothing is extracted from it.
+class CanonicalJson {
+public:
+  explicit CanonicalJson(const std::string& s) : s_(s) {}
+  bool object() { return i_ < s_.size() && s_[i_] == '{' && value(0) && i_ == s_.size(); }
+
+private:
+  static constexpr int kMaxDepth = 64;  // stricter than Python on purpose: bounded recursion
+
+  bool value(int depth) {
+    if (i_ >= s_.size() || depth > kMaxDepth) return false;
+    switch (s_[i_]) {
+      case '{':
+        return members(depth, '}', true);
+      case '[':
+        return members(depth, ']', false);
+      case '"': {
+        std::u32string ignored;
+        return string(ignored);
+      }
+      case 't':
+        return literal("true");
+      case 'f':
+        return literal("false");
+      case 'n':
+        return literal("null");
+      default:
+        return number();
+    }
+  }
+  bool literal(const char* word) {
+    const std::string w(word);
+    if (s_.compare(i_, w.size(), w) != 0) return false;
+    i_ += w.size();
+    return true;
+  }
+  bool members(int depth, char close, bool is_object) {
+    ++i_;  // opening bracket
+    if (i_ < s_.size() && s_[i_] == close) {
+      ++i_;
+      return true;
+    }
+    std::u32string prev;
+    bool first = true;
+    while (true) {
+      if (is_object) {
+        std::u32string key;
+        if (i_ >= s_.size() || s_[i_] != '"' || !string(key)) return false;
+        if (!first && !(prev < key)) return false;  // sort_keys, and no duplicate keys
+        prev = std::move(key);
+        first = false;
+        if (i_ >= s_.size() || s_[i_] != ':') return false;
+        ++i_;
+      }
+      if (!value(depth + 1)) return false;
+      if (i_ >= s_.size()) return false;
+      if (s_[i_] == close) {
+        ++i_;
+        return true;
+      }
+      if (s_[i_] != ',') return false;
+      ++i_;
+    }
+  }
+  static int hex4(const std::string& s, std::size_t at) {
+    if (at + 4 > s.size()) return -1;
+    int v = 0;
+    for (std::size_t k = at; k < at + 4; ++k) {
+      const char c = s[k];
+      v <<= 4;
+      if (c >= '0' && c <= '9')
+        v |= c - '0';
+      else if (c >= 'a' && c <= 'f')
+        v |= c - 'a' + 10;
+      else
+        return -1;  // upper-case hex is not what json.dumps writes
+    }
+    return v;
+  }
+  // json.dumps(ensure_ascii=True) writes printable ASCII except " and \ literally, \" \\ \n \r
+  // \t \b \f as short escapes and everything else (controls, DEL, non-ASCII UTF-16 units) as
+  // lower-case \uXXXX. Anything else spells the same string differently and is refused.
+  bool string(std::u32string& out) {
+    ++i_;  // opening quote
+    while (i_ < s_.size()) {
+      const unsigned char c = static_cast<unsigned char>(s_[i_]);
+      if (c == '"') {
+        ++i_;
+        return true;
+      }
+      if (c < 0x20 || c > 0x7e) return false;
+      if (c != '\\') {
+        out += static_cast<char32_t>(c);
+        ++i_;
+        continue;
+      }
+      if (++i_ >= s_.size()) return false;
+      const char e = s_[i_++];
+      switch (e) {
+        case '"':
+          out += U'"';
+          break;
+        case '\\':
+          out += U'\\';
+          break;
+        case 'n':
+          out += U'\n';
+          break;
+        case 'r':
+          out += U'\r';
+          break;
+        case 't':
+          out += U'\t';
+          break;
+        case 'b':
+          out += U'\b';
+          break;
+        case 'f':
+          out += U'\f';
+          break;
+        case 'u': {
+          int u = hex4(s_, i_);
+          if (u < 0) return false;
+          i_ += 4;
+          if (u >= 0x20 && u <= 0x7e) return false;  // would have been written literally
+          if (u == 0x08 || u == 0x09 || u == 0x0a || u == 0x0c || u == 0x0d) return false;
+          char32_t cp = static_cast<char32_t>(u);
+          if (u >= 0xd800 && u <= 0xdbff && i_ + 1 < s_.size() && s_[i_] == '\\' &&
+              s_[i_ + 1] == 'u') {
+            const int lo = hex4(s_, i_ + 2);
+            if (lo >= 0xdc00 && lo <= 0xdfff) {  // a surrogate pair is one code point
+              cp = 0x10000 + ((static_cast<char32_t>(u) - 0xd800) << 10) +
+                   (static_cast<char32_t>(lo) - 0xdc00);
+              i_ += 6;
+            }
+          }
+          out += cp;
+          break;
+        }
+        default:
+          return false;  // includes the non-canonical "\/"
+      }
+    }
+    return false;
+  }
+  bool number() {
+    const std::size_t start = i_;
+    if (i_ < s_.size() && s_[i_] == '-') ++i_;
+    if (i_ >= s_.size() || s_[i_] < '0' || s_[i_] > '9') return false;
+    if (s_[i_] == '0') {
+      ++i_;
+    } else {
+      while (i_ < s_.size() && s_[i_] >= '0' && s_[i_] <= '9') ++i_;
+    }
+    bool is_float = false;
+    if (i_ < s_.size() && s_[i_] == '.') {
+      is_float = true;
+      ++i_;
+      if (i_ >= s_.size() || s_[i_] < '0' || s_[i_] > '9') return false;
+      while (i_ < s_.size() && s_[i_] >= '0' && s_[i_] <= '9') ++i_;
+    }
+    if (i_ < s_.size() && (s_[i_] == 'e' || s_[i_] == 'E')) {
+      is_float = true;
+      ++i_;
+      if (i_ < s_.size() && (s_[i_] == '+' || s_[i_] == '-')) ++i_;
+      if (i_ >= s_.size() || s_[i_] < '0' || s_[i_] > '9') return false;
+      while (i_ < s_.size() && s_[i_] >= '0' && s_[i_] <= '9') ++i_;
+    }
+    const std::string tok = s_.substr(start, i_ - start);
+    if (!is_float) return tok != "-0";  // json.loads gives int 0, which dumps as "0"
+    double d = 0.0;
+    return parse_canonical_double(tok, d);
+  }
+
+  const std::string& s_;
+  std::size_t i_ = 0;
+};
 
 }  // namespace
 
@@ -89,6 +318,9 @@ ArtifactResult parse_artifact(const std::string& bytes, const std::string& expec
   const auto eng = split(lines[2], ' ');
   if (eng.size() != 2 || eng[0] != "engine" || eng[1].empty()) return fail("bad engine line");
   if (lines[3].rfind("meta ", 0) != 0) return fail("bad meta line");
+  if (!CanonicalJson(lines[3].substr(5)).object()) {
+    return fail("meta is not a canonical JSON object");
+  }
   const auto pl = split(lines[4], ' ');
   unsigned long n = 0;
   if (pl.size() != 2 || pl[0] != "points" || !parse_uint(pl[1], n) || n < 1) {
@@ -108,9 +340,9 @@ ArtifactResult parse_artifact(const std::string& bytes, const std::string& expec
     if (f.size() != 3) return fail("point " + std::to_string(i) + ": expected 3 fields");
     ArtifactPoint p;
     unsigned long flags = 0;
-    if (!parse_double(f[0], p.north_m) || !parse_double(f[1], p.east_m) ||
+    if (!parse_canonical_double(f[0], p.north_m) || !parse_canonical_double(f[1], p.east_m) ||
         !parse_uint(f[2], flags)) {
-      return fail("point " + std::to_string(i) + ": unparseable number");
+      return fail("point " + std::to_string(i) + ": unparseable or non-canonical number");
     }
     if (flags > 3) return fail("point " + std::to_string(i) + ": flags out of range");
     p.flags = static_cast<std::uint8_t>(flags);
