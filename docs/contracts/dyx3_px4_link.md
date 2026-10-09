@@ -298,7 +298,12 @@ System 0 is excluded because MAVLink uses it for broadcast/unspecified targeting
 reserved for the companion's ordinary command identity; 1000+ has PX4 mode-executor semantics.
 The ordered-pair high-water mark is persisted at
 `/var/lib/dyx3/state/px4_link_spray_ack_next` before any corresponding VehicleCommand is
-published. New writes use `v2 <next-index>`; the old numeric component ledger 2..1000 is read as
+published. It is reserved in blocks of 64 pairs (PXL-004): when the in-memory block is used up, the
+mark is advanced by 64 with the same write + `fsync` + rename + directory `fsync`, and the next 64
+pairs are handed out from memory. One durable write per 64 transactions instead of two `fsync`s
+inside the 100 Hz writer tick per transaction. A restart (including after power loss) resumes at
+the persisted mark, so the unused rest of a block is skipped (at most 63 pairs per restart) and no
+pair is ever reused. A failed block write fails closed and latches until restart, as before. New writes use `v2 <next-index>`; the old numeric component ledger 2..1000 is read as
 the corresponding system-1 high-water mark, preserving every previously allocated pair. The
 first-install installer seeds the legacy-compatible value 2 only if the file does not exist.
 Process restart and upgrade preserve the ledger. Missing, corrupt, unwritable, or exhausted state
