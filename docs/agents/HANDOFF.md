@@ -1630,3 +1630,30 @@ next rover. This rover's existing RTK config rev 2 is not touched: an existing `
 
 **Not verified yet:** a fresh install on real hardware (the next rover, or after deleting `config.json` on a bench
 rover, which the owner must approve).
+
+## 2026-10-09 (12:40) — Claude — QGC over TELEM2 serial tried and reverted: Jetson UART defect on L4T 36.5
+
+Goal: match PX4's official baseboard layout (Ethernet = DDS only, `MAV_2_CONFIG 0`) by moving QGC/MAVLink to
+TELEM2 ↔ Jetson `/dev/ttyTHS1`.
+
+**What was done:**
+- On the FCU: `MAV_1_CONFIG 102`, `SER_TEL2_BAUD 921600`, `MAV_1_MODE 0`, then reboot.
+  PX4 ran MAVLink on `/dev/ttyS4` @ 921600 as intended.
+
+**Result: blocked by the Jetson side.**
+- `ttyTHS1` (3100000.serial) receives the right byte rate (~2.2 kB/s, matching the PX4 TX rate), but about 96 % of
+  the bytes read as `0x00`. No usable MAVLink frames; the same with `stty` + `cat`.
+- This matches a known NVIDIA issue: the DMA UART RX path is broken on JetPack 6.2.2 / L4T 36.5 (our release:
+  R36 REVISION 5.0). NVIDIA's suggestion (adding `iommus` to the `uarta` DT node, or forcing PIO) is untested and
+  changes the boot device tree.
+  See forums.developer.nvidia.com threads 363837 and 364699.
+- The Pixhawk USB is not wired to the Jetson on this baseboard, so it is not an alternative.
+
+**Reverted:** `MAV_1_CONFIG 0`, `SER_TEL2_BAUD` reset to default, FCU rebooted. After the reboot:
+`uxrce_dds_client` Running, connected; disarmed. Nothing to persist; the FCU is exactly as before.
+
+**Decision:** keep MAVLink + DDS together on Ethernet (`MAV_2_CONFIG 1000`). The task 2 stall test (30 restarts at
+1000, 30 at 0) decides whether that is safe. Revisit TELEM2 only after an NVIDIA UART fix (newer L4T, or a tested
+DT overlay).
+
+Side note: both FCU reboots today reconnected DDS without a stall (2 informal reboots; not the stress test).
