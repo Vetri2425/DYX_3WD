@@ -18,7 +18,9 @@ struct PathProjection {
   Point foot;
   /// + = position is to the RIGHT of the directed path (docs/contracts/frames.md).
   double signed_cross = 0.0;
-  bool valid = true;  ///< false only for an empty path
+  /// false for an empty path, or when every scanned segment is zero-length (no foot point exists;
+  /// callers must not use the other fields then).
+  bool valid = true;
 };
 
 /// Closest point on a polyline, as a segment projection.
@@ -26,7 +28,8 @@ struct PathProjection {
 /// Windowed: when `hint.valid`, only segments [hint-2, hint+4) are scanned (widened to a full
 /// scan when the window is < 3 wide); a full O(n) scan otherwise. The winning segment is stored
 /// back into `hint`. `signed_cross = copysign(distance, cross_z)`. A window containing only
-/// zero-length segments invalidates the hint.
+/// zero-length segments (e.g. a path of identical points) returns `valid = false` and invalidates
+/// the hint, so the next call full-scans.
 ///
 /// n == 1 returns seg 0, t 0, foot = path[0], signed_cross = +distance (sign undefined).
 /// KNOWN DEFECT carried from the ancestor (open C9): no monotonic-progress window, so on a

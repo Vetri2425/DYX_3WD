@@ -191,8 +191,24 @@ void test_project_onto_path_tiny() {
   const std::vector<Point> degenerate = {{1, 1}, {1, 1}, {1, 1}};
   ProjectionHint hd;
   auto d = project_onto_path({0, 0}, PathView(degenerate), hd);
-  (void)d;
+  CHECK(!d.valid);   // GEO-002: no non-degenerate segment => no projection
   CHECK(!hd.valid);  // nothing usable in the window: hint invalidated, next call full-scans
+  // Same with a warm hint, and with more points than the window.
+  const std::vector<Point> same_many(20, Point{2, 3});
+  ProjectionHint hw{5, true};
+  CHECK(!project_onto_path({0, 0}, PathView(same_many), hw).valid);
+  CHECK(!hw.valid);
+  // A degenerate window inside an otherwise normal path is also reported invalid.
+  std::vector<Point> mixed;
+  for (int i = 0; i < 10; ++i) mixed.push_back({static_cast<double>(i), 0.0});
+  for (int i = 0; i < 12; ++i) mixed.push_back({9.0, 0.0});
+  ProjectionHint hm{15, true};
+  CHECK(!project_onto_path({4, 1}, PathView(mixed), hm).valid);
+  CHECK(!hm.valid);
+  ProjectionHint hc;  // next call (cold) full-scans and recovers
+  auto ok = project_onto_path({4.5, 1}, PathView(mixed), hc);
+  CHECK(ok.valid && ok.seg_idx == 4 && hc.valid);
+  CHECK(project_onto_path({4.2, 0.3}, PathView(l_shape()), hc).valid);  // normal path unchanged
 }
 
 void test_path_length_and_cumulative() {
