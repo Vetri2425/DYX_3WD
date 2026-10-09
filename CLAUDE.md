@@ -63,7 +63,7 @@ calibration, no motion, no field RTK. Bench runbook: `~/Vetri/3WD_PROD/BENCH_202
 
 | | |
 |---|---|
-| This repo | `Vetri2425/DYX_3WD`, **`master` = `8af2595` is the deploy target for 2026-10-09** (release `rover-8af2595…`): production RTK, app-planned missions `/api/missions/plan`, parse-only DXF, optional hotspot, Socket.IO ping 5/5 s. Later commits are docs only |
+| This repo | `Vetri2425/DYX_3WD`, **`master` = `75f3930`; rover runs `0eafcd5`** (same code apart from the BRLTTY installer step, applied by hand). Earlier deploy target `8af2595` (release `rover-8af2595…`): production RTK, app-planned missions `/api/missions/plan`, parse-only DXF, optional hotspot, Socket.IO ping 5/5 s. Later commits are docs only |
 | Firmware | `Vetri2425/PX4-Autopilot-3WD-Prod` `dyx-3wd-production` = **`8279fa4be3`, the V1 final candidate** (stall fix, XRCE fd, RTCM writes, WENC timers). **Flashed: still `9ab2ad3162`**. NuttX from the fork `Vetri2425/NuttX` `dyx-3wd-production` @ `e462af8eb3`. Installer pin `27a7ac9284` = same `msg/` set |
 | Operator app | `yasarbaiiiii-blip/Three_Wheel_v2` (push rights for Vetri2425); **`main` = `dbb2ba1`**, reviewed. Signed APK: `3WD_PROD/App-Releases/dbb2ba1-agy-prod-transport/` (DYX release key) |
 | Rover hardware | Holybro Pixhawk Jetson Baseboard: Pixhawk 6X + Jetson Orin Nano 8 GB, UM982 on TELEM1, RoboClaw on GPS2, spray on FMU PWM OUT 1, 8S LiFePO4 24 Ah |
@@ -96,21 +96,22 @@ PX4 "rate RTCM injection 5.77 Hz", CRC OK (indoors: no fix, expected); upgrade f
   integrity = SHA-256 over GitHub TLS for now; signing + branch protection before customer deliveries.
 - Transport and command interface migrate together; gates are acceptance gates, not start gates.
 
-### Immediate next steps (bench 2026-10-09; details in HANDOFF 2026-10-09)
+### Immediate next steps (updated 2026-10-09 11:55)
 
-1. **Upgrade the stack** to `master`. The upgrade restarts the XRCE agent, so watch for the stall right there.
-2. **PX4 Ethernet TX stall (safety-relevant).**
-   - Reproduce on `9ab2ad3162` (at most 1 h), with captures at the stall and again 75 s later.
-   - Flash `8279fa4be3` and run the stress test: 60 agent restarts plus FCU and Jetson power cycles.
-   - Procedure: `3WD_PROD/OPUS or ChatGPT report for Firmware stall/2026-10-09_eth_tx_stall_procedure.md`.
-3. **RTK:** the 4 source × transport combinations, 10 min each. First collect the UM982 USB and LoRa by-id names,
-   bauds, and whether GGA is output on the USB COM.
-4. **Wi-Fi:** `nmcli device`, `iw reg get`, then the range test at 5/10/15/25 m on both bands.
-5. **Calibration** (gyro, simple level-only accel `PREFLIGHT_CALIBRATION` param5=4, level horizon; no
-   magnetometer), Acro wheels-up, then one mission on the ground, then the valve-close test.
-6. **After the bench:** review the app's `agy/prod-transport`, add release signing (Expo config plugin), merge into
-   app `main` and build a signed APK. Bring the five rover hand fixes listed in HANDOFF 2026-10-09 into the repo.
-   Full next-session brief: `~/Vetri/3WD_PROD/HANDOFF_PROMPT_2026-10-09.md`.
+**Owner order: one task at a time.**
+1. **DONE: RTK over USB.**
+   - UM982 USB = COM3, proven with `UNILOGLIST`; COM1 goes to PX4 TELEM1.
+   - The CH340 is driven by `ch341` (built directly, no DKMS; BRLTTY masked).
+   - NTRIP → USB_DIRECT is live: 0 failures, `/dyx3/rtcm` silent, receiver DGPS. Procedure: installer/README.
+   - Pending: an outdoor RTK FIXED test; a reboot-persistence check; LoRa (parked: needs the radio hardware);
+     automatic USB selection on fresh rovers.
+2. **NOW: PX4↔Jetson Ethernet with no stall, plus reliable QGC.**
+   - Fix the RT-priority `mission…` CPU spin (94 % of a core, load ~50) and the 90 s `dyx3-platform` stop.
+   - Then the 60-restart stress test on firmware `8279fa4be3`, plus 3 FCU and 3 Jetson power cycles.
+   - Then the mavlink-router server-mode re-test, then fix the template.
+   - Later: the RTK PX4_DDS transport does not recover after an agent restart (not in today's path).
+3. Calibration (gyro, level-only accel, level horizon), RoboClaw motion, Acro/manual/mission/offboard basics on PX4.
+4. Backend → frontend (app `main` @ `dbb2ba1`), then RPP.
 
 ### Known risks carried into this repo
 
