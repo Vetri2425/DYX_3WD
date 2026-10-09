@@ -84,6 +84,15 @@ Applied after every gate passed, to the forwarded command, never to STOP:
 | reverse speed | `max_reverse_speed_mps` | **0.10** | **DERIVED — human decision 2026-10-08 (review H6 / fix plan B1).** RPP's active brake is capped at 0.08 m/s and terminal creep is 0.10 m/s. Initial bench value; re-validate at GATE 1. |
 | absolute yaw rate | `max_yaw_rate_radps` | 0.45 | prototype `max_yaw_rate_body` default. Re-validate at GATE 4 |
 
+**The yaw-rate envelope is not a bound in `TRACK_HEADING`.** The 0.45 rad/s clamp is applied to
+`yaw_rate_setpoint`, which exists only in `TRACK_RATE`, `PIVOT` and `CREEP`. In `TRACK_HEADING` the
+rate is NaN by contract (the command carries a heading and PX4 closes the heading loop), so the guard
+has no rate to clamp and `max_yaw_rate_radps` does not limit it. The bound on the turning rate there is
+PX4's `RO_YAW_RATE_LIM` (30 deg/s, about 0.52 rad/s), which is slightly above the guard's 0.45 rad/s.
+This is accepted: the heading is limited by PX4, not by the guard, and a guard-side heading-rate limit
+would be a guard-invented correction (the guard never steers). If the 0.45 rad/s figure must hold in
+every mode, lower `RO_YAW_RATE_LIM` to about 25.8 deg/s (0.45 rad/s) in the PX4 parameters.
+
 **B2 / review H5 authority decision (human, 2026-10-08): RPP is the sole normal motion-profile
 owner.** Motion Guard does not ramp acceleration/deceleration, jerk-limit speed, or limit yaw-rate
 change. If an RPP speed/yaw-rate is inside the three hard envelopes above, the guard forwards it
