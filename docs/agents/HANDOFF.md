@@ -1657,3 +1657,38 @@ TELEM2 ↔ Jetson `/dev/ttyTHS1`.
 DT overlay).
 
 Side note: both FCU reboots today reconnected DDS without a stall (2 informal reboots; not the stress test).
+
+## 2026-10-09 (12:50) — Claude — Task 2: stall stress test PASSED (60/60); task 2 fixes deployed
+
+**Deployed:** release `5f41038` (Codex T2 + review fixes) at 12:26, then `cacc1ba` at 12:49 (this branch: task C
+and the spray/recorder poll fix). Firmware `8279fa4be3` unchanged. Health OK both times.
+
+**Stall stress, rover disarmed, 30× `systemctl restart dyx3-platform` per phase, 3 s between restarts:**
+
+| Phase | Checks after each restart | Result |
+|---|---|---|
+| `MAV_2_CONFIG 1000` (MAVLink + DDS on Ethernet) | FCU ping; QGC TCP 5760 heartbeat through the router; PX4 `uxrce_dds_client` Running, connected | **30/30 PASS**. Agent journal: 30 starts, 30 new "session established". Agent start → session 2.9–5.0 s or 12.0 s (client retry cadence). QGC heartbeat back in 1.0–2.3 s every time. |
+| `MAV_2_CONFIG 0` (DDS only), checked over the USB console | FCU ping; a NEW "session established" in the agent journal after the restart; PX4 Running, connected | **30/30 PASS**. New session 3.4–6.1 s after restart. |
+
+- Zero stalls. The FCU Ethernet TX path never stopped: ping and the session resumed every time.
+- One iteration showed `restart=15.8s`. The journal shows the stop took 7 ms; the delay was ssh latency from the
+  Mac, not the rover.
+- `MAV_2_CONFIG` restored to 1000 and the FCU rebooted. QGC on TCP 5760 and DDS were connected afterwards.
+- The test scripts live in the Claude scratchpad only; the procedure is the one in the bench runbook.
+- **Still to do for task 2:** 3 FCU power cycles and 3 Jetson reboots (these also prove ch341, RTK USB and
+  mavlink-router reboot persistence). Then persist the mavlink-router server-mode template: the hand-edited
+  `0.0.0.0:14550` Server endpoint is now proven by the 30 QGC reconnects.
+
+**Scheduling after the deploy (`ps -eLo cls,rtprio,psr`):**
+- Only `rpp_node` (11 threads) and `motion_guard` (12 threads) are FF 80 on CPU 4. Everything else is TS.
+- `dyx3-ros` has LimitRTPRIO 99, LimitMEMLOCK infinity, TimeoutStopSec 15 s. No "mlockall failed".
+- px4_link: status 9.5 Hz, `loop_overrun_count` 0. RTK USB_DIRECT INJECTING, 0 failures; px4_link
+  `rtcm_chunks_*` 0, so there is no DDS double path.
+
+**Poll fix (`cacc1ba`), on the rover:** spray_node 46 → 6 %, spray_watchdog 37 → 2.8 %, recorder 37 → 1.2 % of a
+core. The Jetson is 94 % idle, load average 1.8 (about 50 this morning).
+
+**Task C proven on hardware:** the 12:49 upgrade ran CH341 provisioning while the RTK service was restarting. It
+recorded `/etc/dyx3/usb-receiver.env` = by-path `platform-3610000.usb-usb-0:2.1:1.0-port0` @ 230400 ("NMEA/GGA
+verified passively"). That is identical to the hand-entered config. The existing RTK config rev 2 was left
+untouched, as designed.
