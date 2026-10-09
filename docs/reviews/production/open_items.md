@@ -45,9 +45,9 @@ Review baseline: DYX_3WD `master` `252778e` (firmware `8279fa4be3`).
 | 7 | `dyx3_spray` | 2026-10-09 | 2026-10-09 | 0 / 2 / 2 / 1 | open |
 | 8 | `dyx3_geometry` | 2026-10-09 | 2026-10-09 | 0 / 0 / 1 / 5 | open |
 | 9 | `dyx3_bringup` + systemd (RT, CPU, restart) | 2026-10-09 | 2026-10-09 | 0 / 0 / 3 / 2 | open |
-| 10 | `dyx3_system_gateway` | 2026-10-09 | 2026-10-09 | 0 / 2 / 1 / 5 | open |
+| 10 | `dyx3_system_gateway` | 2026-10-09 (+CR) | 2026-10-09 | 0 / 2 / 2 / 8 | open |
 | 11 | `dyx3_recorder` | 2026-10-09 (×2) | 2026-10-09 | 0 / 5 / 10 / 9 | open |
-| 12 | backend | 2026-10-09 | 2026-10-09 | 0 / 1 / 3 / 6 | open |
+| 12 | backend | 2026-10-09 (+CR) | 2026-10-09 | 0 / 3 / 4 / 6 | open |
 | 13 | installer / deployment | 2026-10-09 | 2026-10-09 | 0 / 5 / 13 / 7 | open |
 | 14 | tablet app (`Three_Wheel_v2` `App-Polish`) | — | — | — | deferred (not this session) |
 | 15 | PX4 firmware rover path (`dyx-3wd-production`) | — | — | — | deferred (not this session) |
@@ -885,8 +885,8 @@ Confirmed good:
 | ID | Severity | Status | Area | Where | Item |
 |---|---|---|---|---|---|
 | BE-001 | **HIGH** (~~CRITICAL~~) | ACCEPTED ↓ (owner decision) | Link | `realtime/relay.py:33-37`; `hub.py:38-53` | One global heartbeat timestamp: **any** operator tablet keeps the operator link alive for a mission started by another |
-| BE-002 | MEDIUM (~~HIGH~~) | ACCEPTED ↓ | Input | `routes.py:211-224`; `parse_routes.py:18-25` | Multipart DXF: the 20 MiB check happens after Starlette has spooled the whole upload |
-| BE-003 | MEDIUM (~~HIGH~~) | ACCEPTED ↓ | Input | `routes.py:312-314,364-379` | RTK JSON write routes take unbounded `dict` bodies |
+| BE-002 | **HIGH** | ACCEPTED (raised by CR-3: parsed **before** auth, merged into XR-BE-001) | Input | `routes.py:211-224`; `parse_routes.py:18-25` | Multipart DXF: the 20 MiB check happens after Starlette has spooled the whole upload |
+| BE-003 | **HIGH** | ACCEPTED (raised by CR-3: parsed **before** auth, merged into XR-BE-001) | Input | `routes.py:312-314,364-379` | RTK JSON write routes take unbounded `dict` bodies |
 | BE-004 | MEDIUM (~~HIGH~~) | ACCEPTED ↓ | Input | `mission/service.py:74-109`; `routes.py:224` | DXF planning runs in a worker thread with no runtime or output budget; CPU-bound Python shares the GIL with the event loop |
 | BE-005 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Robustness | `routes.py:238-267` | Artifact read, hash and decode on the event loop for `/missions/{sha}`, `/path`, `/start` |
 | BE-006 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Link | `gateway/client.py:170-179` | `drain()` sits outside the 3 s request timeout |
@@ -1034,6 +1034,51 @@ Confirmed good:
    release); a health check after the revert.
 5. **INS-007:** `ROS_DOMAIN_ID=42` in the template (decided), and refuse early with a list of missing per-rover
    inputs.
+
+---
+
+## Cross-review (independent Opus agents, 2026-10-09)
+
+Each hot-path part was re-read in full by an independent agent. The agent checked every recorded finding and
+looked for anything missed. Every new item below was verified by me against the code before being recorded.
+
+### CR-3 — `dyx3_system_gateway` + backend relay
+
+Verdicts on recorded findings:
+- **BE-002 and BE-003 are raised to HIGH, CONFIRMED.**
+  - FastAPI reads and parses the request body (`fastapi/routing.py:422-425`) **before** `solve_dependencies`
+    (`:473`), so the bearer token is checked only **after** the whole body is buffered.
+  - Every multipart and JSON-body route is reachable **without a token**: `/estop`, `/vehicle/*`,
+    `/spray/manual`, the RTK writes, `/missions`, `/path/parse-dxf`.
+  - The earlier assumption that "auth comes first" was wrong.
+- **GW-002 stays HIGH, but the trigger is narrower.** A peer that closes with unread data gives
+  ECONNRESET → POLLERR, which is caught at `ipc_server.cpp:165` before the write.
+  - SIGPIPE needs the peer's receive queue empty AND the gateway's `out` buffer non-empty.
+  - Deterministic trigger: a line rejected on the IPC thread (`gateway_node.cpp:268-275`, also "busy" `:286`)
+    followed by an immediate close.
+  - Otherwise a microsecond window after each telemetry append.
+  - The fix is unchanged.
+- **GW-001: two more effects.** `alive` counts *any* client, and the link state is not reset when the backend
+  disconnects. With a second client connected, a backend crash becomes about 2.1 s to STOP instead of about
+  0.12 s.
+- **BE-001:** the agent rates it CRITICAL by the rubric. The recorded HIGH stands **only if the owner accepts
+  option (b)** ("any operator tablet supervises"); otherwise CRITICAL.
+- **GW-004:** 3.63 s is the no-lag case; with backend event-loop lag it reaches about 5.6 s (XR-BE-002).
+- Confirmed: a hung but connected backend **cannot** keep `alive` (heartbeats come only from the relay task).
+  A backend crash with the backend as the only client → STOP in about 0.12 s.
+- All other GW and BE findings: agreed.
+
+New findings:
+| ID | Severity | Status | Where | Item |
+|---|---|---|---|---|
+| XR-BE-001 | **HIGH** | ACCEPTED (verified) | `routes.py:143,170-181,313,365,372`; FastAPI `routing.py:422-473` | **Pre-auth unbounded body parsing on every body route.** An unauthenticated LAN host can POST a GB to `/api/estop`: memory growth, OOM risk, an event-loop stall → false STOP and delayed real E-stops. Fix: pure-ASGI middleware that checks the bearer token and the size cap **before** reading the body (merges BE-002 and BE-003) |
+| XR-BE-002 | MEDIUM | DOUBT (test) | `relay.py:36-37`; `hub.py:52` | A heartbeat is stamped when it is processed, not when it was received. After a loop stall, queued heartbeats replay as fresh and extend the link by up to the stall time |
+| XR-BE-003 | MEDIUM | DOUBT (test) | `relay.py:60-63,71`; `routes.py:125-126` | The relay task catches only `GatewayError`. Any other exception ends it silently (a permanent STOP, fail-safe) while `/health` still shows `tablet_alive` |
+| XR-BE-004 | MEDIUM | DOUBT (rover) | `dyx3-backend.service` (`ProtectSystem=strict`, no `PrivateTmp` / `TMPDIR`) | Uploads above 1 MiB spool to `/tmp`, which may be read-only under strict, so DXF upload would fail in production. Fix: `PrivateTmp=yes` or `TMPDIR=/var/lib/dyx3/tmp` |
+| XR-GW-001 | MEDIUM | ACCEPTED | `gateway_node.cpp:244`; `hub.py`, `relay.py` | No audit log of E-stop assert/clear (who), link alive transitions, client drops or service timeouts |
+| XR-GW-002 | LOW | ACCEPTED | `client.py:122,139` | At `max_clients`, the reconnect resets its backoff on connect, so accept-then-close flaps at 5 Hz |
+| XR-GW-003 | LOW | ACCEPTED | `ipc_server.cpp:32,78` | Unconditional `unlink` of the socket path: a second gateway (a manual launch) steals or deletes the live socket |
+| XR-GW-004 | LOW | ACCEPTED | `gateway_node_test.cpp:32,238-242`; `test_api.py:24-35` | Tests pass for the wrong reason: `estop_answers` unused (the timeout path is untested); the auth tests send no body, so they cannot catch XR-BE-001 |
 
 ---
 
