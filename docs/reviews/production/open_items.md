@@ -782,8 +782,8 @@ Confirmed good:
 
 ## 11. `dyx3_recorder`
 
-Reviewer verdict: REQUEST CHANGES (1 CRITICAL, 7 HIGH, 9 MEDIUM). After verification: **0 CRITICAL, 5 HIGH,
-6 MEDIUM, 6 LOW**.
+Reviewer verdict: REQUEST CHANGES (1 CRITICAL, 7 HIGH, 9 MEDIUM). After verification + the Opus cross-check: **0 CRITICAL, 5 HIGH,
+10 MEDIUM, 9 LOW**.
 - The recorder never affects motion directly. Its HIGHs are about **evidence**: runs that cannot prove what ran,
   with which tuning, from the first second.
 - **PC-8 verdict: PASS.** Name/value pairs come from each returned `rclcpp::Parameter` (`recorder_node.cpp:61-64`),
