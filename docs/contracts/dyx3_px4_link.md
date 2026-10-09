@@ -116,9 +116,18 @@ DERIVED — NOT FROM V1 SPEC: this interpretation of the F1.7 obligation. Flagge
 `command_max_age_s` is DERIVED from the prototype's `input_max_age_s` 0.2 (re-validate at GATE 4):
 the guard publishes its command at the RPP rate (50 Hz), so 0.2 s is ten missed ticks.
 
-**Not covered here, on purpose:** if this *process* dies, PX4 keeps the last setpoint for up to
-`COM_OF_LOSS_T` (upstream #27514, ~900 ms measured). That is firmware territory (F5 / A1.1) and
-the reason `COM_OF_LOSS_T` needs a human value. This package's obligation is the in-process part.
+**Orderly shutdown (X-010).** rclcpp's signal handler is disabled: SIGINT/SIGTERM only set a flag,
+the executor loop (`spin_once`, 5 ms) exits, and, while the context is still up and without
+spinning the writer timer again, the explicit STOP set is published at 100 Hz for 0.3 s
+(`Px4LinkNode::publish_shutdown_stop`). Only where the heartbeat was running on the last tick; no
+heartbeat is ever started at shutdown. Then the process exits and PX4's offboard-loss handling
+runs with STOP as the last setpoint. SIGPIPE is ignored.
+
+**Not covered here, on purpose:** if this *process* dies (SIGKILL, crash, hang) or the agent,
+Ethernet or Jetson goes, PX4 keeps the last setpoint for up to `COM_OF_LOSS_T` (upstream #27514,
+~900 ms measured). That is firmware territory (F5 / A1.1) and the reason `COM_OF_LOSS_T` needs a
+human value; the stop bound is an acceptance measurement (PXL-001). This package's obligation is
+the in-process part.
 
 ## 5. Per-topic staleness (upstream #27388)
 

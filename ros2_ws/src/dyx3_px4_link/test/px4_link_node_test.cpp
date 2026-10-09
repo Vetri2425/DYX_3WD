@@ -650,6 +650,43 @@ TEST(Px4LinkNode, DisableOffboardStreamsStopBeforeWithdrawingTheHeartbeat) {
   EXPECT_FALSE(r.status.offboard_heartbeat_active);
 }
 
+// X-010: the shutdown path publishes the explicit STOP set while the heartbeat is live, and
+// nothing when it was not running.
+TEST(Px4LinkNode, ShutdownStopPublishesStopOnlyWhereTheHeartbeatWasLive) {
+  Rig r;
+  r.bring_up();
+  r.run(0.1);
+  r.clear();
+  EXPECT_FALSE(r.link->publish_shutdown_stop());  // offboard never enabled: no stream started
+  r.pump(50);
+  EXPECT_TRUE(r.ocm.empty());
+
+  r.nav_state = 14;
+  bool acc = false;
+  uint8_t rs = 0;
+  ASSERT_TRUE(r.call_offboard(true, &acc, &rs));
+  ASSERT_TRUE(acc);
+  for (int i = 0; i < 5; ++i) {
+    r.guard(2, 0.5F, NaN, 0.1F);
+    r.tick();
+  }
+  ASSERT_FLOAT_EQ(r.speed.back().speed_body_x, 0.5F);
+  r.clear();
+  r.guard(2, 0.5F, NaN, 0.1F);  // a fresh motion command is pending
+  r.pump(20);
+  for (size_t i = 1; i <= 30; ++i) {  // the recording readers keep depth 1: drain each one
+    ASSERT_TRUE(r.link->publish_shutdown_stop());
+    ASSERT_TRUE(r.pump_until([&] { return r.speed.size() >= i && r.ocm.size() >= i; })) << i;
+  }
+  r.pump(30);
+  EXPECT_EQ(r.speed.size(), 30U);  // the writer tick did not run in between
+  for (const auto& sp : r.speed) EXPECT_EQ(sp.speed_body_x, 0.0F);
+  EXPECT_EQ(r.rate.back().yaw_rate_setpoint, 0.0F);
+  EXPECT_TRUE(std::isnan(r.att_sp.back().yaw_setpoint));
+  EXPECT_TRUE(all_nan3(r.traj.back().velocity));
+  EXPECT_TRUE(r.ocm.back().velocity);
+}
+
 TEST(Px4LinkNode, SilentTopicWhileSessionUpForcesZero) {  // upstream #27388
   Rig r;
   r.bring_up();

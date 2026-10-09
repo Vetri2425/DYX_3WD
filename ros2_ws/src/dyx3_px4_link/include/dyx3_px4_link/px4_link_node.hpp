@@ -76,6 +76,11 @@ public:
   // One publish cycle at link-clock time `now_s`. Public for deterministic tests.
   void step(double now_s);
 
+  // Process shutdown (X-010): cancels the writer timer and publishes one explicit STOP set if the
+  // heartbeat was running on the last tick. Returns false (nothing sent) otherwise. main() calls it
+  // at 100 Hz for a bounded time before exiting.
+  bool publish_shutdown_stop();
+
   // Read-only views for tests/diagnostics.
   const Handshake& handshake() const { return *handshake_; }
   const CommandGate& gate() const { return *gate_; }

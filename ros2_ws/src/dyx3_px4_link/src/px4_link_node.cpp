@@ -799,6 +799,14 @@ void Px4LinkNode::step(double now_s) {
   publish_status(now_s, last_rep_, last_gate_);
 }
 
+bool Px4LinkNode::publish_shutdown_stop() {
+  if (timer_) timer_->cancel();
+  // Only where the stream was live: never start a heartbeat, and never write an unproven format.
+  if (!last_heartbeat_published_ || handshake_->state() != HandshakeState::Ok) return false;
+  publish_setpoint_set(stop_setpoint(), stamp_us());
+  return true;
+}
+
 void Px4LinkNode::service_pending(double now_s, bool link_healthy, const OffboardStep& ofb) {
   for (auto it = pending_.begin(); it != pending_.end();) {
     bool done = false;
