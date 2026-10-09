@@ -2085,3 +2085,51 @@ Installer 148/0 (new: site LAN address + gateway, FCU-subnet refusal, hotspot/LA
 - `config/vehicle/roboclaw/README.md` documents the current wiring and the rule.
 - Log download over the router: request as a GCS component (source_component 190). Component 0 gets no LOG_ENTRY
   reply through mavlink-router.
+
+## 2026-10-09 (18:40) — Claude — END OF DAY: rover 01 state and the single open list (start here next session)
+
+**Rover 01 (all of this is in the repo or the rover-local /etc/dyx3 files the repo documents):**
+
+| Area | State |
+|---|---|
+| Firmware | `8279fa4be3` (V1 final). Ethernet stall fixed: 60/60 restarts + 3 power cycles |
+| Stack | release `bd49374`, health OK, 7/7 services. Upgrade **only detached** (`systemd-run`, see 18:25) |
+| Network | router "DYX_4WD_PROTOTYPE" `192.168.3.1` → Jetson `192.168.3.150` (`network.env`); hotspot `DYX_3WD` `192.168.2.100` ch 149 (`hotspot.env`); FCU `10.41.10.1`; no 4G dongle; office cable removed |
+| Access | `ssh -o ProxyCommand=none -o HostKeyAlias=dyx-3wd flash@192.168.3.150`; QGC TCP `192.168.3.150:5760` |
+| Discovery | UDP beacon 5003 on both networks; `rover_id dyx3-916baa908b`, name `dyx-3wd` |
+| Drive | RoboClaw M1 = LEFT, M2 = RIGHT → `RBCLW_FUNC1 102`, `RBCLW_FUNC2 101`; `RBCLW_QPPS_MAX 151200`; RoboClaw serial timeout 0.5 s, battery 21.4–28.4 V (`config/vehicle/roboclaw/`) |
+| RC | `RC3_TRIM 1560`, `RC1_REV −1`, mapping throttle 3 / roll 1 / pitch 2 / yaw 4 (`config/px4/3wd_rover01_rc_calibration.params`) |
+| RTK | USB_DIRECT to UM982 (COM3, CH340 port 2.1). NTRIP base **offline** (mountpoint not in the source table). LoRa radio found on CH340 port 2.3 @115200 with valid RTCM; unplugged and parked |
+| Auth | operator token `tablet-1`; delete `/home/flash/tablet-1.token` once both tablets have it |
+
+**App (`Three_Wheel_v2`):**
+- `App-Polish` = `4891a3d`: token remembered per rover_id, beacon discovery, auto-connect, no hardcoded IPs, the
+  Mapbox build guard.
+- Signed APK in `App-Releases/4891a3d-app-polish-beacon-autoconnect/`. Verified on tablet `R5GYA14C7CY`: rover
+  found in about 2 s, auto-connect, map OK.
+- The owner's local `Three_Wheel_v2` clone has an **uncommitted** `plugins/withAndroidMapboxToken.js` plus an
+  `app.json` entry. It writes the native `mapbox_access_token` resource, which is better than my guard. Pending
+  decision: adopt it, drop `withRequiredMapboxToken`, rebuild.
+
+**Open list, in suggested order:**
+1. Owner hands-on app test: Disconnect/Connect, relaunch, hotspot path. Update tablet `R5GL1016QFB`.
+2. Mapbox plugin decision (above), then rebuild, verify, push App-Polish.
+3. App cleanup:
+   - prototype routes `/api/healthz`, `/api/telemetry/latest`, `/api/mission/loaded-path` (404);
+   - mission start/stop port guessing;
+   - reconcile `App-Polish` and `main` into one authoritative branch.
+4. Production-readiness (16:20 list), remaining:
+   - #4 fail-to-zero when `dyx3-ros` dies (#27514);
+   - #5 RC loss, link loss and app E-stop stops (wheels-up);
+   - #6 RoboClaw fault visibility (needs a firmware decision);
+   - #8–10 outdoors: UM982 dual-antenna heading, RTK FIXED, Mission-mode turn (#27497);
+   - #12 long soak;
+   - #14 build `sch_fq_codel` for tegra, then drop the hotspot cap;
+   - #17 scripted PX4 parameter apply/verify;
+   - #19 fresh-install end-to-end;
+   - #20 persistence debt;
+   - check that a full pack stays below 28.4 V.
+5. Installer: select the UM982 by port 2.1 and allow a LoRa CH340 next to it (test stub with a per-device
+   ID_PATH). Then **LoRa correction verification** (owner: after the app is solid).
+6. Base station: bring the NTRIP mountpoint back online (external).
+7. Future: QR pairing for tablet tokens; nicer `DYX3_ROVER_NAME`.
