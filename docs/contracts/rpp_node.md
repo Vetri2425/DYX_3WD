@@ -43,7 +43,10 @@
 ## 3. Parameters
 
 All 117 RPP parameters are ROS parameters with their `ParamSet` class: a change is validated (range, enumerations, cross-parameter relations) and applied
-atomically in the set-callback, recorded in the journal, and **refused** (never deferred) when it is RESTART at runtime or IDLE_ONLY while a mission runs.
+atomically in the set-callback, recorded in the journal, and **refused** (never deferred) when it is RESTART at runtime or IDLE_ONLY while a mission is loaded or active
+(`MissionState` LOADING, READY, RUNNING or PAUSED, or a path loaded or failing to load). RPP-006: the core reads many IDLE_ONLY values every tick
+(`require_rtk_fix`, `pose_max_age_s`, `rtk_*`, `ekf_*`, ...), so a change accepted while PAUSED would switch a safety gate on resume; the
+conditioning subset would silently wait for the next load. Change them with no mission (IDLE, or after COMPLETED / ABORTED / ERROR).
 Startup values (launch file) go through `init_many`: any class, same validation, fail loud (the constructor throws) — never a silent fallback to a default.
 Node-level: `tick_hz` (50, in [20, 100]; DERIVED from the prototype's `CONTROL_HZ`), `artifact_dir` (`/var/lib/dyx3/missions`).
 
@@ -56,7 +59,7 @@ shared with motion_guard, comes from the launch prefix in `dyx3_bringup/launch/c
 
 ## 5. Proof
 
-`rpp_node_test` (in-process, private DDS domain, injected monotonic clock, a kinematic stand-in vehicle): 20 cases — startup validation; load by id and
+`rpp_node_test` (in-process, private DDS domain, injected monotonic clock, a kinematic stand-in vehicle): 21 cases — startup validation; load by id and
 acknowledgement; a missing artifact; a **whole mission driven to COMPLETE** (the line is marked where the planner says, stops on the final point within 6 cm);
 stale pose; RTK drop with the reason; pause and resume from rest; entry pivot; parameter classes; the unported feature; every emitted mode contract-conforming; a final approach 3 cm to the side of the endpoint completes within 10 s
 with at most 2 speed reversals (XR-RPP-001); on an L-shaped mission the first heading after the corner pivot is the exit leg (XR-RPP-007).

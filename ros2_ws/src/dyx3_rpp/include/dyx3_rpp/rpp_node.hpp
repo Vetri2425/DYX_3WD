@@ -59,6 +59,10 @@ private:
 
   // mission
   bool mission_running_{false};
+  // RPP-006: a mission is loaded or active (MissionState LOADING, READY, RUNNING or PAUSED).
+  // IDLE_ONLY parameters are refused while true: several are read every tick (require_rtk_fix,
+  // pose_max_age_s, ...) and a change while PAUSED would apply on resume.
+  bool mission_active_{false};
   bool wants_mission_{false};
   bool loaded_{false};
   bool load_failed_{false};

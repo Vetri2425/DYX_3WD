@@ -113,7 +113,8 @@ RppNode::RppNode(const rclcpp::NodeOptions& options, ClockFn clock, bool create_
       items.push_back(std::move(it));
     }
     SetContext ctx;
-    ctx.mission_running = mission_running_;
+    // RPP-006: IDLE_ONLY is refused for the whole life of a mission, not only while RUNNING.
+    ctx.mission_running = mission_active_ || loaded_ || load_failed_;
     ctx.source = "ros";
     const SetResult r =
         params_.set_many(items, ctx);  // atomic; class rules; recorded in the journal
@@ -184,10 +185,10 @@ ConditionParams RppNode::condition_params() const {
 void RppNode::on_mission_state(const MissionState& m) {
   const bool was_running = mission_running_;
   mission_running_ = m.state == MissionState::STATE_RUNNING;
-  const bool active =
-      (m.state == MissionState::STATE_LOADING || m.state == MissionState::STATE_READY ||
-       m.state == MissionState::STATE_RUNNING || m.state == MissionState::STATE_PAUSED) &&
-      !m.path_artifact_sha256.empty();
+  mission_active_ = m.state == MissionState::STATE_LOADING ||
+                    m.state == MissionState::STATE_READY ||
+                    m.state == MissionState::STATE_RUNNING || m.state == MissionState::STATE_PAUSED;
+  const bool active = mission_active_ && !m.path_artifact_sha256.empty();
   wants_mission_ = active;
   pending_mission_id_ = m.mission_id;
   pending_sha_ = m.path_artifact_sha256;

@@ -741,3 +741,29 @@ TEST(RppNode, TheStatusCrossTrackIsRightPositiveInThePreciseStop) {
   }
   EXPECT_TRUE(seen) << "the precise stop never engaged";
 }
+
+// RPP-006: IDLE_ONLY parameters are refused for the whole life of a mission (LOADING, READY,
+// RUNNING, PAUSED), not only while RUNNING: a change while PAUSED would apply on resume and could
+// switch off the RTK or stale-pose gate mid-mission. LIVE parameters stay changeable.
+TEST(RppNode, IdleOnlyParametersAreRefusedWhileAMissionIsLoadedOrActive) {
+  Rig r;
+  const auto refused = [&](const char* when) {
+    EXPECT_FALSE(r.rpp->set_parameter(rclcpp::Parameter("require_rtk_fix", false)).successful)
+        << when;
+    EXPECT_FALSE(r.rpp->set_parameter(rclcpp::Parameter("pose_max_age_s", 1.5)).successful) << when;
+    EXPECT_TRUE(r.rpp->params().flag(P::require_rtk_fix)) << when;
+    EXPECT_DOUBLE_EQ(r.rpp->params().num(P::pose_max_age_s), 0.5) << when;
+    EXPECT_TRUE(r.rpp->set_parameter(rclcpp::Parameter("mission_speed", 0.6)).successful) << when;
+  };
+  for (const uint8_t st : {MissionState::STATE_LOADING, MissionState::STATE_READY,
+                           MissionState::STATE_RUNNING, MissionState::STATE_PAUSED}) {
+    r.mission_state = st;
+    r.run(0.1);
+    refused(("mission state " + std::to_string(st)).c_str());
+  }
+  // no mission any more: accepted
+  r.mission_state = MissionState::STATE_COMPLETED;
+  r.run(0.1);
+  EXPECT_TRUE(r.rpp->set_parameter(rclcpp::Parameter("pose_max_age_s", 0.4)).successful);
+  EXPECT_DOUBLE_EQ(r.rpp->params().num(P::pose_max_age_s), 0.4);
+}

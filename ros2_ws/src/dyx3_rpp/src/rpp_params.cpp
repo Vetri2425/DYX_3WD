@@ -174,7 +174,7 @@ SetResult ParamSet::set_many(const std::vector<Item>& items, const SetContext& c
       return fail;
     }
     if (d.cls == ParamClass::IdleOnly && ctx.mission_running) {
-      fail.reason = it.name + " is IDLE_ONLY: refused while a mission is running";
+      fail.reason = it.name + " is IDLE_ONLY: refused while a mission is loaded or running";
       return fail;
     }
     const auto v = validate(d, it.num, it.str);
