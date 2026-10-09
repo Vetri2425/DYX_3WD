@@ -452,6 +452,54 @@ TEST(MotionGuardNode, EveryReasonChangeIsOnTheStatusTopicWhateverTheLogRate) {
   EXPECT_EQ(to_ok, kFlaps);
 }
 
+// XR-GPX-009: E-stop immediacy. Nothing but the service call happens: no tick, no world traffic,
+// no explicit step. The STOP must already be on the command topic one pump after the reply.
+TEST(MotionGuardNode, EmergencyStopOutputsStopWithinOnePumpOfTheReply) {
+  Rig r;
+  r.run(0.3);
+  ASSERT_EQ(r.last_out.mode, MotionSetpoint::MODE_TRACK_RATE);
+  ASSERT_GT(r.last_out.speed_body_x, 0.0F);
+  const size_t n_before = r.outs.size();
+  ASSERT_TRUE(r.call_estop(true, "physical"));
+  r.pump();
+  ASSERT_GT(r.outs.size(), n_before) << "the service callback must publish at once";
+  EXPECT_EQ(r.last_out.mode, MotionSetpoint::MODE_STOP);
+  EXPECT_EQ(r.last_out.speed_body_x, 0.0F);
+  EXPECT_EQ(r.last_status.reason_code, dyx3_interfaces::msg::MotionSetpointStatus::REASON_ESTOP);
+}
+
+// XR-GPX-009: the 0.5 s freshness boundary of every status input, on the injected clock. Only the
+// source under test goes silent; RPP and the other inputs keep arriving.
+TEST(MotionGuardNode, StatusInputFreshnessBoundaryIsHalfASecond) {
+  struct Case {
+    const char* name;
+    bool Rig::* flag;
+    uint8_t reason;
+  };
+  using S = dyx3_interfaces::msg::MotionSetpointStatus;
+  const Case cases[] = {{"mission", &Rig::mission_running, S::REASON_MISSION_GATE},
+                        {"vehicle", &Rig::veh_ok, S::REASON_ARMING_GATE},
+                        {"rtk", &Rig::rtk_ok, S::REASON_RTK_GATE},
+                        {"operator", &Rig::op_ok, S::REASON_OPERATOR_LINK_LOST},
+                        {"px4 link", &Rig::link_ok, S::REASON_PX4_LINK_UNHEALTHY},
+                        {"estimator", &Rig::est_ok, S::REASON_HEADING_UNHEALTHY}};
+  for (const auto& c : cases) {
+    Rig r;
+    r.run(0.3);
+    ASSERT_EQ(r.last_out.mode, MotionSetpoint::MODE_TRACK_RATE) << c.name;
+    r.*(c.flag) = false;
+    const double last_heard = r.now;  // the last tick that published this source
+    r.now = last_heard + 0.46;
+    r.tick();  // input age 0.48 s: still inside the limit
+    EXPECT_EQ(r.last_out.mode, MotionSetpoint::MODE_TRACK_RATE) << c.name << " at 0.48 s";
+    EXPECT_FLOAT_EQ(r.last_out.speed_body_x, 0.3F) << c.name << " at 0.48 s";
+    r.tick(0.04);  // input age 0.52 s: past the limit
+    EXPECT_EQ(r.last_out.mode, MotionSetpoint::MODE_STOP) << c.name << " at 0.52 s";
+    EXPECT_EQ(r.last_out.speed_body_x, 0.0F) << c.name << " at 0.52 s";
+    EXPECT_EQ(r.last_status.reason_code, c.reason) << c.name << " at 0.52 s";
+  }
+}
+
 TEST(MotionGuardNode, RestartedPublisherIsStoppedUntilItRebuildsASession) {
   Rig r;
   r.run(0.3);
