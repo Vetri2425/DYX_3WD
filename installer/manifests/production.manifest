@@ -26,12 +26,17 @@ dyx3-rtk
 dyx3-backend
 dyx3-recorder
 dyx3-spray-watchdog
+dyx3-usb-serial-check
 
-# Implemented in code: all of the above. Only services VERIFIED ON A ROVER belong here: an enabled service that fails health makes
+# Implemented in code: all of the above. Only rover services verified on hardware plus the
+# idempotent host USB provisioning/verification unit belong in enabled_services. The USB unit
+# runs during activation of the new release, including upgrades initiated by an older installer.
+# An enabled service that fails health makes
 # `dyx3-upgrade` revert. All six verified running on the 3WD rover 2026-10-08 (release 42c065b + the 4bb213a launcher fix):
 # platform (agent session, 68 /fmu topics), ros (graph + gateway socket), rtk (NTRIP login, reconnect), spray-watchdog,
 # recorder (22 topics), backend (/api/ping 200; bench binds 0.0.0.0 via /etc/dyx3/backend.env until the hotspot exists).
 [enabled_services]
+dyx3-usb-serial-check
 dyx3-platform
 dyx3-ros
 dyx3-rtk

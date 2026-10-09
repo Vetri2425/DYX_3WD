@@ -78,6 +78,7 @@ Blocks columns: **DRY** = basic dry-run (no paint) testing, **PAINT** = paint-en
 | — | | **OPEN – BENCH** | GATE 1: pivot, brake, reverse, rate tracking against real PX4; M8 pivot-gain sweep (30/60/90/135/180°); upstream #27514 stale-setpoint ~900 ms, #27497 differential in Mission Mode, #27388 `uxrce_dds_client` silent stop | before field | before paint | blocks |
 | M8 | Medium | **OPEN – BENCH** | pivot gain 1.5 (bench only) | — | — | blocks |
 | — | | **OPEN – JETSON** | timing and jitter, systemd, installer rehearsal, udev/network | — | — | blocks |
+| — | | **OPEN – JETSON USB** | BRLTTY's generic `1a86:7523` rule claims the CH340 bridge through `usbfs`; `5.15.185-tegra` config has `CONFIG_USB_SERIAL_CH341` unset. Repository-owned, version-pinned DKMS/ID_PATH remediation is prepared but not deployed or hardware-verified. | Complete owner-approved master/CI/release gate; verify module bind, tty path, reboot and repeat install on rover | — | — | blocks |
 
 ## 6. Field calibration and accuracy validation
 

@@ -9,7 +9,7 @@ INSTALLER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export INSTALLER_DIR
 # shellcheck source=lib/common.sh
 . "${INSTALLER_DIR}/lib/common.sh"
-for lib in os_check dependencies ros_install permissions network_install systemd_install health_check release; do
+for lib in os_check dependencies ros_install permissions network_install systemd_install health_check usb_serial release; do
   # shellcheck disable=SC1090
   . "${INSTALLER_DIR}/lib/${lib}.sh"
 done

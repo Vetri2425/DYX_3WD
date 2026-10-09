@@ -1,0 +1,10 @@
+Package: ch341-dyx3 1.0.0
+Source: NVIDIA Jetson Linux (L4T) R36.5.0 public kernel sources
+URL: https://developer.nvidia.com/downloads/embedded/l4t/r36_release_v5.0/sources/public_sources.tbz2
+Nested source: Linux_for_Tegra/source/kernel_src.tbz2
+Kernel source path: kernel/kernel-jammy-src/drivers/usb/serial/ch341.c
+Source SHA-256: f66d070eab6235b8a5c7a06a283d2feecb8fa3d81bc1323c847c2d2cbf7bd410
+Outer archive SHA-256: d0acb2187786d6ba9f012dd72ee7005309903944c4e8f3d649d7dabd3aebba42
+Kernel source archive SHA-256: 422bad33e1bf5cfea0b9f7ada5dc4ec732621b2d15b68c8f2e0da51b3b7dcf69
+Validated build target: 5.15.185-tegra (L4T 36.5.0, aarch64)
+The source is GPL-2.0; retain its SPDX identifier and copyright notices.

@@ -64,6 +64,65 @@ after watching memory on the rover. Builds run under `nice -n 10`.
 apt, the ROS apt repo, the pinned XRCE agent / mavlink-router builds, NetworkManager, systemd, udev,
 real DDS to the FCU, and the supervisor under systemd. See HANDOFF "LOCAL ACTIONS NEEDED".
 
+## CH340 / CH341 USB serial provisioning
+
+The production installer provisions the QinHeng `1a86:7523` bridge through
+`installer/lib/usb_serial.sh` during both fresh installation and upgrades. The currently validated
+kernel is **Jetson Linux L4T 36.5.0, `5.15.185-tegra`, aarch64**, with the matching NVIDIA
+`nvidia-l4t-kernel-headers` tree. The running kernel config has `CONFIG_USB_SERIAL=m` and no
+`CONFIG_USB_SERIAL_CH341`; the installer uses the versioned `ch341-dyx3` DKMS package in
+`installer/drivers/ch341-dyx3-1.0.0/`, copied from the public NVIDIA L4T 36.5.0 source archive.
+`PROVENANCE` records archive and source SHA-256 values. DKMS is installed as an APT dependency and
+builds only for the exact validated kernel. If exact matching headers are missing, the installer
+simulates installation of that header version and refuses any transaction that upgrades or
+replaces the NVIDIA kernel; DKMS is provisioned the same way if absent. A new kernel is rejected
+with a specific incompatibility message until its matching source, headers, build and live binding
+are validated. No kernel package is replaced by this flow.
+
+Provisioning requires exactly one attached `1a86:7523` bridge. It reads that rover's `ID_PATH` from
+udev and records it in `/etc/dyx3/ch341-adapter.env`; it never copies a physical-port mapping from
+another rover. If the installed BRLTTY vendor rule contains its generic `1a86:7523` match, the
+installer shadows (does not edit) it in `/etc/udev/rules.d/85-brltty.rules` and adds an exclusion for
+only the detected `ID_PATH`. An existing unmanaged override is preserved and causes a precise stop.
+The installer verifies module metadata, kernel vermagic, sysfs binding, `/dev/ttyUSB*`, and `dialout`
+ownership. The enabled `dyx3-usb-serial-check.service` provisions and verifies on activation and
+every boot. Keeping it in the production manifest also bootstraps the first upgrade from an older
+installed release: the existing release manager installs and starts newly manifested units after
+the release switch. `dyx3-health` reports a missing provisioned adapter as a failure.
+
+After the change is merged and CI publishes the matching full-SHA rover artifact, require the
+prebuilt path during the production upgrade:
+
+```bash
+sudo DYX3_ARTIFACTS=prebuilt /opt/dyx3/bin/dyx3-upgrade <full-sha>
+```
+
+This prevents a ROS 2/application rebuild on the Jetson. The application artifact is built in CI;
+DKMS separately compiles the pinned CH341 source against the rover's exact running-kernel headers.
+
+This identifies the USB bridge, not its UM982 COM function. Do not write
+`DYX3_UM982_USB_ID_PATH` until the physical USB-to-UM982 wiring has been inspected and the selected
+COM is confirmed distinct from PX4 TELEM1. After that confirmation, rerun the installer with
+`DYX3_UM982_USB_ID_PATH=<detected-ID_PATH>` in its environment. It records the matching stable
+`/dev/serial/by-path/...` path in `/etc/dyx3/usb-receiver.env`; it does not change RTK config or
+send bytes to the receiver. Confirm supported baud and RTCM input capability from the correct
+receiver/carrier documentation before configuring USB_DIRECT.
+
+Rollback removes only the installer-managed artifacts:
+
+```bash
+sudo bash /opt/dyx3/current/installer/usb_serial_uninstall.sh
+sudo reboot
+```
+
+The script refuses to remove an unmanaged BRLTTY override. Reboot restores the vendor BRLTTY rule
+and unloads any in-use DKMS module. The uninstaller does not alter the receiver, PX4 firmware,
+PX4 parameters, or RTK config. Staged tests cover missing/ambiguous adapter, unsupported kernel,
+BRLTTY scoping, unmanaged override preservation, source/provenance staging, missing module, missing
+binding, successful health state, receiver-identity gating, and repeat-run idempotence. These checks
+do not establish live Jetson behavior; current-rover driver deployment still requires the separate
+owner approval and hardware validation recorded in the bench runbook.
+
 
 ## Phase 11 additions
 

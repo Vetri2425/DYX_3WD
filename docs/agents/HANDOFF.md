@@ -1256,3 +1256,60 @@ removed, **locally only**; nothing was deleted on GitHub.
 
 Live on the rover (unchanged): firmware `8279fa4be3`, stack `8af2595` (code identical to `master`; later commits
 are docs only), app `dbb2ba1`.
+
+## 2026-10-09 (10:20 IST) — Codex — CH340/CH341 production remediation prepared, not deployed
+
+The owner approved implementation of a narrowly scoped BRLTTY exclusion and investigation of a driver for the
+current Jetson kernel, while directing that no transport change happen yet. The same owner explicitly required a
+proposal before driver deployment and prohibited kernel replacement, firmware/PX4 parameter changes, UM982
+configuration, push/merge, and release deployment without approval. No live Jetson file, package, driver binding,
+service, or RTK setting was changed in this session.
+
+**Root cause evidence:** Jetson has one QinHeng `1a86:7523` USB Serial bridge, no USB serial number, and it appears
+under `usbfs`; no tty node or `/dev/serial/by-id` path exists. `brltty-udev.service` is active and PID 438 has its
+file descriptor open on `/dev/bus/usb/001/004`. The installed `85-brltty.rules` contains the generic
+`ENV{PRODUCT}=="1a86/7523/*"` claim. The running kernel is `5.15.185-tegra` (L4T 36.5.0); kernel config has
+`CONFIG_USB_SERIAL=m` and `CONFIG_USB_SERIAL_CH341` unset, `modinfo ch341` reports missing, and `usbserial.ko`
+exists. The installed header package is `nvidia-l4t-kernel-headers 5.15.185-tegra-36.5.0-20260115194252`.
+The running kernel config reports `CONFIG_MODULE_SIG=y`, with no `CONFIG_MODULE_SIG_FORCE` setting.
+
+**Driver provenance/compatibility:** the packaged source is NVIDIA's public L4T R36.5.0 `ch341.c`, with the
+source and archive SHA-256 hashes recorded in `installer/drivers/ch341-dyx3-1.0.0/PROVENANCE`. The source was
+compiled as an out-of-tree module on the rover against `/lib/modules/5.15.185-tegra/build`; the compile-only probe
+compiled successfully and reported `vermagic=5.15.185-tegra SMP preempt mod_unload modversions aarch64`, an alias for
+`usb:v1A86p7523...`, and dependency `usbserial`. It was not installed or loaded. DKMS is currently absent from the
+rover; the production installer adds it as an APT dependency. The production route packages this versioned source
+via DKMS, with `AUTOINSTALL=yes` and `BUILD_EXCLUSIVE_KERNEL` restricted to the exact validated kernel. The
+installer can add only the exact headers version for this installed kernel after simulation confirms no kernel
+package changes; unavailable headers or a different kernel fail with a specific message. No arbitrary `.ko`
+download or kernel replacement is used.
+
+**Repository integration prepared:** `install.sh` provisions before its first release switch. Upgrade installs
+the provisioning unit first in enabled-service order, so old and new release managers run it immediately after
+switching and before restarting the six rover services. The helper provisions DKMS and, when needed, exact
+matching NVIDIA headers only after APT simulation proves no kernel package change. It requires exactly one
+adapter, discovers each rover's own `ID_PATH`, shadows (never edits) BRLTTY's package file, refuses unmanaged
+overrides, stages DKMS source idempotently, checks module vermagic and live binding, verifies `/dev/ttyUSB*`
+group `dialout`, and records `/etc/dyx3/ch341-adapter.env`.
+`dyx3-usb-serial-check.service` provisions and verifies the binding on activation and every boot.
+The unit is in the production manifest so an older deployed release manager will start it after
+switching to the new release, bootstrapping the first upgrade without a one-off SSH repair. An optional, explicit
+`DYX3_UM982_USB_ID_PATH` records `/etc/dyx3/usb-receiver.env` only after the physical mapping is confirmed and a
+matching by-path node exists. No identity is inferred for the UM982 and no RTK config is changed. A focused
+uninstaller removes only installer-managed udev/DKMS/identity artifacts and requires reboot to release an
+in-use module. Docs updated: installer README, bench runbook, and cloud review status.
+
+`bash -n` and ShellCheck pass for the changed scripts. `installer/tests/run_tests.sh` passes **133/133** when run
+with the installed GNU coreutils/findutils paths, matching the repo's documented macOS test setup. The test runner
+covers adapter absence/ambiguity, unsupported kernel, BRLTTY path scoping and unmanaged override preservation,
+DKMS source/provenance staging, idempotence, missing module/binding, boot check presence, and waiting for explicit
+physical receiver confirmation. Tests do not establish runtime driver binding or tty permissions on hardware.
+
+**Status / gate:** the owner approved driver deployment subject to diff review, topic-branch commit, owner-approved
+master merge, successful CI/release artifacts, fresh physical safety checks, and successful pre-deployment
+validation. No release deployment or hardware change has happened. The pre-existing Phase A executor remains
+untracked and outside this commit. The original USB_DIRECT migration is a separate later phase. Even after driver
+acceptance, stop before
+USB_DIRECT until documentation/physical inspection proves the CH340-to-UM982 COM mapping, separation from PX4
+TELEM1, supported baud, and RTCM input capability. USB_DIRECT migration and the 30-cycle Ethernet stress batch
+remain outstanding.

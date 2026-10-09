@@ -66,7 +66,7 @@ libs() {
   export INSTALLER_DIR="${REPO}/installer" DYX3_ROOT="${T}/root"
   # shellcheck disable=SC1091
   . "${INSTALLER_DIR}/lib/common.sh"
-  for l in os_check dependencies ros_install permissions network_install systemd_install health_check release; do
+  for l in os_check dependencies ros_install permissions network_install systemd_install health_check usb_serial release; do
     # shellcheck disable=SC1090
     . "${INSTALLER_DIR}/lib/${l}.sh"
   done
@@ -75,13 +75,20 @@ libs() {
   local svc
   svc="$(manifest_section enabled_services)"
   # The six services verified on the 3WD rover 2026-10-08; a new one joins only after a rover run.
-  check "manifest: the six rover-verified services are enabled" '[ "$(printf "%s" "${svc}" | tr "\n" " ")" = "dyx3-platform dyx3-ros dyx3-rtk dyx3-spray-watchdog dyx3-recorder dyx3-backend" ]'
+  check "manifest: USB provisioning runs before the six rover services" '[ "$(printf "%s" "${svc}" | tr "\n" " ")" = "dyx3-usb-serial-check dyx3-platform dyx3-ros dyx3-rtk dyx3-spray-watchdog dyx3-recorder dyx3-backend" ]'
   check "manifest: legacy package absent from ros2_packages" '! manifest_section ros2_packages | grep -q legacy'
   check "manifest: spray watchdog is its own service" 'manifest_section services | grep -qx dyx3-spray-watchdog'
   local s2
   for s2 in $(manifest_section services); do
-    check "service ${s2}: unit and launcher exist" '[ -f "${REPO}/deployment/systemd/${s2}.service" ] && [ -x "${REPO}/deployment/scripts/start-${s2#dyx3-}.sh" ]'
+    if [ "${s2}" = dyx3-usb-serial-check ]; then
+      check "service ${s2}: provisioning unit and setup script exist" '[ -f "${REPO}/deployment/systemd/${s2}.service" ] && [ -x "${REPO}/installer/usb_serial_setup.sh" ]'
+    else
+      check "service ${s2}: unit and launcher exist" '[ -f "${REPO}/deployment/systemd/${s2}.service" ] && [ -x "${REPO}/deployment/scripts/start-${s2#dyx3-}.sh" ]'
+    fi
   done
+  check "USB serial unit provisions during old and new release activation" 'grep -qx "dyx3-usb-serial-check" <(manifest_section enabled_services) && grep -q "ExecStart=/opt/dyx3/current/installer/usb_serial_setup.sh" "${REPO}/deployment/systemd/dyx3-usb-serial-check.service"'
+  check "fresh installer provisions the kernel driver before release setup" 'grep -q "provision_usb_serial_support" "${REPO}/installer/install.sh"'
+  check "upgrade enables the provisioning unit before restarting rover services" 'sed -n "/^\[enabled_services\]/,/^\[/p" "${REPO}/installer/manifests/production.manifest" | sed -n "2p" | grep -qx dyx3-usb-serial-check'
   check "the spray watchdog unit is not tied to dyx3-ros" '! grep -E "^(Requires|BindsTo|PartOf)=.*dyx3-ros" "${REPO}/deployment/systemd/dyx3-spray-watchdog.service"'
   check "the RTK unit creates its own 0700 state directory" 'grep -qx "StateDirectory=dyx3/rtk" "${REPO}/deployment/systemd/dyx3-rtk.service" && grep -qx "StateDirectoryMode=0700" "${REPO}/deployment/systemd/dyx3-rtk.service"'
   check "no unit or template hard-codes a secret (comments excluded)" '! grep -rEi "^[^#]*(password|token)=." "${REPO}/deployment/systemd" "${REPO}/deployment/network"'
@@ -151,6 +158,70 @@ libs() {
     ensure_rtk_state_directory
   )
   check "RTK runtime directory requests dyx3:dyx3 ownership" '[ "$(cat "${T}/rtk_owner_request")" = "dyx3:dyx3 0700" ]'
+
+  # CH341/BRLTTY provisioning against a fake sysfs and staged filesystem. This never loads
+  # a kernel module or contacts the rover.
+  local usbroot="${T}/usb-root" usbsys="${T}/usb-sysfs" usbtools="${T}/usb-tools" original_path="${PATH}"
+  mkdir -p "${usbroot}/lib/udev/rules.d" "${usbsys}/1-2.1" "${usbtools}"
+  printf '1a86\n' >"${usbsys}/1-2.1/idVendor"
+  printf '7523\n' >"${usbsys}/1-2.1/idProduct"
+  cat >"${usbroot}/lib/udev/rules.d/85-brltty.rules" <<'RULE'
+# vendor rule sample
+ENV{PRODUCT}=="1a86/7523/*", ENV{BRLTTY_BRAILLE_DRIVER}="bm", GOTO="brltty_usb_run"
+RULE
+  cat >"${usbtools}/udevadm" <<'TOOL'
+#!/usr/bin/env bash
+printf 'ID_PATH=platform-test-usb-0:2.1\n'
+TOOL
+  chmod +x "${usbtools}/udevadm"
+  export PATH="${usbtools}:${PATH}" DYX3_ROOT="${usbroot}" DYX3_CH341_USB_SYSFS="${usbsys}" DYX3_CH341_KERNEL=5.15.185-tegra
+  if provision_usb_serial_support >"${T}/usb-provision.out" 2>&1; then ok "CH341 source is staged for supported kernel"; else bad "CH341 source is staged for supported kernel"; fi
+  check "BRLTTY exception matches only the detected physical ID_PATH" 'grep -Fq "ENV{ID_PATH}!=\"platform-test-usb-0:2.1\"" "${usbroot}/etc/udev/rules.d/85-brltty.rules" && grep -Fq "${DYX3_CH341_RULE_MARKER}" "${usbroot}/etc/udev/rules.d/85-brltty.rules"'
+  check "DKMS source package and provenance are staged" '[ -s "${usbroot}/usr/src/ch341-dyx3-1.0.0/ch341.c" ] && [ -f "${usbroot}/usr/src/ch341-dyx3-1.0.0/dkms.conf" ] && grep -q "Source SHA-256" "${usbroot}/usr/src/ch341-dyx3-1.0.0/PROVENANCE"'
+  check "per-rover USB identity is recorded from detected ID_PATH" 'grep -qx "DYX3_CH341_EXPECTED_ID_PATH=platform-test-usb-0:2.1" "${usbroot}/etc/dyx3/ch341-adapter.env"'
+  _usb_serial_write_receiver_identity platform-test-usb-0:2.1 >"${T}/usb-receiver-pending.out" 2>&1
+  check "receiver device identity waits for physical wiring confirmation" '[ ! -e "${usbroot}/etc/dyx3/usb-receiver.env" ]'
+  local usb_rule_hash
+  usb_rule_hash="$(sha256sum "${usbroot}/etc/udev/rules.d/85-brltty.rules" | awk '{print $1}')"
+  provision_usb_serial_support >"${T}/usb-provision-repeat.out" 2>&1
+  check "BRLTTY override is idempotent on repeated install" '[ "${usb_rule_hash}" = "$(sha256sum "${usbroot}/etc/udev/rules.d/85-brltty.rules" | awk "{print \$1}")" ]'
+  if (DYX3_CH341_KERNEL=6.1.0-tegra _usb_serial_supported_kernel >/dev/null) >"${T}/usb-unsupported.out" 2>&1; then bad "unsupported Jetson kernel fails closed"; else ok "unsupported Jetson kernel fails closed"; fi
+  mkdir -p "${usbroot}/etc/udev/rules.d"
+  printf 'administrator rule\n' >"${usbroot}/etc/udev/rules.d/85-brltty.rules"
+  if (_usb_serial_install_brltty_override platform-test-usb-0:2.1) >"${T}/usb-admin-rule.out" 2>&1; then bad "administrator udev override is preserved"; else ok "administrator udev override is preserved"; fi
+  check "administrator udev override contents remain untouched" 'grep -qx "administrator rule" "${usbroot}/etc/udev/rules.d/85-brltty.rules"'
+  rm -f "${usbroot}/etc/udev/rules.d/85-brltty.rules"
+  cat >"${usbtools}/lsusb" <<'TOOL'
+#!/usr/bin/env bash
+echo 'Bus 001 Device 004: ID 1a86:7523 USB Serial'
+TOOL
+  cat >"${usbtools}/modinfo" <<'TOOL'
+#!/usr/bin/env bash
+[ "${FAKE_CH341_MODINFO:-0}" = 1 ]
+TOOL
+  chmod +x "${usbtools}/lsusb" "${usbtools}/modinfo"
+  export DYX3_CH341_USB_SYSFS="${usbsys}" DYX3_CH341_DEV_ROOT="${T}/usb-dev" DYX3_ROOT="${usbroot}" DYX3_CH341_KERNEL=5.15.185-tegra
+  mkdir -p "${DYX3_CH341_DEV_ROOT}" "${usbsys}/1-2.1:1.0" "${T}/drivers/ch341"
+  : >"${DYX3_CH341_DEV_ROOT}/ttyUSB0"
+  _health_fail=0; FAKE_CH341_MODINFO=0 health_usb_serial >/dev/null 2>&1
+  check "missing ch341 module is reported unhealthy" '[ "${_health_fail}" -ne 0 ]'
+  _health_fail=0; FAKE_CH341_MODINFO=1 health_usb_serial >/dev/null 2>&1
+  check "driver package does not pass health until ch341 binds" '[ "${_health_fail}" -ne 0 ]'
+  ln -sfn "${T}/drivers/ch341" "${usbsys}/1-2.1:1.0/driver"
+  _health_fail=0; FAKE_CH341_MODINFO=1 health_usb_serial >/dev/null 2>&1
+  check "matching module, binding, and tty node pass health" '[ "${_health_fail}" -eq 0 ]'
+  rm -rf "${usbsys}/1-2.1"
+  if (provision_usb_serial_support) >"${T}/usb-missing.out" 2>&1; then bad "missing USB adapter fails with a blocker"; else ok "missing USB adapter fails with a blocker"; fi
+  mkdir -p "${usbsys}/1-2.1"
+  printf '1a86\n' >"${usbsys}/1-2.1/idVendor"
+  printf '7523\n' >"${usbsys}/1-2.1/idProduct"
+  mkdir -p "${usbsys}/1-3"
+  printf '1a86\n' >"${usbsys}/1-3/idVendor"
+  printf '7523\n' >"${usbsys}/1-3/idProduct"
+  if (provision_usb_serial_support) >"${T}/usb-ambiguous.out" 2>&1; then bad "ambiguous USB adapter selection fails closed"; else ok "ambiguous USB adapter selection fails closed"; fi
+  rm -rf "${usbsys}/1-3"
+  export PATH="${original_path}" DYX3_ROOT="${T}/root"
+  unset DYX3_CH341_USB_SYSFS DYX3_CH341_DEV_ROOT DYX3_CH341_KERNEL
 }
 
 # ---------------------------------------------------------------- release lifecycle
@@ -207,7 +278,7 @@ F
   export DYX3_ROOT="${T}/lc" INSTALLER_DIR="${REPO}/installer" DYX3_SKIP_SYSTEMD=1 DYX3_SKIP_BACKEND=1 DYX3_HEALTH_SETTLE_S=0
   # shellcheck disable=SC1091
   . "${INSTALLER_DIR}/lib/common.sh"
-  for l in os_check dependencies ros_install permissions network_install systemd_install health_check release; do
+  for l in os_check dependencies ros_install permissions network_install systemd_install health_check usb_serial release; do
     # shellcheck disable=SC1090
     . "${INSTALLER_DIR}/lib/${l}.sh"
   done

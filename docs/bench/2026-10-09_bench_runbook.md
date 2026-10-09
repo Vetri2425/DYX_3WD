@@ -106,6 +106,37 @@ velocity-fusion timers, so the EKF-GSF yaw reset and the dead-reckoning detectio
 
 ## 4. RTK — four combinations, 10 min each, 2 min gap (≈ 50 min, outdoors with sky view)
 
+### CH340/CH341 remediation gate (before any USB_DIRECT selection)
+
+The repository installer supports the exact Jetson/L4T kernel `5.15.185-tegra` from L4T 36.5.0.
+Fresh setup and `dyx3-upgrade` provision a version-pinned NVIDIA-source DKMS driver, create a
+BRLTTY shadow rule limited to the detected adapter `ID_PATH`, verify `/dev/ttyUSB*` and `dialout`,
+and enable `dyx3-usb-serial-check.service` for provisioning and boot verification. The unit is in
+the production manifest so the existing release manager starts it after the first upgrade switch,
+even when that manager came from an older installed release. Unsupported kernels, missing
+matching headers, missing/ambiguous adapters, or failed binding stop provisioning. The driver source
+is under `installer/drivers/ch341-dyx3-1.0.0/`; rollback is documented in `installer/README.md`.
+
+The current rover has not received this repository-owned remediation yet. Do not report it fixed
+until the owner authorizes deployment and the following read-only acceptance evidence is collected:
+`lsusb -t` shows `Driver=ch341`; `modinfo -F vermagic ch341` matches `uname -r`; the adapter
+interface's sysfs `driver` symlink resolves to `ch341`; a single stable
+`/dev/serial/by-path/...` link resolves to the resulting `/dev/ttyUSB*`; `dyx3` can open it
+exclusively; and the `dyx3-usb-serial-check.service` passes after reboot and on a second installer
+run. Do not send serial bytes at this stage.
+
+Before recording the receiver path, identify the physical CH340-to-UM982 connection and prove it is
+a separate COM from PX4 TELEM1. Only after that inspection, set
+`DYX3_UM982_USB_ID_PATH=<the detected ID_PATH>` for an installer run. Verify the selected COM's
+baud and RTCM input support from the applicable UM982 carrier/interface documentation. The installer
+then records `/etc/dyx3/usb-receiver.env`; it does not select USB_DIRECT or write receiver settings.
+Never carry a by-path value from one rover to another.
+
+If BRLTTY's generic match is present, the override lives in `/etc/udev/rules.d/85-brltty.rules` and
+excludes only the detected physical path. Driver rollback is `sudo bash
+/opt/dyx3/current/installer/usb_serial_uninstall.sh` followed by reboot. No kernel replacement,
+PX4 firmware change, or receiver configuration is part of this procedure.
+
 **Before slot 2, gather these** (read-only, never configure the UM982):
 - `ls -l /dev/serial/by-id/`. The UM982 USB name and the LoRa radio name must contain only `A-Z a-z 0-9 _ . -`.
 - UM982 USB baud. Confirm the USB COM is a **different** COM from the one wired to PX4 TELEM1.

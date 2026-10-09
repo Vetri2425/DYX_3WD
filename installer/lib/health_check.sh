@@ -122,6 +122,7 @@ health_wifi() {
 health_extras() {
   local rel="${1:-${DYX3_CURRENT}}" m="${1:-${DYX3_CURRENT}}/installer/manifests/production.manifest"
   health_wifi
+  if declare -F health_usb_serial >/dev/null 2>&1; then health_usb_serial; fi
   if _enabled dyx3-ros "${m}"; then
     if _settle _gateway_up; then _pass "gateway socket present"; else _fail "gateway socket ${DYX3_RUN}/gateway.sock missing (dyx3-ros / system_gateway down?)"; fi
   fi

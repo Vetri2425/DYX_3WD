@@ -1,0 +1,12 @@
+[Unit]
+Description=DYX 3WD CH341 provisioning and boot verification
+After=systemd-udev-settle.service
+Wants=systemd-udev-settle.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/dyx3/current/installer/usb_serial_setup.sh
+
+[Install]
+WantedBy=multi-user.target

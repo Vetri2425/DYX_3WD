@@ -10,7 +10,7 @@ INSTALLER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export INSTALLER_DIR
 # shellcheck source=lib/common.sh
 . "${INSTALLER_DIR}/lib/common.sh"
-for lib in os_check dependencies ros_install permissions network_install systemd_install health_check release; do
+for lib in os_check dependencies ros_install permissions network_install systemd_install health_check usb_serial release; do
   # shellcheck disable=SC1090
   . "${INSTALLER_DIR}/lib/${lib}.sh"
 done
@@ -66,6 +66,9 @@ main() {
     install_mavlink_router
     install_ros
   fi
+  # A receiver adapter is a required production input. Fail before switching releases if
+  # this kernel, its headers, or its USB identity cannot be provisioned safely.
+  provision_usb_serial_support
   install_fcu_network
 
   # Bootstrap the release from this checkout's origin so the release has real provenance.
