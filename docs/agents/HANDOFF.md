@@ -2133,3 +2133,25 @@ Installer 148/0 (new: site LAN address + gateway, FCU-subnet refusal, hotspot/LA
    ID_PATH). Then **LoRa correction verification** (owner: after the app is solid).
 6. Base station: bring the NTRIP mountpoint back online (external).
 7. Future: QR pairing for tablet tokens; nicer `DYX3_ROVER_NAME`.
+
+## 2026-10-09 (18:50) — Claude — app: owner's Mapbox plugin adopted (App-Polish 4096af9); tablet R5GL1016QFB updated
+
+- **The owner's `plugins/withAndroidMapboxToken.js` is adopted** (Three_Wheel_v2 `App-Polish` `4096af9`; my
+  env-only guard `withRequiredMapboxToken` and its test are deleted).
+  - It fails prebuild without a `pk.` token **and** writes the native `mapbox_access_token` string resource, so
+    MapView has the token even before JS `setAccessToken()` runs.
+  - New test `src/plugins/__tests__/withAndroidMapboxToken.test.ts` runs the strings mod: refusal, write,
+    replace-not-duplicate. Plugin tests 5/5; tsc clean.
+  - The owner's uncommitted change was stashed, fast-forwarded, moved into the commit, and the stash dropped.
+    Their local clone is at `4096af9` and clean.
+- **APK** `App-Releases/4096af9-app-polish-mapbox-native-token/`: built from a clean worktree at
+  `origin/App-Polish` with `.env`; DYX key `5eaacb96…`; the `mapbox_access_token` resource is in the APK.
+- **Tablet `R5GL1016QFB`** updated to `4096af9` (from `2e75125`, data kept). On the router:
+  - beacon listener up, rover found in 1.2 s;
+  - the owner connected once (no saved token for this rover on that tablet yet);
+  - map OK, 0 crashes.
+  - From now on it auto-connects.
+- **Tablet `R5GYA14C7CY`** still has `4891a3d` (works, auto-connect verified); update it to `4096af9` when next
+  plugged in.
+- The open list is unchanged otherwise (see "END OF DAY" 18:40); items 1–2 are now partly done: Mapbox decision
+  done; the owner's hands-on test and the hotspot path are still pending.
