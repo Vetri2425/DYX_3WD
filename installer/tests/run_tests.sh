@@ -574,13 +574,28 @@ F
   printf 'DYX3_HOTSPOT_SSID=TestRover\nDYX3_HOTSPOT_PSK=DummyBenchPass123\nDYX3_WIFI_COUNTRY=IN\nDYX3_WIFI_BAND=bg\nDYX3_WIFI_CHANNEL=6\nDYX3_WIFI_WIDTH=40\n' >"${DYX3_ETC}/hotspot.env"
   install_hotspot_network >>"${T}/hotspot_log" 2>&1
   check "2.4 GHz 40 MHz configuration is generated" 'grep -qx "band=bg" "${hotspot_profile}" && grep -qx "channel=6" "${hotspot_profile}" && grep -qx "channel-width=40" "${hotspot_profile}"'
+  cp "${hotspot_profile}" "${T}/hotspot_good"
   printf 'DYX3_HOTSPOT_SSID=TestRover\nDYX3_HOTSPOT_PSK=DummyBenchPass123\nDYX3_WIFI_BAND=a\nDYX3_WIFI_CHANNEL=52\n' >"${DYX3_ETC}/hotspot.env"
   install_hotspot_network >>"${T}/hotspot_log" 2>&1
-  check "5 GHz DFS channel is refused" '[ ! -e "${hotspot_profile}" ] && grep -q "DFS or invalid channel refused" "${T}/hotspot_log"'
+  check "5 GHz DFS channel is refused and the working access point is kept" 'cmp -s "${T}/hotspot_good" "${hotspot_profile}" && grep -q "DFS or invalid channel refused; keeping the existing access point unchanged" "${T}/hotspot_log"'
+  # INS-010: a bad hotspot.env never deletes the access point; only SSID and PSK both deliberately empty do.
+  printf 'DYX3_HOTSPOT_SSID=TestRover\nDYX3_HOTSPOT_PSK=short\n' >"${DYX3_ETC}/hotspot.env"
+  install_hotspot_network >>"${T}/hotspot_log" 2>&1
+  check "an invalid passphrase keeps the working access point" 'cmp -s "${T}/hotspot_good" "${hotspot_profile}"'
+  printf 'DYX3_HOTSPOT_SSID=TestRover\nDYX3_HOTSPOT_PSK=\n' >"${DYX3_ETC}/hotspot.env"
+  install_hotspot_network >>"${T}/hotspot_log" 2>&1
+  check "an SSID without a passphrase keeps the working access point" 'cmp -s "${T}/hotspot_good" "${hotspot_profile}" && grep -q "only one of DYX3_HOTSPOT_SSID" "${T}/hotspot_log"'
+  printf 'DYX3_WIFI_COUNTRY=IN\n' >"${DYX3_ETC}/hotspot.env"
+  install_hotspot_network >>"${T}/hotspot_log" 2>&1
+  check "a hotspot.env without SSID/PSK lines keeps the working access point" 'cmp -s "${T}/hotspot_good" "${hotspot_profile}"'
+  printf 'DYX3_HOTSPOT_SSID=\nDYX3_HOTSPOT_PSK=\n' >"${DYX3_ETC}/hotspot.env"
+  install_hotspot_network >>"${T}/hotspot_log" 2>&1
+  check "SSID and PSK both deliberately empty remove the access point" '[ ! -e "${hotspot_profile}" ] && grep -q "SSID and PSK both empty" "${T}/hotspot_log"'
+  cp "${T}/hotspot_good" "${hotspot_profile}"
   nmcli() { if [ "${1:-}" = "-t" ]; then printf '%s\n' "wlan0:wifi"; elif [ "${1:-}" = "--version" ]; then echo 'nmcli tool, version 1.36.6'; else printf '%s\n' "$*" >>"${T}/nmcli_argv"; fi; }
   printf 'DYX3_HOTSPOT_SSID=TestRover\nDYX3_HOTSPOT_PSK=DummyBenchPass123\nDYX3_WIFI_WIDTH=40\n' >"${DYX3_ETC}/hotspot.env"
   install_hotspot_network >>"${T}/hotspot_log" 2>&1
-  check "40 MHz is refused by old NetworkManager" '[ ! -e "${hotspot_profile}" ] && grep -q "NetworkManager 1.50+ is required" "${T}/hotspot_log"'
+  check "40 MHz is refused by old NetworkManager, keeping the access point" 'cmp -s "${T}/hotspot_good" "${hotspot_profile}" && grep -q "NetworkManager 1.50+ is required" "${T}/hotspot_log"'
   # Per-rover address and dongle-safe interface choice (2026-10-09 fleet plan).
   mkdir -p "${DYX3_ROOT}/sys/devices/platform/usbhost/usb1/1-1/net/wlx0" "${DYX3_ROOT}/sys/devices/pci0001/net/wlan0" "${DYX3_ROOT}/sys/class/net/wlx0" "${DYX3_ROOT}/sys/class/net/wlan0"
   ln -sfn "${DYX3_ROOT}/sys/devices/platform/usbhost/usb1/1-1" "${DYX3_ROOT}/sys/class/net/wlx0/device"

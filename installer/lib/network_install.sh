@@ -156,6 +156,16 @@ _hotspot_drop_profile() {
   fi
 }
 
+# _hotspot_invalid <reason>: INS-010. A hotspot.env that fails validation never removes a working access point: it is
+# often the operator's only link to the rover. Only SSID and PSK both deliberately empty remove it.
+_hotspot_invalid() {
+  if [ -f "${DYX3_ROOT}/etc/NetworkManager/system-connections/dyx3-hotspot.nmconnection" ]; then
+    warn "hotspot.env: $1; keeping the existing access point unchanged. Fix ${DYX3_ETC}/hotspot.env (SSID and PSK both empty remove the access point)"
+  else
+    warn "hotspot.env: $1; access point not configured"
+  fi
+}
+
 # _hotspot_pick_iface <wanted>: the Wi-Fi device for the access point. An explicit name must be a
 # Wi-Fi device NetworkManager reports. Otherwise the first Wi-Fi device that is not on USB is used:
 # a USB dongle is the rover's internet uplink (client mode), never the tablet access point.
@@ -178,13 +188,19 @@ _hotspot_pick_iface() {
 install_hotspot_network() {
   local env_file="${DYX3_ETC}/hotspot.env" ssid="" psk="" key value iface profile dir tmp dispatcher old_umask
   local country="IN" band="a" channel="" width="20" nm_ver major minor width_setting="" address="" want_iface=""
-  local dl_limit="2mb/s" dl_burst="4mb" ul_limit="1mb/s" ul_burst="2mb" txqlen="100" qos
+  local dl_limit="2mb/s" dl_burst="4mb" ul_limit="1mb/s" ul_burst="2mb" txqlen="100" qos ssid_set=0 psk_set=0
   profile="${DYX3_ROOT}/etc/NetworkManager/system-connections/dyx3-hotspot.nmconnection"
   if [ -r "${env_file}" ]; then
     while IFS='=' read -r key value || [ -n "${key:-}" ]; do
       case "${key}" in
-        DYX3_HOTSPOT_SSID) ssid="${value}" ;;
-        DYX3_HOTSPOT_PSK) psk="${value}" ;;
+        DYX3_HOTSPOT_SSID)
+          ssid="${value}"
+          ssid_set=1
+          ;;
+        DYX3_HOTSPOT_PSK)
+          psk="${value}"
+          psk_set=1
+          ;;
         DYX3_WIFI_COUNTRY) country="${value}" ;;
         DYX3_WIFI_BAND) band="${value}" ;;
         DYX3_WIFI_CHANNEL) channel="${value}" ;;
@@ -199,11 +215,19 @@ install_hotspot_network() {
       esac
     done <"${env_file}"
   fi
-  if [ -z "${ssid}" ] || [ -z "${psk}" ]; then
-    log "hotspot not configured; leaving access point disabled"
-    if [ -f "${profile}" ]; then
-      _hotspot_drop_profile "${profile}"
+  if [ -z "${ssid}" ] && [ -z "${psk}" ]; then
+    if [ "${ssid_set}" = 1 ] && [ "${psk_set}" = 1 ]; then
+      log "hotspot disabled in hotspot.env (SSID and PSK both empty)"
+      if [ -f "${profile}" ]; then
+        _hotspot_drop_profile "${profile}"
+      fi
+    else
+      log "hotspot.env has no SSID/PSK lines; access point left as it is"
     fi
+    return 0
+  fi
+  if [ -z "${ssid}" ] || [ -z "${psk}" ]; then
+    _hotspot_invalid "only one of DYX3_HOTSPOT_SSID and DYX3_HOTSPOT_PSK is set"
     return 0
   fi
   # DERIVED — NOT FROM V1 SPEC: accept an unquoted ASCII subset so keyfile
@@ -215,10 +239,7 @@ install_hotspot_network() {
      [[ ! "${country}" =~ ^[A-Z]{2}$ ]] ||
      [[ ! "${band}" =~ ^(a|bg)$ ]] ||
      [[ ! "${width}" =~ ^(20|40)$ ]]; then
-    warn "hotspot.env has an invalid SSID or passphrase format; access point disabled"
-    if [ -f "${profile}" ]; then
-      _hotspot_drop_profile "${profile}"
-    fi
+    _hotspot_invalid "invalid SSID, passphrase, country, band or width format"
     return 0
   fi
   # Per-rover access-point address (fleet plan 2026-10-09: 192.168.3.100/24 for the first 3WD, .101 for
@@ -227,10 +248,7 @@ install_hotspot_network() {
   if [[ ! "${address}" =~ ^((25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])/(1[6-9]|2[0-9]|30)$ ]] ||
      [[ "${address}" == 10.41.10.* ]] ||
      { [ -n "${want_iface}" ] && [[ ! "${want_iface}" =~ ^[A-Za-z0-9_.-]+$ ]]; }; then
-    warn "hotspot.env has an invalid DYX3_HOTSPOT_ADDRESS or DYX3_HOTSPOT_IFACE; access point disabled"
-    if [ -f "${profile}" ]; then
-      _hotspot_drop_profile "${profile}"
-    fi
+    _hotspot_invalid "invalid DYX3_HOTSPOT_ADDRESS or DYX3_HOTSPOT_IFACE"
     return 0
   fi
   # 5 GHz default is 149, not 36. The Jetson's vendor rtl8822ce driver is self-managed for regulatory
@@ -239,10 +257,7 @@ install_hotspot_network() {
   # not no-IR, so an AP on 36-48 or 153-165 fails ("Failed to start AP functionality", rover 2026-10-09).
   # 149 is legal in India (5725-5875 MHz).
   if [ -n "$(_network_env DYX3_LAN_ADDRESS)" ] && [ "$(_ipv4_net "${address}")" = "$(_ipv4_net "$(_network_env DYX3_LAN_ADDRESS)")" ]; then
-    warn "hotspot address ${address} is on the site LAN subnet (network.env); access point disabled"
-    if [ -f "${profile}" ]; then
-      _hotspot_drop_profile "${profile}"
-    fi
+    _hotspot_invalid "hotspot address ${address} is on the site LAN subnet (network.env)"
     return 0
   fi
   if [ -z "${channel}" ]; then
@@ -251,22 +266,17 @@ install_hotspot_network() {
   if [[ ! "${dl_limit}" =~ ^[0-9]{1,6}[km]?b/s$ ]] || [[ ! "${ul_limit}" =~ ^[0-9]{1,6}[km]?b/s$ ]] ||
      [[ ! "${dl_burst}" =~ ^[0-9]{1,6}[km]?b$ ]] || [[ ! "${ul_burst}" =~ ^[0-9]{1,6}[km]?b$ ]] ||
      [[ ! "${txqlen}" =~ ^[0-9]{2,4}$ ]]; then
-    warn "hotspot.env has an invalid client-internet limit or txqueuelen; access point disabled"
-    if [ -f "${profile}" ]; then
-      _hotspot_drop_profile "${profile}"
-    fi
+    _hotspot_invalid "invalid client-internet limit or txqueuelen"
     return 0
   fi
   if [ "${band}" = "a" ]; then
-    case "${channel}" in 36 | 40 | 44 | 48 | 149 | 153 | 157 | 161 | 165) ;; *) warn "5 GHz DFS or invalid channel refused; hotspot disabled"; _hotspot_drop_profile "${profile}"; return 0 ;; esac
+    case "${channel}" in 36 | 40 | 44 | 48 | 149 | 153 | 157 | 161 | 165) ;; *) _hotspot_invalid "5 GHz DFS or invalid channel refused"; return 0 ;; esac
     if [ "${channel}" = 165 ] && [ "${width}" = 40 ]; then
-      warn "channel 165 cannot use 40 MHz; hotspot disabled"
-      _hotspot_drop_profile "${profile}"
+      _hotspot_invalid "channel 165 cannot use 40 MHz"
       return 0
     fi
   elif ! [[ "${channel}" =~ ^([1-9]|10|11)$ ]]; then
-    warn "invalid 2.4 GHz channel; hotspot disabled"
-    _hotspot_drop_profile "${profile}"
+    _hotspot_invalid "invalid 2.4 GHz channel"
     return 0
   fi
   if ! have nmcli; then
@@ -294,8 +304,7 @@ install_hotspot_network() {
   if [ -n "${major}" ] && { [ "${major}" -gt 1 ] || { [ "${major}" -eq 1 ] && [ "${minor}" -ge 50 ]; }; }; then
     width_setting="channel-width=${width}"
   elif [ "${width}" = 40 ]; then
-    warn "NetworkManager 1.50+ is required for 40 MHz AP width; hotspot disabled"
-    _hotspot_drop_profile "${profile}"
+    _hotspot_invalid "NetworkManager 1.50+ is required for 40 MHz AP width"
     return 0
   fi
   dir="$(dirname "${profile}")"
