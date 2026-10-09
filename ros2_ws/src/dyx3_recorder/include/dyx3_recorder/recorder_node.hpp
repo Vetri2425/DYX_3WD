@@ -26,6 +26,10 @@ using WallFn = std::function<time_t()>;   // UTC wall time
 using ParamCollector =
     std::function<std::vector<NodeParams>(const std::vector<std::string>& nodes, double timeout_s)>;
 
+// Default `param_nodes`: the control graph (dyx3_bringup control_graph.launch.py) + the separate
+// services (gnss_rtk, spray_watchdog, recorder itself).
+std::vector<std::string> default_param_nodes();
+
 // Default collector: SyncParametersClient per node on a helper node with its own executor.
 std::vector<NodeParams> collect_ros_params(const std::vector<std::string>& nodes, double timeout_s);
 

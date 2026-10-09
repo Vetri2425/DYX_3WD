@@ -48,7 +48,7 @@ a reader can resync); a "negative" jump (> 32768) is out-of-order (dropped, coun
 
 ## 5. Parameters (all RESTART; none affects motion)
 
-`runs_dir` `/var/lib/dyx3/runs` · `versions_file` · `config_dir` · `vehicle_id` `unknown` · `operator` `unknown` · `topics` (list of recorded topics; default = the `/dyx3/**` set) · `param_nodes` ·
+`runs_dir` `/var/lib/dyx3/runs` · `versions_file` · `config_dir` · `vehicle_id` `unknown` · `operator` `unknown` · `topics` (list of recorded topics; default = the `/dyx3/**` set) · `param_nodes` (default: every node of `dyx3_bringup/launch/control_graph.launch.py` GRAPH — `dyx3_mission`, `motion_guard`, `px4_link`, `rpp`, `spray`, `system_gateway` — plus the separate services `gnss_rtk`, `spray_watchdog` and `recorder` itself; `recorder_node_test` parses the launch file and fails if a graph node is missing) ·
 `bag_finalize_timeout_s` 5 (DERIVED) · `param_timeout_s` 2 (DERIVED) · `status_hz` 2 (DERIVED) · `min_free_bytes` **0 = no check** (no source for a threshold; **OPEN**: a full disk is detected by the bag
 process dying, not predicted) · `bag_stall_s` **0 = off** (rosbag2's sqlite file does not grow every second; no source).
 **OPEN:** whether to also bag the raw `/fmu/out/**` topics (default: not recorded; the `/dyx3/vehicle_state` fan-out is).

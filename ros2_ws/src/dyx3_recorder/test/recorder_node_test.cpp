@@ -8,6 +8,8 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <regex>
+#include <set>
 #include <sstream>
 #include <thread>
 
@@ -309,4 +311,26 @@ TEST(RecorderNode, ShutdownFinalisesAnOpenRun) {
     r.rec.reset();  // the destructor path used by main on SIGTERM
     EXPECT_NE(slurp(d + "/summary.json").find("RECORDER_SHUTDOWN"), std::string::npos);
   }
+}
+
+// REC-002: every node of the production control graph (and the separately run services) has its
+// parameters snapshotted by default. The graph is parsed from the launch file in the source tree so
+// a node added there without updating the recorder fails here.
+TEST(RecorderDefaults, ParamNodesCoverTheWholeLaunchGraph) {
+  const std::string launch = slurp(DYX3_CONTROL_GRAPH_LAUNCH);
+  ASSERT_FALSE(launch.empty()) << DYX3_CONTROL_GRAPH_LAUNCH;
+  const size_t g = launch.find("GRAPH = (");
+  ASSERT_NE(g, std::string::npos);
+  const std::string graph = launch.substr(g, launch.find("\n)\n", g) - g);
+  const std::regex row(R"re(\(\s*"([^"]+)",\s*"([^"]+)",\s*"([^"]+)",\s*"([^"]+)"\s*\))re");
+  std::set<std::string> in_graph;
+  for (auto it = std::sregex_iterator(graph.begin(), graph.end(), row); it != std::sregex_iterator();
+       ++it)
+    in_graph.insert((*it)[3].str());
+  EXPECT_GE(in_graph.size(), 6U);
+  const auto defaults = default_param_nodes();
+  const std::set<std::string> have(defaults.begin(), defaults.end());
+  for (const auto& n : in_graph) EXPECT_TRUE(have.count(n)) << "param_nodes misses graph node " << n;
+  for (const char* n : {"gnss_rtk", "spray_watchdog", "recorder", "rpp", "system_gateway"})
+    EXPECT_TRUE(have.count(n)) << n;
 }

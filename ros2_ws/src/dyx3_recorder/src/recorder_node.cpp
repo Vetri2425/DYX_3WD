@@ -45,6 +45,14 @@ uint64_t free_bytes(const std::string& path) {
 
 }  // namespace
 
+std::vector<std::string> default_param_nodes() {
+  // Every node of dyx3_bringup/launch/control_graph.launch.py (GRAPH) plus the nodes that run as
+  // their own services (dyx3-rtk, dyx3-spray-watchdog, dyx3-recorder). recorder_node_test checks
+  // this list against the launch file, so a node added to the graph cannot be silently left out.
+  return {"dyx3_mission", "gnss_rtk", "motion_guard",   "px4_link", "recorder",
+          "rpp",          "spray",    "spray_watchdog", "system_gateway"};
+}
+
 std::vector<NodeParams> collect_ros_params(const std::vector<std::string>& nodes,
                                            double timeout_s) {
   std::vector<NodeParams> out;
@@ -144,9 +152,7 @@ void RecorderNode::declare_params() {
                                                                    "/dyx3/spray/actuator_ack",
                                                                    "/dyx3/spray/watchdog_status",
                                                                    "/dyx3/recorder/status"});
-  param_nodes_ = declare_parameter<std::vector<std::string>>(
-      "param_nodes",
-      {"dyx3_mission", "gnss_rtk", "motion_guard", "px4_link", "spray", "spray_watchdog"});
+  param_nodes_ = declare_parameter<std::vector<std::string>>("param_nodes", default_param_nodes());
   bag_command_ = declare_parameter<std::vector<std::string>>(
       "bag_command", {"ros2", "bag", "record", "-o", "{dir}"});
   bag_finalize_timeout_s_ = declare_parameter<double>("bag_finalize_timeout_s", 5.0);
