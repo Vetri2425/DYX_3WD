@@ -199,6 +199,19 @@ TOOL
   else
     bad "first install records the adapter identity under set -euo pipefail"
   fi
+  # Regression (rover 2026-10-09): one unit failing to restart must not abort the upgrade before
+  # health/rollback; every enabled unit is still restarted.
+  if (set -euo pipefail
+      systemd_available() { return 0; }
+      systemctl() { printf '%s\n' "$2" >>"${T}/restart-calls"; [ "$2" != dyx3-usb-serial-check.service ]; }
+      run() { "$@"; }
+      restart_enabled_services "${REPO}") >"${T}/restart-continue.out" 2>&1 &&
+     grep -qx "dyx3-usb-serial-check.service" "${T}/restart-calls" &&
+     [ "$(grep -c . "${T}/restart-calls")" -eq "$(manifest_section enabled_services "${REPO}/installer/manifests/production.manifest" | grep -c .)" ]; then
+    ok "a failed unit restart continues to the remaining units and returns to health"
+  else
+    bad "a failed unit restart continues to the remaining units and returns to health"
+  fi
   if (set -euo pipefail; [ -z "$(_usb_serial_recorded_id_path "${T}/does-not-exist.env")" ]) >/dev/null 2>&1; then
     ok "missing adapter identity file reads as unprovisioned, not as an error"
   else

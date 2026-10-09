@@ -106,22 +106,31 @@ _usb_serial_install_dkms_source() {
   for file in ch341.c Makefile dkms.conf PROVENANCE; do
     if ! cmp -s "${source}/${file}" "${dest}/${file}"; then install -m 0644 "${source}/${file}" "${dest}/${file}"; fi
   done
-  module="ch341-dyx3/${DYX3_CH341_SOURCE_VERSION}"
-  local dkms_state
-  dkms_state="$(dkms status -m ch341-dyx3 -v "${DYX3_CH341_SOURCE_VERSION}" 2>/dev/null || true)"
-  if ! printf '%s\n' "${dkms_state}" | grep -q "${DYX3_CH341_SUPPORTED_KERNEL}.*installed"; then
-    if ! printf '%s\n' "${dkms_state}" | grep -q "added"; then
-      dkms add -m ch341-dyx3 -v "${DYX3_CH341_SOURCE_VERSION}" || die "DKMS add failed for ${module}"
+  # Direct kbuild against the exact installed NVIDIA headers with the existing toolchain. No DKMS:
+  # on the rover, installing dkms pulled gcc-12 and upgraded 11 system libraries (libstdc++6,
+  # libgcc-s1, ...), which this installer refuses. The package is pinned to one kernel anyway, so
+  # DKMS's auto-rebuild adds nothing; a kernel change fails closed at _usb_serial_supported_kernel.
+  local kernel="${DYX3_CH341_SUPPORTED_KERNEL}" moddir ko stamp source_sha build
+  moddir="/lib/modules/${kernel}/extra/ch341-dyx3"
+  ko="${moddir}/ch341.ko"
+  stamp="${moddir}/SOURCE_SHA256"
+  source_sha="$(sha256sum "${source}/ch341.c" | awk '{print $1}')"
+  if [ ! -f "${ko}" ] || [ "$(cat "${stamp}" 2>/dev/null || true)" != "${source_sha}" ]; then
+    build="$(mktemp -d /tmp/ch341-dyx3-build.XXXXXX)"
+    install -m 0644 "${source}/ch341.c" "${source}/Makefile" "${build}/"
+    if ! make -C "/lib/modules/${kernel}/build" M="${build}" modules >"${build}/make.log" 2>&1; then
+      die "could not build ch341 for ${kernel}; no module was installed or loaded (log: ${build}/make.log)"
     fi
-    dkms build -m ch341-dyx3 -v "${DYX3_CH341_SOURCE_VERSION}" -k "${DYX3_CH341_SUPPORTED_KERNEL}" ||
-      die "DKMS could not build ${module} for ${DYX3_CH341_SUPPORTED_KERNEL}; no module was loaded"
-    dkms install -m ch341-dyx3 -v "${DYX3_CH341_SOURCE_VERSION}" -k "${DYX3_CH341_SUPPORTED_KERNEL}" ||
-      die "DKMS could not install ${module} for ${DYX3_CH341_SUPPORTED_KERNEL}"
+    install -d -m 0755 "${moddir}"
+    install -m 0644 "${build}/ch341.ko" "${ko}"
+    printf '%s\n' "${source_sha}" >"${stamp}"
+    depmod -a "${kernel}" || die "depmod failed for ${kernel}"
+    rm -rf "${build}"
   fi
-  modinfo ch341 >/dev/null 2>&1 || die "installed ch341 module is not visible to modinfo"
+  modinfo -k "${kernel}" ch341 >/dev/null 2>&1 || die "installed ch341 module is not visible to modinfo"
   local vermagic
-  vermagic="$(modinfo -F vermagic ch341 2>/dev/null | awk '{print $1}')"
-  [ "${vermagic}" = "${DYX3_CH341_SUPPORTED_KERNEL}" ] || die "installed ch341 vermagic '${vermagic}' does not match ${DYX3_CH341_SUPPORTED_KERNEL}"
+  vermagic="$(modinfo -k "${kernel}" -F vermagic ch341 2>/dev/null | awk '{print $1}')"
+  [ "${vermagic}" = "${kernel}" ] || die "installed ch341 vermagic '${vermagic}' does not match ${kernel}"
 }
 
 # Install exact NVIDIA headers and the Ubuntu DKMS tool when absent. Simulate each apt
@@ -156,16 +165,8 @@ _usb_serial_ensure_host_build_tools() {
     [ -e "/lib/modules/${DYX3_CH341_SUPPORTED_KERNEL}/build/Makefile" ] ||
     die "matching headers are still unavailable for ${DYX3_CH341_SUPPORTED_KERNEL} after provisioning"
 
-  if ! have dkms; then
-    if ! apt-cache show dkms >/dev/null 2>&1; then apt-get update || die "apt metadata refresh failed while locating DKMS"; fi
-    simulation="$(apt-get -s install --no-install-recommends dkms 2>&1)" || die "APT simulation failed for dkms"
-    upgraded="$(printf '%s\n' "${simulation}" | awk '/^[0-9]+ upgraded,/ {print $1; exit}')"
-    [ "${upgraded:-1}" = 0 ] || die "installing DKMS would upgrade packages; refusing kernel-adjacent changes"
-    if printf '%s\n' "${simulation}" | grep -Eq '^(Remv|Inst) nvidia-l4t-kernel([[:space:]]|$)|^(Remv|Inst) nvidia-l4t-kernel-headers([[:space:]]|$)'; then
-      die "installing DKMS would alter NVIDIA kernel packages; refusing"
-    fi
-    apt-get install -y --no-install-recommends dkms || die "could not install DKMS"
-  fi
+  have make && have gcc ||
+    die "make/gcc missing (build-essential); cannot build the CH341 module"
 }
 
 # Read DYX3_CH341_EXPECTED_ID_PATH from an env file. A missing file means "not provisioned yet"
@@ -236,7 +237,7 @@ _usb_serial_write_receiver_identity() {
 provision_usb_serial_support() {
   local kernel id_path
   if [ "${DYX3_DRY_RUN}" = 1 ]; then
-    log "dry-run: would require one CH340 adapter, an exact supported kernel, matching headers, scoped BRLTTY exclusion, and DKMS ch341-dyx3"
+    log "dry-run: would require one CH340 adapter, an exact supported kernel, matching headers, scoped BRLTTY exclusion, and a ch341-dyx3 module built against the exact headers (no DKMS)"
     return 0
   fi
   [ "${DYX3_ROOT}" != "" ] || kernel="$(_usb_serial_supported_kernel)"
@@ -267,7 +268,7 @@ provision_usb_serial_support() {
       if systemctl is-active --quiet brltty-udev.service 2>/dev/null; then
         systemctl restart brltty-udev.service || die "could not restart BRLTTY after installing the scoped device exclusion"
       fi
-      modprobe ch341 || die "modprobe ch341 failed; see dmesg and /var/lib/dkms/ch341-dyx3/${DYX3_CH341_SOURCE_VERSION}/build/make.log"
+      modprobe ch341 || die "modprobe ch341 failed; see dmesg"
       udevadm trigger --subsystem-match=usb
       udevadm settle --timeout=10 || true
     fi

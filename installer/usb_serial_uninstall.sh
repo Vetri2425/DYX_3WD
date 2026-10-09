@@ -22,6 +22,9 @@ if [ -e "${rule}" ]; then
   }
   rm -f "${rule}"
 fi
+rm -rf /lib/modules/*/extra/ch341-dyx3 2>/dev/null || true
+depmod -a 2>/dev/null || true
+# Earlier DKMS-based provisioning (never deployed) is removed too if present.
 if command -v dkms >/dev/null 2>&1; then
   dkms remove -m ch341-dyx3 -v "${version}" --all 2>/dev/null || true
 fi

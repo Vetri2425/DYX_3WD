@@ -70,12 +70,15 @@ The production installer provisions the QinHeng `1a86:7523` bridge through
 `installer/lib/usb_serial.sh` during both fresh installation and upgrades. The currently validated
 kernel is **Jetson Linux L4T 36.5.0, `5.15.185-tegra`, aarch64**, with the matching NVIDIA
 `nvidia-l4t-kernel-headers` tree. The running kernel config has `CONFIG_USB_SERIAL=m` and no
-`CONFIG_USB_SERIAL_CH341`; the installer uses the versioned `ch341-dyx3` DKMS package in
+`CONFIG_USB_SERIAL_CH341`; the installer builds the versioned `ch341-dyx3` source in
 `installer/drivers/ch341-dyx3-1.0.0/`, copied from the public NVIDIA L4T 36.5.0 source archive.
-`PROVENANCE` records archive and source SHA-256 values. DKMS is installed as an APT dependency and
-builds only for the exact validated kernel. If exact matching headers are missing, the installer
+`PROVENANCE` records archive and source SHA-256 values. The module is built directly (kbuild) against
+the exact installed headers with the existing build-essential GCC 11 toolchain and installed to
+`/lib/modules/<kernel>/extra/ch341-dyx3/` with a source-hash stamp; it is rebuilt only when missing or
+the source changes. **DKMS is not used**: on the rover, installing it pulled gcc-12 and upgraded 11
+system libraries, which this installer refuses. If exact matching headers are missing, the installer
 simulates installation of that header version and refuses any transaction that upgrades or
-replaces the NVIDIA kernel; DKMS is provisioned the same way if absent. A new kernel is rejected
+replaces the NVIDIA kernel. A new kernel is rejected
 with a specific incompatibility message until its matching source, headers, build and live binding
 are validated. No kernel package is replaced by this flow.
 
@@ -98,7 +101,7 @@ sudo DYX3_ARTIFACTS=prebuilt /opt/dyx3/bin/dyx3-upgrade <full-sha>
 ```
 
 This prevents a ROS 2/application rebuild on the Jetson. The application artifact is built in CI;
-DKMS separately compiles the pinned CH341 source against the rover's exact running-kernel headers.
+The provisioning step separately compiles the pinned CH341 source against the rover's exact running-kernel headers.
 
 This identifies the USB bridge, not its UM982 COM function. Do not write
 `DYX3_UM982_USB_ID_PATH` until the physical USB-to-UM982 wiring has been inspected and the selected
@@ -116,7 +119,7 @@ sudo reboot
 ```
 
 The script refuses to remove an unmanaged BRLTTY override. Reboot restores the vendor BRLTTY rule
-and unloads any in-use DKMS module. The uninstaller does not alter the receiver, PX4 firmware,
+and unloads the ch341 module once it is removed. The uninstaller does not alter the receiver, PX4 firmware,
 PX4 parameters, or RTK config. Staged tests cover missing/ambiguous adapter, unsupported kernel,
 BRLTTY scoping, unmanaged override preservation, source/provenance staging, missing module, missing
 binding, successful health state, receiver-identity gating, and repeat-run idempotence. These checks

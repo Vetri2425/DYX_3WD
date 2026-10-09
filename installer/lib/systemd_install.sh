@@ -47,7 +47,11 @@ restart_enabled_services() {
   while IFS= read -r name; do
     [ -n "${name}" ] || continue
     log "restarting ${name}"
-    run systemctl restart "${name}.service"
+    # Never abort here: a unit that fails to (re)start must still let every other unit restart and
+    # the caller reach the health check, which fails on the inactive unit and reverts the release.
+    # Aborting (set -e) left `current` switched with old processes running and no rollback (rover
+    # 2026-10-09, dyx3-usb-serial-check).
+    run systemctl restart "${name}.service" || warn "${name} failed to restart; health check will decide"
   done < <(manifest_section enabled_services "${rel}/installer/manifests/production.manifest")
 }
 
