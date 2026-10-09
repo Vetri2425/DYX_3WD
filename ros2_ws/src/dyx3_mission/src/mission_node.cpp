@@ -28,15 +28,16 @@ MissionNode::MissionNode(const rclcpp::NodeOptions& options)
     : rclcpp::Node("dyx3_mission", options) {
   // Parameter classes (spec section 9): missions_dir RESTART, the rest IDLE_ONLY.
   // DERIVED — NOT FROM V1 SPEC: defaults and their sources are in docs/contracts/dyx3_mission.md
-  // section 8; rpp_ack_timeout_s = 0 means "disabled" because no source gives a value.
+  // section 8; rpp_ack_timeout_s has no source either, so its default is conservative and must
+  // exceed the largest mission's RPP conditioning time.
   missions_dir_ = declare_parameter<std::string>("missions_dir", "/var/lib/dyx3/missions");
   state_publish_hz_ = declare_parameter<double>("state_publish_hz", 10.0);
   gate_max_age_s_ = declare_parameter<double>("gate_status_max_age_s", 0.5);
   point_capture_radius_m_ = declare_parameter<double>("point_capture_radius_m", 0.10);
-  rpp_ack_timeout_s_ = declare_parameter<double>("rpp_ack_timeout_s", 0.0);
+  rpp_ack_timeout_s_ = declare_parameter<double>("rpp_ack_timeout_s", 30.0);
   rpp_status_max_age_s_ = declare_parameter<double>("rpp_status_max_age_s", 0.5);
   if (!(state_publish_hz_ > 0.0 && state_publish_hz_ <= 100.0) || !(gate_max_age_s_ > 0.0) ||
-      !(point_capture_radius_m_ > 0.0) || rpp_ack_timeout_s_ < 0.0 ||
+      !(point_capture_radius_m_ > 0.0) || !(rpp_ack_timeout_s_ > 0.0) ||
       !(rpp_status_max_age_s_ > 0.0) ||
       !std::isfinite(state_publish_hz_ + gate_max_age_s_ + point_capture_radius_m_ +
                      rpp_ack_timeout_s_ + rpp_status_max_age_s_)) {
@@ -184,8 +185,7 @@ rcl_interfaces::msg::SetParametersResult MissionNode::on_parameters(
         return res;
       }
       const double v = p.as_double();
-      const bool bad = !std::isfinite(v) || (n == "rpp_ack_timeout_s" ? v < 0.0 : v <= 0.0) ||
-                       (n == "state_publish_hz" && v > 100.0);
+      const bool bad = !std::isfinite(v) || v <= 0.0 || (n == "state_publish_hz" && v > 100.0);
       if (bad) {
         res.successful = false;
         res.reason = n + " out of range";
@@ -311,9 +311,11 @@ void MissionNode::on_timer() {
     fsm_.rpp_stale(now_ns());
   }
   if (goal_ && goal_->is_active() && goal_->is_canceling()) finish_goal_if_terminal();
-  if (fsm_.state() == State::kReady && rpp_ack_timeout_s_ > 0.0 && ready_since_ns_) {
+  if (fsm_.state() == State::kReady && ready_since_ns_) {
     if (static_cast<double>(now_ns() - *ready_since_ns_) * 1e-9 >= rpp_ack_timeout_s_) {
-      fsm_.rpp_error(now_ns());  // ERROR(INTERNAL): RPP never acknowledged the artifact
+      RCLCPP_ERROR(get_logger(), "RPP did not acknowledge the artifact within %.1f s",
+                   rpp_ack_timeout_s_);
+      fsm_.rpp_ack_timeout(now_ns());  // ERROR(INTERNAL): RPP never acknowledged the artifact
       ready_since_ns_.reset();
       finish_goal_if_terminal();
     }

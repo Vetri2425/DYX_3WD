@@ -563,6 +563,48 @@ TEST_F(RppStatusFreshnessTest, StatusOfAnotherMissionDoesNotKeepTheMissionAlive)
   EXPECT_EQ(state(), di::msg::MissionState::STATE_PAUSED);
 }
 
+// MS-006: a READY mission that RPP never acknowledges must end, not wait forever.
+TEST_F(MissionNodeTest, ReadyWithoutRppAcknowledgementTimesOutToError) {
+  ASSERT_TRUE(
+      node_->set_parameters_atomically({rclcpp::Parameter("rpp_ack_timeout_s", 0.4)}).successful);
+  start_ready();
+  for (int i = 0; i < 20; ++i) hold_gate(true, 0, 50ms);  // gate stays fresh, RPP never answers
+  EXPECT_EQ(state(), di::msg::MissionState::STATE_ERROR);
+  EXPECT_EQ(last_state_.reason_code, di::msg::MissionState::REASON_INTERNAL_ERROR);
+  EXPECT_EQ(node_->fsm().log().back().event, dyx3_mission::Event::kRppAckTimeout);
+}
+
+TEST_F(MissionNodeTest, AnAcknowledgementBeforeTheTimeoutStillRuns) {
+  ASSERT_TRUE(
+      node_->set_parameters_atomically({rclcpp::Parameter("rpp_ack_timeout_s", 0.8)}).successful);
+  start_running();
+  for (int i = 0; i < 40; ++i) {
+    rpp(di::msg::RppStatus::STATE_TRACKING, 1);
+    hold_gate(true, 0, 30ms);
+  }
+  EXPECT_EQ(state(), di::msg::MissionState::STATE_RUNNING);
+}
+
+TEST_F(MissionNodeTest, RppAckTimeoutHasAFiniteDefaultAndRejectsNonPositiveValues) {
+  exec_.remove_node(node_);
+  node_.reset();
+  rclcpp::NodeOptions o;
+  o.parameter_overrides({{"missions_dir", std::string(DYX3_FIXTURES)}});
+  node_ = std::make_shared<dyx3_mission::MissionNode>(o);
+  exec_.add_node(node_);
+  EXPECT_DOUBLE_EQ(node_->get_parameter("rpp_ack_timeout_s").as_double(), 30.0);
+  for (double bad : {0.0, -1.0, std::numeric_limits<double>::infinity(),
+                     std::numeric_limits<double>::quiet_NaN()}) {
+    EXPECT_FALSE(
+        node_->set_parameters_atomically({rclcpp::Parameter("rpp_ack_timeout_s", bad)}).successful)
+        << bad;
+    rclcpp::NodeOptions bo;
+    bo.parameter_overrides({{"rpp_ack_timeout_s", bad}});
+    EXPECT_THROW(std::make_shared<dyx3_mission::MissionNode>(bo), std::invalid_argument) << bad;
+  }
+  EXPECT_DOUBLE_EQ(node_->get_parameter("rpp_ack_timeout_s").as_double(), 30.0);
+}
+
 TEST_F(MissionNodeTest, RppStatusMaxAgeParameterDefaultAndValidation) {
   // default 0.5 s
   exec_.remove_node(node_);

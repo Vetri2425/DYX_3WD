@@ -53,6 +53,8 @@ const char* to_string(Event e) {
       return "skip_point";
     case Event::kRppStale:
       return "rpp_stale";
+    case Event::kRppAckTimeout:
+      return "rpp_ack_timeout";
   }
   return "?";
 }
@@ -253,6 +255,14 @@ Result MissionFsm::rpp_stale(std::int64_t now_ns) {
               now_ns);
   }
   return ok_no_change(Event::kRppStale, "no running mission", now_ns);
+}
+
+Result MissionFsm::rpp_ack_timeout(std::int64_t now_ns) {
+  if (state_ == State::kReady) {
+    return go(State::kError, Event::kRppAckTimeout, kReasonInternalError,
+              "rpp never acknowledged the artifact", now_ns);
+  }
+  return ok_no_change(Event::kRppAckTimeout, "not waiting for an ack", now_ns);
 }
 
 Result MissionFsm::skip_point(bool has_active_point, std::int64_t now_ns) {

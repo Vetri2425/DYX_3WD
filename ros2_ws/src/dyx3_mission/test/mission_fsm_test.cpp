@@ -203,6 +203,15 @@ std::vector<Case> table() {
     c.push_back({s, "rpp stale no effect", [](MissionFsm& f) { return f.rpp_stale(kNow); }, true,
                  Reject::kNone, s, 0, false});
   }
+  // ---- rpp_ack_timeout
+  c.push_back({S::kReady, "rpp ack timeout", [](MissionFsm& f) { return f.rpp_ack_timeout(kNow); },
+               true, Reject::kNone, S::kError, kReasonInternalError, true});
+  for (State s :
+       {S::kIdle, S::kLoading, S::kRunning, S::kPaused, S::kCompleted, S::kAborted, S::kError}) {
+    c.push_back({s, "rpp ack timeout no effect",
+                 [](MissionFsm& f) { return f.rpp_ack_timeout(kNow); }, true, Reject::kNone, s, 0,
+                 false});
+  }
   // ---- skip_point
   for (State s : {S::kRunning, S::kPaused}) {
     c.push_back({s, "skip with active point",
@@ -291,6 +300,7 @@ TEST(MissionFsmGuards, TerminalStatesAreLeftOnlyByANewStart) {
     f.gate_lost(5, kNow);
     f.estop(kNow);
     f.rpp_stale(kNow);
+    f.rpp_ack_timeout(kNow);
     f.skip_point(true, kNow);
     f.artifact_loaded(true, kNow);
     f.rpp_ack(true, 0, kNow);
@@ -339,7 +349,7 @@ TEST(MissionFsmProperty, InvariantsHoldUnderRandomEventSequences) {
       const bool gate = rng() % 4 != 0;
       const std::uint8_t reason = static_cast<std::uint8_t>(rng() % 14);
       const State before = f.state();
-      switch (rng() % 12) {
+      switch (rng() % 13) {
         case 0:
           f.start(gate, i);
           break;
@@ -372,6 +382,9 @@ TEST(MissionFsmProperty, InvariantsHoldUnderRandomEventSequences) {
           break;
         case 10:
           f.rpp_stale(i);
+          break;
+        case 11:
+          f.rpp_ack_timeout(i);
           break;
         default:
           f.skip_point(rng() % 2, i);
