@@ -2279,3 +2279,104 @@ accepted value in the field before changing the production parameter file.
 **DERIVED — NOT FROM V1 SPEC:** `NAV_ACC_RAD=0.3` and `0.5` are diagnostic comparison
 values from the task, not recommended production tuning. The simulator limitation prevents
 the requested parameter and firmware A/B; controller behavior remains unproven.
+
+## 2026-10-09 (late) — Claude — production code review complete; controlled task list for 2026-10-10
+
+**Production review (rover stack):**
+- The register is `docs/reviews/production/open_items.md`.
+- 13 parts were reviewed:
+  - by ChatGPT, prompt per part, CodeRabbit style;
+  - by Opus for recorder and installer;
+  - every finding then **verified against the code**;
+  - then an **independent Opus cross-review of the hot path** (CR-1 rpp + geometry, CR-2 guard + px4_link,
+    CR-3 gateway + backend relay).
+- Totals: **1 CRITICAL, 22 HIGH, 59 MEDIUM, 67 LOW**, 3 rejected.
+- Firmware rover path and tablet app: deferred to a later session.
+- No code was changed today; the review is documentation only.
+
+**Review facts that change how we operate the rover now (until fixed):**
+- **In PX4 Mission mode the companion guard is NOT in the loop.** The app E-stop goes to the guard, which only
+  gates OFFBOARD setpoints. During tomorrow's Mission test the stops are the **RC kill switch** and an RC/QGC
+  mode change (Hold).
+- Every STOP, including an E-stop, is ramped by PX4 at `RO_DECEL_LIM` 0.3 m/s² (XR-GPX-002): about 1.7 m from
+  1 m/s, about 0.2 m from 0.35 m/s.
+- `COM_OF_LOSS_T` is not in the baseline (default 1.0 s). On companion loss, PX4 holds the last setpoint 1.0 s,
+  then disarms (`COM_OBL_RC_ACT` 7).
+- `COM_RCL_EXCEPT` = 4: **RC loss triggers no failsafe in OFFBOARD** (X-011).
+- **Do not while armed or in a run:**
+  - `dyx3-upgrade` / `dyx3-rollback` (INS-001: no idle check);
+  - restart `dyx3-backend` (GW-002: SIGPIPE can kill the whole control graph);
+  - `SetOffboard(false)` (PXL-002: drops the stream with no STOP).
+- **Spray stays OFF on the rover until XR-GPX-001 is fixed:** a spray OFF can wait up to 5 s behind an
+  un-ACKed ON.
+
+### Controlled task list — 2026-10-10 (owner's order; each step has a gate, do not skip ahead)
+
+**T0 — Pre-flight (bench, 15 min)**
+- Checks:
+  - `dyx3-health --deep` OK;
+  - FCU `ver git` = `8279fa4be3`;
+  - DDS connected, timesync converged;
+  - QGC on TCP `192.168.3.150:5760`;
+  - battery ≤ 28.4 V;
+  - spray hardware disconnected or OFF.
+- Gate: all green. Abort: any FAIL → fix first.
+
+**T1 — Motor output mapping and stick (wheels up, disarmed, spray off).** Detail in the 19:00 and 19:10 entries.
+- Set `RBCLW_FUNC1 101`, `RBCLW_FUNC2 102`.
+- `actuator_test`: function 101 → RIGHT wheel forward; function 102 → LEFT wheel forward.
+  `listener wheel_encoders` signs agree.
+- Stick right ⇒ `manual_control_setpoint.roll` > 0 → set `RC1_REV` (expected +1). Throttle forward > 0.
+- Manual, wheels up, then down: right is right, forward is forward; the log shows gyro yaw > 0 on a right turn.
+- **Gate:** all pass, logs saved. **Persist:** baseline params, `3wd_rover01_rc_calibration.params`, RoboClaw
+  README, commit + push.
+- **Abort:** any mirrored result → stop; nothing autonomous today.
+
+**T2 — Safety parameters (owner decides values first; persist to the baseline file the same day)**
+- `COM_OF_LOSS_T`: proposed **0.5** (PC-2c).
+- `COM_RCL_EXCEPT`: owner choice (X-011). Recommended **0** for autonomy, so RC loss stops OFFBOARD and Mission.
+- `RO_DECEL_LIM`: keep 0.3 for today; **measure** the braking distance in T4 (XR-GPX-002).
+- PC-5 estimator noise: `EKF2_GPS_P_NOISE` 0.015, `EKF2_GPS_V_NOISE` 0.05, `RO_YAW_RATE_TH` 0.5 are the earlier
+  recommendations. Change only with the owner's OK; log before and after.
+- **RC kill switch test** (wheels up, armed): kill stops the outputs at once. **Gate:** works. **Abort:** fails →
+  no ground motion.
+
+**T3 — RTCM over USB to the UM982 + dual-antenna heading (outdoors, open sky)**
+- RTK worker INJECTING; receiver GGA quality and correction age; PX4 fix type → RTK FLOAT / FIXED.
+  - The NTRIP base was offline: bring it up or use a working mountpoint.
+  - LoRa stays parked.
+- UNIHEADINGA leaves `INSUFFICIENT_OBS`; EKF yaw valid; global position valid.
+- **Never configure the UM982** (read-only CONFIG / UNILOGLIST only).
+- **Gate:** RTK FIXED (or FLOAT, noted) + valid heading + EKF global position. **Abort:** no heading → no Mission.
+
+**T4 — PX4 Mission mode, 4-point square (about 10 m sides), from QGC**
+- Preconditions: T1–T3 passed; RC kill tested; an observer at the RC; open area; low speed (`RO_SPEED_LIM` as
+  baseline); spray off.
+- Keep `NAV_ACC_RAD` 0.05 (baseline). If it drives back and forth near a waypoint (#27497, F-tasks A1.2), stop
+  (Hold) and trace from the ULog: do not change parameters in the field without a log.
+- Record per corner: reached y/n, time, overshoot, heading at exit. Record the end stop and the stopping distance
+  after Hold (for `RO_DECEL_LIM`).
+- **Gate:** all 4 points reached and turns correct. **Abort:** a wrong turn direction or a spin → RC kill, back
+  to T1.
+
+**T5 — Only if T1–T4 pass: app integration start**
+- Three_Wheel_v2 `App-Polish` `4096af9`.
+- Cleanup list: the 18:25 and 18:40 entries.
+- Contract: `docs/contracts/backend.md`.
+- Pending owner decisions before production use: BE-001 (one controlling tablet vs any), GW-004 (tablet-loss
+  budget), X-015 (plain HTTP on the site LAN).
+
+**Desk track (Claude; code fixes, no rover needed; deploy only on request)**, in order:
+1. **XR-GPX-001:** spray OFF pre-empts the in-flight ON; timeout about 0.3 s.
+2. **GW-002:** `MSG_NOSIGNAL` + `SIGPIPE` ignored.
+3. **X-010 / PXL-002:** `px4_link` STOP on exit and before offboard disable.
+4. **XR-BE-001:** auth and size check before body parsing.
+5. **INS-001 / 002 / 004 / 006 / 009:** installer interlock, re-exec, detach, baseline health, lock fd.
+6. **XR-RPP-001 + XR-RPP-006:** precise-stop lateral fix; tests at command level.
+
+Each fix: tests + `ros2_humble.sh build-test`, HANDOFF entry, commit `Agent: Claude`.
+
+**Housekeeping:**
+- delete `/home/flash/tablet-1.token` once both tablets have the token;
+- remove the stale `4393fb07e1` line from `docs/bench/2026-10-09_bench_runbook.md`;
+- the PC-9 pin bump is **blocked by INS-003** (do it via a fresh install or after the re-exec fix).
