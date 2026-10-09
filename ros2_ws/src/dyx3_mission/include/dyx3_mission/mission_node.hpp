@@ -50,6 +50,8 @@ private:
   /// Gate verdict from the guard's SafetyGateStatus; stale or never-seen == not ok.
   bool gate_ok(std::uint8_t* reason = nullptr);
   void evaluate_gate();
+  /// An RppStatus of the current mission arrived within rpp_status_max_age_s (receipt time).
+  bool rpp_status_fresh();
   void on_gate(const dyx3_interfaces::msg::SafetyGateStatus& m);
   void on_rpp(const dyx3_interfaces::msg::RppStatus& m);
   void on_vehicle(const dyx3_interfaces::msg::VehicleState& m);
@@ -66,6 +68,7 @@ private:
   double gate_max_age_s_;
   double point_capture_radius_m_;
   double rpp_ack_timeout_s_;
+  double rpp_status_max_age_s_;
 
   MissionFsm fsm_;
   RunState run_;
@@ -77,6 +80,7 @@ private:
   bool gate_flag_ = false;
   std::uint8_t gate_reason_ = 0;
   std::optional<std::int64_t> ready_since_ns_;
+  std::optional<std::int64_t> rpp_stamp_ns_;  // receipt time of the last RppStatus of this mission
 
   std::shared_ptr<GoalHandle> goal_;
 

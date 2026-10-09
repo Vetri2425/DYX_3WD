@@ -34,10 +34,12 @@ MissionNode::MissionNode(const rclcpp::NodeOptions& options)
   gate_max_age_s_ = declare_parameter<double>("gate_status_max_age_s", 0.5);
   point_capture_radius_m_ = declare_parameter<double>("point_capture_radius_m", 0.10);
   rpp_ack_timeout_s_ = declare_parameter<double>("rpp_ack_timeout_s", 0.0);
+  rpp_status_max_age_s_ = declare_parameter<double>("rpp_status_max_age_s", 0.5);
   if (!(state_publish_hz_ > 0.0 && state_publish_hz_ <= 100.0) || !(gate_max_age_s_ > 0.0) ||
       !(point_capture_radius_m_ > 0.0) || rpp_ack_timeout_s_ < 0.0 ||
+      !(rpp_status_max_age_s_ > 0.0) ||
       !std::isfinite(state_publish_hz_ + gate_max_age_s_ + point_capture_radius_m_ +
-                     rpp_ack_timeout_s_)) {
+                     rpp_ack_timeout_s_ + rpp_status_max_age_s_)) {
     throw std::invalid_argument("dyx3_mission: invalid parameter value");
   }
   param_cb_ = add_on_set_parameters_callback(
@@ -86,7 +88,8 @@ MissionNode::MissionNode(const rclcpp::NodeOptions& options)
       "/dyx3/mission/resume",
       [this](const std::shared_ptr<dyx3_interfaces::srv::ResumeMission::Request>,
              std::shared_ptr<dyx3_interfaces::srv::ResumeMission::Response> res) {
-        const Result r = fsm_.resume(gate_ok(), now_ns());
+        // Resume also needs a fresh RppStatus: otherwise it would run until the next timer tick.
+        const Result r = fsm_.resume(gate_ok() && rpp_status_fresh(), now_ns());
         res->accepted = r.accepted;
         res->reason_code = r.accepted                       ? res->REASON_OK
                            : r.reject == Reject::kNotPaused ? res->REASON_NOT_PAUSED
@@ -160,6 +163,7 @@ rcl_interfaces::msg::SetParametersResult MissionNode::on_parameters(
   double next_gate_age = gate_max_age_s_;
   double next_capture_radius = point_capture_radius_m_;
   double next_ack_timeout = rpp_ack_timeout_s_;
+  double next_rpp_age = rpp_status_max_age_s_;
   for (const auto& p : ps) {
     const std::string& n = p.get_name();
     if (n == "missions_dir") {
@@ -168,7 +172,7 @@ rcl_interfaces::msg::SetParametersResult MissionNode::on_parameters(
       return res;
     }
     if (n == "state_publish_hz" || n == "gate_status_max_age_s" || n == "point_capture_radius_m" ||
-        n == "rpp_ack_timeout_s") {
+        n == "rpp_ack_timeout_s" || n == "rpp_status_max_age_s") {
       if (fsm_.state() != State::kIdle) {
         res.successful = false;
         res.reason = n + " is IDLE_ONLY: mission must be IDLE";
@@ -191,6 +195,7 @@ rcl_interfaces::msg::SetParametersResult MissionNode::on_parameters(
       if (n == "gate_status_max_age_s") next_gate_age = v;
       if (n == "point_capture_radius_m") next_capture_radius = v;
       if (n == "rpp_ack_timeout_s") next_ack_timeout = v;
+      if (n == "rpp_status_max_age_s") next_rpp_age = v;
     }
   }
   // Humble has no post-set callback. Validate the entire atomic request before changing any
@@ -206,6 +211,7 @@ rcl_interfaces::msg::SetParametersResult MissionNode::on_parameters(
   gate_max_age_s_ = next_gate_age;
   point_capture_radius_m_ = next_capture_radius;
   rpp_ack_timeout_s_ = next_ack_timeout;
+  rpp_status_max_age_s_ = next_rpp_age;
   return res;
 }
 
@@ -221,6 +227,12 @@ bool MissionNode::gate_ok(std::uint8_t* reason) {
   }
   if (reason != nullptr) *reason = why;
   return ok;
+}
+
+bool MissionNode::rpp_status_fresh() {
+  if (!rpp_stamp_ns_) return false;
+  const double age = static_cast<double>(now_ns() - *rpp_stamp_ns_) * 1e-9;
+  return age >= 0.0 && age <= rpp_status_max_age_s_;  // a clock step back is not fresh either
 }
 
 void MissionNode::on_gate(const dyx3_interfaces::msg::SafetyGateStatus& m) {
@@ -251,6 +263,8 @@ void MissionNode::evaluate_gate() {
 
 void MissionNode::on_rpp(const RppStatus& m) {
   if (m.mission_id != fsm_.mission_id()) return;  // only the current mission's RPP status counts
+  // Freshness is measured on OUR clock at receipt.
+  rpp_stamp_ns_ = now_ns();
   run_.run_index = m.run_index;
   // Review H4 / fix plan A2: ERROR and COMPLETE are evaluated before the READY acknowledgement;
   // only a state that shows RPP holds this mission's path acknowledges it.
@@ -289,6 +303,13 @@ void MissionNode::on_vehicle(const dyx3_interfaces::msg::VehicleState& m) {
 
 void MissionNode::on_timer() {
   evaluate_gate();
+  if (fsm_.state() == State::kRunning && !rpp_status_fresh()) {
+    // RPP is silent while the mission says RUNNING (the guard has already stopped the rover on its
+    // own command age). Pause; resuming is an explicit operator action, never automatic.
+    RCLCPP_WARN(get_logger(), "RppStatus older than %.3f s while RUNNING: pausing",
+                rpp_status_max_age_s_);
+    fsm_.rpp_stale(now_ns());
+  }
   if (goal_ && goal_->is_active() && goal_->is_canceling()) finish_goal_if_terminal();
   if (fsm_.state() == State::kReady && rpp_ack_timeout_s_ > 0.0 && ready_since_ns_) {
     if (static_cast<double>(now_ns() - *ready_since_ns_) * 1e-9 >= rpp_ack_timeout_s_) {
@@ -381,6 +402,7 @@ MissionNode::StartOutcome MissionNode::begin_mission(const std::string& sha) {
   run_.mission_id = out.mission_id;
   artifact_.reset();
   journal_.reset();
+  rpp_stamp_ns_.reset();
 
   ArtifactResult art;
   if (is_lower_hex64(sha)) {

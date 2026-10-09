@@ -10,6 +10,7 @@
 #include <ctime>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <string>
 #include <thread>
@@ -45,7 +46,10 @@ class MissionNodeTest : public ::testing::Test {
 protected:
   void SetUp() override {
     rclcpp::NodeOptions o;
-    o.parameter_overrides({{"missions_dir", std::string(DYX3_FIXTURES)}});
+    // The tests that are slow on a loaded machine do not publish RppStatus continuously; the ones
+    // that exercise RppStatus staleness set a short limit themselves (IDLE_ONLY parameter).
+    o.parameter_overrides(
+        {{"missions_dir", std::string(DYX3_FIXTURES)}, {"rpp_status_max_age_s", 5.0}});
     node_ = std::make_shared<dyx3_mission::MissionNode>(o);
     helper_ = std::make_shared<rclcpp::Node>("helper");
     exec_.add_node(node_);
@@ -254,7 +258,8 @@ TEST_F(MissionNodeTest, AllTerminalStatesRejectIdleOnlyUpdates) {
     exec_.remove_node(node_);
     node_.reset();
     rclcpp::NodeOptions o;
-    o.parameter_overrides({{"missions_dir", std::string(DYX3_FIXTURES)}});
+    o.parameter_overrides(
+        {{"missions_dir", std::string(DYX3_FIXTURES)}, {"rpp_status_max_age_s", 5.0}});
     node_ = std::make_shared<dyx3_mission::MissionNode>(o);
     exec_.add_node(node_);
     EXPECT_EQ(node_->fsm().state(), dyx3_mission::State::kIdle);
@@ -496,6 +501,94 @@ TEST_F(MissionNodeTest, RppCompleteInReadyIsNotAnAcknowledgement) {
     hold_gate(true, 0, 30ms);
   }
   EXPECT_TRUE(wait_state(di::msg::MissionState::STATE_RUNNING));
+}
+
+// MS-003: the RPP loop can hang without dying. The guard then stops the rover on command age, but
+// the mission must stop claiming RUNNING.
+class RppStatusFreshnessTest : public MissionNodeTest {
+protected:
+  void SetUp() override {
+    MissionNodeTest::SetUp();
+    ASSERT_TRUE(node_->set_parameters_atomically({rclcpp::Parameter("rpp_status_max_age_s", 0.4)})
+                    .successful);
+  }
+  // Keep the gate and (optionally) RPP alive for `dur`.
+  void hold(bool with_rpp, std::chrono::milliseconds dur) {
+    const auto end = std::chrono::steady_clock::now() + dur;
+    while (std::chrono::steady_clock::now() < end) {
+      if (with_rpp) rpp(di::msg::RppStatus::STATE_TRACKING, 1);
+      hold_gate(true, 0, 30ms);
+    }
+  }
+};
+
+TEST_F(RppStatusFreshnessTest, SilentRppPausesARunningMissionAndNeverAutoResumes) {
+  start_running();
+  hold(true, 800ms);  // status keeps arriving: stays RUNNING well past the 0.4 s limit
+  EXPECT_EQ(state(), di::msg::MissionState::STATE_RUNNING);
+
+  hold(false, 900ms);  // the gate is fresh, RPP is silent
+  EXPECT_EQ(state(), di::msg::MissionState::STATE_PAUSED);
+  EXPECT_EQ(last_state_.reason_code, di::msg::MissionState::REASON_SAFETY);
+  const auto& log = node_->fsm().log();
+  EXPECT_EQ(log.back().event, dyx3_mission::Event::kRppStale);
+
+  hold(true, 900ms);  // RPP is back and the gate is ok: still PAUSED, no auto-resume
+  EXPECT_EQ(state(), di::msg::MissionState::STATE_PAUSED);
+  EXPECT_EQ(node_->fsm().state(), dyx3_mission::State::kPaused);
+
+  rpp(di::msg::RppStatus::STATE_TRACKING, 1);  // an explicit resume is the only way back
+  hold_gate(true, 0, 30ms);
+  EXPECT_TRUE(call(resume_, std::make_shared<di::srv::ResumeMission::Request>())->accepted);
+  EXPECT_TRUE(wait_state(di::msg::MissionState::STATE_RUNNING));
+}
+
+TEST_F(RppStatusFreshnessTest, ResumeIsRefusedWhileRppStatusIsStale) {
+  start_running();
+  hold(false, 900ms);
+  ASSERT_EQ(state(), di::msg::MissionState::STATE_PAUSED);
+  hold(false, 100ms);
+  const auto res = call(resume_, std::make_shared<di::srv::ResumeMission::Request>());
+  EXPECT_FALSE(res->accepted);
+  EXPECT_EQ(res->reason_code, di::srv::ResumeMission::Response::REASON_SAFETY_GATE);
+  EXPECT_EQ(node_->fsm().state(), dyx3_mission::State::kPaused);
+}
+
+TEST_F(RppStatusFreshnessTest, StatusOfAnotherMissionDoesNotKeepTheMissionAlive) {
+  start_running();
+  for (int i = 0; i < 30; ++i) {
+    rpp(di::msg::RppStatus::STATE_TRACKING, 99);
+    hold_gate(true, 0, 30ms);
+  }
+  EXPECT_EQ(state(), di::msg::MissionState::STATE_PAUSED);
+}
+
+TEST_F(MissionNodeTest, RppStatusMaxAgeParameterDefaultAndValidation) {
+  // default 0.5 s
+  exec_.remove_node(node_);
+  node_.reset();
+  rclcpp::NodeOptions o;
+  o.parameter_overrides({{"missions_dir", std::string(DYX3_FIXTURES)}});
+  node_ = std::make_shared<dyx3_mission::MissionNode>(o);
+  exec_.add_node(node_);
+  EXPECT_DOUBLE_EQ(node_->get_parameter("rpp_status_max_age_s").as_double(), 0.5);
+  // runtime validation (IDLE_ONLY, finite, > 0)
+  for (double bad : {0.0, -1.0, std::numeric_limits<double>::infinity(),
+                     std::numeric_limits<double>::quiet_NaN()}) {
+    EXPECT_FALSE(node_->set_parameters_atomically({rclcpp::Parameter("rpp_status_max_age_s", bad)})
+                     .successful)
+        << bad;
+  }
+  EXPECT_DOUBLE_EQ(node_->get_parameter("rpp_status_max_age_s").as_double(), 0.5);
+  EXPECT_TRUE(node_->set_parameters_atomically({rclcpp::Parameter("rpp_status_max_age_s", 0.25)})
+                  .successful);
+  // construction-time validation
+  for (double bad : {0.0, -0.5, std::numeric_limits<double>::infinity(),
+                     std::numeric_limits<double>::quiet_NaN()}) {
+    rclcpp::NodeOptions bo;
+    bo.parameter_overrides({{"rpp_status_max_age_s", bad}});
+    EXPECT_THROW(std::make_shared<dyx3_mission::MissionNode>(bo), std::invalid_argument) << bad;
+  }
 }
 
 int main(int argc, char** argv) {
