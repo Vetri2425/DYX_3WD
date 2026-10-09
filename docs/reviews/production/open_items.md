@@ -45,9 +45,9 @@ Review baseline: DYX_3WD `master` `252778e` (firmware `8279fa4be3`).
 | 7 | `dyx3_spray` | 2026-10-09 | 2026-10-09 | 0 / 2 / 2 / 1 | open |
 | 8 | `dyx3_geometry` | 2026-10-09 | 2026-10-09 | 0 / 0 / 1 / 5 | open |
 | 9 | `dyx3_bringup` + systemd (RT, CPU, restart) | — | — | — | prompt issued |
-| 10 | `dyx3_system_gateway` | — | — | — | |
-| 11 | `dyx3_recorder` | — | — | — | |
-| 12 | backend | — | — | — | |
+| 10 | `dyx3_system_gateway` | — | — | — | prompt issued |
+| 11 | `dyx3_recorder` | — | — | — | prompt issued |
+| 12 | backend | — | — | — | prompt issued |
 | 13 | installer / deployment | — | — | — | |
 | 14 | tablet app (`Three_Wheel_v2` `App-Polish`) | — | — | — | |
 | 15 | PX4 firmware rover path (`dyx-3wd-production`) | — | — | — | |
