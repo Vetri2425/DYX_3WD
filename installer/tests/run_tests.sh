@@ -9,12 +9,63 @@ set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 T="$(mktemp -d)"
-trap 'rm -rf "${T}"' EXIT
+trap '[ -n "${KEEP_T:-}" ] || rm -rf "${T}"' EXIT
 RESULTS="${T}/results"
 : >"${RESULTS}"
 ok() { printf 'ok   %s\n' "$1"; echo ok >>"${RESULTS}"; }
 bad() { printf 'FAIL %s\n' "$1"; echo bad >>"${RESULTS}"; }
 check() { if eval "$2"; then ok "$1"; else bad "$1"; fi; }
+
+# ---------------------------------------------------------------- fake system gateway
+# fake_gateway_start <socket> <reply-file>: a newline-JSON server like dyx3_system_gateway. Per connection it
+# reads one request, sends one telemetry broadcast, then the contents of <reply-file> (re-read every time).
+# "silent" never answers; "garbage" answers with a line that is not JSON.
+fake_gateway_start() {
+  mkdir -p "$(dirname "$1")"
+  python3 - "$1" "$2" <<'PY' &
+import os
+import socket
+import sys
+import threading
+
+path, state = sys.argv[1], sys.argv[2]
+try:
+    os.unlink(path)
+except FileNotFoundError:
+    pass
+srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+srv.bind(path)
+srv.listen(8)
+
+
+def handle(c):
+    with c:
+        c.makefile("rb").readline()
+        mode = open(state).read().strip()
+        if mode == "silent":
+            c.recv(1)
+            return
+        c.sendall(b'{"v":1,"type":"telemetry","snapshot":{}}\n')
+        c.sendall((b"not json" if mode == "garbage" else mode.encode()) + b"\n")
+
+
+while True:
+    conn, _ = srv.accept()
+    threading.Thread(target=handle, args=(conn,), daemon=True).start()
+PY
+  FAKE_GW_PID=$!
+  local i
+  for i in $(seq 50); do [ -S "$1" ] && break; sleep 0.1; done
+}
+# gw_state <reply-file> <arming_state> <vehicle fresh> <mission state> <mission fresh>
+gw_state() {
+  printf '{"v":1,"id":1,"ok":true,"code":"ok","reason":"","data":{"vehicle_state":{"age_s":0.1,"fresh":%s,"data":{"arming_state":%s}},"mission":{"age_s":0.1,"fresh":%s,"data":{"state":%s}},"gateway":{}}}\n' \
+    "$3" "$2" "$5" "$4" >"$1"
+}
+idle_rc() {
+  rover_idle_check >"${T}/idle_reason" 2>&1
+  echo $?
+}
 
 # ---------------------------------------------------------------- supervisor
 sup() {
@@ -575,6 +626,70 @@ F
   # ---- health extras
   (health_extras "${DYX3_CURRENT}") >"${T}/hx" 2>&1
   check "health reports the data volume" 'grep -q "^PASS  disk" "${T}/hx"'
+
+  # ---- INS-001: no switch or restart unless the rover is known idle (fake gateway on the staged socket)
+  local gwf="${T}/gw_state"
+  export DYX3_GATEWAY_QUERY_TIMEOUT_S=1
+  check "idle: dyx3-ros not running and no gateway socket is idle" '[ "$(idle_rc)" = 0 ]'
+  gw_state "${gwf}" 1 true 0 true
+  fake_gateway_start "${DYX3_GATEWAY_SOCK}" "${gwf}"
+  check "idle: fresh DISARMED with the mission IDLE is idle" '[ "$(idle_rc)" = 0 ] && grep -q "disarmed, mission state 0" "${T}/idle_reason"'
+  gw_state "${gwf}" 2 true 0 true
+  check "idle: ARMED refuses" '[ "$(idle_rc)" = 1 ] && grep -q ARMED "${T}/idle_reason"'
+  gw_state "${gwf}" 2 false 0 true
+  check "idle: a stale ARMED still refuses" '[ "$(idle_rc)" = 1 ]'
+  gw_state "${gwf}" 1 true 3 true
+  check "idle: a RUNNING mission refuses" '[ "$(idle_rc)" = 1 ] && grep -q RUNNING "${T}/idle_reason"'
+  gw_state "${gwf}" 1 false 0 true
+  check "idle: a stale DISARMED is unknown, not idle" '[ "$(idle_rc)" = 2 ]'
+  gw_state "${gwf}" 0 true 0 true
+  check "idle: no FCU status (arming_state 0) is unknown, not idle" '[ "$(idle_rc)" = 2 ]'
+  gw_state "${gwf}" 1 true 4 true
+  check "idle: a PAUSED mission is idle but named" '[ "$(idle_rc)" = 0 ] && grep -q PAUSED "${T}/idle_reason"'
+  echo silent >"${gwf}"
+  check "idle: a gateway that never answers is unknown" '[ "$(idle_rc)" = 2 ]'
+  echo garbage >"${gwf}"
+  check "idle: a gateway that answers garbage is unknown" '[ "$(idle_rc)" = 2 ]'
+  echo '{"v":1,"id":1,"ok":false,"code":"busy","reason":"x","data":{}}' >"${gwf}"
+  check "idle: a refused get_snapshot is unknown" '[ "$(idle_rc)" = 2 ]'
+  check "idle: dyx3-ros active under systemd with no answering gateway is unknown" \
+    '[ "$( (systemd_available() { return 0; }; systemctl() { echo active; }; DYX3_GATEWAY_SOCK="${T}/none.sock"; idle_rc) )" = 2 ]'
+
+  gw_state "${gwf}" 2 true 3 true
+  printf '%s\n' "${B}" >"${DYX3_VAR_LIB}/state/previous_release"
+  (upgrade_to "${B}") >"${T}/il_up" 2>&1
+  rc=$?
+  check "an upgrade is refused while ARMED and changes nothing" '[ "${rc}" -ne 0 ] && grep -q "refusing upgrade" "${T}/il_up" && [ "$(basename "$(readlink -f "${DYX3_CURRENT}")")" = "${D}" ]'
+  (rollback_release) >"${T}/il_rb" 2>&1
+  rc=$?
+  check "a rollback is refused while a mission runs and changes nothing" '[ "${rc}" -ne 0 ] && grep -q "refusing rollback" "${T}/il_rb" && [ "$(basename "$(readlink -f "${DYX3_CURRENT}")")" = "${D}" ]'
+  (DYX3_FORCE_UNSAFE=1 rollback_release) >"${T}/il_force" 2>&1
+  rc=$?
+  check "DYX3_FORCE_UNSAFE=1 overrides the interlock loudly" '[ "${rc}" -eq 0 ] && grep -q "DYX3_FORCE_UNSAFE=1: rollback" "${T}/il_force" && [ "$(basename "$(readlink -f "${DYX3_CURRENT}")")" = "${B}" ]'
+
+  # A mission started during the build: the switch is refused.
+  echo f >"${src}/ros2_ws/src/f"
+  git -C "${src}" checkout -q "${D}" -- deployment/scripts/start-platform.sh
+  git -C "${src}" add -A && git -C "${src}" commit -q -m F
+  local F
+  F="$(git -C "${src}" rev-parse HEAD)"
+  eval "$(declare -f build_release | sed '1s/build_release/_real_build_release/')"
+  gw_state "${gwf}" 1 true 0 true
+  (build_release() { _real_build_release "$@" && gw_state "${gwf}" 1 true 3 true; }; upgrade_to "${F}") >"${T}/il_switch" 2>&1
+  rc=$?
+  check "the switch is refused when a mission started during the build" '[ "${rc}" -ne 0 ] && grep -q "refusing the switch" "${T}/il_switch" && [ "$(basename "$(readlink -f "${DYX3_CURRENT}")")" = "${B}" ]'
+  # Armed right after the switch, then health fails: no revert under a moving rover.
+  gw_state "${gwf}" 1 true 0 true
+  (restart_enabled_services() { gw_state "${gwf}" 2 true 0 true; }; FAKE_NO_AGENT="${T}/no_agent" upgrade_to "${F}") >"${T}/il_revert" 2>&1
+  rc=$?
+  check "a failed upgrade is not reverted under an ARMED rover" '[ "${rc}" -ne 0 ] && grep -q "NOT reverting" "${T}/il_revert" && [ "$(basename "$(readlink -f "${DYX3_CURRENT}")")" = "${F}" ]'
+  gw_state "${gwf}" 1 true 0 true
+  (rollback_release) >"${T}/il_after" 2>&1
+  check "once idle, dyx3-rollback returns to the healthy release" '[ "$(basename "$(readlink -f "${DYX3_CURRENT}")")" = "${B}" ]'
+  kill "${FAKE_GW_PID}" 2>/dev/null
+  wait "${FAKE_GW_PID}" 2>/dev/null
+  check "idle: a stale socket file with dyx3-ros stopped is idle" '[ -S "${DYX3_GATEWAY_SOCK}" ] && [ "$(idle_rc)" = 0 ]'
+  rm -f "${DYX3_GATEWAY_SOCK}"
 }
 
 # ---------------------------------------------------------------- prebuilt artifacts

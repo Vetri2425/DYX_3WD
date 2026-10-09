@@ -6,6 +6,9 @@
 # WARN is for things that can legitimately be off during an upgrade (FCU powered down).
 # Deep checks (DDS topics) need the ROS environment and a live FCU.
 
+# shellcheck source=rover_state.sh
+. "${INSTALLER_DIR}/lib/rover_state.sh"
+
 _health_fail=0
 _pass() { printf 'PASS  %s\n' "$*"; }
 _warn() { printf 'WARN  %s\n' "$*"; }

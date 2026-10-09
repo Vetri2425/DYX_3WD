@@ -56,6 +56,9 @@ done
 
 main() {
   require_root
+  # A reinstall re-applies the FCU link, the Wi-Fi access point and USB provisioning before any release work:
+  # all of them can cut a moving rover off. Refuse unless it is known to be idle (INS-001).
+  require_rover_idle "install"
   os_check
   create_user
   create_directories

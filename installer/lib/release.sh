@@ -160,6 +160,8 @@ upgrade_to() {
   if [ -z "${DYX3_ROOT}" ]; then create_user; fi
   ensure_rtk_state_directory
   local ref="$1" sha prev=""
+  # Fail fast, before a long fetch and build; asked again right before the switch (INS-001).
+  require_rover_idle "upgrade to ${ref}"
   load_pin firmware
   sha="$(resolve_ref "${ref}")" || die "cannot resolve '${ref}'"
   [ -n "${sha}" ] || die "cannot resolve '${ref}'"
@@ -191,6 +193,8 @@ upgrade_to() {
   run rm -f "${DYX3_RELEASES}/${sha}/.failed"
   run touch "${DYX3_RELEASES}/${sha}/.complete"
 
+  # The build can take an hour: the rover may have started a mission meanwhile.
+  require_rover_idle "the switch to ${sha:0:10}"
   switch_release "${sha}"
   install_units "${DYX3_CURRENT}"
   install_config_templates "${DYX3_CURRENT}"
@@ -209,6 +213,9 @@ upgrade_to() {
   run rm -f "${DYX3_RELEASES}/${sha}/.complete"
   run touch "${DYX3_RELEASES}/${sha}/.failed"
   if [ -n "${prev}" ] && [ -d "${DYX3_RELEASES}/${prev}" ]; then
+    # Someone may have armed the new release already: a revert restarts the graph under them.
+    rover_may_restart "the revert to ${prev:0:10}" ||
+      die "release ${sha:0:10} failed health but the rover is not known idle (${ROVER_BUSY_REASON}); NOT reverting. When it is idle, run dyx3-rollback"
     warn "post-switch health FAILED: reverting to ${prev:0:10}"
     stop_enabled_services "${DYX3_RELEASES}/${sha}"
     atomic_symlink "${DYX3_RELEASES}/${prev}" "${DYX3_CURRENT}"
@@ -305,6 +312,7 @@ rollback_release() {
     die "previous release ${prev:0:10} is missing or incomplete (pruned?)"
   load_pin firmware
   health_release_only "${DYX3_RELEASES}/${prev}" || die "previous release ${prev:0:10} failed verification; current is unchanged"
+  require_rover_idle "rollback to ${prev:0:10}"
 
   log "rollback: ${cur:0:10} -> ${prev:0:10}"
   atomic_symlink "${DYX3_RELEASES}/${prev}" "${DYX3_CURRENT}"
@@ -317,6 +325,8 @@ rollback_release() {
     log "rollback complete: ${prev:0:10}"
     return 0
   fi
+  rover_may_restart "restoring ${cur:0:10}" ||
+    die "rollback to ${prev:0:10} failed health but the rover is not known idle (${ROVER_BUSY_REASON}); NOT restoring ${cur:0:10}. When it is idle, run dyx3-rollback"
   warn "post-rollback health FAILED: restoring ${cur:0:10}"
   atomic_symlink "${DYX3_RELEASES}/${cur}" "${DYX3_CURRENT}"
   printf '%s\n' "${prev}" >"${DYX3_VAR_LIB}/state/previous_release"
