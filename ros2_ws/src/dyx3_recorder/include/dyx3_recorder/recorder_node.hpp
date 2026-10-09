@@ -71,6 +71,8 @@ private:
   void stop_run(const std::string& final_state);
   void check_disk(double now_s);
   void check_mission_silence(double now_s);
+  void check_bag(double now_s);
+  std::vector<std::string> bag_argv(const std::string& bag_dir) const;
   uint64_t free_space() const;
   void publish_status(double now_s);
 
@@ -83,6 +85,7 @@ private:
   int64_t bag_compression_threads_{1}, bag_max_duration_s_{300};
   double bag_finalize_timeout_s_{10.0}, param_timeout_s_{2.0}, status_hz_{2.0};
   double mission_silence_s_{3.0};
+  int64_t max_bag_restarts_{1};
   uint64_t min_free_bytes_{0}, max_runs_bytes_{0};
   FreeSpaceFn free_fn_;  // guarded by mu_
 
@@ -104,7 +107,9 @@ private:
   bool error_{false};
   bool finalizing_{false};
   bool bag_died_{false};
-  bool disk_stopped_{false};  // the bag was stopped because free space fell below min_free_bytes
+  bool disk_stopped_{false};
+  int64_t bag_restarts_{0};      // restarts of the bag child in this run (REC-012)
+  uint64_t bag_bytes_prev_{0};   // bytes of the bag directories before the current one  // the bag was stopped because free space fell below min_free_bytes
   double last_status_s_{-1e18};
   double last_mission_s_{-1e18};  // clock_() of the newest MissionState (guarded by mu_)
   // newest FCU timesync evidence from dyx3_px4_link (guarded by mu_); stale after link_max_age_s

@@ -311,14 +311,42 @@ TEST(RecorderNode, ABagThatDiesMidRunIsReportedAndRecorded) {
   Rig r("mkdir -p \"$0\"; echo x > \"$0/data\"; sleep 0.3; exit 5");
   r.mission(MissionState::STATE_RUNNING);
   r.pump(600);
-  r.rec->step(r.now += 1.0);
+  r.rec->step(r.now += 1.0);  // first death: restarted once (max_bag_restarts 1)
+  r.pump(600);
+  r.rec->step(r.now += 1.0);  // second death: given up
   r.pump(100);
   EXPECT_EQ(r.status.state, RecorderStatus::STATE_ERROR);
   EXPECT_FALSE(r.status.bag_healthy);
   r.mission(MissionState::STATE_COMPLETED);
-  const std::string summary = slurp(r.run_dir() + "/summary.json");
+  const std::string d = r.run_dir();
+  const std::string summary = slurp(d + "/summary.json");
   EXPECT_NE(summary.find("\"bag_healthy_throughout\": false"), std::string::npos);
-  EXPECT_NE(summary.find("bag process died"), std::string::npos);
+  EXPECT_NE(summary.find("restarted into rosbag2_2"), std::string::npos);
+  EXPECT_NE(summary.find("restart limit 1 reached"), std::string::npos);
+  EXPECT_TRUE(fs::exists(d + "/rosbag2_2/data"));
+  EXPECT_FALSE(fs::exists(d + "/rosbag2_3"));  // bounded
+}
+
+// REC-012: one death mid-run costs one restart, not the rest of the run.
+TEST(RecorderNode, ABagThatDiesOnceIsRestartedIntoANewDirectory) {
+  Rig r("mkdir -p \"$0\"; case \"$0\" in *rosbag2_2) trap 'exit 0' INT; "
+        "while :; do echo xxxxxxxxxx >> \"$0/data\"; sleep 0.05; done;; "
+        "*) echo x > \"$0/data\"; sleep 0.2; exit 6;; esac");
+  r.mission(MissionState::STATE_READY);
+  r.mission(MissionState::STATE_RUNNING);
+  r.pump(500);
+  r.rec->step(r.now += 1.0);
+  r.pump(400);
+  r.rec->step(r.now += 1.0);
+  r.pump(100);
+  EXPECT_EQ(r.status.state, RecorderStatus::STATE_RECORDING);
+  EXPECT_TRUE(r.status.bag_healthy);
+  r.mission(MissionState::STATE_COMPLETED);
+  const std::string d = r.run_dir();
+  const std::string summary = slurp(d + "/summary.json");
+  EXPECT_NE(summary.find("exit code 6): restarted into rosbag2_2"), std::string::npos);
+  EXPECT_NE(summary.find("\"bag_healthy_throughout\": false"), std::string::npos);
+  EXPECT_GT(fs::file_size(d + "/rosbag2_2/data"), 10U);
 }
 
 TEST(RecorderNode, AnUnstartableBagIsAnErrorButTheRunDirectoryAndMissionAreUntouched) {

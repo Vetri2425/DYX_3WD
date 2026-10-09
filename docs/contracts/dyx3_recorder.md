@@ -8,7 +8,7 @@ recorder only observes; it publishes `RecorderStatus` and nothing else, runs as 
 
 ```text
 <runs_dir>/<YYYY-MM-DD_HHMMSS>_mission_<id:04d>[_run<n>]/     (UTC, from the wall clock at start)
-├── rosbag2/                  # produced by a supervised `ros2 bag record` child (sqlite3 WAL, a split every 300 s, closed splits zstd-compressed: *.db3.zstd)
+├── rosbag2/ [rosbag2_2/ ...] # produced by a supervised `ros2 bag record` child (sqlite3 WAL, a split every 300 s, closed splits zstd-compressed: *.db3.zstd)
 ├── ulog/stream.ulg          # cached ULog header + whole messages from /dyx3/ulog_chunk (section 3); ulog/gaps.json: header status + every missing chunk range
 ├── manifest.json             # run id, mission id/index, path artifact sha256, vehicle, operator, host, start time, FCU timesync at start
 ├── versions.json             # copy of the installer's versions file (stack SHA, px4_msgs SHA, firmware SHA, overlay hash) or {"status":"unavailable",...}
@@ -30,6 +30,9 @@ Directory names are collision-free (a numeric suffix is appended if the name exi
   (DERIVED: one run directory per run of a mission) while recording closes the old run (`SUPERSEDED`, or `NOT_STARTED` if it never ran) and opens a new one.
 * **Lost MissionState (REC-008).** If no `MissionState` arrives for `mission_silence_s` (default 3 s; the mission publishes at 10 Hz) while a
   run is open, the run is closed as **`MISSION_STATE_LOST`** with a note; when the mission comes back, its next `READY`/`RUNNING` opens a new run.
+* **Dead bag child (REC-012).** If the `ros2 bag` child exits during a run, it is restarted into `rosbag2_<n>` (rosbag2 refuses an existing
+  directory), at most `max_bag_restarts` (default 1) times per run, with a note each time; `bag_healthy_throughout` becomes false. After the
+  limit, `RecorderStatus.state = ERROR` until the run closes. `bag_bytes` counts every bag directory of the run.
 * **Interrupted runs (REC-009).** At startup, before any new run, every run directory without `summary.json` (recorder crash, power cut,
   SIGKILL) gets a minimal `summary.json` with `final_state` **`INTERRUPTED`**, `bag_healthy_throughout`/`provenance_complete` false, the bag/ULog
   bytes found, and a note (plus "metadata.yaml missing … `ros2 bag reindex`" when the bag was not finalised). Such runs then count as complete for
@@ -75,7 +78,7 @@ last split is uncompressed, and it is a valid WAL database). These options are a
 container (22 topics at production rates, 60 s, every float field noisy): default sqlite3 153 MB/h, these defaults **60 MB/h** (zstd per message: 108 MB/h).
 The payload alone compresses to ~30 MB/h; the rest is the sqlite row/index overhead. **OPEN (owner):** for < 50 MB/h install
 `ros-humble-rosbag2-storage-mcap` and set `bag_storage: mcap`, `bag_storage_preset: zstd_small`, `bag_compression_mode: none` (chunk compression; not measured here) ·
-`bag_finalize_timeout_s` 10 (DERIVED: the last split is compressed while finalising) · `param_timeout_s` 2 (DERIVED) · `status_hz` 2 (DERIVED) · `min_free_bytes` **2 GiB** (REC-001, DERIVED; 0 = off) · `max_runs_bytes` **20 GiB** (retention budget, DERIVED; 0 = off) · `mission_silence_s` 3 (REC-008, DERIVED) · `bag_stall_s` **0 = off** (rosbag2's sqlite file does not grow every second; no source).
+`bag_finalize_timeout_s` 10 (DERIVED: the last split is compressed while finalising) · `param_timeout_s` 2 (DERIVED) · `status_hz` 2 (DERIVED) · `min_free_bytes` **2 GiB** (REC-001, DERIVED; 0 = off) · `max_runs_bytes` **20 GiB** (retention budget, DERIVED; 0 = off) · `mission_silence_s` 3 (REC-008, DERIVED) · `max_bag_restarts` 1 (REC-012, DERIVED) · `bag_stall_s` **0 = off** (rosbag2's sqlite file does not grow every second; no source).
 **OPEN:** whether to also bag the raw `/fmu/out/**` topics (default: not recorded; the `/dyx3/vehicle_state` fan-out is).
 
 ## 6. Acceptance

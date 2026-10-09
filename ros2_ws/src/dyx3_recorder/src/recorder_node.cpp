@@ -243,6 +243,8 @@ void RecorderNode::declare_params() {
   // (the graph died and was not restarted), the run is closed as MISSION_STATE_LOST instead of
   // recording forever.
   mission_silence_s_ = declare_parameter<double>("mission_silence_s", 3.0);
+  max_bag_restarts_ = declare_parameter<int64_t>("max_bag_restarts", 1);
+  if (max_bag_restarts_ < 0) throw std::invalid_argument("recorder parameter invalid: max_bag_restarts");
   // REC-001: the runs share /var/lib/dyx3 with the missions, the RTK state and the spray-ACK
   // ledger. Below min_free_bytes no run starts and a running bag is stopped (checked at every
   // step); retention keeps the complete runs under max_runs_bytes. 0 disables either.
@@ -267,6 +269,17 @@ void RecorderNode::declare_params() {
     throw std::invalid_argument("recorder parameter invalid: bag_compression_format");
   if (bag_max_duration_s_ < 0 || bag_compression_threads_ < 0)
     throw std::invalid_argument("recorder parameter invalid: negative bag setting");
+}
+
+std::vector<std::string> RecorderNode::bag_argv(const std::string& bag_dir) const {
+  std::vector<std::string> argv;
+  for (auto a : bag_command_) {
+    for (size_t p; (p = a.find("{dir}")) != std::string::npos;) a.replace(p, 5, bag_dir);
+    argv.push_back(a);
+  }
+  for (const auto& a : bag_options()) argv.push_back(a);
+  for (const auto& t : topics_) argv.push_back(t);
+  return argv;
 }
 
 std::vector<std::string> RecorderNode::bag_options() const {
@@ -468,13 +481,7 @@ void RecorderNode::start_run(uint32_t mission_id, uint32_t run_index, const std:
   // ulog + bag
   fs::create_directories(dir + "/ulog", ec);
   bool bag_ok = false;
-  std::vector<std::string> argv;
-  for (auto a : bag_command_) {
-    for (size_t p; (p = a.find("{dir}")) != std::string::npos;) a.replace(p, 5, dir + "/rosbag2");
-    argv.push_back(a);
-  }
-  for (const auto& a : bag_options()) argv.push_back(a);
-  for (const auto& t : topics_) argv.push_back(t);
+  const std::vector<std::string> argv = bag_argv(dir + "/rosbag2");
 
   {
     std::lock_guard<std::mutex> lk(mu_);
@@ -487,6 +494,8 @@ void RecorderNode::start_run(uint32_t mission_id, uint32_t run_index, const std:
     bag_died_ = false;
     disk_stopped_ = false;
     finalizing_ = false;
+    bag_restarts_ = 0;
+    bag_bytes_prev_ = 0;
     if (!ulog_.open(dir + "/ulog/stream.ulg")) {
       summary_.notes.push_back("ulog file could not be created");
       summary_.provenance_complete = false;
@@ -556,7 +565,7 @@ void RecorderNode::stop_run(const std::string& final_state) {
     summary.timesync_round_trip_us_end = fresh ? ts_rtt_us_ : 0U;
     if (!info.timesync_valid || !fresh)
       summary.notes.push_back("FCU timesync not available at the start or the end of the run");
-    summary.bag_bytes = bag_.bytes();
+    summary.bag_bytes = bag_bytes_prev_ + bag_.bytes();
     summary.ulog_bytes = ulog_.bytes();
     summary.ulog_gaps = ulog_.gaps().size();
     summary.ulog_header = ulog_.header_status();
@@ -601,6 +610,40 @@ void RecorderNode::stop_run(const std::string& final_state) {
   finalizing_ = false;
   error_ = false;
   disk_stopped_ = false;
+}
+
+void RecorderNode::check_bag(double) {
+  // Called from step() with run_mu_ held. REC-012: a bag child that dies mid-run is restarted into
+  // a new directory (rosbag2 refuses an existing one), at most max_bag_restarts times per run.
+  std::lock_guard<std::mutex> lk(mu_);
+  if (!lifecycle_.recording() || run_dir_.empty() || finalizing_ || error_ || disk_stopped_ ||
+      bag_died_ || bag_.running())
+    return;
+  const int code = bag_.last_exit_code();
+  summary_.bag_healthy_throughout = false;
+  if (bag_restarts_ >= max_bag_restarts_) {
+    bag_died_ = true;
+    error_ = true;
+    summary_.notes.push_back("bag process died during the run (exit code " + std::to_string(code) +
+                             ")" +
+                             (bag_restarts_ > 0 ? ", restart limit " +
+                                                      std::to_string(max_bag_restarts_) + " reached"
+                                                : std::string()));
+    RCLCPP_ERROR(get_logger(), "bag process died during the run (exit code %d)", code);
+    return;
+  }
+  ++bag_restarts_;
+  bag_bytes_prev_ += bag_.bytes();
+  const std::string name = "rosbag2_" + std::to_string(bag_restarts_ + 1);
+  const bool ok = bag_.start(bag_argv(run_dir_ + "/" + name), run_dir_ + "/" + name);
+  summary_.notes.push_back("bag process died during the run (exit code " + std::to_string(code) +
+                           "): " + (ok ? "restarted into " + name : "restart failed"));
+  RCLCPP_ERROR(get_logger(), "bag process died during the run (exit code %d): %s %s", code,
+               ok ? "restarted into" : "restart failed for", name.c_str());
+  if (!ok) {
+    bag_died_ = true;
+    error_ = true;
+  }
 }
 
 void RecorderNode::check_mission_silence(double now_s) {
@@ -656,19 +699,8 @@ void RecorderNode::step(double now_s) {
     std::unique_lock<std::mutex> tl(run_mu_, std::try_to_lock);
     if (tl.owns_lock()) {
       check_disk(now_s);
+      check_bag(now_s);
       check_mission_silence(now_s);
-    }
-  }
-  {
-    std::lock_guard<std::mutex> lk(mu_);
-    if (lifecycle_.recording() && !run_dir_.empty() && !finalizing_ && !error_ && !disk_stopped_ &&
-        !bag_.running() && !bag_died_) {
-      bag_died_ = true;
-      error_ = true;
-      summary_.bag_healthy_throughout = false;
-      summary_.notes.push_back("bag process died during the run (exit code " +
-                               std::to_string(bag_.last_exit_code()) + ")");
-      RCLCPP_ERROR(get_logger(), "bag process died during the run");
     }
   }
   if (now_s - last_status_s_ >= 1.0 / status_hz_ - 1e-9) {
@@ -691,7 +723,7 @@ void RecorderNode::publish_status(double) {
     s.state = RecorderStatus::STATE_IDLE;
   }
   s.bag_healthy = lifecycle_.recording() && !error_ && !bag_died_ && bag_.running();
-  s.bytes_written = lifecycle_.recording() ? bag_.bytes() + ulog_.bytes() : 0;
+  s.bytes_written = lifecycle_.recording() ? bag_bytes_prev_ + bag_.bytes() + ulog_.bytes() : 0;
   s.free_bytes = free_fn_(runs_dir_);
   pub_status_->publish(s);
 }
