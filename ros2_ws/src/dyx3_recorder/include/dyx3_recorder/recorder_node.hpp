@@ -26,6 +26,10 @@ using WallFn = std::function<time_t()>;   // UTC wall time
 using ParamCollector =
     std::function<std::vector<NodeParams>(const std::vector<std::string>& nodes, double timeout_s)>;
 
+// Parameter value as text; doubles and double arrays with %.17g (exact round trip), the rest as
+// rclcpp::to_string.
+std::string param_value_text(const rclcpp::ParameterValue& v);
+
 // Default `param_nodes`: the control graph (dyx3_bringup control_graph.launch.py) + the separate
 // services (gnss_rtk, spray_watchdog, recorder itself).
 std::vector<std::string> default_param_nodes();

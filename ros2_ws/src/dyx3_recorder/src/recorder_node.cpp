@@ -6,6 +6,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -44,6 +45,30 @@ uint64_t free_bytes(const std::string& path) {
 }
 
 }  // namespace
+
+std::string param_value_text(const rclcpp::ParameterValue& v) {
+  // REC-020: rclcpp's to_string formats doubles with std::to_string (6 fixed decimals: 1e-7 ->
+  // "0.000000"). %.17g round-trips every double exactly (PC-8 precision).
+  const auto g17 = [](double d) {
+    if (std::isnan(d)) return std::string("nan");
+    if (std::isinf(d)) return std::string(d > 0 ? "inf" : "-inf");
+    char b[40];
+    std::snprintf(b, sizeof b, "%.17g", d);
+    return std::string(b);
+  };
+  switch (v.get_type()) {
+    case rclcpp::ParameterType::PARAMETER_DOUBLE:
+      return g17(v.get<double>());
+    case rclcpp::ParameterType::PARAMETER_DOUBLE_ARRAY: {
+      std::string o = "[";
+      const auto& a = v.get<std::vector<double>>();
+      for (size_t i = 0; i < a.size(); ++i) o += (i ? ", " : "") + g17(a[i]);
+      return o + "]";
+    }
+    default:
+      return rclcpp::to_string(v);
+  }
+}
 
 std::vector<std::string> default_param_nodes() {
   // Every node of dyx3_bringup/launch/control_graph.launch.py (GRAPH) plus the nodes that run as
@@ -100,7 +125,7 @@ std::vector<NodeParams> collect_ros_params(const std::vector<std::string>& nodes
         } else {
           for (const auto& p : values) {
             np.params.push_back(
-                ParamEntry{name, p.get_name(), p.get_type_name(), p.value_to_string()});
+                ParamEntry{name, p.get_name(), p.get_type_name(), param_value_text(p.get_parameter_value())});
           }
         }
       }

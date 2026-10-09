@@ -409,3 +409,27 @@ TEST(RecorderNode, AThrowingCollectorNeverEscapesTheNode) {
   std::error_code ec;
   fs::remove_all(root, ec);
 }
+
+// REC-020: doubles keep full precision (rclcpp's to_string prints 1e-7 as "0.000000").
+TEST(ParamValueText, DoublesAndDoubleArraysRoundTripExactly) {
+  const double tiny = 1e-7, sum = 0.1 + 0.2;
+  const std::string a = param_value_text(rclcpp::ParameterValue(tiny));
+  const std::string b = param_value_text(rclcpp::ParameterValue(sum));
+  EXPECT_EQ(std::strtod(a.c_str(), nullptr), tiny) << a;
+  EXPECT_EQ(std::strtod(b.c_str(), nullptr), sum) << b;
+  EXPECT_EQ(b, "0.30000000000000004");
+  const std::string arr =
+      param_value_text(rclcpp::ParameterValue(std::vector<double>{tiny, sum, -2.5}));
+  ASSERT_EQ(arr.front(), '[');
+  std::vector<double> back;
+  const char* p = arr.c_str() + 1;
+  for (int i = 0; i < 3; ++i) {
+    char* e = nullptr;
+    back.push_back(std::strtod(p, &e));
+    p = e + 1;  // skip ',' or ']'
+  }
+  EXPECT_EQ(back, (std::vector<double>{tiny, sum, -2.5}));
+  EXPECT_EQ(param_value_text(rclcpp::ParameterValue(int64_t{7})), "7");
+  EXPECT_EQ(param_value_text(rclcpp::ParameterValue(true)), "true");
+  EXPECT_EQ(param_value_text(rclcpp::ParameterValue(std::string("x"))), "x");
+}
