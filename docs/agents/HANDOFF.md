@@ -1918,3 +1918,19 @@ What still blocks production grade, by risk. Proven so far:
 
 **Suggested order:** RoboClaw settings 1–3, then the rover upgrade 16, then wheels-up safety stops 4–5, then outdoors
 8–10 and 14, then the soak 12.
+
+## 2026-10-09 (16:50) — Claude — app auth on the 3WD; QR pairing planned
+
+- **Production auth:** one static operator Bearer token per tablet, SHA-256 hashed in
+  `/var/lib/dyx3/state/auth.json`. No expiry; survives reboots and upgrades. Revoke a tablet by deleting its entry
+  and restarting `dyx3-backend`.
+  - `tablet-1` (operator) was created on rover 01 today. The plaintext was handed over via `/home/flash/tablet-1.token`
+    (0600), which the owner deletes after pasting. Never logged.
+  - Owner decision: keep tokens rather than the prototype password login.
+- **The app build on the tablet comes from `Three_Wheel_v2` `App-Polish`, not `main`.**
+  - `App-Polish` already sends `Authorization: Bearer` for NTRIP profiles (`main` sent nothing, which gave 401), and
+    has no dead prototype logout/password buttons.
+  - The two branches have diverged: the same safety code exists under different SHAs on each. Reconcile them so
+    that `main` is authoritative again, with the owner's OK, then rebuild the signed APK.
+- **Future (after Saturday): QR pairing.** The rover shows a QR code for a new tablet token (a CLI or local page);
+  the app scans it. No copy-paste; still one token per tablet (`tablet-1`, `tablet-2`, …).
