@@ -106,8 +106,11 @@ async def send(request: Request, cmd: str, args: dict | None = None) -> JSONResp
 
 # ------------------------------------------------------------------------------------------------ routes
 @router.get("/ping")
-async def ping() -> dict[str, str]:
-    return {"status": "ok"}
+async def ping(request: Request) -> dict[str, str]:
+    # Unauthenticated liveness + identity, so the app can tell rovers apart by id (not IP) and key its
+    # saved token per rover. No secret here.
+    ident = request.app.state.identity
+    return {"status": "ok", "rover_id": ident.rover_id, "rover_name": ident.rover_name}
 
 
 @router.get("/health")

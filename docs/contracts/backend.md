@@ -9,7 +9,7 @@ or tablet E-stop is a **request** to `dyx3_motion_guard`. If the gateway is not 
 
 | Route | Role | Notes |
 |---|---|---|
-| `GET /ping` | none | liveness of the backend process only |
+| `GET /ping` | none | liveness, plus `rover_id` and `rover_name` (identity, no secret; see 1a) |
 | `GET /health` | viewer | backend, gateway connection, age of the last telemetry, tablet heartbeat |
 | `POST /missions` (multipart: `file` + optional `origin_n`, `origin_e`, `rotation_deg`, `unit_scale`, `close_loop`, `anchor`) | operator | upload -> path engine -> `DYX3PATH 1` artifact stored by sha256 (idempotent) -> summary |
 | `GET /missions`, `GET /missions/{sha}`, `GET /missions/{sha}/path` | viewer | stored artifacts, summary, points |
@@ -24,6 +24,22 @@ or tablet E-stop is a **request** to `dyx3_motion_guard`. If the gateway is not 
 Error mapping of a gateway verdict: `ok` -> 200; downstream `rejected` -> 409 (body carries the downstream `reason_code`, verbatim); `invalid_command` -> 400; `service_unavailable` -> 503;
 `timeout` -> 504; gateway not connected -> 503 with `"delivered": false`. Every error body: `{"ok":false,"code":...,"reason":...,"delivered":bool,"data":...}`.
 An upload is rejected (413/415/422) for: size over `upload_max_bytes`, extension not `.dxf`/`.csv`/`.waypoints`, an engine error (message returned), or an artifact the reader would refuse. The uploaded name is never used as a path.
+
+
+## 1a. Rover identity and LAN discovery
+
+- **Identity:** `rover_id` is stable across IP changes, network switches, reboots and upgrades:
+  `DYX3_ROVER_ID`, else `dyx3-` + the first 10 hex characters of sha256(`/etc/machine-id`).
+  `rover_name` is `DYX3_ROVER_NAME`, else the hostname. Both come from `/etc/dyx3/backend.env`.
+  The app keys its saved operator token by `rover_id`, so one token works on every network.
+- **Beacon:** every `DYX3_BEACON_INTERVAL_S` (default 1.0 s, DERIVED) the backend sends one UDP datagram to
+  port `DYX3_BEACON_PORT` (default 5003) at the subnet broadcast address of **each** IPv4 network it is on.
+  Each datagram carries the address the rover has on that network:
+  `{"type":"dyx3_beacon","v":1,"rover_id":"…","rover_name":"…","ip":"192.168.3.150","port":8000}`.
+  - Networks in `DYX3_BEACON_EXCLUDE` (default the FCU link `10.41.10.0/24`) are never beaconed.
+  - `DYX3_BEACON_ENABLE=0` turns the beacon off.
+  - The beacon carries no secret and controls nothing; a send failure never affects the API.
+  - The pattern comes from the 4WD prototype (UDP 5002); 3WD uses its own port and type so the two apps never mix.
 
 ## 2. Auth (DERIVED — NOT FROM V1 SPEC; OPEN)
 

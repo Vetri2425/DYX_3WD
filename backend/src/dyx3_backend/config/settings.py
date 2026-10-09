@@ -37,6 +37,16 @@ class Settings:
     # DERIVED — re-validate in field Wi-Fi. Tablet heartbeat owns the safety timeout.
     sio_ping_timeout_s: float = 5.0
     allowed_extensions: tuple[str, ...] = field(default=(".dxf", ".csv", ".waypoints"))
+    # Rover identity and LAN discovery beacon (contract section 1a). Empty id/name = derived from the
+    # machine id and hostname. The beacon is off by default here (tests); from_env turns it on.
+    rover_id: str = ""
+    rover_name: str = ""
+    api_port: int = 8000
+    beacon_enabled: bool = False
+    beacon_port: int = 5003
+    # DERIVED — NOT FROM V1 SPEC: 1 s keeps first discovery under ~1 s; one ~120-byte datagram per network.
+    beacon_interval_s: float = 1.0
+    beacon_exclude: tuple[str, ...] = ("10.41.10.0/24",)
 
     @property
     def missions_dir(self) -> str:
@@ -72,6 +82,13 @@ class Settings:
             telemetry_stale_s=_f(e, "DYX3_TELEMETRY_STALE_S", 2.0),
             sio_ping_interval_s=_f(e, "DYX3_SIO_PING_INTERVAL_S", 5.0),
             sio_ping_timeout_s=_f(e, "DYX3_SIO_PING_TIMEOUT_S", 5.0),
+            rover_id=e.get("DYX3_ROVER_ID", ""),
+            rover_name=e.get("DYX3_ROVER_NAME", ""),
+            api_port=int(_f(e, "DYX3_BACKEND_PORT", 8000)),
+            beacon_enabled=e.get("DYX3_BEACON_ENABLE", "1").strip() not in ("0", "false", "no", ""),
+            beacon_port=int(_f(e, "DYX3_BEACON_PORT", 5003)),
+            beacon_interval_s=_f(e, "DYX3_BEACON_INTERVAL_S", 1.0),
+            beacon_exclude=tuple(x.strip() for x in e.get("DYX3_BEACON_EXCLUDE", "10.41.10.0/24").split(",") if x.strip()),
         )
         if s.heartbeat_relay_s >= s.tablet_heartbeat_timeout_s:
             raise ValueError("heartbeat_relay_s must be shorter than tablet_heartbeat_timeout_s")

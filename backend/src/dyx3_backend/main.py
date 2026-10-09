@@ -22,6 +22,7 @@ from dyx3_backend.api.parse_routes import router as parse_router
 from dyx3_backend.api.routes import router
 from dyx3_backend.auth.tokens import TokenStore
 from dyx3_backend.config.settings import Settings
+from dyx3_backend.discovery.beacon import DiscoveryBeacon, rover_identity
 from dyx3_backend.gateway.client import GatewayClient
 from dyx3_backend.mission.service import MissionService
 from dyx3_backend.realtime.hub import RealtimeHub
@@ -63,20 +64,32 @@ def create_api(
     )
     hub = RealtimeHub(tokens or TokenStore.load(settings.auth_path), gw, relay, server.emit)
 
+    identity = rover_identity(settings.rover_id, settings.rover_name)
+    beacon = (
+        DiscoveryBeacon(identity, settings.api_port, settings.beacon_port, settings.beacon_interval_s, settings.beacon_exclude)
+        if settings.beacon_enabled
+        else None
+    )
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         gw.on_telemetry(hub.broadcast_telemetry)
         gw.on_state(hub.broadcast_gateway_state)
         await gw.start()
         await relay.start()
+        if beacon:
+            await beacon.start()
         try:
             yield
         finally:
+            if beacon:
+                await beacon.stop()
             await relay.stop()
             await gw.stop()
 
     api = FastAPI(title="DYX 3WD Backend", version="0.1.0", lifespan=lifespan)
     api.state.settings = settings
+    api.state.identity = identity
     api.state.tokens = tokens or TokenStore.load(settings.auth_path)
     api.state.gateway = gw
     api.state.relay = relay

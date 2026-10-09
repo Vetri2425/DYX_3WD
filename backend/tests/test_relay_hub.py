@@ -108,6 +108,6 @@ def test_socketio_endpoint_is_mounted_and_rejects_tokenless_clients(tmp_path):
 
     app = create_app(Settings(data_dir=str(tmp_path)), tokens=token_store(), gateway=FakeGateway())
     c = TestClient(app)
-    assert c.get("/api/ping").json() == {"status": "ok"}
+    assert c.get("/api/ping").json()["status"] == "ok"
     r = c.get("/socket.io/?EIO=4&transport=polling")
     assert r.status_code == 200 and r.text.startswith("0{")  # engine.io handshake answered by the Socket.IO app
