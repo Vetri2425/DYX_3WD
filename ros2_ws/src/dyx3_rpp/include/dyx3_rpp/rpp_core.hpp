@@ -64,7 +64,9 @@ enum class CmdKind : uint8_t {
   Track,     // follow: the NED velocity vector (v_n, v_e) with the body yaw rate
   Brake,     // active body-axis brake: signed speed along the nose (brake_speed)
   Pivot,     // in-place turn toward the exit heading (pivot_heading_err, wrapped target - yaw)
-  Creep,     // endpoint precise stop: a small signed speed along the nose (creep_speed), no turn
+  Creep,     // endpoint precise stop: a small signed speed along the nose (creep_speed), no turn;
+             // (v_n, v_e) carries the correction direction, which the command layer steers toward
+             // when it is off the nose (XR-RPP-001, rpp_command.hpp)
 };
 const char* to_string(CmdKind k);
 

@@ -417,9 +417,11 @@ TEST(RppCommand, EveryKindMapsToAContractConformingCommand) {
   EXPECT_EQ(c.mode, MotionMode::Pivot);
   EXPECT_EQ(c.speed_body_x, 0.0F);
   EXPECT_FLOAT_EQ(c.yaw_rate_setpoint, -0.45F);
-  // CREEP: signed, no turn
+  // CREEP: signed, no turn (the vector lies on the nose axis, here behind it: reverse)
   o.cmd = CmdKind::Creep;
   o.creep_speed = -0.03;
+  o.v_n = -0.03 * std::cos(2.0);
+  o.v_e = -0.03 * std::sin(2.0);
   c = command_from_tick(o, true, 0.45);
   EXPECT_EQ(c.mode, MotionMode::Creep);
   EXPECT_FLOAT_EQ(c.speed_body_x, -0.03F);
@@ -429,4 +431,63 @@ TEST(RppCommand, EveryKindMapsToAContractConformingCommand) {
   o.v_n = std::nan("");
   c = command_from_tick(o, true, 0.45);
   EXPECT_EQ(c.mode, MotionMode::Stop);
+}
+
+// XR-RPP-001: the precise stop's diagonal correction must reach the vehicle. A CREEP vector off the
+// nose becomes a heading command toward it (forward ahead of the beam, reverse behind it), with
+// the same magnitude; a vector within kCreepSteerMinRad of the nose axis keeps the plain CREEP.
+TEST(RppCommand, CreepOffTheNoseSteersTowardTheCorrectionVector) {
+  TickOutput o;
+  o.cmd = CmdKind::Creep;
+  o.yaw_ned = 0.0;  // nose North
+  // ahead and to the right (east): forward, heading toward the vector
+  const double b = std::atan2(-0.03, 0.07);  // endpoint 7 cm ahead, rover 3 cm east of the line
+  o.v_n = 0.1 * std::cos(b);
+  o.v_e = 0.1 * std::sin(b);
+  o.creep_speed = 0.1;
+  MotionCommand c = command_from_tick(o, true, 0.45);
+  EXPECT_EQ(c.mode, MotionMode::TrackHeading);
+  EXPECT_FLOAT_EQ(c.speed_body_x, 0.1F);
+  EXPECT_NEAR(c.yaw_setpoint, b, 1e-5);
+  EXPECT_TRUE(std::isnan(c.yaw_rate_setpoint));
+  // behind and to the left: reverse, the nose turned toward the opposite bearing (never a spot
+  // turn to drive it forward)
+  const double back = M_PI - 0.4;  // 157 deg: behind the beam, to the right
+  o.v_n = 0.05 * std::cos(back);
+  o.v_e = 0.05 * std::sin(back);
+  o.creep_speed = -0.05;
+  c = command_from_tick(o, true, 0.45);
+  EXPECT_EQ(c.mode, MotionMode::TrackHeading);
+  EXPECT_FLOAT_EQ(c.speed_body_x, -0.05F);
+  EXPECT_NEAR(c.yaw_setpoint, std::atan2(-o.v_e, -o.v_n), 1e-5);
+  EXPECT_NEAR(c.yaw_setpoint, -0.4, 1e-5);
+  // nearly on the nose (1 deg): the plain CREEP mapping, unchanged
+  o.v_n = 0.05 * std::cos(0.0175);
+  o.v_e = 0.05 * std::sin(0.0175);
+  o.creep_speed = 0.05;
+  c = command_from_tick(o, true, 0.45);
+  EXPECT_EQ(c.mode, MotionMode::Creep);
+  EXPECT_FLOAT_EQ(c.speed_body_x, 0.05F);
+  EXPECT_FLOAT_EQ(c.yaw_rate_setpoint, 0.0F);
+  // nearly straight behind (179 deg): plain reverse CREEP
+  o.v_n = -0.05 * std::cos(0.0175);
+  o.v_e = -0.05 * std::sin(0.0175);
+  o.creep_speed = -0.05;
+  c = command_from_tick(o, true, 0.45);
+  EXPECT_EQ(c.mode, MotionMode::Creep);
+  EXPECT_FLOAT_EQ(c.speed_body_x, -0.05F);
+  // the nose wraps: nose 179 deg, vector -170 deg is 11 deg off, forward
+  o.yaw_ned = M_PI - 0.0175;
+  o.v_n = 0.05 * std::cos(-M_PI + 0.1745);
+  o.v_e = 0.05 * std::sin(-M_PI + 0.1745);
+  o.creep_speed = 0.05;
+  c = command_from_tick(o, true, 0.45);
+  EXPECT_EQ(c.mode, MotionMode::TrackHeading);
+  EXPECT_FLOAT_EQ(c.speed_body_x, 0.05F);
+  EXPECT_NEAR(c.yaw_setpoint, -M_PI + 0.1745, 1e-5);
+  // zero vector: plain CREEP (speed 0)
+  o.v_n = 0.0;
+  o.v_e = 0.0;
+  o.creep_speed = 0.0;
+  EXPECT_EQ(command_from_tick(o, true, 0.45).mode, MotionMode::Creep);
 }

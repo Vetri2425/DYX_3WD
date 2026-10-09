@@ -671,8 +671,9 @@ bool RppCore::precise_stop_tick(double pos_n, double pos_e, double yaw_ned, doub
     return true;
   }
   const double max_s = params_.num(P::segment_endpoint_precise_max_s);
-  if (max_s > 0.0 && endpoint_stop_started_ &&
-      static_cast<double>(now_ns - endpoint_stop_start_ns_) * 1e-9 >= max_s && stopped) {
+  const bool timed_out = max_s > 0.0 && endpoint_stop_started_ &&
+                         static_cast<double>(now_ns - endpoint_stop_start_ns_) * 1e-9 >= max_s;
+  if (timed_out && stopped) {
     finish();  // timeout: accept the best position, only once stopped
     return true;
   }
@@ -680,6 +681,20 @@ bool RppCore::precise_stop_tick(double pos_n, double pos_e, double yaw_ned, doub
   segment_state_ = SegState::CornerStop;
   last_speed_cmd_ = 0.0;
   const double age_ms = pose_age_s * 1000.0;
+
+  if (timed_out) {
+    // XR-RPP-001 (BEHAVIOUR CHANGE, not in the prototype): past the timeout the correction is over.
+    // The prototype kept creeping until a stop happened to be confirmed, which a rover rocking
+    // through the end plane never reaches. Brake to a confirmed stop instead; the shared stop
+    // confirmation then finishes on a later tick (a stale velocity confirms after its 2 s cap), so
+    // the endpoint always completes and reports the miss it was left with.
+    double hv = 0.0;
+    publish_brake(yaw_ned, tel, &hv);
+    publish_debug(hold_row(cross, 0.0, dist_to_goal, hv, dist_to_goal, age_ms, false));
+    publish_segment_debug(SegState::CornerStop, std::max(0, static_cast<int>(run_->pts.size()) - 2),
+                          std::max(0.0, residual), dist_to_goal, kNaN, kNaN, kNaN, 0.0);
+    return true;
+  }
 
   if (radial > correction_limit && std::fabs(cross) > cross_tol) {
     // lateral miss outside the correction envelope: brake, no aggressive diagonal chase

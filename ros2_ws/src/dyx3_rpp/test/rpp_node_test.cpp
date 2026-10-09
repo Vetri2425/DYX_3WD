@@ -10,6 +10,9 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
+#include <locale>
+#include <sstream>
 #include <vector>
 
 #include "dyx3_mission/path_artifact.hpp"
@@ -23,16 +26,32 @@ using dyx3_interfaces::msg::RppStatus;
 
 namespace {
 
-// A 6 m north line: TRANSIT 0..1, MARK 1..5, TRANSIT 5..6, as a content-addressed DYX3PATH
-// artifact.
-std::string write_artifact(const std::string& dir) {
-  std::string body = "DYX3PATH 1\nframe local_ned\nengine 0123456789abcdef\nmeta {}\npoints 7\n";
+struct ArtPoint {
+  double n, e;
+  int flag;  // 1 MARK, 0 TRANSIT
+};
+
+// A 6 m north line: TRANSIT 0..1, MARK 1..5, TRANSIT 5..6.
+std::vector<ArtPoint> north_line() {
+  std::vector<ArtPoint> pts;
   for (int i = 0; i <= 6; ++i)
-    body += std::to_string(i) + ".0 0.0 " + ((i >= 1 && i <= 5) ? "1" : "0") + "\n";
-  body += "end 7\n";
-  const std::string sha = dyx3_mission::sha256_hex(body);
+    pts.push_back({static_cast<double>(i), 0.0, (i >= 1 && i <= 5) ? 1 : 0});
+  return pts;
+}
+
+// The points as a content-addressed DYX3PATH artifact.
+std::string write_artifact(const std::string& dir, const std::vector<ArtPoint>& pts) {
+  std::ostringstream body;
+  body.imbue(std::locale::classic());
+  body << "DYX3PATH 1\nframe local_ned\nengine 0123456789abcdef\nmeta {}\npoints " << pts.size()
+       << "\n";
+  body << std::setprecision(17);
+  for (const auto& p : pts) body << p.n << " " << p.e << " " << p.flag << "\n";
+  body << "end " << pts.size() << "\n";
+  const std::string text = body.str();
+  const std::string sha = dyx3_mission::sha256_hex(text);
   std::filesystem::create_directories(dir);
-  std::ofstream(dir + "/" + sha + ".dyx3path", std::ios::binary) << body;
+  std::ofstream(dir + "/" + sha + ".dyx3path", std::ios::binary) << text;
   return sha;
 }
 
@@ -58,7 +77,8 @@ struct Rig {
   double north{0.0}, east{0.0}, heading{0.0}, speed{0.0};
   uint8_t fix{6};
 
-  explicit Rig(const std::vector<rclcpp::Parameter>& params = {}, bool with_artifact = true) {
+  explicit Rig(const std::vector<rclcpp::Parameter>& params = {}, bool with_artifact = true,
+               const std::vector<ArtPoint>& path = north_line()) {
     ctx = std::make_shared<rclcpp::Context>();
     rclcpp::InitOptions io;
     io.set_domain_id(120 + (getpid() % 100));
@@ -67,7 +87,7 @@ struct Rig {
            ("dyx3_rpp_test_" + std::to_string(getpid()) + "_" +
             std::to_string(reinterpret_cast<uintptr_t>(this))))
               .string();
-    sha = with_artifact ? write_artifact(dir) : std::string(64, 'e');
+    sha = with_artifact ? write_artifact(dir, path) : std::string(64, 'e');
     mission_sha = sha;
     rclcpp::NodeOptions no;
     no.context(ctx);
@@ -434,4 +454,54 @@ TEST(RppNode, TheCommandStreamNeverCarriesANonFiniteValueInTheWrongField) {
         ADD_FAILURE() << "unknown mode " << static_cast<int>(m.mode);
     }
   }
+}
+
+namespace {
+// Sign changes of the commanded body speed, counting only commands at or above the stop speed
+// threshold (segment_stop_speed_threshold, 0.02 m/s): below it the rover is stopped by definition.
+int speed_sign_changes(const std::vector<MotionSetpoint>& ms, size_t from) {
+  int changes = 0, last = 0;
+  for (size_t i = from; i < ms.size(); ++i) {
+    const float v = ms[i].speed_body_x;
+    if (std::fabs(v) < 0.02F) continue;
+    const int s = v > 0.0F ? 1 : -1;
+    if (last != 0 && s != last) ++changes;
+    last = s;
+  }
+  return changes;
+}
+}  // namespace
+
+// XR-RPP-001: the final approach ends 3 cm to the side of the endpoint. The precise stop aims
+// diagonally; the published command must carry that direction, so the rover removes the lateral
+// miss and completes instead of rocking through the end plane along its nose.
+TEST(RppNode, AnEndpointWithALateralMissCompletesWithoutRocking) {
+  // pivot_to_intercept off: the entry alignment holds the leg heading, so the 3 cm miss is intact
+  // when the precise stop engages (it is a final approach, not a line acquisition).
+  Rig r({rclcpp::Parameter("pivot_to_intercept_enabled", false)});
+  r.auto_drive = true;
+  r.north = 5.92;
+  r.east = 0.03;
+  r.heading = 0.0;
+  r.mission_state = MissionState::STATE_RUNNING;
+  const size_t from = r.motion.size();
+  bool saw_creeping = false, saw_steer = false;
+  int ticks = 0;
+  for (; ticks < 500 && r.status.state != RppStatus::STATE_COMPLETE; ++ticks) {  // 10 s
+    r.cycle();
+    if (r.status.state == RppStatus::STATE_CREEPING) {
+      saw_creeping = true;
+      const MotionSetpoint& m = r.motion.back();
+      if (m.mode == MotionSetpoint::MODE_TRACK_HEADING && std::fabs(m.yaw_setpoint) > 0.05F)
+        saw_steer = true;  // toward the endpoint, off the line heading
+    }
+  }
+  EXPECT_TRUE(saw_creeping) << "the precise stop never engaged";
+  EXPECT_TRUE(saw_steer) << "the lateral correction never reached the command";
+  EXPECT_EQ(r.status.state, RppStatus::STATE_COMPLETE)
+      << "not complete after " << ticks * 0.02 << " s at n " << r.north << " e " << r.east;
+  EXPECT_LE(speed_sign_changes(r.motion, from), 2);
+  EXPECT_NEAR(r.north, 6.0, 0.02 + 1e-3);
+  EXPECT_NEAR(r.east, 0.0, 0.02 + 1e-3);
+  EXPECT_EQ(r.motion.back().mode, MotionSetpoint::MODE_STOP);
 }

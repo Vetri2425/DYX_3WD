@@ -77,7 +77,8 @@ old code published zero at `dist ≤ tol`, the rover drifted 1.08 m past, the go
 ### 3.6 Endpoint precise stop (default **on** in demo-ready)
 Final run only. Residual along the final segment tangent (+ ahead, − overshot), cross-track at the endpoint, radial distance.
 `trigger = v²/(2·decel) + along_tol + trigger_margin`. Negative residual engages immediately. Done when `|residual| ≤ along_tol ∧ |cross| ≤ cross_tol ∧ stopped`
-→ `_hold_at_completion`; timeout `segment_endpoint_precise_max_s` accepts the best position **only when stopped**. Lateral miss outside
+→ `_hold_at_completion`; timeout `segment_endpoint_precise_max_s` accepts the best position **only when stopped**; past the timeout while still moving, the C++ **brakes**
+(body-axis brake) until the shared stop confirmation holds and then finishes (XR-RPP-001, BEHAVIOUR CHANGE: the prototype kept creeping). Lateral miss outside
 `segment_endpoint_max_correction_m` ⇒ brake and warn (no aggressive diagonal chase). Creep speed `segment_endpoint_creep_speed` when stopped but off the mark;
 else `feedforward_brake_speed(profile_dist, decel, max(speed, creep))`. Direction: along the segment (±), or at the endpoint when a small lateral correction is needed.
 Pure helpers (`precise_stop.py`): trigger `max(floor, v²/2a)`, `v = min(√(2ad), cap)`, `along_track_residual`, bang-bang `servo_speed`, `reached`.

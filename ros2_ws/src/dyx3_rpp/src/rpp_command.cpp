@@ -2,6 +2,8 @@
 
 #include <cmath>
 
+#include "dyx3_geometry/angle_wrap.hpp"
+
 namespace dyx3_rpp {
 
 MotionCommand command_from_tick(const TickOutput& o, bool profile_segment, double max_yaw_rate,
@@ -27,9 +29,26 @@ MotionCommand command_from_tick(const TickOutput& o, bool profile_segment, doubl
     case CmdKind::Pivot:
       c = make_pivot(o.pivot_heading_err, max_yaw_rate);
       break;
-    case CmdKind::Creep:
+    case CmdKind::Creep: {
+      // XR-RPP-001: carry the direction of the core's correction vector, not only its projection on
+      // the nose. Same magnitude (the core's caps are unchanged); a vector off the nose by more
+      // than kCreepSteerMinRad becomes a heading command toward it, driven forward when it is
+      // ahead of the beam and in reverse (nose kept toward the opposite bearing) when behind.
+      const double mag = std::hypot(o.v_n, o.v_e);
+      if (mag > 1e-9 && std::isfinite(mag) && std::isfinite(o.yaw_ned)) {
+        const double bearing = std::atan2(o.v_e, o.v_n);
+        const double off = dyx3_geometry::angle_wrap(bearing - o.yaw_ned);
+        const bool ahead = std::fabs(off) <= M_PI / 2.0;
+        const double off_axis = ahead ? std::fabs(off) : M_PI - std::fabs(off);
+        if (off_axis > kCreepSteerMinRad) {
+          c = ahead ? make_track_heading(mag, bearing)
+                    : make_track_heading(-mag, std::atan2(-o.v_e, -o.v_n));
+          break;
+        }
+      }
       c = make_creep(o.creep_speed, 0.0, max_yaw_rate);
       break;
+    }
   }
   sanitize(&c);
   return c;
