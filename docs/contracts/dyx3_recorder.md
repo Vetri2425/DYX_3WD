@@ -75,7 +75,8 @@ since the recorder started (or a gap hit the definitions), the file has no heade
 
 ## 5. Parameters (all RESTART; none affects motion)
 
-`runs_dir` `/var/lib/dyx3/runs` · `versions_file` · `config_dir` · `vehicle_id` `unknown` · `operator` `unknown` · `topics` (list of recorded topics; default = the `/dyx3/**` set) · `param_nodes` (default: every node of `dyx3_bringup/launch/control_graph.launch.py` GRAPH — `dyx3_mission`, `motion_guard`, `px4_link`, `rpp`, `spray`, `system_gateway` — plus the separate services `gnss_rtk`, `spray_watchdog` and `recorder` itself; `recorder_node_test` parses the launch file and fails if a graph node is missing) ·
+`runs_dir` `/var/lib/dyx3/runs` · `versions_file` · `config_dir` · `vehicle_id` `unknown` · `operator` `unknown` · `topics` (list of recorded topics; default = the `/dyx3/**` set plus `/parameter_events` and `/rosout`, so LIVE parameter changes and node
+logs between the start and end snapshots are journaled — REC-003) · `param_nodes` (default: every node of `dyx3_bringup/launch/control_graph.launch.py` GRAPH — `dyx3_mission`, `motion_guard`, `px4_link`, `rpp`, `spray`, `system_gateway` — plus the separate services `gnss_rtk`, `spray_watchdog` and `recorder` itself; `recorder_node_test` parses the launch file and fails if a graph node is missing) ·
 `bag_storage` `sqlite3` · `bag_storage_preset` `resilient` (REC-021: WAL + `synchronous=NORMAL` instead of an in-memory journal + `synchronous=OFF`) ·
 `bag_compression_mode` `file` · `bag_compression_format` `zstd` · `bag_compression_threads` 1 · `bag_max_duration_s` 300 (split; after a power cut only the
 last split is uncompressed, and it is a valid WAL database). These options are appended to `bag_command` before the topics. Measured in the dev

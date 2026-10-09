@@ -242,7 +242,12 @@ void RecorderNode::declare_params() {
                                                                    "/dyx3/spray/actuator_command",
                                                                    "/dyx3/spray/actuator_ack",
                                                                    "/dyx3/spray/watchdog_status",
-                                                                   "/dyx3/recorder/status"});
+                                                                   "/dyx3/recorder/status",
+                                                                   // REC-003: every LIVE parameter
+                                                                   // change of every node, and
+                                                                   // every node's log, mid-run
+                                                                   "/parameter_events",
+                                                                   "/rosout"});
   param_nodes_ = declare_parameter<std::vector<std::string>>("param_nodes", default_param_nodes());
   bag_command_ = declare_parameter<std::vector<std::string>>(
       "bag_command", {"ros2", "bag", "record", "-o", "{dir}"});

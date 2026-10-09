@@ -701,3 +701,14 @@ TEST(RecorderNode, ConditionedExecutionShaIsRecorded) {
   summary = slurp(d2 + "/summary.json");
   EXPECT_NE(summary.find("conditioned_execution_sha256 not reported"), std::string::npos);
 }
+
+// REC-003: parameter changes and node logs between the start and end snapshots are in the bag.
+TEST(RecorderNode, DefaultTopicsJournalParameterChangesAndLogs) {
+  Rig r;
+  const auto topics = r.rec->get_parameter("topics").as_string_array();
+  const std::set<std::string> have(topics.begin(), topics.end());
+  EXPECT_TRUE(have.count("/parameter_events"));
+  EXPECT_TRUE(have.count("/rosout"));
+  EXPECT_TRUE(have.count("/dyx3/rpp/status"));
+  EXPECT_EQ(have.size(), 24U);
+}
