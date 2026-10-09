@@ -165,13 +165,26 @@ build_release() {
   run install -m 0644 "${rel}/deployment/scripts/dyx3-env.sh" "${rel}/bin/dyx3-env.sh"
 }
 
+# write_atomic <mode> <file> <content>: temp file in the same directory, then one rename (INS-023). A reader (the shim
+# an operator runs, the next rollback) sees the old or the new file, never a truncated one.
+write_atomic() {
+  local mode="$1" f="$2" tmp
+  install -d "$(dirname "${f}")"
+  tmp="$(mktemp "$(dirname "${f}")/.$(basename "${f}").XXXXXX")"
+  printf '%s' "$3" >"${tmp}"
+  chmod "${mode}" "${tmp}"
+  mv -f "${tmp}" "${f}"
+}
+
+set_previous_release() { write_atomic 0644 "${DYX3_VAR_LIB}/state/previous_release" "$1"$'\n'; }
+
 # switch_release <sha>: atomically point current at it; remember the previous one.
 switch_release() {
   local sha="$1" prev=""
   [ -L "${DYX3_CURRENT}" ] && prev="$(basename "$(readlink -f "${DYX3_CURRENT}")")"
   if [ -n "${prev}" ] && [ "${prev}" != "${sha}" ]; then
     run install -d "${DYX3_VAR_LIB}/state"
-    if [ "${DYX3_DRY_RUN}" != "1" ]; then printf '%s\n' "${prev}" >"${DYX3_VAR_LIB}/state/previous_release"; fi
+    if [ "${DYX3_DRY_RUN}" != "1" ]; then set_previous_release "${prev}"; fi
   fi
   atomic_symlink "${DYX3_RELEASES}/${sha}" "${DYX3_CURRENT}"
   log "current -> ${sha:0:10}${prev:+ (previous ${prev:0:10})}"
@@ -188,11 +201,9 @@ install_operator_shims() {
       printf '[dry-run] shim %s -> current/installer/%s\n' "${name}" "${target}" >&2
       continue
     fi
-    cat >"${DYX3_BIN}/${name}" <<SHIM
-#!/usr/bin/env bash
-exec "${DYX3_CURRENT}/installer/${target}" "\$@"
-SHIM
-    chmod 0755 "${DYX3_BIN}/${name}"
+    write_atomic 0755 "${DYX3_BIN}/${name}" "#!/usr/bin/env bash
+exec \"${DYX3_CURRENT}/installer/${target}\" \"\$@\"
+"
   done
 }
 
@@ -290,7 +301,7 @@ finish_interrupted_switch() {
   require_rover_idle "the revert of the interrupted ${kind}"
   warn "current ${cur:0:10} is unhealthy: reverting the interrupted ${kind} to ${previous:0:10}"
   atomic_symlink "${DYX3_RELEASES}/${previous}" "${DYX3_CURRENT}"
-  if [ -n "${cur}" ]; then printf '%s\n' "${cur}" >"${DYX3_VAR_LIB}/state/previous_release"; fi
+  if [ -n "${cur}" ]; then set_previous_release "${cur}"; fi
   sync_fs "${DYX3_PREFIX}"
   install_units "${DYX3_CURRENT}"
   install_operator_shims
@@ -506,7 +517,7 @@ rollback_release() {
   log "rollback: ${cur:0:10} -> ${prev:0:10}"
   mark_switch_in_progress rollback "${prev}" "${cur}"
   atomic_symlink "${DYX3_RELEASES}/${prev}" "${DYX3_CURRENT}"
-  printf '%s\n' "${cur}" >"${DYX3_VAR_LIB}/state/previous_release"
+  set_previous_release "${cur}"
   sync_fs "${DYX3_PREFIX}"
   install_units "${DYX3_CURRENT}"
   install_operator_shims
@@ -521,7 +532,7 @@ rollback_release() {
     die "rollback to ${prev:0:10} failed health but the rover is not known idle (${ROVER_BUSY_REASON}); NOT restoring ${cur:0:10}. When it is idle, the next dyx3-upgrade or dyx3-rollback restores it"
   warn "post-rollback health FAILED: restoring ${cur:0:10}"
   atomic_symlink "${DYX3_RELEASES}/${cur}" "${DYX3_CURRENT}"
-  printf '%s\n' "${prev}" >"${DYX3_VAR_LIB}/state/previous_release"
+  set_previous_release "${prev}"
   sync_fs "${DYX3_PREFIX}"
   install_units "${DYX3_CURRENT}"
   install_operator_shims

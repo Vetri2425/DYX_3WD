@@ -545,6 +545,12 @@ F
   check "release has .complete and launchers" '[ -f "${DYX3_RELEASES}/${A}/.complete" ] && [ -x "${DYX3_RELEASES}/${A}/bin/dyx3-platform" ]'
   check "config templates installed" '[ -f "${DYX3_ETC}/platform.env" ] && [ -f "${DYX3_ETC}/mavlink-router.conf" ]'
   check "operator shims installed" '[ -x "${DYX3_BIN}/dyx3-upgrade" ] && [ -x "${DYX3_BIN}/dyx3-health" ] && [ -x "${DYX3_BIN}/dyx3-install" ] && [ -x "${DYX3_BIN}/dyx3-rollback" ] && [ -x "${DYX3_BIN}/dyx3-version" ]'
+  check "a shim execs the current release's script" '[ "$(sed -n 2p "${DYX3_BIN}/dyx3-upgrade")" = "exec \"${DYX3_CURRENT}/installer/upgrade.sh\" \"\$@\"" ]'
+  # INS-023: shims and previous_release are replaced by rename, never rewritten in place.
+  local shim_inode
+  shim_inode="$(stat -c %i "${DYX3_BIN}/dyx3-upgrade")"
+  install_operator_shims
+  check "shims are replaced atomically (new inode, no temp file left)" '[ "$(stat -c %i "${DYX3_BIN}/dyx3-upgrade")" != "${shim_inode}" ] && [ -x "${DYX3_BIN}/dyx3-upgrade" ] && [ -z "$(find "${DYX3_BIN}" -name ".*")" ]'
   check "config templates for ros/backend/ntrip installed" '[ -f "${DYX3_ETC}/ros.env" ] && [ -f "${DYX3_ETC}/backend.env" ] && [ -f "${DYX3_ETC}/ntrip.env" ]'
   check "hotspot template created with no credentials and mode 0640" '[ -f "${DYX3_ETC}/hotspot.env" ] && [ "$(stat -c %a "${DYX3_ETC}/hotspot.env")" = 640 ] && ! grep -Eq "^DYX3_HOTSPOT_(SSID|PSK)=." "${DYX3_ETC}/hotspot.env"'
   local hotspot_profile="${DYX3_ROOT}/etc/NetworkManager/system-connections/dyx3-hotspot.nmconnection"
@@ -669,6 +675,7 @@ F
   check "the switch is flushed to disk" 'grep -qx "${DYX3_PREFIX} complete=0 current=${B}" "${T}/sync_log"'
   check "upgrade to B (rc=0)" '[ "${rc}" -eq 0 ]'
   check "current -> B, previous recorded as A" '[ "$(basename "$(readlink -f "${DYX3_CURRENT}")")" = "${B}" ] && [ "$(cat "${DYX3_VAR_LIB}/state/previous_release")" = "${A}" ]'
+  check "previous_release is written by rename, no temp file left" '[ -z "$(find "${DYX3_VAR_LIB}/state" -maxdepth 1 -name ".previous_release.*")" ] && [ "$(stat -c %a "${DYX3_VAR_LIB}/state/previous_release")" = 644 ]'
   check "upgrade never overwrites edited /etc config" 'grep -q "EDITED=1" "${DYX3_ETC}/platform.env"'
   check "upgrade preserves spray correlation ledger" '[ "$(cat "${DYX3_VAR_LIB}/state/px4_link_spray_ack_next")" = "v2 12345" ]'
   check "upgrade preserves RTK runtime config" 'grep -q "persist RTK config" "${DYX3_VAR_LIB}/rtk/config.json"'
