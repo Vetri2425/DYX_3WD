@@ -44,6 +44,11 @@ public:
   // One decision cycle at guard-clock time now_s. Public for deterministic tests.
   void step(double now_s);
 
+  // Publishes one canonical STOP on /dyx3/motion_guard/command, independent of the gates and of
+  // the last RPP command. Called by main in a bounded burst after SIGINT/SIGTERM, while the
+  // context is still up, so the last word the downstream hop sees is STOP.
+  void shutdown_stop();
+
 private:
   void declare_and_validate_params();
   rcl_interfaces::msg::SetParametersResult on_parameters(
@@ -70,9 +75,11 @@ private:
   MissionIn mission_;
   double last_step_s_{-1.0};
   double last_gate_pub_s_{-1e18};
+  bool force_safety_pub_{false};  // E-stop latch changed: publish gate + E-stop state this step
   double last_status_pub_s_{-1e18};
   uint64_t out_seq_{0};
   Reason last_reason_{Reason::Ok};
+  uint64_t reason_changes_{0};
   uint64_t last_status_input_seq_{~0ULL};
 
   rclcpp::TimerBase::SharedPtr timer_;

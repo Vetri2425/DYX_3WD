@@ -34,6 +34,9 @@ struct Rig {
   std::vector<rclcpp::SubscriptionBase::SharedPtr> keep;
   MotionSetpoint last_out;
   std::vector<MotionSetpoint> outs;
+  std::vector<dyx3_interfaces::msg::MotionSetpointStatus> statuses;
+  std::vector<dyx3_interfaces::msg::SafetyGateStatus> gates;
+  std::vector<dyx3_interfaces::msg::EmergencyStopState> estops;
   dyx3_interfaces::msg::MotionSetpointStatus last_status;
   dyx3_interfaces::msg::SafetyGateStatus last_gate;
   dyx3_interfaces::msg::EmergencyStopState last_estop;
@@ -80,13 +83,20 @@ struct Rig {
         "/dyx3/motion_guard/status", rclcpp::QoS(10).reliable(),
         [this](dyx3_interfaces::msg::MotionSetpointStatus::ConstSharedPtr m) {
           last_status = *m;
+          statuses.push_back(*m);
         }));
     keep.push_back(world->create_subscription<dyx3_interfaces::msg::SafetyGateStatus>(
         "/dyx3/safety_gate", r1,
-        [this](dyx3_interfaces::msg::SafetyGateStatus::ConstSharedPtr m) { last_gate = *m; }));
+        [this](dyx3_interfaces::msg::SafetyGateStatus::ConstSharedPtr m) {
+          last_gate = *m;
+          gates.push_back(*m);
+        }));
     keep.push_back(world->create_subscription<dyx3_interfaces::msg::EmergencyStopState>(
         "/dyx3/emergency_stop_state", r1,
-        [this](dyx3_interfaces::msg::EmergencyStopState::ConstSharedPtr m) { last_estop = *m; }));
+        [this](dyx3_interfaces::msg::EmergencyStopState::ConstSharedPtr m) {
+          last_estop = *m;
+          estops.push_back(*m);
+        }));
     cli_estop = world->create_client<dyx3_interfaces::srv::SetEmergencyStop>(
         "/dyx3/motion_guard/set_emergency_stop");
     const auto end = std::chrono::steady_clock::now() + 10s;
@@ -164,6 +174,18 @@ struct Rig {
     m.yaw_rate_setpoint = rate;
     m.valid = valid;
     p_cmd->publish(m);
+  }
+  // Calls the E-stop service and pumps (no guard step, no world traffic) until the reply arrives.
+  // Returns whether the guard accepted the request.
+  bool call_estop(bool asserted, const char* source) {
+    auto req = std::make_shared<dyx3_interfaces::srv::SetEmergencyStop::Request>();
+    req->asserted = asserted;
+    req->source = source;
+    auto fut = cli_estop->async_send_request(req);
+    for (int i = 0; i < 500 && fut.wait_for(0ms) != std::future_status::ready; ++i)
+      exec->spin_some(2ms);
+    if (fut.wait_for(0ms) != std::future_status::ready) return false;
+    return fut.get()->accepted;
   }
   // One cycle: world publishes, deliver, guard decides, deliver outputs.
   void tick(double dt = 0.02, bool with_rpp = true, uint8_t mode = 2, float v = 0.3F,
@@ -335,6 +357,147 @@ TEST(MotionGuardNode, EmergencyStopLatchesUntilExplicitlyCleared) {
   EXPECT_TRUE(clr.get()->accepted);
   r.run(0.3);
   EXPECT_EQ(r.last_out.mode, MotionSetpoint::MODE_TRACK_RATE);
+}
+
+// MG-007: the latch change is published at once, so an assert and a clear less than one 100 ms
+// gate period apart are both visible to the mission and the spray node.
+TEST(MotionGuardNode, EmergencyStopAssertAndClearWithinOneGatePeriodAreBothPublished) {
+  Rig r;
+  r.run(0.3);
+  ASSERT_TRUE(r.last_gate.ok);
+  r.gates.clear();
+  r.estops.clear();
+
+  ASSERT_TRUE(r.call_estop(true, "tablet"));
+  r.pump();
+  ASSERT_FALSE(r.gates.empty()) << "assert must publish the gate state without waiting for 10 Hz";
+  ASSERT_FALSE(r.estops.empty());
+  EXPECT_FALSE(r.gates.back().ok);
+  EXPECT_EQ(r.gates.back().reason_code,
+            dyx3_interfaces::msg::MotionSetpointStatus::REASON_ESTOP);
+  EXPECT_TRUE(r.estops.back().asserted);
+  EXPECT_EQ(r.estops.back().source, "tablet");
+
+  r.now += 0.03;  // 30 ms later: still inside the same 100 ms gate period
+  ASSERT_TRUE(r.call_estop(false, "tablet"));
+  r.pump();
+  ASSERT_GE(r.gates.size(), 2U) << "the clear must be published as well";
+  ASSERT_GE(r.estops.size(), 2U);
+  EXPECT_TRUE(r.gates.back().ok);
+  EXPECT_FALSE(r.estops.back().asserted);
+
+  // Exactly the sequence a consumer must have seen: ESTOP-failing gate first, then ok.
+  bool saw_estop = false, ok_after = false;
+  for (const auto& g : r.gates) {
+    if (!g.ok && g.reason_code == dyx3_interfaces::msg::MotionSetpointStatus::REASON_ESTOP)
+      saw_estop = true;
+    else if (saw_estop && g.ok)
+      ok_after = true;
+  }
+  EXPECT_TRUE(saw_estop);
+  EXPECT_TRUE(ok_after);
+}
+
+// MG-003: the shutdown path publishes a canonical STOP even while a motion command is being
+// forwarded and every gate passes.
+TEST(MotionGuardNode, ShutdownStopPublishesCanonicalStopWhileMoving) {
+  Rig r;
+  r.run(0.3);
+  ASSERT_EQ(r.last_out.mode, MotionSetpoint::MODE_TRACK_RATE);
+  const uint64_t seq_before = r.last_out.seq;
+  const size_t n_before = r.outs.size();
+  for (int i = 0; i < 5; ++i) {
+    r.guard->shutdown_stop();
+    r.pump(5);
+  }
+  ASSERT_EQ(r.outs.size(), n_before + 5);
+  for (size_t i = n_before; i < r.outs.size(); ++i) {
+    const auto& m = r.outs[i];
+    EXPECT_EQ(m.mode, MotionSetpoint::MODE_STOP);
+    EXPECT_EQ(m.speed_body_x, 0.0F);
+    EXPECT_TRUE(std::isnan(m.yaw_setpoint));
+    EXPECT_EQ(m.yaw_rate_setpoint, 0.0F);
+    EXPECT_TRUE(m.valid);
+    EXPECT_GT(m.seq, i == n_before ? seq_before : r.outs[i - 1].seq);
+  }
+}
+
+// MG-006: the reason-change log line is throttled, but every transition stays observable on the
+// status topic.
+TEST(MotionGuardNode, EveryReasonChangeIsOnTheStatusTopicWhateverTheLogRate) {
+  using S = dyx3_interfaces::msg::MotionSetpointStatus;
+  Rig r;
+  r.run(0.3);
+  ASSERT_EQ(r.last_status.reason_code, S::REASON_OK);
+  r.statuses.clear();
+  constexpr int kFlaps = 8;
+  for (int i = 0; i < kFlaps; ++i) {
+    for (const bool valid : {false, true}) {
+      r.now += 0.02;
+      r.publish_world();
+      r.rpp(MotionSetpoint::MODE_TRACK_RATE, 0.3F, NaN, 0.1F, valid);
+      r.pump();
+      r.guard->step(r.now);
+      r.pump();
+    }
+  }
+  int to_invalid = 0, to_ok = 0;
+  for (size_t i = 0; i < r.statuses.size(); ++i) {
+    const uint8_t prev = i == 0 ? S::REASON_OK : r.statuses[i - 1].reason_code;
+    if (r.statuses[i].reason_code == prev) continue;
+    if (r.statuses[i].reason_code == S::REASON_INVALID_MESSAGE) ++to_invalid;
+    if (r.statuses[i].reason_code == S::REASON_OK) ++to_ok;
+  }
+  EXPECT_EQ(to_invalid, kFlaps);
+  EXPECT_EQ(to_ok, kFlaps);
+}
+
+// XR-GPX-009: E-stop immediacy. Nothing but the service call happens: no tick, no world traffic,
+// no explicit step. The STOP must already be on the command topic one pump after the reply.
+TEST(MotionGuardNode, EmergencyStopOutputsStopWithinOnePumpOfTheReply) {
+  Rig r;
+  r.run(0.3);
+  ASSERT_EQ(r.last_out.mode, MotionSetpoint::MODE_TRACK_RATE);
+  ASSERT_GT(r.last_out.speed_body_x, 0.0F);
+  const size_t n_before = r.outs.size();
+  ASSERT_TRUE(r.call_estop(true, "physical"));
+  r.pump();
+  ASSERT_GT(r.outs.size(), n_before) << "the service callback must publish at once";
+  EXPECT_EQ(r.last_out.mode, MotionSetpoint::MODE_STOP);
+  EXPECT_EQ(r.last_out.speed_body_x, 0.0F);
+  EXPECT_EQ(r.last_status.reason_code, dyx3_interfaces::msg::MotionSetpointStatus::REASON_ESTOP);
+}
+
+// XR-GPX-009: the 0.5 s freshness boundary of every status input, on the injected clock. Only the
+// source under test goes silent; RPP and the other inputs keep arriving.
+TEST(MotionGuardNode, StatusInputFreshnessBoundaryIsHalfASecond) {
+  struct Case {
+    const char* name;
+    bool Rig::* flag;
+    uint8_t reason;
+  };
+  using S = dyx3_interfaces::msg::MotionSetpointStatus;
+  const Case cases[] = {{"mission", &Rig::mission_running, S::REASON_MISSION_GATE},
+                        {"vehicle", &Rig::veh_ok, S::REASON_ARMING_GATE},
+                        {"rtk", &Rig::rtk_ok, S::REASON_RTK_GATE},
+                        {"operator", &Rig::op_ok, S::REASON_OPERATOR_LINK_LOST},
+                        {"px4 link", &Rig::link_ok, S::REASON_PX4_LINK_UNHEALTHY},
+                        {"estimator", &Rig::est_ok, S::REASON_HEADING_UNHEALTHY}};
+  for (const auto& c : cases) {
+    Rig r;
+    r.run(0.3);
+    ASSERT_EQ(r.last_out.mode, MotionSetpoint::MODE_TRACK_RATE) << c.name;
+    r.*(c.flag) = false;
+    const double last_heard = r.now;  // the last tick that published this source
+    r.now = last_heard + 0.46;
+    r.tick();  // input age 0.48 s: still inside the limit
+    EXPECT_EQ(r.last_out.mode, MotionSetpoint::MODE_TRACK_RATE) << c.name << " at 0.48 s";
+    EXPECT_FLOAT_EQ(r.last_out.speed_body_x, 0.3F) << c.name << " at 0.48 s";
+    r.tick(0.04);  // input age 0.52 s: past the limit
+    EXPECT_EQ(r.last_out.mode, MotionSetpoint::MODE_STOP) << c.name << " at 0.52 s";
+    EXPECT_EQ(r.last_out.speed_body_x, 0.0F) << c.name << " at 0.52 s";
+    EXPECT_EQ(r.last_status.reason_code, c.reason) << c.name << " at 0.52 s";
+  }
 }
 
 TEST(MotionGuardNode, RestartedPublisherIsStoppedUntilItRebuildsASession) {

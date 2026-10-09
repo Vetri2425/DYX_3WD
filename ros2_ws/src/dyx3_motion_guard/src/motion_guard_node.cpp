@@ -136,7 +136,10 @@ MotionGuardNode::MotionGuardNode(const rclcpp::NodeOptions& options, ClockFn clo
           RCLCPP_WARN(get_logger(), "emergency stop %s by %s",
                       req->asserted ? "ASSERTED" : "cleared", req->source.c_str());
           // Latched at once: the next decision tick outputs STOP; do not wait for it to be
-          // published.
+          // published. The latch change is also published on /dyx3/safety_gate and
+          // /dyx3/emergency_stop_state now, not at the next 10 Hz slot (MG-007): an assert and a
+          // clear less than 100 ms apart must both be seen by the mission and the spray node.
+          force_safety_pub_ = true;
           step(clock_());
         }
       });
@@ -258,12 +261,18 @@ void MotionGuardNode::step(double now_s) {
     pub_status_->publish(s);
   }
   if (reason_changed) {
-    RCLCPP_WARN(get_logger(), "decision reason %u -> %u", static_cast<unsigned>(last_reason_),
-                static_cast<unsigned>(d.reason));
+    // Every transition is on /dyx3/motion_guard/status (published above); the log line is
+    // rate-limited so a flapping gate cannot flood the logger from the control callback (MG-006).
+    ++reason_changes_;
+    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
+                         "decision reason %u -> %u (%llu reason changes since start)",
+                         static_cast<unsigned>(last_reason_), static_cast<unsigned>(d.reason),
+                         static_cast<unsigned long long>(reason_changes_));
   }
   last_reason_ = d.reason;
 
-  if (now_s - last_gate_pub_s_ >= 0.1 - 1e-9) {
+  if (force_safety_pub_ || now_s - last_gate_pub_s_ >= 0.1 - 1e-9) {
+    force_safety_pub_ = false;
     last_gate_pub_s_ = now_s;
     const Reason g = first_failing_safety_gate(gates, gate_cfg_);
     dyx3_interfaces::msg::SafetyGateStatus gs;  // ok=false default
@@ -277,6 +286,19 @@ void MotionGuardNode::step(double now_s) {
     es.source = estop_.source();
     pub_estop_->publish(es);
   }
+}
+
+void MotionGuardNode::shutdown_stop() {
+  const Motion stop = canonical_stop();
+  MotionSetpoint out;
+  out.stamp = ros_now();
+  out.seq = out_seq_++;
+  out.mode = static_cast<uint8_t>(stop.mode);
+  out.speed_body_x = stop.speed_body_x;
+  out.yaw_setpoint = stop.yaw_setpoint;
+  out.yaw_rate_setpoint = stop.yaw_rate_setpoint;
+  out.valid = true;
+  pub_cmd_->publish(out);
 }
 
 }  // namespace dyx3_motion_guard
