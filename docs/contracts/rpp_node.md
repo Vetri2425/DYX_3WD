@@ -52,10 +52,13 @@ shared with motion_guard, comes from the launch prefix in `dyx3_bringup/launch/c
 
 ## 5. Proof
 
-`rpp_node_test` (in-process, private DDS domain, injected monotonic clock, a kinematic stand-in vehicle): 13 cases — startup validation; load by id and
+`rpp_node_test` (in-process, private DDS domain, injected monotonic clock, a kinematic stand-in vehicle): 16 cases — startup validation; load by id and
 acknowledgement; a missing artifact; a **whole mission driven to COMPLETE** (the line is marked where the planner says, stops on the final point within 6 cm);
 stale pose; RTK drop with the reason; pause and resume from rest; entry pivot; parameter classes; the unported feature; every emitted mode contract-conforming; a final approach 3 cm to the side of the endpoint completes within 10 s
 with at most 2 speed reversals (XR-RPP-001); on an L-shaped mission the first heading after the corner pivot is the exit leg (XR-RPP-007).
+Command-level cases (XR-RPP-006) drive the stand-in from the published `MotionSetpoint` alone, which the equivalence suites (core output)
+cannot see: an L-shaped mission (corner pivot sign, heading per leg, at most 5 cm off the path, COMPLETE at the end); an endpoint 5 cm to the
+side (every creep moves toward it, ends within 2 cm); a pause with a 0.2 m coast and a resume (STOP while paused, ramp from rest, COMPLETE).
 The stand-in can limit its acceleration (`accel_limit`) so a body-axis brake decelerates through zero as a vehicle does. `rpp_core_test` pins core behaviour the prototype did not have (the precise-stop timeout brake).
 The stand-in vehicle does exactly what the last command asks: it proves the wiring and the state machine, not the controller on a rover.
 

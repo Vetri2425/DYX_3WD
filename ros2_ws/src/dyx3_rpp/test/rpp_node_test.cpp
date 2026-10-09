@@ -568,3 +568,111 @@ TEST(RppNode, TheFirstHeadingAfterACornerPivotIsTheExitLeg) {
   EXPECT_GT(r.east, 0.1);
   EXPECT_LT(std::fabs(wrap(r.heading - M_PI / 2.0)), 3.0 * M_PI / 180.0);
 }
+
+// ---- XR-RPP-006: command-level checks -------------------------------------------------------
+// The equivalence suites compare RppCore's output with the prototype; they cannot see what
+// command_from_tick does with it. These cases drive the kinematic stand-in from the PUBLISHED
+// MotionSetpoint only and check the motion that results.
+TEST(RppNode, AnLShapedMissionIsDrivenFromThePublishedCommandsAlone) {
+  Rig r({}, true, l_path());
+  r.auto_drive = true;
+  r.accel_limit = 0.5;
+  r.mission_state = MissionState::STATE_RUNNING;
+  bool pivoted = false, saw_leg2 = false;
+  double worst_off_path = 0.0;
+  for (int i = 0; i < 2500 && r.status.state != RppStatus::STATE_COMPLETE; ++i) {  // 50 s
+    r.cycle();
+    const MotionSetpoint& m = r.motion.back();
+    worst_off_path = std::max(worst_off_path, dist_to_l(r.north, r.east));
+    if (m.mode == MotionSetpoint::MODE_PIVOT) {
+      EXPECT_EQ(m.speed_body_x, 0.0F);
+      if (r.north > 2.5) {  // the corner (the run also starts with an entry alignment)
+        pivoted = true;
+        EXPECT_GE(m.yaw_rate_setpoint, 0.0F) << "North to East is a clockwise (positive) turn";
+      }
+    }
+    if (m.mode == MotionSetpoint::MODE_TRACK_HEADING && m.speed_body_x >= 0.05F) {
+      // a commanded heading at speed follows the leg being driven
+      const double leg = pivoted ? M_PI / 2.0 : 0.0;
+      EXPECT_LT(std::fabs(wrap(m.yaw_setpoint - leg)), 0.35)
+          << "tick " << i << " at n " << r.north << " e " << r.east;
+      saw_leg2 = saw_leg2 || pivoted;
+    }
+  }
+  EXPECT_TRUE(pivoted) << "the corner was not pivoted";
+  EXPECT_TRUE(saw_leg2) << "the second leg was not tracked";
+  EXPECT_EQ(r.status.state, RppStatus::STATE_COMPLETE)
+      << "at n " << r.north << " e " << r.east << " run " << r.status.run_index;
+  EXPECT_LT(worst_off_path, 0.05);
+  EXPECT_NEAR(r.north, 3.0, 0.03);
+  EXPECT_NEAR(r.east, 3.0, 0.03);
+}
+
+TEST(RppNode, AnOffsetEndpointIsReachedFromThePublishedCommandsAlone) {
+  Rig r;  // pivot_to_intercept at its default: the entry pivot already aims at the line
+  r.auto_drive = true;
+  r.north = 5.88;
+  r.east = -0.05;  // 5 cm WEST of the final point
+  r.mission_state = MissionState::STATE_RUNNING;
+  bool saw_creeping = false;
+  for (int i = 0; i < 750 && r.status.state != RppStatus::STATE_COMPLETE; ++i) {  // 15 s
+    const double to_n = 6.0 - r.north, to_e = 0.0 - r.east;
+    r.cycle();
+    if (r.status.state != RppStatus::STATE_CREEPING) continue;
+    saw_creeping = true;
+    const MotionSetpoint& m = r.motion.back();
+    if (std::fabs(m.speed_body_x) < 0.02F) continue;
+    // the commanded motion has a component toward the endpoint
+    const double yaw = m.mode == MotionSetpoint::MODE_TRACK_HEADING ? m.yaw_setpoint : r.heading;
+    const double dir = m.speed_body_x > 0.0F ? 1.0 : -1.0;
+    EXPECT_GT(dir * (std::cos(yaw) * to_n + std::sin(yaw) * to_e), 0.0)
+        << "tick " << i << " moves away from the endpoint";
+  }
+  EXPECT_TRUE(saw_creeping);
+  EXPECT_EQ(r.status.state, RppStatus::STATE_COMPLETE) << "at n " << r.north << " e " << r.east;
+  EXPECT_NEAR(r.north, 6.0, 0.02 + 1e-3);
+  EXPECT_NEAR(r.east, 0.0, 0.02 + 1e-3);
+}
+
+TEST(RppNode, APauseWithACoastResumesAlongTheLineFromRest) {
+  Rig r;
+  r.auto_drive = true;
+  r.mission_state = MissionState::STATE_RUNNING;
+  for (int i = 0; i < 400 && !(r.status.state == RppStatus::STATE_TRACKING && r.north > 2.0); ++i)
+    r.cycle();
+  ASSERT_EQ(r.status.state, RppStatus::STATE_TRACKING);
+  ASSERT_GT(r.speed, 0.1);
+  // pause; the rover coasts 0.2 m to rest without following any command
+  r.mission_state = MissionState::STATE_PAUSED;
+  r.auto_drive = false;
+  const size_t pause_from = r.motion.size();
+  const double coast_from = r.north;
+  r.speed = 0.25;
+  for (int i = 0; i < 40; ++i) {  // 0.8 s
+    r.north += r.speed * 0.02;
+    r.speed = std::max(0.0, r.speed - 0.0025);
+    r.cycle();
+  }
+  r.speed = 0.0;
+  EXPECT_NEAR(r.north - coast_from, 0.2, 0.06);
+  for (size_t i = pause_from + 2; i < r.motion.size(); ++i)
+    EXPECT_EQ(r.motion[i].mode, MotionSetpoint::MODE_STOP) << "paused, tick " << i;
+  // resume
+  r.mission_state = MissionState::STATE_RUNNING;
+  r.auto_drive = true;
+  const size_t resume_from = r.motion.size();
+  float first_speed = -1.0F;
+  for (int i = 0; i < 1500 && r.status.state != RppStatus::STATE_COMPLETE; ++i) {
+    r.cycle();
+    const MotionSetpoint& m = r.motion.back();
+    if (first_speed < 0.0F && m.mode != MotionSetpoint::MODE_STOP) first_speed = m.speed_body_x;
+    if (m.mode == MotionSetpoint::MODE_TRACK_HEADING && m.speed_body_x >= 0.05F)
+      EXPECT_LT(std::fabs(m.yaw_setpoint), 0.2F) << "along the line";
+  }
+  EXPECT_GT(r.motion.size(), resume_from);
+  EXPECT_GE(first_speed, 0.0F);
+  EXPECT_LT(first_speed, 0.1F) << "a resume ramps from rest";
+  EXPECT_EQ(r.status.state, RppStatus::STATE_COMPLETE);
+  EXPECT_NEAR(r.north, 6.0, 0.06);
+  EXPECT_NEAR(r.east, 0.0, 0.03);
+}
