@@ -116,6 +116,7 @@ private:
   std::optional<SprayCommand> drive_fsm(double now_s);
   bool effective_desired() const { return manual_active_ ? true : desired_debounced_; }
   DecisionParams decision_params() const;
+  bool low_speed_cut(bool geometry_desired, double speed);
 
   const ParamSet* p_;
   double tick_period_s_;
@@ -157,6 +158,9 @@ private:
   bool rpp_heading_evidence_valid_{false};
   double rpp_recv_s_{0.0};
   bool heading_entry_hold_{true};
+  // SP-004: the rover has driven this MARK stretch at >= min_spray_speed_mps while TRACKING, so a
+  // later drop below it is a stop or a stall, not a standing start.
+  bool moved_on_mark_{false};
 
   bool manual_active_{false};
   double manual_deadline_s_{0.0};

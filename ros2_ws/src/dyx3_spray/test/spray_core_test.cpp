@@ -874,3 +874,107 @@ TEST(Controller, TrackingOfAnotherMissionIsNotEvidence) {
   EXPECT_FALSE(r.c->status(r.t).spraying);
   EXPECT_EQ(r.c->status(r.t).safety_reason, "awaiting tracking");
 }
+
+// SP-004: min_spray_speed_mps. No paint blob while (nearly) stationary on a MARK leg, but no new gap
+// at a line start or in the terminal creep.
+namespace {
+// 0..5 m north: TRANSIT 0..2, MARK 2..5; the path ends on MARK (synthetic terminal boundary at 5.0).
+std::shared_ptr<const PathModel> ends_on_mark() {
+  std::vector<double> n, e;
+  std::vector<bool> f;
+  for (int i = 0; i <= 5; ++i) {
+    n.push_back(i);
+    e.push_back(0.0);
+    f.push_back(i >= 2);
+  }
+  auto m = std::make_shared<PathModel>();
+  EXPECT_TRUE(build_path_model(n, e, f, m.get()));
+  return m;
+}
+}  // namespace
+
+TEST(Controller, StationaryOnMarkAfterDrivingItClosesTheValve) {
+  Rig r;
+  double n = 0.0;
+  for (; n < 4.0; n += 0.007) r.step(n);
+  ASSERT_TRUE(r.c->status(r.t).spraying);
+  const int offs = r.offs;
+  for (int i = 0; i < 5; ++i) r.step(n, 0.0);  // still TRACKING, but stalled on the mark
+  EXPECT_FALSE(r.c->status(r.t).spraying);
+  EXPECT_EQ(r.offs, offs + 1);
+  EXPECT_TRUE(r.c->status(r.t).geometry_desired);  // a process cut, not a geometry or safety one
+  EXPECT_TRUE(r.c->status(r.t).safety_ok);
+  for (int i = 0; i < 5; ++i) r.step(n += 0.007);  // moving again: paints again
+  EXPECT_TRUE(r.c->status(r.t).spraying);
+}
+
+TEST(Controller, CornerStoppingClosesTheValveBeforeTheRoverStops) {
+  for (const bool gate_on : {true, false}) {
+    Rig r(true, 0.02, {{"min_spray_speed_mps", gate_on ? 0.05 : 0.0, ""}});
+    double n = 0.0;
+    for (; n < 4.0; n += 0.007) r.step(n);
+    ASSERT_TRUE(r.c->status(r.t).spraying);
+    r.rpp_override = RppState::Stopping;  // corner stop: brake at 0.5 m/s^2 to standstill
+    double v = 0.35, v_at_off = -1.0;
+    const int offs = r.offs;
+    while (v > 0.0) {
+      v = std::max(0.0, v - 0.5 * 0.02);
+      n += v * 0.02;
+      r.step(n, v);
+      if (v_at_off < 0.0 && r.offs > offs) v_at_off = v;
+    }
+    for (int i = 0; i < 10; ++i) r.step(n, 0.0);  // standing at the corner, not yet pivoting
+    if (gate_on) {
+      ASSERT_GT(v_at_off, 0.0);  // the OFF went out while the rover was still rolling
+      EXPECT_LT(v_at_off, 0.05);
+      EXPECT_FALSE(r.c->status(r.t).spraying);
+    } else {
+      EXPECT_TRUE(r.c->status(r.t).spraying);  // the blob the gate removes
+    }
+  }
+}
+
+TEST(Controller, TerminalCreepBelowMinSpeedHasNoGap) {
+  Rig r;
+  r.c->load_path(ends_on_mark());
+  double n = 0.0;
+  for (; n < 4.6; n += 0.007) r.step(n);
+  ASSERT_TRUE(r.c->status(r.t).spraying);
+  r.rpp_override = RppState::Creeping;  // endpoint precise stop at 0.03 m/s (< min 0.05)
+  const int offs = r.offs;
+  double off_at = -1.0;
+  LeadEvent off_event = LeadEvent::None;
+  for (; n < 5.0; n += 0.03 * 0.02) {
+    r.step(n, 0.03);
+    if (off_at < 0.0 && r.offs > offs) {
+      off_at = n;
+      off_event = r.c->status(r.t).event;
+    }
+  }
+  // The only OFF is the terminal shutoff within terminal_off_epsilon_m (0.05) of the final station.
+  ASSERT_GT(off_at, 0.0);
+  EXPECT_GE(off_at, 5.0 - 0.05 - 1e-9);
+  EXPECT_LT(off_at, 5.0 - 0.05 + 0.002);
+  EXPECT_EQ(off_event, LeadEvent::TerminalOff);
+}
+
+TEST(Controller, StandingStartOnAMarkLegStillOpensAtOnce) {
+  // After a corner the next leg starts from standstill on MARK: the valve opens as before (the
+  // opening delay elapses while the rover pulls away) instead of waiting for min_spray_speed_mps.
+  Rig r;
+  for (int i = 0; i < 5; ++i) r.step(3.0, 0.0);
+  EXPECT_TRUE(r.c->status(r.t).spraying);
+  // Same after a corner stop: STOPPING at standstill is OFF, the TRACKING pull-away opens at once.
+  r.rpp_override = RppState::Stopping;
+  for (int i = 0; i < 5; ++i) r.step(3.0, 0.0);
+  ASSERT_FALSE(r.c->status(r.t).spraying);
+  r.rpp_override.reset();
+  double v = 0.0, n = 3.0;
+  for (int i = 0; i < 4; ++i) {  // accelerate at 0.5 m/s^2: 0.01 .. 0.04 m/s, all below 0.05
+    v += 0.5 * 0.02;
+    n += v * 0.02;
+    r.step(n, v);
+  }
+  EXPECT_LT(v, 0.05);
+  EXPECT_TRUE(r.c->status(r.t).spraying);
+}

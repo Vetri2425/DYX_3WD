@@ -17,9 +17,9 @@
 | manual override with a hard expiry; debounce; ON re-assertion | |
 
 48 of the 57 parameters assigned to spray in the updated registry are carried (`tools/gen_param_tables.py`); the 9 that belong to the unported features
-are excluded with a reason in the generator. Two carried parameters do nothing in the prototype either and are kept only for
-registry parity: `anticipatory_margin_m` (declared, never read) and `min_spray_speed_mps` (its gate was removed: spraying is a
-question of WHERE the nozzle is, slow means thin flow, never off).
+are excluded with a reason in the generator. One carried parameter does nothing in the prototype either and is kept only for
+registry parity: `anticipatory_margin_m` (declared, never read). `min_spray_speed_mps` was also unused in the prototype (its gate
+had been removed); it is live again as the low-speed cut of section 5 (SP-004).
 
 ## 2. Authority and the three layers
 
@@ -83,7 +83,16 @@ boundaries from the flag changes; **a path that ends on MARK gets a synthetic te
 with `debounce_delay = (max(1, debounce_samples) - 1) / tick_hz` (SP-002, see below); the valve opens early before
 TRANSIT->MARK and closes early before MARK->TRANSIT. Terminal shutoff: forced OFF within `terminal_off_epsilon_m` of the final
 station at speed <= `terminal_off_speed_mps` (the OFF lead is ~1 mm at creep speed, so the geometric boundary is never
-crossed). Cross-track gate with hysteresis (trip at the wide level, clear at the tight one, and stay off at least
+crossed). **Low-speed cut (SP-004; DERIVED — NOT FROM V1 SPEC).** Below `min_spray_speed_mps` (0.05; 0 disables) the desire is
+OFF on a MARK leg while RPP is STOPPING (corner/brake stop, settle), and while it is TRACKING once the current MARK stretch has
+been driven at or above that speed (a stall), so a stopping or stalled rover does not lay a paint blob; with a 0.5 m/s² stop the
+OFF goes out while the rover is still rolling. Exempt, so no new gap is created: a TRACKING **standing start** (the "driven"
+latch is cleared by TRANSIT geometry, any non-TRACKING RPP state, a run or mission change and a path load, so a leg that starts
+from standstill opens as before and the opening delay elapses while the rover pulls away); the terminal **CREEPING** (the
+terminal shutoff above ends it); **PIVOTING** (its own gate, `spray_off_during_pivot`). Not covered: a rover that never moves
+after a TRACKING standing start keeps the valve open, as before. The cut shapes the desire before the debounce; it is a
+process cut, not a safety refusal (no reason string, `safety_ok` stays true), and safety OFF never depends on it. Cross-track
+gate with hysteresis (trip at the wide level, clear at the tight one, and stay off at least
 `xtrack_gate_min_off_s`); it is **load-bearing** and must not be loosened.
 
 **Geometry source (C1).** RPP conditions the source `DYX3PATH` once and writes a content-addressed `DYX3COND 1` artifact. It
@@ -150,7 +159,7 @@ the field missions from the backend (`/var/lib/dyx3/missions/*.dyx3path`) and ru
 **Mission / RPP ownership (review C1, fix plan A1, human decision 2026-10-08), second in the order after E-stop.** Autonomous spray
 may operate only while `MissionState` is RUNNING, `RppStatus` is fresh (`rpp_timeout_s`, 0.5 s, IDLE_ONLY, DERIVED: the stack's
 0.5 s freshness convention = 25 missed ticks at 50 Hz; re-validate from Jetson jitter), reports the same `mission_id`, and is in
-TRACKING, STOPPING (corner stop lays the last ~2 cm of the leg), PIVOTING (then the pivot gate below decides) or CREEPING
+TRACKING, STOPPING (corner stop lays the last ~2 cm of the leg while still rolling at or above `min_spray_speed_mps`, section 5), PIVOTING (then the pivot gate below decides) or CREEPING
 (DERIVED — NOT FROM V1 SPEC: endpoint creep is still on the leg; the geometry decides whether it is MARK). IDLE, LOADED,
 COMPLETE, ERROR and unknown values refuse. Reasons: `mission not running`, `rpp stale`, `rpp mission mismatch`,
 `rpp not marking`. Any refusal goes through the normal OFF path: OFF command at once (no debounce: the FSM reads the safety

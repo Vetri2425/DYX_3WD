@@ -28,6 +28,7 @@ void SprayController::load_path(std::shared_ptr<const PathModel> model) {
   // globally.
   tracking_seen_ = false;
   heading_entry_hold_ = true;
+  moved_on_mark_ = false;
   dstate_ = DecisionState{};
   xtrack_trip_s_.reset();
   last_decision_.reset();
@@ -49,7 +50,10 @@ void SprayController::note_rtk(const RtkSnapshot& r, double now_s) {
 void SprayController::note_rpp(uint8_t state, uint32_t mission_id, uint32_t run_index,
                                double heading_error_rad, double path_travel_m,
                                bool heading_evidence_valid, double now_s) {
-  if (mission_id != rpp_mission_id_ || run_index != rpp_run_index_) heading_entry_hold_ = true;
+  if (mission_id != rpp_mission_id_ || run_index != rpp_run_index_) {
+    heading_entry_hold_ = true;
+    moved_on_mark_ = false;
+  }
   rpp_known_ = true;
   rpp_state_ = state;
   rpp_mission_id_ = mission_id;
@@ -71,6 +75,7 @@ void SprayController::set_mission(bool running, uint32_t mission_id) {
   if (!running || mission_id != mission_id_) {
     tracking_seen_ = false;
     heading_entry_hold_ = true;
+    moved_on_mark_ = false;
   }
   mission_running_ = running;
   mission_id_ = mission_id;
@@ -230,6 +235,28 @@ ManualResult SprayController::set_manual(bool on, double now_s) {
   return ManualResult::Ok;
 }
 
+// SP-004: no paint while (nearly) stationary on a MARK leg. Below min_spray_speed_mps the raw desire
+// is OFF while RPP is STOPPING (corner/brake stop, settle), and while it is TRACKING once this MARK
+// stretch has been driven at or above that speed (a stall). Exempt: a TRACKING standing start (the
+// valve may open while the rover pulls away, as before, so a line start is not cut), the terminal
+// CREEP (the terminal shutoff ends it), and PIVOTING (its own gate, spray_off_during_pivot). 0 disables.
+// It shapes the desire before the debounce; safety OFF never depends on it.
+bool SprayController::low_speed_cut(bool geometry_desired, double speed) {
+  const double min_speed = std::max(0.0, p_->num(P::min_spray_speed_mps));
+  const RppState st = static_cast<RppState>(rpp_state_);
+  const bool tracking = rpp_known_ && st == RppState::Tracking;
+  if (!geometry_desired || !tracking) moved_on_mark_ = false;
+  if (!(min_speed > 0.0) || !geometry_desired) return false;
+  if (speed >= min_speed) {
+    if (tracking) moved_on_mark_ = true;
+    return false;
+  }
+  if (!rpp_known_) return false;  // the ownership gate refuses autonomous spray anyway
+  if (st == RppState::Stopping) return true;
+  if (tracking) return moved_on_mark_;
+  return false;
+}
+
 std::optional<SprayCommand> SprayController::drive_fsm(double now_s) {
   const auto [sok, why] = fsm_safety_ok(now_s);
   (void)why;
@@ -315,6 +342,7 @@ std::optional<SprayCommand> SprayController::tick(double now_s) {
         d.desired = false;
     }
   }
+  if (low_speed_cut(d.geometry_desired, speed) && !manual_active_) d.desired = false;
   if (d.projection)
     dstate_.prev_projection_s =
         d.projection->s;  // carry the station so the next search stays on this leg
