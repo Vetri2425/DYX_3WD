@@ -141,3 +141,41 @@ TEST(PointJournal, RealArchivedMissionDrivenWithALateralOffset) {
     EXPECT_LE(got[k].error_m, 0.03) << "point " << k;
   }
 }
+
+// Resume (docs/contracts/dyx3_mission.md section 9a): the points an earlier execution resolved are
+// never reported again, even when the resumed run drives back over them.
+TEST(PointJournal, RestoredPointsAreNeverReportedAgain) {
+  PointJournal j(line_with_points({1.0, 3.0, 6.0, 9.0}), 0.10);
+  ASSERT_TRUE(j.restore_resolved(2));
+  ASSERT_TRUE(j.active_point().has_value());
+  EXPECT_EQ(*j.active_point(), 2U);
+  std::vector<PointEvent> got;
+  // The resumed run starts behind the restored points and drives over all of them.
+  for (int i = 0; i <= 1000; ++i) {
+    auto ev = j.update(0.01 * i, 0.02);
+    got.insert(got.end(), ev.begin(), ev.end());
+  }
+  const auto fin = j.finish();
+  got.insert(got.end(), fin.begin(), fin.end());
+  ASSERT_EQ(got.size(), 2U);
+  EXPECT_EQ(got[0].point_index, 2U);
+  EXPECT_EQ(got[0].outcome, PointOutcome::kCompleted);
+  EXPECT_NEAR(got[0].error_m, 0.02, 1e-9);
+  EXPECT_EQ(got[1].point_index, 3U);
+  EXPECT_EQ(got[1].outcome, PointOutcome::kCompleted);
+}
+
+TEST(PointJournal, RestoreIsRefusedWhenItDoesNotFitOrTheJournalAlreadyMoved) {
+  PointJournal j(line_with_points({1.0, 3.0}), 0.10);
+  EXPECT_FALSE(j.restore_resolved(3));  // more points than the path has: nothing changes
+  EXPECT_EQ(*j.active_point(), 0U);
+  EXPECT_TRUE(j.restore_resolved(0));
+  EXPECT_EQ(*j.active_point(), 0U);
+  ASSERT_TRUE(j.skip().has_value());
+  EXPECT_FALSE(j.restore_resolved(1));  // only before anything was resolved here
+  PointJournal all(line_with_points({1.0, 3.0}), 0.10);
+  EXPECT_TRUE(all.restore_resolved(2));  // everything resolved: nothing left to report
+  EXPECT_FALSE(all.active_point().has_value());
+  EXPECT_TRUE(all.update(1.0, 0.0).empty());
+  EXPECT_TRUE(all.finish().empty());
+}

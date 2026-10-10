@@ -41,6 +41,11 @@ public:
   /// End of the path: resolves everything still open (a capture in progress completes; the rest
   /// FAIL).
   std::vector<PointEvent> finish();
+  /// Resume of an earlier execution of the same path (docs/contracts/dyx3_mission.md section 9a):
+  /// the first `resolved` points were resolved then (their PointResults were issued) and are never
+  /// reported again; the journal continues at point `resolved`. Only before anything is resolved;
+  /// false and no change when `resolved` > point_count() or the journal already moved.
+  bool restore_resolved(std::size_t resolved);
 
 private:
   struct Vertex {

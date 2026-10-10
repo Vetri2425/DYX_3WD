@@ -28,6 +28,7 @@
 #include "dyx3_interfaces/srv/start_mission.hpp"
 #include "dyx3_mission/frame_placement.hpp"
 #include "dyx3_mission/mission_fsm.hpp"
+#include "dyx3_mission/mission_progress.hpp"
 #include "dyx3_mission/path_artifact.hpp"
 #include "dyx3_mission/point_journal.hpp"
 #include "dyx3_mission/px4_sequencer.hpp"
@@ -58,10 +59,14 @@ public:
     std::uint32_t mission_id = 0;
     bool duplicate = false;
     std::uint8_t gate_reason = 0;
+    std::uint32_t resumed_run_index = 0;  ///< StartMission.Response.resumed_run_index
   };
   /// THE single mission-start entry point (the action server and StartMission both call it).
   /// Admission only: no file I/O, no hashing, no PX4 call; the lifecycle then runs on its own.
-  StartOutcome begin_mission(const std::string& artifact_sha256, const std::string& request_id);
+  /// `resume`: start from the persisted progress of this artifact (the in-memory copy of it, read
+  /// at construction and kept current), else from run 0, overwriting that progress.
+  StartOutcome begin_mission(const std::string& artifact_sha256, const std::string& request_id,
+                             bool resume = false);
 
   const MissionFsm& fsm() const { return fsm_; }
 
@@ -117,6 +122,16 @@ private:
   void on_px4_reply(std::uint64_t id, bool accepted, std::uint8_t reason);
   bool jobs_pending() const { return load_job_.valid() || place_job_.valid(); }
   std::uint8_t waiting_on() const;
+  /// MissionState.state: a re-engage's ARMING / ENGAGING is published as PAUSED (RPP keeps the
+  /// execution loaded and streams STOP until RUNNING; it unloads on ARMING / ENGAGING).
+  std::uint8_t published_state() const;
+
+  /// Persisted progress (contract section 9a): points resolved while driving are appended, then the
+  /// record of this execution is queued for writing.
+  void record_resolved(const std::vector<PointEvent>& evs);
+  /// Queues the current record of this execution (newest wins per artifact) and starts the writer.
+  void note_progress();
+  void launch_progress_job();
 
   void publish_state();
   void publish_point(const PointEvent& ev);
@@ -157,6 +172,23 @@ private:
   std::future<ArtifactResult> load_job_;
   std::future<PlaceResult> place_job_;
   std::uint32_t job_mission_id_ = 0;
+
+  // persisted progress (contract section 9a): the latest record per source artifact (disk +
+  // queued), the writes not yet started (newest per artifact), and the writer job (one at a time)
+  std::map<std::string, MissionProgress> progress_;
+  std::map<std::string, MissionProgress> progress_queue_;
+  std::future<std::vector<std::string>> progress_job_;
+  bool progress_tracking_ =
+      false;  ///< this execution writes progress (artifact verified, not ended)
+  std::vector<std::uint32_t>
+      resume_points_;                     ///< restored at admission, pre-loaded into the journal
+  std::vector<std::uint32_t> completed_;  ///< resolved while driving (restored ones first)
+  std::uint32_t progress_run_ = 0;        ///< first run not yet completed
+
+  // re-engage from PAUSED: steady time of the OFFBOARD confirmation (the full-gate hold starts)
+  std::optional<std::int64_t> reengage_confirmed_ns_;
+  // RPP's pivot watchdog expiry already paused this execution; cleared when RPP reports it false
+  bool pivot_timeout_latched_ = false;
 
   // latest guard verdict
   // every *_ns_ below is on the steady clock (receipt times and READY entry), never ROS time

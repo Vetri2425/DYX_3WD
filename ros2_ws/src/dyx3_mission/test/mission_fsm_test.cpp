@@ -279,6 +279,31 @@ std::vector<Case> table() {
                  [](MissionFsm& f) { return f.rpp_ack_timeout(true, 0, kNow); }, true,
                  Reject::kNone, s, 0, false});
   }
+  // ---- reengage (resume of a PAUSED execution whose vehicle lost arm / OFFBOARD)
+  c.push_back({S::kPaused, "reengage", [](MissionFsm& f) { return f.reengage(kNow); }, true,
+               Reject::kNone, S::kArming, kReasonNone, true});
+  for (State s : all_but({S::kPaused})) {
+    c.push_back({s, "reengage not paused", [](MissionFsm& f) { return f.reengage(kNow); }, false,
+                 Reject::kNotPaused, s, 0, false});
+  }
+  // ---- reengage_gate / reengage_timeout: no state of a start awaits a re-engage's gate
+  for (State s : kAll) {
+    c.push_back({s, "reengage gate without a re-engage",
+                 [](MissionFsm& f) { return f.reengage_gate(true, kNow); }, false, Reject::kIllegal,
+                 s, 0, false});
+    c.push_back({s, "reengage timeout without a re-engage",
+                 [](MissionFsm& f) { return f.reengage_timeout(11, kNow); }, true, Reject::kNone, s,
+                 0, false});
+  }
+  // ---- rpp_pivot_timeout: an automatic pause like rpp_stale, with its own reason
+  c.push_back({S::kRunning, "rpp pivot timeout -> automatic pause",
+               [](MissionFsm& f) { return f.rpp_pivot_timeout(kNow); }, true, Reject::kNone,
+               S::kPaused, kReasonRppPivotTimeout, true});
+  for (State s : all_but({S::kRunning})) {
+    c.push_back({s, "rpp pivot timeout no effect",
+                 [](MissionFsm& f) { return f.rpp_pivot_timeout(kNow); }, true, Reject::kNone, s, 0,
+                 false});
+  }
   // ---- skip_point
   for (State s : {S::kRunning, S::kPaused}) {
     c.push_back({s, "skip with active point",
@@ -406,6 +431,152 @@ TEST(MissionFsmGuards, StaleRppPausesWithADistinctReasonAndNeverAutoResumes) {
   EXPECT_EQ(f.state(), S::kRunning);
 }
 
+TEST(MissionFsmGuards, PivotTimeoutPausesWithItsOwnReasonAndNeverAutoResumes) {
+  MissionFsm f = in_state(S::kRunning);
+  std::vector<Transition> seen;
+  f.set_observer([&](const Transition& t) { seen.push_back(t); });
+  EXPECT_EQ(f.rpp_pivot_timeout(kNow).state, S::kPaused);
+  ASSERT_EQ(seen.size(), 1U);
+  EXPECT_EQ(seen[0].event, Event::kRppPivotTimeout);
+  EXPECT_STREQ(to_string(seen[0].event), "rpp_pivot_timeout");
+  EXPECT_EQ(f.reason(), kReasonRppPivotTimeout);
+  EXPECT_EQ(f.detail(), "rpp pivot watchdog expired (heading not reached)");
+  f.rpp_pivot_timeout(kNow);  // still paused, reason kept
+  f.gate_lost(0, kNow);
+  f.rpp_ack(true, kNow);
+  EXPECT_EQ(f.state(), S::kPaused);
+  EXPECT_EQ(f.reason(), kReasonRppPivotTimeout);
+  EXPECT_TRUE(f.resume(true, kNow).accepted);  // only an explicit resume
+  EXPECT_EQ(f.state(), S::kRunning);
+}
+
+namespace {
+// PAUSED by the arming gate (the guard reason for "not armed / not OFFBOARD"), then re-engaging,
+// stopped at `upto` (ARMING, ENGAGING, or ENGAGING with OFFBOARD confirmed when `confirmed`).
+MissionFsm in_reengage(State upto, bool confirmed = false) {
+  MissionFsm f = in_state(S::kRunning);
+  f.gate_lost(11, kNow);
+  EXPECT_EQ(f.state(), S::kPaused);
+  EXPECT_TRUE(f.reengage(kNow).accepted);
+  if (upto != S::kArming) f.armed(true, 0, kD, kNow);
+  if (confirmed) f.engaged(true, 0, kD, kNow);
+  EXPECT_EQ(f.state(), upto);
+  EXPECT_TRUE(f.reengaging());
+  EXPECT_EQ(f.awaiting_reengage_gate(), confirmed);
+  return f;
+}
+}  // namespace
+
+TEST(MissionFsmReengage, PausedReArmsAndReEngagesWithoutAReadyHandshake) {
+  MissionFsm f = in_state(S::kRunning);
+  f.gate_lost(11, kNow);
+  std::vector<Transition> seen;
+  f.set_observer([&](const Transition& t) {
+    if (!t.refused && t.from != t.to) seen.push_back(t);
+  });
+  EXPECT_EQ(f.reengage(kNow).state, S::kArming);
+  EXPECT_TRUE(f.reengaging());
+  EXPECT_EQ(f.reason(), kReasonNone);
+  EXPECT_EQ(f.armed(true, 0, kD, kNow).state, S::kEngaging);
+  EXPECT_TRUE(f.reengaging());
+  // OFFBOARD confirmed: RUNNING only with the full gate (the guard may lag the confirmation).
+  const Result e = f.engaged(true, 0, kD, kNow);
+  EXPECT_TRUE(e.accepted);
+  EXPECT_FALSE(e.transitioned);
+  EXPECT_EQ(f.state(), S::kEngaging);
+  EXPECT_TRUE(f.awaiting_reengage_gate());
+  for (int i = 0; i < 3; ++i) EXPECT_EQ(f.reengage_gate(false, kNow).state, S::kEngaging);
+  EXPECT_EQ(f.reengage_gate(true, kNow).state, S::kRunning);
+  EXPECT_FALSE(f.reengaging());
+  EXPECT_FALSE(f.awaiting_reengage_gate());
+  EXPECT_EQ(f.reason(), kReasonNone);
+  ASSERT_EQ(seen.size(), 3U);
+  EXPECT_EQ(seen[0].event, Event::kReengage);
+  EXPECT_EQ(seen[0].from, S::kPaused);
+  EXPECT_EQ(seen[1].event, Event::kArmed);
+  EXPECT_EQ(seen[2].event, Event::kReengaged);
+  EXPECT_EQ(seen[2].from, S::kEngaging);
+  EXPECT_EQ(seen[2].to, S::kRunning);
+  // A second loss and a second re-engage in the same execution.
+  f.gate_lost(11, kNow);
+  EXPECT_EQ(f.reengage(kNow).state, S::kArming);
+  EXPECT_EQ(f.mission_id(), 1U);  // never a new execution
+}
+
+TEST(MissionFsmReengage, EveryStepFailsToErrorWithTheStartsReasons) {
+  for (std::uint8_t r : {kReasonArmRefused, kReasonArmTimeout}) {
+    MissionFsm f = in_reengage(S::kArming);
+    EXPECT_EQ(f.armed(false, r, kD, kNow).state, S::kError);
+    EXPECT_EQ(f.reason(), r);
+    EXPECT_FALSE(f.reengaging());
+  }
+  for (std::uint8_t r : {kReasonOffboardRefused, kReasonOffboardTimeout}) {
+    MissionFsm f = in_reengage(S::kEngaging);
+    EXPECT_EQ(f.engaged(false, r, kD, kNow).state, S::kError);
+    EXPECT_EQ(f.reason(), r);
+    EXPECT_FALSE(f.reengaging());
+  }
+  MissionFsm g = in_reengage(S::kEngaging, true);
+  EXPECT_EQ(g.reengage_timeout(11, kNow).state, S::kError);
+  EXPECT_EQ(g.reason(), kReasonSafety);
+  EXPECT_EQ(g.gate_reason(), 11U);
+  MissionFsm h = in_reengage(S::kEngaging, true);
+  EXPECT_EQ(h.reengage_timeout(6, kNow).state, S::kError);
+  EXPECT_EQ(h.reason(), kReasonRtk);
+  // Not confirmed yet: the timeout is the sequencer's (engaged(false, OFFBOARD_TIMEOUT)).
+  MissionFsm k = in_reengage(S::kEngaging);
+  EXPECT_EQ(k.reengage_timeout(11, kNow).state, S::kEngaging);
+  EXPECT_FALSE(k.reengage_gate(true, kNow).accepted);
+}
+
+TEST(MissionFsmReengage, EventsDuringAReengageTreatItAsAPausedExecutionRppHolds) {
+  for (State at : {S::kArming, S::kEngaging}) {
+    SCOPED_TRACE(to_string(at));
+    {  // RPP still holds the execution: its error is an ERROR, its COMPLETE is ignored
+      MissionFsm f = in_reengage(at);
+      EXPECT_EQ(f.rpp_complete(kNow).state, at);
+      EXPECT_EQ(f.rpp_error(kNow).state, S::kError);
+      EXPECT_EQ(f.reason(), kReasonRppError);
+    }
+    {  // a retried resume / re-engage is accepted and changes nothing; skip works as in PAUSED
+      MissionFsm f = in_reengage(at);
+      const Result r = f.resume(true, kNow);
+      EXPECT_TRUE(r.accepted);
+      EXPECT_FALSE(r.transitioned);
+      EXPECT_TRUE(f.reengage(kNow).accepted);
+      EXPECT_EQ(f.state(), at);
+      EXPECT_TRUE(f.skip_point(true, kNow).accepted);
+      EXPECT_FALSE(f.pause(kNow).accepted);
+      EXPECT_FALSE(f.start(true, kNow).accepted);
+      EXPECT_EQ(f.rpp_pivot_timeout(kNow).state, at);
+      EXPECT_EQ(f.rpp_stale(kNow).state, at);
+    }
+    {  // the pre-arm gate is the one that must hold: lost -> ERROR, as for a start
+      MissionFsm f = in_reengage(at);
+      EXPECT_EQ(f.gate_lost(6, kNow).state, S::kError);
+      EXPECT_EQ(f.reason(), kReasonRtk);
+    }
+    {
+      MissionFsm f = in_reengage(at);
+      EXPECT_EQ(f.ekf_reset(kD, kNow).state, S::kError);
+      EXPECT_EQ(f.reason(), kReasonEkfReset);
+    }
+    {
+      MissionFsm f = in_reengage(at);
+      EXPECT_EQ(f.estop(kNow).state, S::kAborted);
+      EXPECT_EQ(f.reason(), kReasonEstop);
+      EXPECT_FALSE(f.reengaging());
+    }
+    {
+      MissionFsm f = in_reengage(at);
+      EXPECT_EQ(f.abort(1, kNow).state, S::kAborted);
+      EXPECT_FALSE(f.reengaging());
+      EXPECT_TRUE(f.start(true, kNow).accepted);  // a new execution starts as a start
+      EXPECT_FALSE(f.reengaging());
+    }
+  }
+}
+
 TEST(MissionFsmGuards, TerminalStatesAreLeftOnlyByANewStart) {
   for (State s : {S::kCompleted, S::kAborted, S::kError}) {
     MissionFsm f = in_state(s);
@@ -418,6 +589,10 @@ TEST(MissionFsmGuards, TerminalStatesAreLeftOnlyByANewStart) {
     f.estop(kNow);
     f.ekf_reset(kD, kNow);
     f.rpp_stale(kNow);
+    f.rpp_pivot_timeout(kNow);
+    f.reengage(kNow);
+    f.reengage_gate(true, kNow);
+    f.reengage_timeout(11, kNow);
     f.rpp_ack_timeout(true, 0, kNow);
     f.skip_point(true, kNow);
     f.artifact_loaded(true, kD, kNow);
@@ -491,7 +666,7 @@ TEST(MissionFsmProperty, InvariantsHoldUnderRandomEventSequences) {
       const bool ok = rng() % 4 != 0;
       const std::uint8_t reason = static_cast<std::uint8_t>(rng() % 18);
       const State before = f.state();
-      switch (rng() % 17) {
+      switch (rng() % 21) {
         case 0:
           f.start(ok, i);
           break;
@@ -540,6 +715,18 @@ TEST(MissionFsmProperty, InvariantsHoldUnderRandomEventSequences) {
         case 15:
           f.ekf_reset(kD, i);
           break;
+        case 17:
+          f.reengage(i);
+          break;
+        case 18:
+          f.reengage_gate(ok, i);
+          break;
+        case 19:
+          f.reengage_timeout(reason, i);
+          break;
+        case 20:
+          f.rpp_pivot_timeout(i);
+          break;
         default:
           f.skip_point(rng() % 2, i);
           break;
@@ -553,7 +740,10 @@ TEST(MissionFsmProperty, InvariantsHoldUnderRandomEventSequences) {
       if (after == S::kPaused)
         EXPECT_TRUE(f.reason() == kReasonOperator || f.reason() == kReasonSafety ||
                     f.reason() == kReasonRtk || f.reason() == kReasonEkfReset ||
-                    f.reason() == kReasonRppStale);
+                    f.reason() == kReasonRppStale || f.reason() == kReasonRppPivotTimeout);
+      // A re-engage lives only in ARMING / ENGAGING.
+      if (f.reengaging()) EXPECT_TRUE(after == S::kArming || after == S::kEngaging);
+      if (f.awaiting_reengage_gate()) EXPECT_EQ(after, S::kEngaging);
       if (after == S::kError) EXPECT_NE(f.reason(), kReasonNone);
       // terminal states are left only through an accepted start into LOADING
       if ((before == S::kCompleted || before == S::kAborted || before == S::kError) &&
@@ -567,15 +757,20 @@ TEST(MissionFsmProperty, InvariantsHoldUnderRandomEventSequences) {
     for (const auto& t : log) {
       EXPECT_FALSE(t.detail.empty());
       if (t.refused) EXPECT_EQ(t.from, t.to);
-      // RUNNING is only ever entered from READY (rpp_ack) or PAUSED (resume).
+      // RUNNING is only ever entered from READY (rpp_ack), PAUSED (resume) or a re-engage's
+      // ENGAGING (reengaged, with the full gate).
       if (!t.refused && t.to == S::kRunning && t.from != S::kRunning) {
         EXPECT_TRUE((t.from == S::kReady && t.event == Event::kRppAck) ||
-                    (t.from == S::kPaused && t.event == Event::kResume));
+                    (t.from == S::kPaused && t.event == Event::kResume) ||
+                    (t.from == S::kEngaging && t.event == Event::kReengaged));
       }
-      // ARMING is only ever entered from PLACING, ENGAGING only from ARMING, READY only from
-      // ENGAGING: the vehicle is never armed or engaged out of order.
+      // ARMING is only ever entered from PLACING (a start) or PAUSED (a re-engage), ENGAGING only
+      // from ARMING, READY only from ENGAGING: the vehicle is never armed or engaged out of order.
       if (!t.refused && t.to != t.from) {
-        if (t.to == S::kArming) EXPECT_EQ(t.from, S::kPlacing);
+        if (t.to == S::kArming) {
+          EXPECT_TRUE((t.from == S::kPlacing && t.event == Event::kPlaced) ||
+                      (t.from == S::kPaused && t.event == Event::kReengage));
+        }
         if (t.to == S::kEngaging) EXPECT_EQ(t.from, S::kArming);
         if (t.to == S::kReady) EXPECT_EQ(t.from, S::kEngaging);
       }

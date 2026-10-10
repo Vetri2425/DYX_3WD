@@ -236,3 +236,68 @@ TEST(Px4Sequencer, ArmRejectedByTheFcuIsADefiniteRefusal) {
   s.release(false);
   EXPECT_FALSE(s.busy());  // nothing to release
 }
+
+// Re-engage from PAUSED (docs/contracts/dyx3_mission.md section 3a): the same execution runs a
+// second arm -> OFFBOARD cycle, with the same one-at-a-time rule and per-operation timeouts, and
+// the release afterwards still undoes everything this execution did.
+TEST(Px4Sequencer, ASecondEngageCycleInOneExecutionRunsAndIsReleased) {
+  Px4Sequencer s = armed_and_engaged();
+  s.set_timeouts({4.0, 5.0});
+  s.engage(Px4Op::kArm);
+  s.engage(Px4Op::kOffboardOn);
+  auto r = drain(s, 10 * kS);
+  ASSERT_EQ(r.size(), 1U);  // OFFBOARD waits for the re-arm
+  EXPECT_EQ(r[0].op, Px4Op::kArm);
+  EXPECT_TRUE(s.on_tick(14 * kS - 1).empty());  // arm_s from this request's own send time
+  ASSERT_TRUE(s.on_response(r[0].id, true, 0, 11 * kS).has_value());
+  r = drain(s, 11 * kS);
+  ASSERT_EQ(r.size(), 1U);
+  EXPECT_EQ(r[0].op, Px4Op::kOffboardOn);
+  const auto t = s.on_tick(16 * kS);  // offboard_s 5.0 after 11 s
+  ASSERT_EQ(t.size(), 1U);
+  EXPECT_EQ(t[0].op, Px4Op::kOffboardOn);
+  EXPECT_EQ(t[0].result, Px4Result::kTimeout);
+  EXPECT_FALSE(t[0].abandoned);
+  s.release(false);
+  r = drain(s, 17 * kS);
+  ASSERT_EQ(r.size(), 1U);
+  EXPECT_EQ(r[0].op, Px4Op::kOffboardOff);
+  s.on_response(r[0].id, true, 0, 17 * kS);
+  EXPECT_EQ(drain(s, 17 * kS).at(0).op, Px4Op::kDisarm);
+}
+
+TEST(Px4Sequencer, ARefusedReArmKeepsTheEarlierArmOwned) {
+  Px4Sequencer s = armed_and_engaged();
+  s.engage(Px4Op::kArm);
+  const auto r = drain(s, 10).at(0);
+  EXPECT_EQ(s.on_response(r.id, false, 1, 11)->result, Px4Result::kRefused);  // LINK_UNHEALTHY
+  // The first cycle armed the vehicle and nothing disarmed it: the release must disarm.
+  EXPECT_TRUE(s.arm_owned());
+  s.release(false);
+  auto rel = drain(s, 12);
+  ASSERT_EQ(rel.size(), 1U);
+  EXPECT_EQ(rel[0].op, Px4Op::kOffboardOff);
+  s.on_response(rel[0].id, true, 0, 13);
+  rel = drain(s, 13);
+  ASSERT_EQ(rel.size(), 1U);
+  EXPECT_EQ(rel[0].op, Px4Op::kDisarm);
+  // A new execution forgets it.
+  s.on_response(rel[0].id, true, 0, 14);
+  s.begin_execution();
+  EXPECT_FALSE(s.arm_owned());
+}
+
+TEST(Px4Sequencer, AReArmThatTimesOutIsADoubtAndIsDisarmed) {
+  Px4Sequencer s = armed_and_engaged();
+  s.set_timeouts({4.0, 5.0});
+  s.engage(Px4Op::kArm);
+  drain(s, 0);
+  const auto t = s.on_tick(4 * kS);
+  ASSERT_EQ(t.size(), 1U);
+  EXPECT_EQ(t[0].result, Px4Result::kTimeout);
+  EXPECT_TRUE(s.arm_owned());
+  s.release(false);
+  const auto rel = drain(s, 5 * kS);
+  ASSERT_EQ(rel.size(), 1U);
+  EXPECT_EQ(rel[0].op, Px4Op::kOffboardOff);  // OFFBOARD was requested in the first cycle
+}
