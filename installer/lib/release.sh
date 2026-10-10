@@ -145,9 +145,13 @@ build_release() {
   [ -n "${packages}" ] || [ "${DYX3_DRY_RUN}" = "1" ] || die "manifest lists no ros2_packages"
   log "colcon build (${packages}) with -j${DYX3_BUILD_JOBS}"
   # A failed build must never reach `.complete`: die here, leaving an incomplete (ignored) dir.
+  # BUILD_TESTING=OFF: a release never ships a test (no install() exists inside any if(BUILD_TESTING)
+  # block, and the slimming step deletes the test sources afterwards), so the 30 gtest targets and
+  # gtest itself are not compiled for it. The installed tree is identical with and without it.
   run bash -c "set +u; . '${ROS_SETUP}'; . '${pm}/install/setup.bash'; set -u; cd '${rel}/ros2_ws' && \
     MAKEFLAGS='-j${DYX3_BUILD_JOBS}' nice -n 10 colcon build \
-      --parallel-workers ${DYX3_COLCON_WORKERS:-1} --packages-select ${packages} --cmake-args -DCMAKE_BUILD_TYPE=Release" ||
+      --parallel-workers ${DYX3_COLCON_WORKERS:-1} --packages-select ${packages} \
+      --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF" ||
     die "colcon build failed for ${sha:0:10}"
 
   build_backend_venv "${rel}"

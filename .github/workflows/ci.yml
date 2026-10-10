@@ -330,7 +330,10 @@ jobs:
   rover_artifacts:
     name: rover artifacts (arm64 build)
     if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/claude/cloud-phases')
-    needs: [interface_freeze, ros2_build_test, native_geometry_tests, clang_format, backend_checks, installer_checks, tools_tests, legacy_quarantine, repo_hygiene]
+    # Builds in parallel with the check jobs (it needs only the interface freeze to be meaningful);
+    # rover_publish below is what waits for every check, so a release is still published only
+    # when all of them pass.
+    needs: [interface_freeze]
     runs-on: ubuntu-24.04-arm
     container:
       image: ros:humble-ros-base
@@ -372,7 +375,7 @@ jobs:
 
   rover_publish:
     name: publish rover release
-    needs: [rover_artifacts]
+    needs: [rover_artifacts, interface_freeze, ros2_build_test, native_geometry_tests, clang_format, backend_checks, installer_checks, tools_tests, legacy_quarantine, repo_hygiene]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
