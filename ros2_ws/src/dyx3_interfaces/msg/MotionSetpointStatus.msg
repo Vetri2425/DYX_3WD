@@ -27,6 +27,10 @@ uint8 REASON_ESTIMATOR_UNHEALTHY=12
 # 0.15.0: the EKF has no valid global (WGS84) reference (VehicleState.global_reference_valid).
 # Reported only as SafetyGateStatus.pre_arm_reason_code; the guard never refuses a command with it.
 uint8 REASON_GLOBAL_REFERENCE_INVALID=13
+# 0.17.0: a motion command (pivot rate or speed) has been applied for longer than the spin-up margin while the
+# measured yaw rate and speed stayed at zero: the drivetrain is not executing it (powered off, UART dead, stalled).
+# Fail to zero; the mission pauses. Pre-arm gate: never (nothing is commanded).
+uint8 REASON_ACTUATOR_STALL=14
 uint8 reason_code
 
 bool accepted

@@ -17,6 +17,11 @@ string path_artifact_sha256
 # [A-Za-z0-9._:-]). A start carrying the request_id of the most recent execution returns that
 # execution's mission_id with duplicate = true and starts nothing. Empty = no idempotency.
 string request_id
+# 0.17.0: resume the persisted progress of this artifact (the last execution's completed points on this rover)
+# instead of starting at run 0. Accepted only when a journal for path_artifact_sha256 exists and is not complete;
+# otherwise the start proceeds from run 0 and resumed_run_index is 0.
+bool resume
+
 ---
 bool accepted
 uint8 REASON_OK=0
@@ -37,3 +42,6 @@ bool duplicate
 # With REASON_SAFETY_GATE: the guard's first failing pre-arm gate (MotionSetpointStatus.REASON_*;
 # REASON_STALE when no fresh SafetyGateStatus). 0 otherwise.
 uint8 gate_reason_code
+# --- appended in 0.17.0 ---
+# The run the execution starts from (0 unless resume restored progress).
+uint32 resumed_run_index

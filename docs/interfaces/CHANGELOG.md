@@ -1,5 +1,17 @@
 # Interface changelog
 
+## 0.17.0 — 2026-10-10 (recovery, drivetrain visibility, RC link)
+
+- `StartMission.srv`: request `resume` (restore the persisted progress of the same artifact instead of starting at run 0);
+  response `resumed_run_index`.
+- `MissionState`: new reason `REASON_RPP_PIVOT_TIMEOUT=18`; appended `start_run_index`, the run this execution starts from
+  (`dyx3_rpp` installs the artifact and begins there).
+- `MotionSetpointStatus`: new reason `REASON_ACTUATOR_STALL=14` (commanded for longer than the spin-up margin with measured
+  yaw rate and speed at zero; fail to zero, mission pauses).
+- `RppStatus`: appended `pivot_timed_out` (pivot watchdog expired with the heading outside the release band).
+- `VehicleState`: appended `rc_link_valid`, `rc_link_ok` from PX4 `failsafe_flags.manual_control_signal_lost`.
+- Migration: rebuild every consumer against 0.17.0; all fields are appended, all constants are new values.
+
 ## 0.16.0 — 2026-10-10 (live telemetry for the tablet)
 
 - `VehicleState`: appended `battery_valid`, `battery_voltage_v`, `battery_current_a`, `battery_remaining` (0..1), from
