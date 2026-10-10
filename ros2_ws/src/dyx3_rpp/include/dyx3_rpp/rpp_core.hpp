@@ -273,6 +273,7 @@ private:
   bool run_boundary_stop_pending_{false};
   bool completion_stop_pending_{false};
   bool segment_endpoint_stop_active_{false};
+  bool endpoint_brake_hold_{false};  // precise stop: braking inside the arrival / hold band
   bool endpoint_stop_started_{false};
   int64_t endpoint_stop_start_ns_{0};
   double run_align_turn_rad_{0.0};

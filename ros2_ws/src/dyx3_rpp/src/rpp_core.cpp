@@ -94,6 +94,7 @@ void RppCore::install_mission(std::vector<ConditionedRun> runs) {
   kappa_hard_latched_ = false;
   stop_latched_ = false;
   segment_endpoint_stop_active_ = false;
+  endpoint_brake_hold_ = false;
   have_last_tick_ = false;
   have_last_pos_ = false;
   ekf_off_n_ = ekf_off_e_ = 0.0;
@@ -141,6 +142,7 @@ void RppCore::apply_run(int idx, bool pre_stopped) {
   path_done_ = false;
   completion_stop_pending_ = false;
   segment_endpoint_stop_active_ = false;
+  endpoint_brake_hold_ = false;
   path_travel_m_ = 0.0;
   kappa_hard_latched_ = false;
   run_tail_transit_m_ = run_tail_transit_[static_cast<size_t>(idx)];
@@ -651,6 +653,7 @@ bool RppCore::precise_stop_tick(double pos_n, double pos_e, double yaw_ned, doub
   const double along_tol = params_.num(P::segment_endpoint_arrival_tolerance_m);
   const double cross_tol = params_.num(P::segment_endpoint_cross_tolerance_m);
   const double correction_limit = params_.num(P::segment_endpoint_max_correction_m);
+  const double capture_past_m = params_.num(P::endpoint_capture_past_m);
   const double speed = measured_speed(now_ns);
   const double decel = params_.num(P::segment_endpoint_precise_decel_m_s2);
   // precise_stop.feedforward_trigger_distance(speed, decel, along_tol)
@@ -664,6 +667,7 @@ bool RppCore::precise_stop_tick(double pos_n, double pos_e, double yaw_ned, doub
   if (!segment_endpoint_stop_active_) {
     reset_corner_pivot_state();
     segment_endpoint_stop_active_ = true;
+    endpoint_brake_hold_ = false;
     endpoint_stop_started_ = true;
     endpoint_stop_start_ns_ = now_ns;
   }
@@ -673,6 +677,7 @@ bool RppCore::precise_stop_tick(double pos_n, double pos_e, double yaw_ned, doub
   auto finish = [&]() {
     segment_endpoint_stop_active_ = false;
     endpoint_stop_started_ = false;
+    endpoint_brake_hold_ = false;
     completion_stop_pending_ = true;
     hold_at_completion(pos_n, pos_e, yaw_ned, pose_age_s, dist_to_goal, now_ns);
   };
@@ -716,6 +721,31 @@ bool RppCore::precise_stop_tick(double pos_n, double pos_e, double yaw_ned, doub
     return true;
   }
 
+  // BEHAVIOUR CHANGE, not in the prototype (2026-10-10, mission 0001 run 3: 14 forward/reverse
+  // reversals in 8.6 s, finished by the timeout 7 mm from the point). Inside the arrival band the
+  // finish geometry is met and only the stop confirmation is missing, so the correct command is a
+  // brake: the creep law below drives toward residual = 0 with a sign flip at the plane, and a
+  // vehicle with speed-loop latency overshoots it and never settles.
+  const bool in_finish_geometry = std::fabs(residual) <= along_tol && std::fabs(cross) <= cross_tol;
+  // DERIVED — NOT FROM V1 SPEC: `endpoint_capture_past_m` (the prototype's "capture past"
+  // allowance) reused as the brake-hold band beyond the arrival band, so a few millimetres of
+  // coast after the brake does not abandon it; no new number.
+  const bool in_hold_geometry =
+      std::fabs(residual) <= along_tol + capture_past_m && std::fabs(cross) <= cross_tol;
+  if (!stopped && (in_finish_geometry || (endpoint_brake_hold_ && in_hold_geometry))) {
+    endpoint_brake_hold_ = true;
+    double hv = 0.0;
+    publish_brake(yaw_ned, tel, &hv);
+    publish_debug(hold_row(cross, 0.0, dist_to_goal, hv, dist_to_goal, age_ms, false));
+    out_.cross_track_right = -cross;  // XR-RPP-005: `cross` is left-positive
+    publish_segment_debug(SegState::CornerStop, std::max(0, static_cast<int>(run_->pts.size()) - 2),
+                          std::max(0.0, residual), dist_to_goal, kNaN, kNaN, kNaN, 0.0);
+    return true;
+  }
+  // Released: a real overshoot (beyond the hold band), or stopped off the mark (the creep nudge
+  // below takes over; the next arrival in the band brakes again).
+  endpoint_brake_hold_ = false;
+
   const bool needs_lateral_correction = std::fabs(cross) > cross_tol && radial <= correction_limit;
   const double profile_dist = needs_lateral_correction ? radial : std::fabs(residual);
   const double creep = params_.num(P::segment_endpoint_creep_speed);
@@ -724,8 +754,13 @@ bool RppCore::precise_stop_tick(double pos_n, double pos_e, double yaw_ned, doub
     speed_mag = creep;
   } else {
     const double cap = std::max(speed, creep);
-    // precise_stop.feedforward_brake_speed(max(0, profile_dist), decel, cap)
-    const double rem = std::max(0.0, profile_dist);
+    // precise_stop.feedforward_brake_speed(max(0, profile_dist - band), decel, cap)
+    // DERIVED — NOT FROM V1 SPEC: the feed-forward is evaluated to the EDGE of the arrival band
+    // (along_tol; max(along_tol, cross_tol) for the radial lateral correction), so the speed
+    // reaches zero where the finish geometry is first met instead of at the plane. The prototype
+    // evaluated it to the plane and relied on the stop happening to be confirmed there.
+    const double band = needs_lateral_correction ? std::max(along_tol, cross_tol) : along_tol;
+    const double rem = std::max(0.0, profile_dist - band);
     const double capc = std::max(0.0, cap);
     speed_mag = (rem <= 0.0 || decel <= 0.0) ? 0.0 : std::min(std::sqrt(2.0 * decel * rem), capc);
   }
@@ -1384,6 +1419,7 @@ void RppCore::pause() {
   //   from the trigger test with a fresh start time.
   segment_endpoint_stop_active_ = false;
   endpoint_stop_started_ = false;
+  endpoint_brake_hold_ = false;
   // - stop latch: re-evaluated from the rest position.
   stop_latched_ = false;
 }
