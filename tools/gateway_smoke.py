@@ -16,7 +16,7 @@ from dyx3_backend.gateway.client import GatewayClient
 
 
 async def main(path: str) -> int:
-    gw = GatewayClient(path, request_timeout_s=3.0)
+    gw = GatewayClient(path, request_timeout_s=6.0)
     await gw.start()
     for _ in range(100):
         if gw.connected:

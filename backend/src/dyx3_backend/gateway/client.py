@@ -55,7 +55,7 @@ class GatewayClient:
         self,
         path: str,
         *,
-        request_timeout_s: float = 3.0,
+        request_timeout_s: float = 6.0,
         reconnect_min_s: float = 0.2,
         reconnect_max_s: float = 3.0,
         clock: Callable[[], float] = time.monotonic,

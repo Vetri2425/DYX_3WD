@@ -350,3 +350,22 @@ async def test_a_per_call_timeout_overrides_the_default(sock_path):
     assert asyncio.get_running_loop().time() - t0 < 1.0
     await gw.stop()
     await srv.stop()
+
+
+def test_request_timeout_outlasts_the_gateways_offboard_wait():
+    # The gateway's OFFBOARD command waits up to 5.0 s (docs/contracts/dyx3_system_gateway.md); the backend's reply
+    # wait must exceed it, or a command the gateway later confirms is reported to the tablet as a timeout.
+    from dyx3_backend.config.settings import MIN_REQUEST_TIMEOUT_S, Settings
+
+    assert MIN_REQUEST_TIMEOUT_S == 6.0
+    assert Settings().request_timeout_s == 6.0
+    assert Settings.from_env({}).request_timeout_s == 6.0
+    assert Settings.from_env({"DYX3_REQUEST_TIMEOUT_S": "8"}).request_timeout_s == 8.0
+    assert Settings().with_(request_timeout_s=6.0).request_timeout_s == 6.0
+    for bad in ("5.99", "3", "0", "-1", "nan", "inf"):
+        with pytest.raises(ValueError):
+            Settings.from_env({"DYX3_REQUEST_TIMEOUT_S": bad})
+    with pytest.raises(ValueError):
+        Settings(request_timeout_s=3.0)
+    with pytest.raises(ValueError):
+        Settings().with_(request_timeout_s=5.0)

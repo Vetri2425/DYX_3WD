@@ -10,6 +10,10 @@ import math
 import os
 from dataclasses import dataclass, replace
 
+# The gateway's OFFBOARD command waits up to 5.0 s (offboard_timeout_s, docs/contracts/dyx3_system_gateway.md); the
+# backend's reply wait must outlast it with margin, or the tablet sees a timeout for a command that then succeeds.
+MIN_REQUEST_TIMEOUT_S = 6.0
+
 
 def _f(env: dict, key: str, default: float) -> float:
     v = float(env.get(key, default))
@@ -32,8 +36,10 @@ class Settings:
     # DERIVED — NOT FROM V1 SPEC (BE-004): wall-clock budget of one app-plan admission job, process start-up
     # included. Over budget = terminated, an error.
     plan_timeout_s: float = 60.0
-    # gateway reply wait; must exceed the gateway's own service_timeout_s (2.0) so its verdict arrives first
-    request_timeout_s: float = 3.0
+    # Gateway reply wait. The slowest gateway command is OFFBOARD, which waits up to 5.0 s for the FCU to confirm the
+    # mode change (docs/contracts/dyx3_system_gateway.md), so the reply wait must outlast it with margin, otherwise
+    # the tablet sees a timeout for a command that then succeeds. Below ``MIN_REQUEST_TIMEOUT_S`` (6.0) is refused.
+    request_timeout_s: float = 6.0
     # DERIVED — NOT FROM V1 SPEC (see contract section 3). OPEN.
     heartbeat_relay_s: float = 0.5
     tablet_heartbeat_timeout_s: float = 1.5
@@ -52,6 +58,13 @@ class Settings:
     # DERIVED — NOT FROM V1 SPEC: 1 s keeps first discovery under ~1 s; one ~120-byte datagram per network.
     beacon_interval_s: float = 1.0
     beacon_exclude: tuple[str, ...] = ("10.41.10.0/24",)
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.request_timeout_s) or self.request_timeout_s < MIN_REQUEST_TIMEOUT_S:
+            raise ValueError(
+                f"request_timeout_s must be finite and >= {MIN_REQUEST_TIMEOUT_S:g} s so it outlasts the gateway's "
+                f"5.0 s OFFBOARD wait (got {self.request_timeout_s!r})"
+            )
 
     @property
     def missions_dir(self) -> str:
@@ -83,7 +96,7 @@ class Settings:
             upload_max_bytes=int(_f(e, "DYX3_UPLOAD_MAX_BYTES", 20 * 1024 * 1024)),
             json_body_max_bytes=int(_f(e, "DYX3_JSON_BODY_MAX_BYTES", 64 * 1024)),
             plan_timeout_s=_f(e, "DYX3_PLAN_TIMEOUT_S", 60.0),
-            request_timeout_s=_f(e, "DYX3_REQUEST_TIMEOUT_S", 3.0),
+            request_timeout_s=_f(e, "DYX3_REQUEST_TIMEOUT_S", 6.0),
             heartbeat_relay_s=_f(e, "DYX3_HEARTBEAT_RELAY_S", 0.5),
             tablet_heartbeat_timeout_s=_f(e, "DYX3_TABLET_HEARTBEAT_TIMEOUT_S", 1.5),
             telemetry_stale_s=_f(e, "DYX3_TELEMETRY_STALE_S", 2.0),
