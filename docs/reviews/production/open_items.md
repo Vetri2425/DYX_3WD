@@ -103,7 +103,7 @@ Facts used to re-rate (all at `252778e`):
 | RPP-001 | MEDIUM (~~CRITICAL~~) | ACCEPTED ↓ | Stall / RT | `rpp_node.cpp:200-202,217-312,321-322` | Mission load, conditioning, hashing and disk I/O run on the FIFO-80 control thread |
 | RPP-003 | MEDIUM (~~HIGH~~) | ACCEPTED ↓ | Latency | `rpp_node.cpp:57-72`; `rpp_core.cpp:157-169,782` | Pose age is measured from RPP receipt, not the PX4 sample time |
 | RPP-005 | MEDIUM (~~HIGH~~) | DOUBT (measure) | RT | `control_graph.launch.py:34`; `main.cpp:22-36` | RPP and `motion_guard` share CPU 4 at equal FIFO 80 |
-| RPP-008 | MEDIUM | DOUBT (measure) | Latency | `rpp_node.cpp:125-127` | Free-running tick, not synchronised to pose arrival |
+| RPP-008 | MEDIUM | **FIXED** `59d1ae9` (C2: tick on each new VehicleState sample, timer as watchdog; `event_driven` default true) — was: DOUBT (measure) | Latency | `rpp_node.cpp:125-127` | Free-running tick, not synchronised to pose arrival |
 | RPP-002 | LOW (~~CRITICAL~~) | **FIXED** `6244e16` (hardening/2026-10-10) — was: ACCEPTED ↓ | Hardening | `rpp_node.cpp:57-72` | No `isfinite` check at the RPP boundary |
 | RPP-004 | LOW (~~HIGH~~) | **FIXED** `6244e16` (hardening/2026-10-10) — was: ACCEPTED ↓ | Hardening | `rpp_core.cpp:782-797` | Negative or non-finite age is not rejected before extrapolation |
 | RPP-006 | MEDIUM | **FIXED** `3dae11b` (hardening/2026-10-10) — was: ACCEPTED, re-rated by CR-1 (IDLE_ONLY gates change on resume) | Params | `rpp_node.cpp:116`; `docs/contracts/rpp_node.md:40` | IDLE_ONLY conditioning parameters are accepted while READY/PAUSED but take effect only at the next load |
@@ -955,13 +955,13 @@ Confirmed good:
 
 | ID | Severity | Status | Area | Where | Item |
 |---|---|---|---|---|---|
-| IF-003 | MEDIUM | ACCEPTED | Time | `MotionSetpoint.msg:5-15`; `rpp_node.cpp:382-390`; `motion_guard_node.cpp:232-240` | The source-pose sample time is not carried through RPP → guard → px4_link, so pose-to-command age cannot be measured from the data (the latency acceptance gates need it; ties to X-001 / X-003 / PC-2) |
+| IF-003 | MEDIUM | **FIXED** `178460b` (hardening/2026-10-10) — was: ACCEPTED | Time | `MotionSetpoint.msg:5-15`; `rpp_node.cpp:382-390`; `motion_guard_node.cpp:232-240` | The source-pose sample time is not carried through RPP → guard → px4_link, so pose-to-command age cannot be measured from the data (the latency acceptance gates need it; ties to X-001 / X-003 / PC-2) |
 | IF-001 | LOW (~~HIGH~~) | ACCEPTED ↓ | Hot-path | `RppStatus.msg:46-48`; `rpp_node.cpp:398` | A 64-char `string` SHA is copied into `RppStatus` on every 50 Hz tick (one heap allocation; a non-loaned `publish` serialises anyway). Fold into PC-2's bounded, loanable hot-path types (`uint8[32]` digest) |
 | IF-002 | LOW (~~MEDIUM~~) | **FIXED** `9afe3de` (hardening/2026-10-10) — was: ACCEPTED ↓ | Time | `EstimatorHealth.msg:10-11`; `px4_link_node.cpp` (only `VehicleState` sets `px4_sample_stamp`, line 836) | `EstimatorHealth.px4_sample_stamp` is never filled, so it is always 0 |
-| IF-004 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Safety | `VehicleState.msg:7-18`; `vehicle_state_assembler.cpp:11-12` | `position_valid` / `velocity_valid` reflect XY only; `down_m` / `velocity_down_mps` have no validity flag (no control consumer uses them on a 2D rover) |
-| IF-005 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Doc | `docs/contracts/topics.md:14` | The contract says `/dyx3/vehicle_state` is published "on each FCU sample"; it is a 20 ms timer republishing the latest cached sample |
-| IF-006 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Tests | `interface_abi_test.cpp` | `conditioned_execution_sha256`, `heading_evidence_valid` and `path_travel_m` (0.9 / 0.10 additions) are not pinned; there is no schema fingerprint test |
-| IF-007 | LOW | ACCEPTED | Doc | `SetEmergencyStop.srv:1-2` | The accepted E-stop sources (`tablet`, `backend`, `ble`, `physical`) are not documented in the `.srv` |
+| IF-004 | LOW (~~MEDIUM~~) | **FIXED** `0ee47e1` (hardening/2026-10-10) — was: ACCEPTED ↓ | Safety | `VehicleState.msg:7-18`; `vehicle_state_assembler.cpp:11-12` | `position_valid` / `velocity_valid` reflect XY only; `down_m` / `velocity_down_mps` have no validity flag (no control consumer uses them on a 2D rover) |
+| IF-005 | LOW (~~MEDIUM~~) | **FIXED** `d252583` (hardening/2026-10-10) — was: ACCEPTED ↓ | Doc | `docs/contracts/topics.md:14` | The contract says `/dyx3/vehicle_state` is published "on each FCU sample"; it is a 20 ms timer republishing the latest cached sample |
+| IF-006 | LOW (~~MEDIUM~~) | **FIXED** `c5b485d` (hardening/2026-10-10) — was: ACCEPTED ↓ | Tests | `interface_abi_test.cpp` | `conditioned_execution_sha256`, `heading_evidence_valid` and `path_travel_m` (0.9 / 0.10 additions) are not pinned; there is no schema fingerprint test |
+| IF-007 | LOW | **FIXED** `9730a42` (hardening/2026-10-10) — was: ACCEPTED | Doc | `SetEmergencyStop.srv:1-2` | The accepted E-stop sources (`tablet`, `backend`, `ble`, `physical`) are not documented in the `.srv` |
 
 ### Grouping
 - **One breaking interface release, 0.14.0, with PC-2:**
