@@ -343,3 +343,30 @@ TEST(ConditionedArtifact, DeterministicHashSourceIdentityAndStrictFailures) {
   EXPECT_FALSE(parse_conditioned_artifact(one, std::string(64, 'b')).ok);
   EXPECT_FALSE(parse_conditioned_artifact(one + "junk\n").ok);
 }
+
+// The C++ writer (dyx3_mission's execution artifact) reproduces the Python writer byte for byte.
+TEST(PathArtifactWriter, ReproducesThePythonWriterExactly) {
+  for (const auto& row : manifest()) {
+    SCOPED_TRACE(row.name);
+    const std::string bytes = read(row.sha);
+    const auto r = parse_artifact(bytes, row.sha);
+    ASSERT_TRUE(r.ok) << r.error;
+    EXPECT_EQ(serialize_artifact(r.artifact.engine_id, r.artifact.meta_json, r.artifact.points),
+              bytes);
+  }
+}
+
+TEST(PathArtifactWriter, RefusesWhatHasNoCanonicalSpelling) {
+  const std::vector<ArtifactPoint> pts = {{1.5, -2.25, 1}, {0.1, 1e-05, 3}};
+  const std::string ok = serialize_artifact("eng", "{\"a\":1}", pts);
+  ASSERT_FALSE(ok.empty());
+  EXPECT_TRUE(parse_artifact(ok).ok);
+  EXPECT_NE(ok.find("\n0.1 1e-05 3\n"), std::string::npos);
+  EXPECT_TRUE(serialize_artifact("eng", "{\"a\":1}", {}).empty());
+  EXPECT_TRUE(serialize_artifact("", "{\"a\":1}", pts).empty());
+  EXPECT_TRUE(serialize_artifact("e g", "{\"a\":1}", pts).empty());
+  EXPECT_TRUE(serialize_artifact("eng", "{\"b\":1,\"a\":2}", pts).empty());  // unsorted keys
+  EXPECT_TRUE(serialize_artifact("eng", "[1]", pts).empty());
+  EXPECT_TRUE(serialize_artifact("eng", "{}", {{std::nan(""), 0.0, 0}}).empty());
+  EXPECT_TRUE(serialize_artifact("eng", "{}", {{0.0, 0.0, 4}}).empty());
+}

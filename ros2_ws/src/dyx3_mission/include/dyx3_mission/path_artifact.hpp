@@ -44,12 +44,21 @@ struct ArtifactResult {
 /// For C++ writers of DYX3PATH artifacts (tests, tools); empty for a non-finite value.
 std::string python_repr(double v);
 
+/// Canonical DYX3PATH 1 bytes, as the Python writer would produce them, for a C++ writer
+/// (dyx3_mission's placed execution artifact). Empty when the input has no canonical spelling: no
+/// points, a non-finite coordinate, flags > 3, an engine id that is empty or has a space or a
+/// control byte, or a meta that is not a canonical JSON object. parse_artifact() accepts the
+/// result.
+std::string serialize_artifact(const std::string& engine_id, const std::string& meta_json,
+                               const std::vector<ArtifactPoint>& points);
+
 /// Parse artifact bytes. When `expected_sha256` is non-empty the bytes must hash to it.
 ArtifactResult parse_artifact(const std::string& bytes, const std::string& expected_sha256 = "");
 
 /// Largest artifact file the reader will load. A planned path is a few MB at most (the backend caps
 /// a mission at 50k points; its upload limit is 20 MiB); this bound keeps a wrong or hostile file
-/// from stalling the Start service callback in read + SHA-256 or exhausting memory. DERIVED.
+/// from stalling LOADING in read + SHA-256 or exhausting memory (MS-004). DERIVED. dyx3_mission
+/// reads the artifact off the executor thread, never inside the Start service callback.
 constexpr std::uintmax_t kMaxArtifactBytes = 64ULL * 1024 * 1024;
 
 /// Read `<dir>/<sha256>.dyx3path` and verify it hashes to its own name. The file must be a regular
