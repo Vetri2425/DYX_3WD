@@ -2713,3 +2713,6 @@ chain.
   3. then `RO_SPEED_RED` 1 (prototype corner slowdown) as a separate change.
 - **Rule:** never set `RO_JERK_LIM` or `RO_DECEL_LIM` ≤ 0 on this firmware; the rover would not move in Mission.
   Upstream `6cf8d80bdd` (that guard) and `df387bdec2` (pure pursuit past a waypoint) are not in `8279fa4be3`.
+- **Verified (13:10 IST, log `forward_5s_tuned.ulg`):** Offboard 0.20 m/s now gives 0.199 m/s measured, 0.201 m/s from
+  the wheels and 0.199 m/s along the heading (steady state; it was 0.157 before). The first second is the
+  `RO_ACCEL_LIM` ramp. Next: the Mission square at the new limits.
