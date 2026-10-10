@@ -1,5 +1,26 @@
 # Interface changelog
 
+## 0.15.0 — 2026-10-10 (mission contract v2: rover-owned lifecycle)
+
+- `MissionState`: new states `PLACING=8`, `ARMING=9`, `ENGAGING=10` (values 0–7 unchanged). New reasons
+  `EKF_RESET=6`, `EKF_REFERENCE_INVALID=7`, `PLACEMENT_OUT_OF_BOUNDS=8`, `NO_PLACEMENT_FRAME=9`, `ARM_REFUSED=10`,
+  `ARM_TIMEOUT=11`, `OFFBOARD_REFUSED=12`, `OFFBOARD_TIMEOUT=13`, `RPP_ACK_TIMEOUT=14`, `ESTOP=15`, `RPP_ERROR=16`,
+  `RPP_STALE=17` (values 0–5 unchanged; E-stop, RPP error, RPP ack timeout and RPP staleness now carry their own code
+  instead of `SAFETY` / `INTERNAL_ERROR`). Appended `source_artifact_sha256`, `request_id`, `reason_detail`,
+  `gate_reason_code`, `waiting_on` (`WAIT_NONE..WAIT_DISARM`) and `state_entered`. `path_artifact_sha256` keeps its
+  meaning for every consumer (the file RPP loads) but now names the placed execution artifact; it is set from ARMING on
+  and cleared on ERROR.
+- `StartMission`: asynchronous (admission only, returns the execution id at once). Request appends `request_id`
+  (idempotency key). Response appends `REASON_INVALID_REQUEST=4`, `duplicate`, `gate_reason_code`. A missing or corrupt
+  artifact is now an accepted start that ends in `ERROR(PATH_ERROR)`; only a malformed id is `REASON_INVALID_ARTIFACT`.
+- `SafetyGateStatus`: appended `pre_arm_ok`, `pre_arm_reason_code` (every guard gate except armed and OFFBOARD, plus the
+  EKF global reference), published by `dyx3_motion_guard`.
+- `MotionSetpointStatus`: new `REASON_GLOBAL_REFERENCE_INVALID=13` (used only as a pre-arm reason).
+- `ResumeMission`: new `REASON_NOT_ARMED_OR_OFFBOARD=3`, `REASON_EKF_REFERENCE_CHANGED=4`.
+- Migration: appended fields and constants only; every consumer is rebuilt against 0.15.0 in the same release. The
+  gateway and backend must map the new states, reasons and `request_id`. Bags recorded with 0.14.x carry the old
+  `MissionState` / `SafetyGateStatus` definitions.
+
 ## 0.14.0 — 2026-10-10 (latency hardening)
 
 - `VehicleState`: appended `vertical_position_valid` and `vertical_velocity_valid`, filled by `dyx3_px4_link` from PX4

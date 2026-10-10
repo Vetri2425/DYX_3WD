@@ -3,4 +3,10 @@ bool accepted
 uint8 REASON_OK=0
 uint8 REASON_NOT_PAUSED=1
 uint8 REASON_SAFETY_GATE=2
+# 0.15.0: the vehicle is no longer armed or no longer in OFFBOARD (it is never re-engaged
+# automatically: abort and start again).
+uint8 REASON_NOT_ARMED_OR_OFFBOARD=3
+# 0.15.0: the EKF global reference changed (or became invalid) since the trajectory was placed:
+# the placed path no longer lies where it was drawn. Abort and start again.
+uint8 REASON_EKF_REFERENCE_CHANGED=4
 uint8 reason_code

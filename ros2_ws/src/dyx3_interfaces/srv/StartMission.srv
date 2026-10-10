@@ -2,17 +2,38 @@
 #
 # ExecuteMission.action is the canonical mission-execution interface (goal =
 # start, feedback = progress, result = outcome, cancel = abort). This service is
-# a thin admission-only convenience over the SAME dyx3_mission entry point: it
-# validates the artifact and starts the mission exactly as an ExecuteMission goal
-# would, but returns immediately with no feedback. Both resolve to one code path
-# inside dyx3_mission; no other package may implement either.
-# Content-addressed path artifact produced by the backend.
+# a thin admission-only convenience over the SAME dyx3_mission entry point. Both
+# resolve to one code path inside dyx3_mission; no other package may implement either.
+#
+# 0.15.0 (mission contract v2): ASYNCHRONOUS. The call only admits or refuses (no file I/O, no
+# hashing, no PX4 call inside it) and returns the execution id (mission_id). Loading, frame
+# placement, arming and OFFBOARD then run in dyx3_mission and are reported on MissionState
+# (LOADING -> PLACING -> ARMING -> ENGAGING -> READY -> RUNNING). A missing or corrupt artifact is
+# therefore an accepted start that ends in ERROR(PATH_ERROR), not a refusal.
+
+# Content-addressed path artifact produced by the backend (64 lowercase hex).
 string path_artifact_sha256
+# 0.15.0: optional client request id (idempotency key; 1 to 64 characters of
+# [A-Za-z0-9._:-]). A start carrying the request_id of the most recent execution returns that
+# execution's mission_id with duplicate = true and starts nothing. Empty = no idempotency.
+string request_id
 ---
 bool accepted
 uint8 REASON_OK=0
+# Malformed artifact id (not 64 lowercase hex). No execution is created.
 uint8 REASON_INVALID_ARTIFACT=1
+# An execution is active, or the previous one is still releasing OFFBOARD / disarming.
 uint8 REASON_BUSY=2
+# The guard's pre-arm gate (SafetyGateStatus.pre_arm_ok) is not fresh and ok; see gate_reason_code.
 uint8 REASON_SAFETY_GATE=3
+# 0.15.0: request_id longer than 64 characters or with characters outside [A-Za-z0-9._:-].
+uint8 REASON_INVALID_REQUEST=4
 uint8 reason_code
+# The execution id: incremented on every accepted start (per process).
 uint32 mission_id
+# --- appended in 0.15.0 ---
+# true: request_id matched the most recent execution; nothing new was started.
+bool duplicate
+# With REASON_SAFETY_GATE: the guard's first failing pre-arm gate (MotionSetpointStatus.REASON_*;
+# REASON_STALE when no fresh SafetyGateStatus). 0 otherwise.
+uint8 gate_reason_code
