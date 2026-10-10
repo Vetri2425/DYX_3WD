@@ -278,13 +278,20 @@ A request still in `Prestream`/`Requested` restarts from `Prestream` when the li
 
 `SetOffboard(enable=false)` (PXL-002): from the next writer tick the heartbeat carries the explicit
 STOP set, whatever the guard commands, for `offboard_disable_stop_s` (default 0.3 s, validated
-> 0); then the heartbeat is withdrawn and PX4 leaves OFFBOARD through its own offboard-loss
-handling (`COM_OF_LOSS_T`, `COM_OBL_RC_ACT`) with a zero as the last setpoint. Dropping the
+> 0); then the heartbeat is withdrawn and the link sends `DO_SET_MODE` MANUAL (`param1=1`,
+`param2=1`), repeated every 0.5 s for at most 1.5 s while PX4 still reports OFFBOARD (owner decision
+2026-10-10, prototype behaviour). PX4 left in OFFBOARD without a signal refuses the next arm. Dropping the
 stream at once would leave PX4 applying the last motion setpoint until the loss timeout. The
 window only runs while the link is healthy (otherwise there is no trustworthy zero to send), and a
 repeated disable does not restart it. The reply is immediate and unchanged: `accepted=true`,
 `REASON_OK` means "the link stopped commanding motion and started the STOP window", **not** "PX4
-left OFFBOARD" or "the rover stopped". No mode change or disarm is sent (owner policy, open).
+left OFFBOARD" or "the rover stopped". No disarm is sent; the caller disarms.
+
+**Arm with a stale OFFBOARD.** `ArmDisarm(arm=true)` while PX4 reports OFFBOARD and the link has no
+offboard session (a restart, or a release whose MANUAL was not confirmed): the link first requests
+MANUAL as above and holds the arm command until PX4 has left OFFBOARD, then arms with the usual
+`arm_confirm_timeout_s`. PX4 still in OFFBOARD after 1.5 s: `REASON_TIMEOUT`, no arm command sent.
+Worst case 1.5 s + 2.0 s, inside `dyx3_mission`'s `arm_timeout_s` 4.0 s.
 `Px4LinkStatus.offboard_heartbeat_active` is true while the heartbeat is actually published,
 including the STOP window.
 

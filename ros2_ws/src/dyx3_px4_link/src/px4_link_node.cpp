@@ -15,9 +15,15 @@ namespace dyx3_px4_link {
 namespace {
 
 constexpr float kNaN = std::numeric_limits<float>::quiet_NaN();
-constexpr uint8_t kNavStateOffboard = 14;    // px4_msgs VehicleStatus NAVIGATION_STATE_OFFBOARD
-constexpr uint8_t kArmed = 2;                // ARMING_STATE_ARMED
-constexpr uint32_t kCmdDoSetMode = 176;      // VEHICLE_CMD_DO_SET_MODE
+constexpr uint8_t kNavStateOffboard = 14;  // px4_msgs VehicleStatus NAVIGATION_STATE_OFFBOARD
+constexpr uint8_t kArmed = 2;              // ARMING_STATE_ARMED
+constexpr uint32_t kCmdDoSetMode = 176;    // VEHICLE_CMD_DO_SET_MODE
+constexpr float kMainModeManual = 1.0F;    // PX4_CUSTOM_MAIN_MODE_MANUAL
+constexpr float kMainModeOffboard = 6.0F;  // PX4_CUSTOM_MAIN_MODE_OFFBOARD
+// Leaving OFFBOARD: MANUAL is re-sent every 0.5 s for at most 1.5 s (PX4 confirms in one status
+// sample, 2 Hz at worst). Bounded so arm (2.0 s confirm) still fits the mission's 4 s budget.
+constexpr double kLeaveOffboardRetryS = 0.5;
+constexpr double kLeaveOffboardTimeoutS = 1.5;
 constexpr uint32_t kCmdArmDisarm = 400;      // VEHICLE_CMD_COMPONENT_ARM_DISARM
 constexpr uint32_t kCmdLoggingStart = 2510;  // VEHICLE_CMD_LOGGING_START
 constexpr uint32_t kCmdDoSetServo = 183;     // VEHICLE_CMD_DO_SET_SERVO
@@ -320,12 +326,23 @@ Px4LinkNode::Px4LinkNode(const rclcpp::NodeOptions& options, ClockFn clock, bool
           srv_arm_->send_response(*hdr, r);
           return;
         }
-        publish_vehicle_command(kCmdArmDisarm, req->arm ? 1.0F : 0.0F, 0.0F, stamp_us());
         Pending p;
         p.is_arm = true;
         p.arm_target = req->arm;
         p.header = hdr;
-        p.deadline_s = now + p_.arm_confirm_timeout_s;
+        // PX4 refuses to arm in OFFBOARD without an offboard signal (a session we released, or one
+        // left over by a restart): leave OFFBOARD to MANUAL first, then arm.
+        if (req->arm && nav_offboard_ && offboard_->state() == OffboardState::Disabled) {
+          request_leave_offboard(now);
+          p.arm_after_leave_offboard = true;
+          p.deadline_s = now + kLeaveOffboardTimeoutS;
+          RCLCPP_WARN(get_logger(),
+                      "arm requested while PX4 is in OFFBOARD without our heartbeat: "
+                      "switching to MANUAL first");
+        } else {
+          publish_vehicle_command(kCmdArmDisarm, req->arm ? 1.0F : 0.0F, 0.0F, stamp_us());
+          p.deadline_s = now + p_.arm_confirm_timeout_s;
+        }
         pending_.push_back(p);
       });
   srv_off_ = create_service<OffSrv>(
@@ -338,6 +355,7 @@ Px4LinkNode::Px4LinkNode(const rclcpp::NodeOptions& options, ClockFn clock, bool
           // offboard_disable_stop_s, then the heartbeat is withdrawn. It does not mean PX4 has
           // left OFFBOARD or the rover has stopped.
           offboard_->enable(false, now);
+          request_leave_offboard(now);  // then MANUAL, once the STOP window has ended
           r.accepted = true;
           r.reason_code = OffSrv::Response::REASON_OK;
           srv_off_->send_response(*hdr, r);
@@ -868,13 +886,27 @@ void Px4LinkNode::step(double now_s) {
     age_last_s_ = age;
     age_valid_ = true;
   }
-  if (ofb.send_mode_command)
-    publish_vehicle_command(kCmdDoSetMode, 1.0F, 6.0F, t_us);  // 6 = OFFBOARD
+  if (ofb.send_mode_command) publish_vehicle_command(kCmdDoSetMode, 1.0F, kMainModeOffboard, t_us);
+  if (now_s <= leave_offboard_until_s_) {
+    if (!nav_offboard_) {
+      leave_offboard_until_s_ = -1e18;  // PX4 has left OFFBOARD
+    } else if (!ofb.publish_heartbeat && last_link_ok_ &&
+               now_s - leave_offboard_sent_s_ >= kLeaveOffboardRetryS - 1e-9) {
+      publish_vehicle_command(kCmdDoSetMode, 1.0F, kMainModeManual, t_us);
+      leave_offboard_sent_s_ = now_s;
+      RCLCPP_INFO(get_logger(), "leaving OFFBOARD: MANUAL requested");
+    }
+  }
   start_ulog_if_due(now_s, last_link_ok_);
 
   service_pending(now_s, last_link_ok_, ofb);
   publish_state_and_health(now_s);
   publish_status(now_s, last_rep_, last_gate_);
+}
+
+void Px4LinkNode::request_leave_offboard(double now_s) {
+  // A repeated request extends the window; the first MANUAL goes out once the heartbeat is off.
+  leave_offboard_until_s_ = now_s + kLeaveOffboardTimeoutS + p_.offboard.disable_stop_s;
 }
 
 void Px4LinkNode::on_timer(double now_s) {
@@ -901,7 +933,20 @@ bool Px4LinkNode::publish_shutdown_stop() {
 void Px4LinkNode::service_pending(double now_s, bool link_healthy, const OffboardStep& ofb) {
   for (auto it = pending_.begin(); it != pending_.end();) {
     bool done = false;
-    if (it->is_arm) {
+    if (it->is_arm && it->arm_after_leave_offboard) {
+      if (!nav_offboard_) {
+        publish_vehicle_command(kCmdArmDisarm, 1.0F, 0.0F, stamp_us());
+        it->arm_after_leave_offboard = false;
+        it->deadline_s = now_s + p_.arm_confirm_timeout_s;
+      } else if (now_s > it->deadline_s) {
+        ArmSrv::Response r;
+        r.accepted = false;
+        r.reason_code = ArmSrv::Response::REASON_TIMEOUT;
+        RCLCPP_ERROR(get_logger(), "arm refused: PX4 did not leave OFFBOARD for MANUAL");
+        srv_arm_->send_response(*it->header, r);
+        done = true;
+      }
+    } else if (it->is_arm) {
       ArmSrv::Response r;
       const bool st_fresh = (now_s - st_t_) <= p_.stale.max_age_s[kVehicleStatus];
       const bool confirmed =

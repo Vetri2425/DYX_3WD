@@ -108,6 +108,9 @@ private:
   struct Pending {
     bool is_arm{true};
     bool arm_target{false};
+    // Arm requested while PX4 was still in OFFBOARD without our heartbeat: the arm command is held
+    // until PX4 has left OFFBOARD (MANUAL requested first), then sent with a fresh confirm window.
+    bool arm_after_leave_offboard{false};
     std::shared_ptr<rmw_request_id_t> header;
     double deadline_s{0.0};
   };
@@ -161,6 +164,12 @@ private:
   px4_msgs::msg::EstimatorStatusFlags flags_;
   double flags_t_{-1e18};
   bool nav_offboard_{false};
+  // Leaving OFFBOARD to MANUAL (prototype behaviour): requested by set_offboard(false) and by an
+  // arm while a stale OFFBOARD is left over. While this deadline is in the future, the heartbeat is
+  // off and PX4 still reports OFFBOARD, DO_SET_MODE MANUAL is sent every kLeaveOffboardRetryS.
+  double leave_offboard_until_s_{-1e18};
+  double leave_offboard_sent_s_{-1e18};
+  void request_leave_offboard(double now_s);
   uint8_t arming_state_{0};
 
   // outputs of the last step

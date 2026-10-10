@@ -853,6 +853,88 @@ TEST(Px4LinkNode, ArmRefusedWhenUnhealthyConfirmedByStatus) {
   EXPECT_EQ(arm_cmds, 1);
 }
 
+// Leaving OFFBOARD (prototype behaviour): after a release PX4 is sent to MANUAL, never during the
+// STOP window, and no more once it has left OFFBOARD.
+namespace {
+int manual_mode_cmds(const std::vector<px4_msgs::msg::VehicleCommand>& cmds) {
+  int n = 0;
+  for (const auto& c : cmds)
+    n += (c.command == 176 && c.param1 == 1.0F && c.param2 == 1.0F) ? 1 : 0;
+  return n;
+}
+int arm_cmds(const std::vector<px4_msgs::msg::VehicleCommand>& cmds) {
+  int n = 0;
+  for (const auto& c : cmds) n += (c.command == 400 && c.param1 == 1.0F) ? 1 : 0;
+  return n;
+}
+}  // namespace
+
+TEST(Px4LinkNode, ReleasingOffboardSwitchesPx4ToManualAfterTheStopWindow) {
+  Rig r;
+  r.bring_up();
+  r.nav_state = 14;
+  bool acc = false;
+  uint8_t rs = 0;
+  ASSERT_TRUE(r.call_offboard(true, &acc, &rs));
+  ASSERT_TRUE(acc);
+  r.run(0.1);
+  r.clear();
+  auto req = std::make_shared<dyx3_interfaces::srv::SetOffboard::Request>();
+  req->enable = false;
+  auto fut = r.cli_off->async_send_request(req);
+  ASSERT_TRUE(r.pump_until([&] { return fut.wait_for(0ms) == std::future_status::ready; }));
+  ASSERT_TRUE(fut.get()->accepted);
+  r.run(0.2);  // inside the 0.3 s STOP window: no mode change yet
+  r.deliver();
+  EXPECT_EQ(manual_mode_cmds(r.cmds), 0);
+  r.run(0.3);  // window over, PX4 still reports OFFBOARD
+  r.deliver();
+  EXPECT_EQ(manual_mode_cmds(r.cmds), 1);
+  r.nav_state = 1;  // PX4 is in MANUAL
+  r.run(1.0);
+  r.deliver();
+  EXPECT_EQ(manual_mode_cmds(r.cmds), 1);  // not repeated once it has left OFFBOARD
+}
+
+TEST(Px4LinkNode, ArmWithAStaleOffboardModeLeavesItForManualFirst) {
+  Rig r;
+  r.bring_up();
+  r.nav_state = 14;  // left over: PX4 in OFFBOARD, our heartbeat never started
+  r.run(0.1);
+  r.clear();
+  auto req = std::make_shared<dyx3_interfaces::srv::ArmDisarm::Request>();
+  req->arm = true;
+  auto fut = r.cli_arm->async_send_request(req);
+  r.run(0.2);
+  r.deliver();
+  EXPECT_EQ(manual_mode_cmds(r.cmds), 1);
+  EXPECT_EQ(arm_cmds(r.cmds), 0);  // the arm is held until PX4 has left OFFBOARD
+  r.nav_state = 1;
+  r.arming_state = 2;  // the fake FCU arms once asked
+  for (int i = 0; i < 300 && fut.wait_for(0ms) != std::future_status::ready; ++i) r.tick();
+  ASSERT_EQ(fut.wait_for(0ms), std::future_status::ready);
+  EXPECT_TRUE(fut.get()->accepted);
+  EXPECT_EQ(arm_cmds(r.cmds), 1);
+}
+
+TEST(Px4LinkNode, ArmIsRefusedWhenPx4NeverLeavesAStaleOffboard) {
+  Rig r;
+  r.bring_up();
+  r.nav_state = 14;
+  r.run(0.1);
+  r.clear();
+  auto req = std::make_shared<dyx3_interfaces::srv::ArmDisarm::Request>();
+  req->arm = true;
+  auto fut = r.cli_arm->async_send_request(req);
+  for (int i = 0; i < 300 && fut.wait_for(0ms) != std::future_status::ready; ++i) r.tick();
+  ASSERT_EQ(fut.wait_for(0ms), std::future_status::ready);
+  auto resp = fut.get();
+  EXPECT_FALSE(resp->accepted);
+  EXPECT_EQ(resp->reason_code, dyx3_interfaces::srv::ArmDisarm::Response::REASON_TIMEOUT);
+  EXPECT_EQ(arm_cmds(r.cmds), 0);  // never armed into OFFBOARD without a signal
+  EXPECT_GE(manual_mode_cmds(r.cmds), 2);
+}
+
 TEST(Px4LinkNode, UlogChunksAreAckedThenRepublished) {
   Rig r;
   r.bring_up();
