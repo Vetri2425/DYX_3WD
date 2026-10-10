@@ -15,6 +15,7 @@
 #include <string>
 #include <thread>
 
+#include "dds_test_support.hpp"
 #include "dyx3_interfaces/action/execute_mission.hpp"
 #include "dyx3_interfaces/msg/mission_state.hpp"
 #include "dyx3_interfaces/msg/motion_setpoint_status.hpp"
@@ -635,7 +636,11 @@ TEST_F(MissionNodeTest, RppStatusMaxAgeParameterDefaultAndValidation) {
 
 int main(int argc, char** argv) {
   testing::InitGoogleTest(&argc, argv);
-  rclcpp::init(argc, argv);
+  // A private DDS domain (an exclusive per-process lock, dds_test_support.hpp): before this the
+  // suite ran on the caller's domain and could talk to other test processes or a live graph.
+  rclcpp::InitOptions io;
+  io.set_domain_id(static_cast<size_t>(dyx3_test::isolated_domain_id()));
+  rclcpp::init(argc, argv, io);
   const int rc = RUN_ALL_TESTS();
   rclcpp::shutdown();
   return rc;
