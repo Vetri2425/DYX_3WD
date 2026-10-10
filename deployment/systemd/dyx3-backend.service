@@ -17,6 +17,10 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 ReadWritePaths=/var/lib/dyx3 /var/log/dyx3 /run/dyx3
+# ProtectSystem=strict leaves /tmp read-only otherwise; uploads over 1 MiB spool there and the planner/parser
+# subprocesses write their DXF scratch dirs there. Nothing is shared with another unit through /tmp (artifacts and
+# tokens are written under /var/lib/dyx3), so a private /tmp is enough.
+PrivateTmp=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes

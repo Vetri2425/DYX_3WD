@@ -12,6 +12,22 @@ EnvironmentFile=-/etc/dyx3/ros.env
 ExecStart=/opt/dyx3/current/bin/dyx3-recorder
 Restart=always
 RestartSec=5
+# The main PID is recorder_node itself (start-recorder.sh execs it). `mixed`: SIGTERM goes to it alone, so it finalises the
+# bag (SIGINT to the bag child's own process group, up to bag_finalize_timeout_s = 10 s), the end-of-run parameter calls and
+# summary.json; whatever is still left in the cgroup after it exits is SIGKILLed. With control-group the bag child got
+# SIGTERM at the same moment as the recorder and could be killed mid-finalise.
+KillMode=mixed
+# 10 s bag stop + 2 s SIGTERM grace + end-of-run parameter snapshots + summary.json, with margin.
+TimeoutStopSec=30
+
+# Scheduling: the recorder (and its bag child, which inherits these) must never compete with the control graph.
+# best-effort class 7, not idle: on a busy disk an idle-class recorder could be starved indefinitely.
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+# CPU 4 is reserved for RPP + motion_guard (SCHED_FIFO 80, pinned by control_graph.launch.py): nothing else may run there.
+# Assumes the Jetson Orin Nano's 6 cores, numbered 0-5; CPUs 6+ (a larger module) are NOT listed and would stay unused: revisit if the SoM changes.
+CPUAffinity=0-3 5
 
 # Hardening
 NoNewPrivileges=yes

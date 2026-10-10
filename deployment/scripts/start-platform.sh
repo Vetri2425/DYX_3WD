@@ -19,18 +19,36 @@ fi
 : "${DYX3_RESTART_DELAY_S:=2}"
 : "${DYX3_AGENT_BIN:=MicroXRCEAgent}"
 : "${DYX3_ROUTER_BIN:=mavlink-routerd}"
+: "${DYX3_PLATFORM_STATE_DIR:=/run/dyx3}"
 
 log() { printf 'dyx3-platform: %s\n' "$*"; }
 
 pids=()
+
+# BR-003: child restarts are otherwise invisible (the unit stays "active" while a child crash-loops). Each supervisor keeps its
+# own count since this unit started, logs every restart with the count and the exit status, and publishes
+# ${DYX3_PLATFORM_STATE_DIR}/platform_restarts.<name> (restarts=, last_exit_status=, updated_utc=) with temp file + rename.
+# One file per child, not one shared file: the supervisors are separate processes and a shared file would need a lock.
+# dyx3-health reads these. A write failure (read-only or missing directory) never affects supervision.
+publish_restarts() {
+  local name="$1" count="$2" status="$3" f
+  f="${DYX3_PLATFORM_STATE_DIR}/platform_restarts.${name}"
+  if printf 'restarts=%s\nlast_exit_status=%s\nupdated_utc=%s\n' "${count}" "${status}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    2>/dev/null >"${f}.tmp.${BASHPID}" && mv -f "${f}.tmp.${BASHPID}" "${f}" 2>/dev/null; then
+    return 0
+  fi
+  rm -f "${f}.tmp.${BASHPID}" 2>/dev/null
+  return 0
+}
 
 # supervise <name> <cmd...>: run in a loop (as a background subshell) until told to stop.
 # The TERM trap lives INSIDE the subshell so the child is stopped and not restarted.
 supervise() {
   local name="$1"
   shift
-  local child=0 stop=0
+  local child=0 stop=0 restarts=0
   trap 'stop=1; [ "${child}" -ne 0 ] && kill -TERM "${child}" 2>/dev/null' TERM INT
+  publish_restarts "${name}" 0 none
   while [ "${stop}" -eq 0 ]; do
     log "${name}: starting"
     "$@" &
@@ -41,7 +59,9 @@ supervise() {
     wait "${child}" 2>/dev/null
     [ "${stop}" -eq 1 ] && break
     child=0
-    log "${name}: exited rc=${rc}; restarting in ${DYX3_RESTART_DELAY_S}s"
+    restarts=$((restarts + 1))
+    log "${name}: exited rc=${rc}; restart #${restarts} in ${DYX3_RESTART_DELAY_S}s"
+    publish_restarts "${name}" "${restarts}" "${rc}"
     sleep "${DYX3_RESTART_DELAY_S}" &
     wait $!
   done

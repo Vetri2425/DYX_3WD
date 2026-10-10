@@ -122,7 +122,7 @@ make_src() {
 # ---------------------------------------------------------------- supervisor
 sup() {
   local d="${T}/sup"
-  mkdir -p "${d}/bin"
+  mkdir -p "${d}/bin" "${d}/state"
   # Agent that dies immediately (to prove restart) and counts its starts.
   cat >"${d}/bin/MicroXRCEAgent" <<'A'
 #!/usr/bin/env bash
@@ -138,13 +138,18 @@ A
   : >"${d}/router.conf"
   : >"${d}/count"
   env PATH="${d}/bin:${PATH}" COUNT="${d}/count" DYX3_PLATFORM_ENV=/nonexistent \
-    DYX3_RESTART_DELAY_S=0.1 DYX3_MAVROUTER_CONF="${d}/router.conf" \
+    DYX3_RESTART_DELAY_S=0.1 DYX3_MAVROUTER_CONF="${d}/router.conf" DYX3_PLATFORM_STATE_DIR="${d}/state" \
     "${REPO}/deployment/scripts/start-platform.sh" >"${d}/out" 2>&1 &
   local pid=$!
   sleep 2
   local starts
   starts="$(wc -l <"${d}/count")"
   check "supervisor restarts a crashing agent (starts=${starts})" '[ "${starts}" -ge 3 ]'
+  check "supervisor logs each restart with its count and exit status" 'grep -q "xrce-agent: exited rc=3; restart #1 in" "${d}/out" && grep -q "xrce-agent: exited rc=3; restart #2 in" "${d}/out"'
+  local sf="${d}/state/platform_restarts.xrce-agent"
+  check "supervisor publishes the restart count (restarts, last exit status, time)" 'grep -qx "restarts=[1-9][0-9]*" "${sf}" && grep -qx "last_exit_status=3" "${sf}" && grep -q "^updated_utc=" "${sf}"'
+  check "the router, which never crashed, publishes 0 restarts" 'grep -qx "restarts=0" "${d}/state/platform_restarts.mavlink-router"'
+  check "dyx3-health reports a crash-looping child as WARN and a quiet one as PASS" '(DYX3_RUN="${d}/state"; INSTALLER_DIR="${REPO}/installer"; export INSTALLER_DIR; . "${REPO}/installer/lib/common.sh"; . "${REPO}/installer/lib/health_check.sh"; DYX3_RUN="${d}/state"; out="$(_platform_restart_counts)"; printf "%s\n" "${out}" | grep -q "^WARN  dyx3-platform xrce-agent: restarted [1-9][0-9]* time(s) .*last exit status 3" && printf "%s\n" "${out}" | grep -q "^PASS  dyx3-platform mavlink-router: no restarts")'
   check "supervisor runs the router" 'grep -q "mavlink-router: starting" "${d}/out"'
   kill -TERM "${pid}"
   local i
@@ -157,11 +162,46 @@ A
   sleep 0.6
   n2="$(wc -l <"${d}/count")"
   check "agent is not restarted after SIGTERM" '[ "${n1}" = "${n2}" ]'
+  check "no temp file is left in the state directory after the supervisors stop" '! ls "${d}/state" | grep -q "\.tmp\."'
   # Missing agent binary is fatal (systemd will surface it) — never silently "healthy".
   env PATH="/usr/bin:/bin" DYX3_PLATFORM_ENV=/nonexistent DYX3_AGENT_BIN=definitely-missing \
     "${REPO}/deployment/scripts/start-platform.sh" >/dev/null 2>&1
   rc=$?
   check "missing agent binary exits non-zero" '[ "${rc}" -ne 0 ]'
+}
+
+# ---------------------------------------------------------------- recorder launcher (REC-024, REC-022)
+recorder_launcher() {
+  local d="${T}/rec" ws="${T}/rec/ws" out rc
+  mkdir -p "${d}/rel/installer/pins" "${d}/rel/ros2_ws/install" "${d}/px/abc/install" "${ws}/lib/dyx3_recorder" "${d}/other"
+  echo FIRMWARE_SHA=abc >"${d}/rel/installer/pins/firmware.pin"
+  : >"${d}/ros.bash"
+  : >"${d}/px/abc/install/setup.bash"
+  echo "export AMENT_PREFIX_PATH=${d}/other:${ws}" >"${d}/rel/ros2_ws/install/setup.bash"
+  printf '#!/bin/sh\necho "ARGS:$*"\n' >"${ws}/lib/dyx3_recorder/recorder_node"
+  chmod +x "${ws}/lib/dyx3_recorder/recorder_node"
+  rl() {
+    env -i PATH="${PATH}" ROS_DOMAIN_ID=42 DYX3_RELEASE_DIR="${d}/rel" DYX3_ROS_SETUP="${d}/ros.bash" DYX3_PX4_MSGS_DIR="${d}/px" \
+      ROS_HOME="${d}/home" ROS_LOG_DIR="${d}/log" "$@" bash "${REPO}/deployment/scripts/start-recorder.sh" 2>&1
+  }
+  out="$(rl DYX3_RECORDER_PARAMS="${d}/absent.yaml")"
+  check "recorder launcher: execs the binary found on AMENT_PREFIX_PATH, no parameter file needed" '[ "${out}" = "ARGS:" ]'
+  echo "recorder: {ros__parameters: {vehicle_id: x}}" >"${d}/rec.yaml"
+  out="$(rl DYX3_RECORDER_PARAMS="${d}/rec.yaml")"
+  check "recorder launcher: an existing parameter file is passed with --ros-args --params-file" '[ "${out}" = "ARGS:--ros-args --params-file ${d}/rec.yaml" ]'
+  chmod 000 "${d}/rec.yaml"
+  if [ ! -r "${d}/rec.yaml" ]; then # skipped when the tests run as root
+    out="$(rl DYX3_RECORDER_PARAMS="${d}/rec.yaml")"
+    rc=$?
+    check "recorder launcher: an unreadable parameter file is an error, not a silent default" '[ "${rc}" -ne 0 ] && printf "%s" "${out}" | grep -q "not readable"'
+  fi
+  chmod 600 "${d}/rec.yaml"
+  chmod -x "${ws}/lib/dyx3_recorder/recorder_node"
+  out="$(rl DYX3_RECORDER_PARAMS="${d}/absent.yaml")"
+  check "recorder launcher: a missing binary fails loudly" 'printf "%s" "${out}" | grep -q "recorder_node not found"'
+  local tpl="${REPO}/config/recorder/recorder.yaml.example" src="${REPO}/ros2_ws/src/dyx3_recorder/src/recorder_node.cpp"
+  check "recorder template: keyed by the node name, sets vehicle_id and operator" 'grep -q "^recorder:" "${tpl}" && grep -q "^    vehicle_id:" "${tpl}" && grep -q "^    operator:" "${tpl}"'
+  check "recorder template: the parameters are the ones the recorder declares" 'grep -q "Node(\"recorder\"" "${src}" && grep -q "declare_parameter<std::string>(\"vehicle_id\"" "${src}" && grep -q "declare_parameter<std::string>(\"operator\"" "${src}"'
 }
 
 # ---------------------------------------------------------------- libs
@@ -1173,6 +1213,7 @@ PY
 }
 
 sup
+recorder_launcher
 (libs)
 (lifecycle)
 (handoff)

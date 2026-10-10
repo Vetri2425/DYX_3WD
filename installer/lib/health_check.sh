@@ -74,6 +74,25 @@ health_services() {
   done
 }
 
+# _platform_restart_counts: BR-003. start-platform.sh publishes platform_restarts.<child> (restarts=, last_exit_status=) under
+# ${DYX3_RUN}; the unit stays "active" while the XRCE agent or mavlink-router crash-loops, so report the counts. WARN only: a
+# restart is not by itself a failed upgrade (the INS-005 hold decides that), but it must be visible.
+_platform_restart_counts() {
+  local f name n st
+  for f in "${DYX3_RUN}"/platform_restarts.*; do
+    [ -f "${f}" ] || continue
+    name="${f##*/platform_restarts.}"
+    case "${name}" in *.tmp.*) continue ;; esac
+    n="$(sed -n 's/^restarts=//p' "${f}" | head -n1)"
+    st="$(sed -n 's/^last_exit_status=//p' "${f}" | head -n1)"
+    case "${n}" in
+      '' | *[!0-9]*) _warn "dyx3-platform ${name}: unreadable restart count in ${f}" ;;
+      0) _pass "dyx3-platform ${name}: no restarts since the unit started" ;;
+      *) _warn "dyx3-platform ${name}: restarted ${n} time(s) since the unit started (last exit status ${st:-unknown}); see journalctl -u dyx3-platform" ;;
+    esac
+  done
+}
+
 health_platform() {
   local rel="${1:-${DYX3_CURRENT}}"
   if systemd_available; then
@@ -93,6 +112,7 @@ health_platform() {
   else
     _warn "ss not available; agent port not checked"
   fi
+  _platform_restart_counts
   if have ping; then
     if ping -c1 -W1 "${px4}" >/dev/null 2>&1; then _pass "FCU ${px4} reachable"; else _warn "FCU ${px4} not reachable (powered? cable?)"; fi
   fi
