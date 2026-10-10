@@ -86,6 +86,37 @@ Computed over the steady part of every TRACK leg (commanded speed ≥ 0.5 m/s; t
   at 0.2 m/s, where the heading-mode tracker barely corrects at low speed), (3) a 0.3–0.7° heading
   bias per leg. Items (1) and (2) are controller structure; (3) is partly drivetrain asymmetry.
 
+## 1c. Rates — what the controller actually runs at, and what it is fed
+
+Instantaneous rates from consecutive message times in the bags (all runs, both missions).
+
+| Signal | Mean over a run | Instantaneous min / p50 / max | Worst gap |
+|---|---|---|---|
+| PX4 EKF2 `vehicle_local_position` sample stamps (`VehicleState.px4_sample_stamp`) | **50.0 Hz** | 33.3 / 50.0 / 100 Hz — PX4 alternates 30 ms and 10 ms steps (EKF2 output on the 10 ms IMU grid) | 30.0 ms |
+| `/dyx3/vehicle_state` at RPP (receipt) | 50.0 Hz | `7f9651d`: 42–45 / 50.0 / 54–57 Hz; `172b047`: 36–39 / 50 / 68–72 Hz | 22–30 ms |
+| `/dyx3/rpp/motion_setpoint` (RPP tick output) | **50.0 Hz** | `7f9651d`: 33.7–44 / 50.0 / 53–57 Hz; `172b047`: 36–39 / 50 / 68–105 Hz (double ticks) | 29.6 ms (one tick) |
+| `/dyx3/motion_guard/command` (to px4_link) | 50.0 Hz | as RPP ± 1 Hz | 27.8 ms |
+| px4_link → PX4 (`offboard_control_mode` + the setpoint set) | 100 Hz timer plus one write per guard command (design) | **not measurable from these logs**: the PX4 logger decimates `offboard_control_mode` / `rover_*_setpoint` to 10 Hz and `/fmu/**` is not bagged | — |
+| `/dyx3/px4_link/status` | 9.5 Hz | 9.0 / 9.3 / 10.1 | 111 ms |
+
+**Control rate:** RPP ticks once per new PX4 sample, event-driven, so the control loop *is* PX4's
+50 Hz local-position cadence; the guard decides on each RPP command; px4_link writes on each guard
+command and keeps a 100 Hz heartbeat between them. On `7f9651d` the cadence is tight (p1–p99
+46–54 Hz, 1 overrun in 88 s); `172b047` showed double ticks (p99 68 Hz) and 32 overruns. The
+33/100 Hz p1/p99 at the PX4 end is PX4's own output jitter, not transport.
+
+**Pose input to RPP:** `/dyx3/vehicle_state`, built by px4_link from PX4 EKF2's
+`/fmu/out/vehicle_local_position_v1` (NED `x, y, vx, vy, heading, xy_reset_counter`, validity flags),
+`vehicle_attitude` (quaternion; the yaw rate is derived on the Jetson from consecutive attitude
+samples, 50 ms low-pass) and `vehicle_status`. It is the **EKF2 fused estimate** (RTK position +
+dual-antenna heading + wheel encoders + IMU, lever arms inside EKF2), not the raw GNSS and not
+the antenna. RPP ages it from receipt (0.5 s limit), not from the sample stamp; EKF resets are the
+mission's business (pause), RPP still carries the prototype's jump heuristic.
+
+**To see what PX4 receives at 100 Hz:** raise the SD logger rate for `offboard_control_mode`, or
+add `/fmu/in/offboard_control_mode` to the recorder's topic list for timing runs (it is excluded
+by design today). One of the two is needed before the timing contract can be closed on evidence.
+
 ## 2. Finding A — a dead RoboClaw link is invisible to the whole stack (mission 0001)
 
 > Owner note 2026-10-10: the RoboClaw had been powered off by hand and nobody noticed — the
@@ -222,7 +253,20 @@ changes. **Field re-validation at the next endpoint is required** (this is a con
 - The 0.36–0.43 s gap in *all* ULog topics at t ≈ 0.9 s of each log is the SD logger starting; not a
   transport event.
 
-## 6. Actions, ranked
+## 6. How to fix each issue (root cause → fix → where)
+
+| Issue (measured) | Root cause | Fix | Where / status |
+|---|---|---|---|
+| Endpoint rocking (14 reversals, timeout finish) | creep law commands `√(2·a·|residual|)` with the residual's sign inside the 2 cm band; "stopped" never satisfied | brake inside the band; hold with `endpoint_capture_past_m` hysteresis; feed-forward to the band edge | `dyx3_rpp`, **done on this branch** (`fb74658`); field re-validate at the next endpoint |
+| Corner entry 1–3 cm, pivot hunting 1–4 cycles | fine pivot `1.5 × 2–3° = 0.05–0.08 rad/s` is below the drivetrain's minimum effective rate; FSM dithers at the 2°/3° release band | measure the minimum rate that moves the rover (0.08–0.37 rad/s from these logs); command `max(gain·err, floor)` with a short pulse for the last degrees; only then tighten the band — or fix the deadband in PX4 so small rates execute | GATE 4 tuning (owner value); PX4 `RO_YAW_RATE_I`, RoboClaw deadband patches B1 #7/#8 |
+| Braking-tail drift 1–4 cm in the last metre | at 0.2 m/s the heading-mode tracker's lateral correction is weak | the `heading` vs `rate` A/B (`segment_command_mode`, review §8.1) — RPP's own yaw-rate law with κ·v feed-forward; or a speed-scheduled lateral-gain floor at approach speed | GATE 4 A/B, no default change without the number |
+| Per-leg heading bias 0.3–0.7° | steady yaw offset: PX4 attitude P-loop without integral action on the rate error, plus drivetrain asymmetry | PX4 `RO_YAW_RATE_I`; per-wheel RoboClaw calibration (`RBCLW_*`), checked on a constant-speed straight; RPP already compensates through the lookahead | PX4 tuning (PC-5) |
+| 5 Hz yaw-rate dither ±0.1 rad/s | PX4 rate loop / wheel-speed quantisation at 50 Hz encoder reads | lower `RO_YAW_RATE_P` or filter the measured rate (`RO_YAW_RATE_TH`, encoder-speed LPF); verify on `rover_rate_status` | PX4 tuning; harmless today |
+| Speed overshoot +8 % at the plateau | `RO_MAX_THR_SPEED` feed-forward scale | set from the measured 0.96 m/s full-command speed | PX4 param, already proposed |
+| "Commanded but not moving" invisible (any cause) | no actuator-plausibility check in the chain | guard gate: commanded rate ≥ nominal pivot rate (or speed ≥ a fraction of `mission_speed`) with measured ≈ 0 for longer than `segment_pivot_spinup_margin_s` → STOP + reason; RPP surfaces its pivot timeout; the mission pauses on it | owner decision (new reason code → interfaces bump) |
+| PX4-side receive rate not observable | logger decimation; `/fmu/in` not bagged | full-rate `offboard_control_mode` in the SD profile, or bag `/fmu/in/offboard_control_mode` for timing runs | recorder topic list, small |
+
+## 7. Actions, ranked
 
 1. **Endpoint stop:** the dead-band/brake-hold fix is on this branch (§4); re-validate at the next
    endpoint (expect ≤ 2 reversals, completion within ~2 s of entering the band, no timeout finish).
