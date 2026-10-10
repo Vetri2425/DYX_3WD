@@ -2668,3 +2668,30 @@ to the baseline and `config/px4/2026-10-10.params`; no other parameter changed.
   - The logged local position is 10 Hz (logger profile); the DDS stream is 50 Hz.
 - **Still open from step 2:** the stopping distance from about 1 m/s with `RO_DECEL_LIM` 2.0 (manual stick release, or
   the step 5 Jetson-loss test).
+
+## 2026-10-10 (12:55 IST) — Claude — Step 5 (Offboard sign convention + link loss) passed
+
+**Tool:** `tools/bench/offboard_sign_test.py`. It sends exactly px4_link's Offboard messages, with caps of 0.5 m/s,
+0.6 rad/s and 5 s, and `--only`/`--wait-arm` options. `dyx3-ros` was stopped during the test and restarted after;
+health and the link were OK.
+
+**Operator sequence:** arm in Manual, then the script switches to OFFBOARD (RC cannot arm in OFFBOARD). One arm
+attempt was undone by the RC arm switch toggling ("Armed by RC switch" then "Disarmed by RC switch" 1 s later); it
+was not a fault.
+
+**Results (wheels down, RTK fixed):**
+
+| Check | Result |
+|---|---|
+| +0.2 m/s | straight (yaw rate +0.001–0.009 rad/s) |
+| Forward, 5 s run (log `forward_5s.ulg`) | both wheels +1.06 rad/s; velocity along the heading +0.157 m/s; moved 0.78 m at bearing 15.6° with heading 16.2° |
+| +0.3 rad/s | measured +0.253/+0.259 (clockwise, right turn) |
+| −0.3 rad/s | measured −0.258/−0.254 (left turn) |
+| **Link loss** (stream cut at 0.2 m/s, log `loss_test.ulg`) | "Failsafe activated, Disarmed by failsafe" **0.69 s** after the cut; stopped 0.29 s after the disarm, rolling 9 mm. X-012 is proven by test (disarm also drops the spray PWM to `PWM_AUX_DIS1` 0) |
+
+**Finding (matches the v1.16→v1.17 code comparison):** a 0.20 m/s command gave 0.157 m/s, which equals the
+feed-forward 0.20/`RO_MAX_THR_SPEED` 1.28 × the RoboClaw full-command speed 0.96 m/s (`RBCLW_QPPS_MAX`/counts × wheel
+circumference). `RO_MAX_THR_SPEED` should be about 0.96. See the tuning proposal.
+
+**Not covered in step 5:** live `pose_to_write_age` (px4_link was stopped); it is measured in step 7 through the real
+chain.

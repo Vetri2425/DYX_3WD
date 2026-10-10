@@ -42,7 +42,7 @@ CMD_ARM_DISARM = 400
 NAN = float("nan")
 MAX_SPEED = 0.5      # m/s hard cap, whatever the arguments say
 MAX_RATE = 0.6       # rad/s hard cap
-MAX_STEP_S = 4.0     # s hard cap per motion step
+MAX_STEP_S = 5.0     # s hard cap per motion step
 
 
 def now_us():
@@ -151,7 +151,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--speed", type=float, default=0.2, help="forward speed for the speed step, m/s (cap 0.5)")
     ap.add_argument("--rate", type=float, default=0.3, help="yaw rate for the rate steps, rad/s (cap 0.6)")
-    ap.add_argument("--step", type=float, default=2.0, help="seconds per motion step (cap 4)")
+    ap.add_argument("--step", type=float, default=2.0, help="seconds per motion step (cap 5)")
+    ap.add_argument("--only", choices=("speed", "cw", "ccw"), help="run only this motion step")
+    ap.add_argument("--wait-arm", type=float, default=0.0,
+                    help="wait up to this many seconds for the operator to arm, then start at once")
     ap.add_argument("--wheels-up", action="store_true", help="judge by encoders only (gyro does not move)")
     ap.add_argument("--heading", action="store_true", help="also turn to current yaw + 30 deg (wheels down)")
     ap.add_argument("--loss-test", action="store_true",
@@ -170,6 +173,10 @@ def main():
         if others > 0:
             print("ABORT: %d other publisher(s) on /fmu/in/offboard_control_mode. Stop dyx3-ros first." % others)
             return 2
+        t_wait = time.monotonic()
+        while a.wait_arm > 0 and time.monotonic() - t_wait < a.wait_arm and (
+                n.status is None or n.status.arming_state != ARMED):
+            n.spin_for(0.1)
         st = n.status
         if st is None or n.yaw is None:
             print("ABORT: no vehicle_status / attitude from PX4 (DDS session down?)")
@@ -212,6 +219,8 @@ def main():
             ("+yaw rate %.2f rad/s (CW)" % rate, 0.0, NAN, rate, lambda r: r > 0.5 * rate),
             ("-yaw rate %.2f rad/s (CCW)" % rate, 0.0, NAN, -rate, lambda r: r < -0.5 * rate),
         ]
+        if a.only:
+            steps = [steps[("speed", "cw", "ccw").index(a.only)]]
         for name, spd, yaw, rt, chk in steps:
             if not motion(name, spd, yaw, rt, chk):
                 print("STOPPED: PX4 left OFFBOARD or disarmed (operator / failsafe). Ending.")
