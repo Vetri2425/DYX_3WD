@@ -221,6 +221,15 @@ ok**), `RppStatus` (only this `mission_id`), `VehicleState` (EKF reference, `xy_
 position for the point journal), and the px4_link service answers. Mission never reads RTK / estimator / E-stop directly —
 one owner per gate (the guard); E-stop is recognised as the guard's `REASON_ESTOP` (the guard's highest-priority gate).
 
+**Clocks.** All mission timing is on the node's steady clock (`std::chrono::steady_clock`, injectable in the `MissionNode`
+constructor for tests): input freshness (`gate_status_max_age_s`, `rpp_status_max_age_s`, `vehicle_state_max_age_s`, measured
+from the receipt time, never from the message stamp), the READY `rpp_ack_timeout_s`, the px4 sequencer deadlines
+(`arm_timeout_s`, `offboard_timeout_s`) and the FSM's transition times (`Transition.stamp_ns`). A wall-clock step (the first
+NTP sync over the LTE link; the Orin has no battery RTC) therefore cannot make a fresh input look stale or let a deadline
+expire early, which is the same rule `dyx3_rpp`, `dyx3_motion_guard` and `dyx3_px4_link` follow. A negative age (a clock that
+went back) is not fresh either. Message stamps keep ROS time: `MissionState.stamp`, `MissionState.state_entered` (the ROS time
+recorded at the transition) and `PointResult.stamp`; no age or deadline is ever computed from them.
+
 ## 9. Point journal
 Must-hit vertices (bit1 of the artifact flags) of the **execution** artifact, in path order; **point index = rank among
 must-hit vertices**. A vertex is *captured* when the rover comes within `point_capture_radius_m` (default **0.10 m = prototype
