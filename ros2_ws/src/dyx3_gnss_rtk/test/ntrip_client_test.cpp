@@ -447,7 +447,9 @@ TEST(NtripClient, FiftyStartStopCyclesDoNotLeakDescriptors) {
     ASSERT_TRUE(wait_for([&] { return c.snapshot().state == NtripState::Streaming; }));
     c.stop();
   }
-  EXPECT_EQ(open_fd_count(), before);
+  // The FakeCaster closes its accepted socket on its own thread after the client hangs up, so the
+  // count can lag by one for a moment (seen in CI with ctest -j2). A real leak never comes back.
+  EXPECT_TRUE(wait_for([&] { return open_fd_count() == before; }, 2.0)) << open_fd_count();
 }
 
 TEST(NtripClient, RepeatedConnectFailureDoesNotLeakDescriptors) {
