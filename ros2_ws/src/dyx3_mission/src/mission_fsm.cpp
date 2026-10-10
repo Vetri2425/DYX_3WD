@@ -23,6 +23,12 @@ const char* to_string(State s) {
       return "ABORTED";
     case State::kError:
       return "ERROR";
+    case State::kPlacing:
+      return "PLACING";
+    case State::kArming:
+      return "ARMING";
+    case State::kEngaging:
+      return "ENGAGING";
   }
   return "?";
 }
@@ -33,6 +39,12 @@ const char* to_string(Event e) {
       return "start";
     case Event::kArtifactLoaded:
       return "artifact_loaded";
+    case Event::kPlaced:
+      return "placed";
+    case Event::kArmed:
+      return "armed";
+    case Event::kEngaged:
+      return "engaged";
     case Event::kRppAck:
       return "rpp_ack";
     case Event::kPause:
@@ -49,6 +61,8 @@ const char* to_string(Event e) {
       return "gate_lost";
     case Event::kEstop:
       return "estop";
+    case Event::kEkfReset:
+      return "ekf_reset";
     case Event::kSkipPoint:
       return "skip_point";
     case Event::kRppStale:
@@ -93,8 +107,8 @@ void MissionFsm::record(const Transition& t) {
   }
 }
 
-Result MissionFsm::go(State to, Event ev, std::uint8_t reason, const char* detail,
-                      std::int64_t now_ns) {
+Result MissionFsm::go(State to, Event ev, std::uint8_t reason, const std::string& detail,
+                      std::int64_t now_ns, std::uint8_t gate_reason) {
   Transition t;
   t.seq = ++seq_;
   t.from = state_;
@@ -105,6 +119,10 @@ Result MissionFsm::go(State to, Event ev, std::uint8_t reason, const char* detai
   t.stamp_ns = now_ns;
   state_ = to;
   reason_ = reason;
+  gate_reason_ = gate_reason;
+  detail_ = detail;
+  entered_ns_ = now_ns;
+  ++changes_;
   record(t);
   Result r;
   r.accepted = true;
@@ -149,35 +167,55 @@ Result MissionFsm::ok_no_change(Event ev, const char* detail, std::int64_t now_n
   return r;
 }
 
-Result MissionFsm::start(bool gate_ok, std::int64_t now_ns) {
+// One pre-RUNNING step: `expected` -> `next` on success, -> ERROR(reason) on failure.
+Result MissionFsm::step(State expected, State next, Event ev, bool ok, std::uint8_t reason,
+                        const std::string& detail, std::int64_t now_ns) {
+  if (state_ != expected) {
+    return refuse(ev, Reject::kIllegal, true, "not in the step this event completes", now_ns);
+  }
+  if (ok) return go(next, ev, kReasonNone, detail, now_ns);
+  return go(State::kError, ev, reason, detail, now_ns);
+}
+
+Result MissionFsm::start(bool pre_arm_ok, std::int64_t now_ns) {
   if (active()) {
     return refuse(Event::kStart, Reject::kBusy, false, "a mission is already active", now_ns);
   }
-  if (!gate_ok) {
-    return refuse(Event::kStart, Reject::kSafetyGate, false, "safety gate not ok", now_ns);
+  if (!pre_arm_ok) {
+    return refuse(Event::kStart, Reject::kSafetyGate, false, "pre-arm gate not ok", now_ns);
   }
   ++mission_id_;
   return go(State::kLoading, Event::kStart, kReasonNone, "start accepted", now_ns);
 }
 
-Result MissionFsm::artifact_loaded(bool valid, std::int64_t now_ns) {
-  if (state_ != State::kLoading) {
-    return refuse(Event::kArtifactLoaded, Reject::kIllegal, true, "not loading", now_ns);
-  }
-  if (valid) {
-    return go(State::kReady, Event::kArtifactLoaded, kReasonNone, "artifact verified", now_ns);
-  }
-  return go(State::kError, Event::kArtifactLoaded, kReasonPathError, "artifact invalid", now_ns);
+Result MissionFsm::artifact_loaded(bool valid, const std::string& detail, std::int64_t now_ns) {
+  return step(State::kLoading, State::kPlacing, Event::kArtifactLoaded, valid, kReasonPathError,
+              detail, now_ns);
 }
 
-Result MissionFsm::rpp_ack(bool gate_ok, std::uint8_t guard_reason, std::int64_t now_ns) {
+Result MissionFsm::placed(bool ok, std::uint8_t reason, const std::string& detail,
+                          std::int64_t now_ns) {
+  return step(State::kPlacing, State::kArming, Event::kPlaced, ok, reason, detail, now_ns);
+}
+
+Result MissionFsm::armed(bool ok, std::uint8_t reason, const std::string& detail,
+                         std::int64_t now_ns) {
+  return step(State::kArming, State::kEngaging, Event::kArmed, ok, reason, detail, now_ns);
+}
+
+Result MissionFsm::engaged(bool ok, std::uint8_t reason, const std::string& detail,
+                           std::int64_t now_ns) {
+  return step(State::kEngaging, State::kReady, Event::kEngaged, ok, reason, detail, now_ns);
+}
+
+Result MissionFsm::rpp_ack(bool gate_ok, std::int64_t now_ns) {
   switch (state_) {
     case State::kReady:
       if (!gate_ok) {
-        return go(State::kAborted, Event::kRppAck, map_guard_reason(guard_reason),
-                  "gate lost before motion started", now_ns);
+        return ok_no_change(Event::kRppAck, "ack held: full safety gate not ok yet", now_ns);
       }
-      return go(State::kRunning, Event::kRppAck, kReasonNone, "rpp acknowledged artifact", now_ns);
+      return go(State::kRunning, Event::kRppAck, kReasonNone, "rpp acknowledged the execution",
+                now_ns);
     case State::kRunning:
     case State::kPaused:
       return ok_no_change(Event::kRppAck, "duplicate ack ignored", now_ns);
@@ -198,7 +236,7 @@ Result MissionFsm::resume(bool gate_ok, std::int64_t now_ns) {
     return refuse(Event::kResume, Reject::kNotPaused, false, "not paused", now_ns);
   }
   if (!gate_ok) {
-    return refuse(Event::kResume, Reject::kSafetyGate, false, "safety gate not ok", now_ns);
+    return refuse(Event::kResume, Reject::kSafetyGate, false, "resume conditions not met", now_ns);
   }
   return go(State::kRunning, Event::kResume, kReasonNone, "operator resume", now_ns);
 }
@@ -223,46 +261,66 @@ Result MissionFsm::rpp_complete(std::int64_t now_ns) {
 }
 
 Result MissionFsm::rpp_error(std::int64_t now_ns) {
+  if (state_ == State::kReady || state_ == State::kRunning || state_ == State::kPaused) {
+    return go(State::kError, Event::kRppError, kReasonRppError, "rpp reports error", now_ns);
+  }
   if (active()) {
-    return go(State::kError, Event::kRppError, kReasonInternalError, "rpp reports error", now_ns);
+    return ok_no_change(Event::kRppError, "rpp holds no path of this execution yet", now_ns);
   }
   return refuse(Event::kRppError, Reject::kIllegal, true, "no active mission", now_ns);
 }
 
 Result MissionFsm::gate_lost(std::uint8_t guard_reason, std::int64_t now_ns) {
   const std::uint8_t r = map_guard_reason(guard_reason);
-  switch (state_) {
-    case State::kLoading:
-    case State::kReady:
-      return go(State::kAborted, Event::kGateLost, r, "gate lost before motion", now_ns);
-    case State::kRunning:
-      return go(State::kPaused, Event::kGateLost, r, "automatic safety pause", now_ns);
-    default:
-      return ok_no_change(Event::kGateLost, "no running mission", now_ns);
+  if (before_running()) {
+    return go(State::kError, Event::kGateLost, r, "safety gate lost before motion", now_ns,
+              guard_reason);
   }
+  if (state_ == State::kRunning) {
+    return go(State::kPaused, Event::kGateLost, r, "automatic safety pause", now_ns, guard_reason);
+  }
+  return ok_no_change(Event::kGateLost, "no running mission", now_ns);
 }
 
 Result MissionFsm::estop(std::int64_t now_ns) {
   if (active()) {
-    return go(State::kAborted, Event::kEstop, kReasonSafety, "emergency stop", now_ns);
+    return go(State::kAborted, Event::kEstop, kReasonEstop, "emergency stop", now_ns);
   }
   return ok_no_change(Event::kEstop, "no active mission", now_ns);
 }
 
+Result MissionFsm::ekf_reset(const std::string& detail, std::int64_t now_ns) {
+  switch (state_) {
+    case State::kArming:
+    case State::kEngaging:
+      return go(State::kError, Event::kEkfReset, kReasonEkfReset, detail, now_ns);
+    case State::kReady:
+    case State::kRunning:
+    case State::kPaused:  // a self-transition: the pause reason becomes EKF_RESET
+      return go(State::kPaused, Event::kEkfReset, kReasonEkfReset, detail, now_ns);
+    default:
+      return ok_no_change(Event::kEkfReset, "no placed execution", now_ns);
+  }
+}
+
 Result MissionFsm::rpp_stale(std::int64_t now_ns) {
   if (state_ == State::kRunning) {
-    return go(State::kPaused, Event::kRppStale, kReasonSafety, "rpp status stale: automatic pause",
-              now_ns);
+    return go(State::kPaused, Event::kRppStale, kReasonRppStale,
+              "rpp status stale: automatic pause", now_ns);
   }
   return ok_no_change(Event::kRppStale, "no running mission", now_ns);
 }
 
-Result MissionFsm::rpp_ack_timeout(std::int64_t now_ns) {
-  if (state_ == State::kReady) {
-    return go(State::kError, Event::kRppAckTimeout, kReasonInternalError,
-              "rpp never acknowledged the artifact", now_ns);
+Result MissionFsm::rpp_ack_timeout(bool gate_ok, std::uint8_t guard_reason, std::int64_t now_ns) {
+  if (state_ != State::kReady) {
+    return ok_no_change(Event::kRppAckTimeout, "not waiting for an ack", now_ns);
   }
-  return ok_no_change(Event::kRppAckTimeout, "not waiting for an ack", now_ns);
+  if (!gate_ok) {
+    return go(State::kError, Event::kRppAckTimeout, map_guard_reason(guard_reason),
+              "full safety gate never passed while READY", now_ns, guard_reason);
+  }
+  return go(State::kError, Event::kRppAckTimeout, kReasonRppAckTimeout,
+            "rpp never acknowledged the execution", now_ns);
 }
 
 Result MissionFsm::skip_point(bool has_active_point, std::int64_t now_ns) {

@@ -2,7 +2,8 @@
 //
 // Pure C++ (no ROS). Named states, an explicit event set, every transition and every refusal logged
 // with a reason. The legal transitions are exactly the table in the contract; anything else is
-// refused (never silently ignored) and logged.
+// refused (never silently ignored) and logged. The FSM decides states only: the PX4 calls that
+// arm, engage and release the vehicle are sequenced by Px4Sequencer, the frame by place_artifact.
 #pragma once
 
 #include <cstddef>
@@ -13,7 +14,7 @@
 
 namespace dyx3_mission {
 
-/// Frozen ABI values (dyx3_interfaces/msg/MissionState.msg).
+/// Frozen ABI values (dyx3_interfaces/msg/MissionState.msg). 8..10 appended in interfaces 0.15.0.
 enum class State : std::uint8_t {
   kIdle = 0,
   kLoading = 1,
@@ -23,6 +24,9 @@ enum class State : std::uint8_t {
   kCompleted = 5,
   kAborted = 6,
   kError = 7,
+  kPlacing = 8,
+  kArming = 9,
+  kEngaging = 10,
 };
 
 /// MissionState.REASON_* values.
@@ -33,11 +37,26 @@ enum Reason : std::uint8_t {
   kReasonRtk = 3,
   kReasonPathError = 4,
   kReasonInternalError = 5,
+  kReasonEkfReset = 6,
+  kReasonEkfReferenceInvalid = 7,
+  kReasonPlacementOutOfBounds = 8,
+  kReasonNoPlacementFrame = 9,
+  kReasonArmRefused = 10,
+  kReasonArmTimeout = 11,
+  kReasonOffboardRefused = 12,
+  kReasonOffboardTimeout = 13,
+  kReasonRppAckTimeout = 14,
+  kReasonEstop = 15,
+  kReasonRppError = 16,
+  kReasonRppStale = 17,
 };
 
 enum class Event : std::uint8_t {
   kStart,
   kArtifactLoaded,
+  kPlaced,
+  kArmed,
+  kEngaged,
   kRppAck,
   kPause,
   kResume,
@@ -46,6 +65,7 @@ enum class Event : std::uint8_t {
   kRppError,
   kGateLost,
   kEstop,
+  kEkfReset,
   kSkipPoint,
   kRppStale,
   kRppAckTimeout,
@@ -100,54 +120,88 @@ public:
   using Observer = std::function<void(const Transition&)>;
   static constexpr std::size_t kLogCapacity = 256;
 
-  /// Called for every logged transition or refusal (the node writes them to /rosout).
+  /// Called for every logged transition or refusal (the node logs it and publishes MissionState
+  /// on every transition).
   void set_observer(Observer o) { observer_ = std::move(o); }
 
-  Result start(bool gate_ok, std::int64_t now_ns);
-  Result artifact_loaded(bool valid, std::int64_t now_ns);
-  /// RPP acknowledged this mission's artifact. `gate_ok` is re-checked: a gate lost while waiting
-  /// aborts rather than driving.
-  Result rpp_ack(bool gate_ok, std::uint8_t guard_reason, std::int64_t now_ns);
+  /// Admission: needs the guard's PRE-ARM gate (not armed / OFFBOARD: the vehicle is not yet).
+  Result start(bool pre_arm_ok, std::int64_t now_ns);
+  /// LOADING: the artifact was read and verified by its hash (valid) or not.
+  Result artifact_loaded(bool valid, const std::string& detail, std::int64_t now_ns);
+  /// PLACING: the execution artifact exists (ok) or placement failed with `reason`.
+  Result placed(bool ok, std::uint8_t reason, const std::string& detail, std::int64_t now_ns);
+  /// ARMING: px4_link confirmed the arm (ok) or refused / timed out (`reason`).
+  Result armed(bool ok, std::uint8_t reason, const std::string& detail, std::int64_t now_ns);
+  /// ENGAGING: px4_link confirmed OFFBOARD (ok) or refused / timed out (`reason`).
+  Result engaged(bool ok, std::uint8_t reason, const std::string& detail, std::int64_t now_ns);
+  /// RPP holds this execution's path. READY -> RUNNING only with the FULL gate ok; otherwise the
+  /// acknowledgement is held (the guard's verdict may lag the OFFBOARD confirmation) until the
+  /// gate passes or rpp_ack_timeout fires.
+  Result rpp_ack(bool gate_ok, std::int64_t now_ns);
   Result pause(std::int64_t now_ns);
   Result resume(bool gate_ok, std::int64_t now_ns);
   Result abort(std::uint8_t reason, std::int64_t now_ns);
   Result rpp_complete(std::int64_t now_ns);
   Result rpp_error(std::int64_t now_ns);
+  /// A guard gate failed: the pre-arm gate before RUNNING (-> ERROR), the full gate while RUNNING
+  /// (-> PAUSED). Never an automatic resume.
   Result gate_lost(std::uint8_t guard_reason, std::int64_t now_ns);
+  /// E-stop asserted: every active state -> ABORTED(ESTOP) (the node disarms).
   Result estop(std::int64_t now_ns);
-  /// READY and RPP never acknowledged the artifact in time: ERROR (REASON_INTERNAL_ERROR).
-  Result rpp_ack_timeout(std::int64_t now_ns);
-  /// RPP stopped reporting for the running mission: automatic pause (REASON_SAFETY), never an
+  /// The EKF xy reset counter or global reference changed after placement.
+  Result ekf_reset(const std::string& detail, std::int64_t now_ns);
+  /// READY and RPP never acknowledged the artifact in time: ERROR(RPP_ACK_TIMEOUT), or the guard
+  /// reason when the full gate was the one not passing.
+  Result rpp_ack_timeout(bool gate_ok, std::uint8_t guard_reason, std::int64_t now_ns);
+  /// RPP stopped reporting for the running mission: automatic pause (REASON_RPP_STALE), never an
   /// automatic resume.
   Result rpp_stale(std::int64_t now_ns);
   Result skip_point(bool has_active_point, std::int64_t now_ns);
 
   State state() const { return state_; }
   std::uint8_t reason() const { return reason_; }
-  /// Incremented on every ACCEPTED start (0 until the first mission).
+  /// The guard gate behind REASON_SAFETY / REASON_RTK (MotionSetpointStatus.REASON_*), else 0.
+  std::uint8_t gate_reason() const { return gate_reason_; }
+  /// Detail of the transition into the current state.
+  const std::string& detail() const { return detail_; }
+  /// Time of the transition into the current state (0 before the first one).
+  std::int64_t state_entered_ns() const { return entered_ns_; }
+  /// Incremented on every ACCEPTED start (0 until the first mission): the execution id.
   std::uint32_t mission_id() const { return mission_id_; }
   const std::deque<Transition>& log() const { return log_; }
   std::uint64_t transitions_total() const { return seq_; }
+  /// Number of state changes (refusals and no-change events excluded). A self-transition (PAUSED
+  /// -> PAUSED on an EKF reset) counts.
+  std::uint64_t changes() const { return changes_; }
 
-  /// True while a mission occupies the system (LOADING, READY, RUNNING, PAUSED).
-  bool active() const {
-    return state_ == State::kLoading || state_ == State::kReady || state_ == State::kRunning ||
-           state_ == State::kPaused;
+  /// True while an execution occupies the system (every non-IDLE, non-terminal state).
+  bool active() const { return state_ != State::kIdle && !terminal(); }
+  /// The steps before motion is allowed: LOADING, PLACING, ARMING, ENGAGING, READY.
+  bool before_running() const {
+    return state_ == State::kLoading || state_ == State::kPlacing || state_ == State::kArming ||
+           state_ == State::kEngaging || state_ == State::kReady;
   }
   bool terminal() const {
     return state_ == State::kCompleted || state_ == State::kAborted || state_ == State::kError;
   }
 
 private:
-  Result go(State to, Event ev, std::uint8_t reason, const char* detail, std::int64_t now_ns);
+  Result go(State to, Event ev, std::uint8_t reason, const std::string& detail, std::int64_t now_ns,
+            std::uint8_t gate_reason = 0);
   Result refuse(Event ev, Reject why, bool illegal, const char* detail, std::int64_t now_ns);
   Result ok_no_change(Event ev, const char* detail, std::int64_t now_ns);
+  Result step(State expected, State next, Event ev, bool ok, std::uint8_t reason,
+              const std::string& detail, std::int64_t now_ns);
   void record(const Transition& t);
 
   State state_ = State::kIdle;
   std::uint8_t reason_ = kReasonNone;
+  std::uint8_t gate_reason_ = 0;
+  std::string detail_;
+  std::int64_t entered_ns_ = 0;
   std::uint32_t mission_id_ = 0;
   std::uint64_t seq_ = 0;
+  std::uint64_t changes_ = 0;
   std::deque<Transition> log_;
   Observer observer_;
 };
