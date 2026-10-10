@@ -74,7 +74,7 @@ def create_api(
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        gw.on_telemetry(hub.broadcast_telemetry)
+        gw.on_telemetry_frame(hub.broadcast_telemetry_frame)
         gw.on_state(hub.broadcast_gateway_state)
         await gw.start()
         await relay.start()

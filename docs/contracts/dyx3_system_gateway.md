@@ -20,7 +20,10 @@ is the **operator-link heartbeat** (§4.3.1): it publishes `OperatorLinkStatus` 
 
 ### Gateway -> client
 * reply: `{"v":1,"id":<id>,"ok":<bool>,"code":"<snake_case>","reason":"<text>","data":{...}}`. Always this typed shape: `data` is an object (`{}` when there is nothing to report).
-* telemetry push: `{"v":1,"type":"telemetry","snapshot":{...}}` at `telemetry_hz` (10, DERIVED; the prototype rate) to every client.
+* telemetry push: `{"v":1,"type":"telemetry","seq":<uint>,"t_mono_s":<float>,"snapshot":{...}}` at `telemetry_hz` (10, DERIVED; the prototype rate) to every client.
+  `seq` is the telemetry frame counter: it starts at 1 per gateway process and rises by one per frame pushed (separate from the event `seq`; it counts frames serialised, which happens only while at least one client is connected, so a client that connects later sees a first `seq` above 1). A gap or a drop in `seq` is a lost or reordered frame; a `seq` that restarts at 1 is a gateway restart.
+  `t_mono_s` is the gateway steady clock (seconds) when the frame was serialised, the same clock and number format as an event's `t_mono_s`, so it is comparable only with other values of the same gateway process, and non-decreasing across frames.
+  Both were added in place without a protocol version change (`v` stays 1): a client that ignores them keeps working.
 * event push: `{"v":1,"type":"event","event":"<kind>",...}` to every client, the moment a status changes (section 1.3).
 
 A client ignores a `type` it does not know, so message types can be added without a protocol version change; `v` changes only for an incompatible change.

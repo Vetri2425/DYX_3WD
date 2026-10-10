@@ -7,6 +7,10 @@ does not arrive in time raises ``GatewayTimeout`` (delivery unknown).
 Status events (gateway contract section 1.3) are handed to the ``on_event`` callbacks in arrival order, one at a time, from a
 bounded queue: a slow subscriber can never block the socket reader (replies keep flowing) and never grows memory without bound.
 On every (re)connect the gateway replays the latest event of each kind, so the subscribers get the current state at once.
+
+Telemetry is the opposite: only the newest frame matters. While a telemetry subscriber is still busy, a newer frame replaces the
+one waiting (``telemetry_coalesced``), so a stalled event loop can never fan out a burst of stale frames. The frame handed to
+``on_telemetry_frame`` carries the gateway's ``seq`` / ``t_mono_s`` and ``dropped``, the frames replaced since the previous one it got.
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import math
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -23,6 +28,14 @@ log = logging.getLogger("dyx3.gateway")
 
 PROTOCOL_VERSION = 1
 MAX_LINE = 4 * 1024 * 1024  # a snapshot is a few KiB; this only bounds a misbehaving peer
+
+
+def _int_or_none(v: Any) -> int | None:
+    return v if isinstance(v, int) and not isinstance(v, bool) else None
+
+
+def _number_or_none(v: Any) -> float | None:
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else None
 
 
 class GatewayError(RuntimeError):
@@ -48,6 +61,8 @@ EVENT_QUEUE_MAX = 256
 TelemetryCb = Callable[[dict], Awaitable[None] | None]
 StateCb = Callable[[bool], Awaitable[None] | None]
 EventCb = Callable[[dict], Awaitable[None] | None]
+# {"snapshot", "seq", "t_mono_s", "dropped"}; seq / t_mono_s are None when the gateway frame carries none.
+TelemetryFrameCb = Callable[[dict], Awaitable[None] | None]
 
 
 class GatewayClient:
@@ -71,12 +86,17 @@ class GatewayClient:
         self._next_id = 1
         self._stop = False
         self._on_telemetry: list[TelemetryCb] = []
+        self._on_telemetry_frame: list[TelemetryFrameCb] = []
         self._on_state: list[StateCb] = []
         self._on_event: list[EventCb] = []
         self._events: asyncio.Queue[dict] = asyncio.Queue(maxsize=EVENT_QUEUE_MAX)
         self._event_task: asyncio.Task | None = None
         self._event_seq: dict[str, int] = {}  # highest seq per kind on the current connection
         self.events_dropped = 0
+        self._tel_pending: dict | None = None  # the newest telemetry frame not yet handed to the subscribers
+        self._tel_task: asyncio.Task | None = None
+        self._tel_dropped = 0  # frames replaced since the last frame handed on
+        self.telemetry_coalesced = 0  # in total
         self.snapshot: dict | None = None
         self.snapshot_stamp: float | None = None
 
@@ -90,6 +110,10 @@ class GatewayClient:
 
     def on_telemetry(self, cb: TelemetryCb) -> None:
         self._on_telemetry.append(cb)
+
+    def on_telemetry_frame(self, cb: TelemetryFrameCb) -> None:
+        """``cb(frame)`` for the newest telemetry frame: ``{"snapshot", "seq", "t_mono_s", "dropped"}`` (see the module doc)."""
+        self._on_telemetry_frame.append(cb)
 
     def on_state(self, cb: StateCb) -> None:
         self._on_state.append(cb)
@@ -117,7 +141,7 @@ class GatewayClient:
         self._stop = True
         if self._writer is not None:
             self._writer.close()
-        for task in (self._task, self._event_task):
+        for task in (self._task, self._event_task, self._tel_task):
             if task is not None:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -182,7 +206,9 @@ class GatewayClient:
         if msg.get("type") == "telemetry":
             self.snapshot = msg.get("snapshot")
             self.snapshot_stamp = self._clock()
-            asyncio.ensure_future(self._fire(self._on_telemetry, msg.get("snapshot")))
+            self._queue_telemetry(
+                {"snapshot": self.snapshot, "seq": _int_or_none(msg.get("seq")), "t_mono_s": _number_or_none(msg.get("t_mono_s"))}
+            )
             return
         if msg.get("type") == "event":
             self._handle_event(msg)
@@ -191,6 +217,22 @@ class GatewayClient:
         fut = self._pending.pop(rid, None) if isinstance(rid, int) else None
         if fut is not None and not fut.done():
             fut.set_result(msg)
+
+    def _queue_telemetry(self, frame: dict) -> None:
+        """Keep the newest frame only: one still waiting for the subscribers is replaced (and counted)."""
+        if self._tel_pending is not None:
+            self._tel_dropped += 1
+            self.telemetry_coalesced += 1
+        self._tel_pending = frame
+        if self._tel_task is None or self._tel_task.done():
+            self._tel_task = asyncio.ensure_future(self._pump_telemetry())
+
+    async def _pump_telemetry(self) -> None:
+        while self._tel_pending is not None:
+            frame, self._tel_pending = self._tel_pending, None
+            frame["dropped"], self._tel_dropped = self._tel_dropped, 0
+            await self._fire(self._on_telemetry, frame["snapshot"])
+            await self._fire(self._on_telemetry_frame, frame)
 
     def _handle_event(self, msg: dict) -> None:
         kind, seq = msg.get("event"), msg.get("seq")

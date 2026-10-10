@@ -79,6 +79,22 @@ async def test_hub_auth_roles_heartbeat_and_disconnect():
     assert emitted[1][1]["kind"] == "gateway_link" and emitted[1][1]["data"] == {"connected": False}
 
 
+async def test_hub_telemetry_carries_seq_t_mono_s_and_dropped():
+    gw, clk = FakeGateway(), Clock()
+    relay = OperatorLinkRelay(gw, relay_s=0.5, tablet_timeout_s=1.5, clock=clk)
+    emitted = []
+
+    async def emit(ev, data, to=None):
+        emitted.append((ev, data))
+
+    hub = RealtimeHub(token_store(), gw, relay, emit)
+    emitted.clear()
+    await hub.broadcast_telemetry_frame({"snapshot": {"a": 1}, "seq": 7, "t_mono_s": 123.25, "dropped": 2})
+    await hub.broadcast_telemetry({"a": 2})  # no gateway stamp: null, nothing dropped
+    assert emitted[0] == ("telemetry", {"snapshot": {"a": 1}, "age_s": None, "seq": 7, "t_mono_s": 123.25, "dropped": 2})
+    assert emitted[1] == ("telemetry", {"snapshot": {"a": 2}, "age_s": None, "seq": None, "t_mono_s": None, "dropped": 0})
+
+
 async def test_hub_estop_rules_and_honest_verdicts():
     gw, clk = FakeGateway(), Clock()
     relay = OperatorLinkRelay(gw, relay_s=0.5, tablet_timeout_s=1.5, clock=clk)
@@ -185,7 +201,7 @@ def test_health_reports_relay_running_and_operator_alive(tmp_path):
     from dyx3_backend.main import create_api
 
     class LifespanGateway(FakeGateway):
-        def on_telemetry(self, _cb):
+        def on_telemetry_frame(self, _cb):
             pass
 
         def on_state(self, _cb):

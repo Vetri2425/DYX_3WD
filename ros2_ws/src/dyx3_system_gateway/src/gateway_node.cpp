@@ -827,9 +827,14 @@ void GatewayNode::step(double now_s) {
   if (now_s - last_tel_s_ >= 1.0 / telemetry_hz_ - 1e-9) {
     last_tel_s_ = now_s;
     if (ipc_.clients() > 0) {
+      // seq counts the frames pushed (1, 2, ...) so a consumer can see a dropped or reordered
+      // frame; t_mono_s is the same clock and format as an event's t_mono_s.
+      const uint64_t seq = ++telemetry_seq_;
       ipc_.broadcast(JsonLine()
                          .integer("v", kProtocolVersion)
                          .str("type", "telemetry")
+                         .integer("seq", static_cast<int64_t>(seq))
+                         .raw("t_mono_s", json_dbl(now_s))
                          .raw("snapshot", snap_.to_json(now_s, gateway_json(now_s)))
                          .dump());
     }

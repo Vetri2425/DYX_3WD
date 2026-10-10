@@ -493,8 +493,7 @@ async def delete_rtk_profile(profile_id: str, request: Request, _: Identity = Op
 SERIAL_PORT_DIRS = (Path("/dev/serial/by-id"), Path("/dev/serial/by-path"))
 
 
-@router.get("/rtk/serial-ports")
-async def rtk_serial_ports(_: Identity = Viewer) -> dict:
+def _list_serial_ports() -> list[dict]:
     # by-path covers adapters without a USB serial number (the rover's CH340). Never auto-selected.
     ports = []
     for directory in SERIAL_PORT_DIRS:
@@ -503,4 +502,10 @@ async def rtk_serial_ports(_: Identity = Viewer) -> dict:
         for entry in sorted(directory.iterdir(), key=lambda item: item.name)[:128]:
             if entry.is_symlink() and entry.name not in (".", ".."):
                 ports.append({"path": str(entry), "present": entry.exists()})
-    return {"ports": ports}
+    return ports
+
+
+@router.get("/rtk/serial-ports")
+async def rtk_serial_ports(_: Identity = Viewer) -> dict:
+    # the directory walk touches the filesystem: off the event loop, like the other routes
+    return {"ports": await anyio.to_thread.run_sync(_list_serial_ports)}
