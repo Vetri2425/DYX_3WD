@@ -2583,3 +2583,37 @@ After the upgrade: `health: OK`, `event_driven=True` in px4_link/rpp/motion_guar
 
 Not blocking: availability only, and the rover disarms 0.5 s after offboard loss.
 **New finding:** `dyx3-health` DDS WARN is false (wrong DDS environment); a fix is in progress.
+
+## 2026-10-10 (12:30) — Claude — Step 2 closed, Step 3 (RTK + heading) passed outdoors
+
+**Step 2 (params):**
+- Repo baseline vs FCU: 105/105 match.
+- Added `SYS_AUTOSTART 50000` with a load-order note: the airframe provides `CA_R_REV 3`; the board provides
+  `UXRCE_DDS_CFG 1000`.
+- Stopping distance moves to step 4; Jetson-loss → disarm moves to step 5.
+
+**Step 3 (outdoors, open sky):**
+- **NTRIP:** the caster was reachable; the base started streaming at 11:28. Before that: connect, then 0 bytes, then a
+  stream timeout every 15 s, and the worker recovered on its own. Then `INJECTING`: RTCM about 6 Hz, 0 CRC errors,
+  delivered over USB_DIRECT.
+- **Fix:** PX4 `fix_type` **6** (RTK fixed), 30 satellites, HDOP 0.6, eph 1.6 cm.
+- **Heading:**
+  1. First test: the EKF rejected the GNSS heading (`cs_gnss_yaw_fault`). The rover faced north while the GNSS read
+     182.5° and the EKF read 49.6°.
+  2. Cause: the **antenna cables were swapped** (master/slave).
+  3. The owner restored them: **slave (ANT2) front, master (ANT1) rear** → `GPS_YAW_OFFSET` **180** is correct (the
+     baseline value). A 0 was briefly set while the cables were swapped, then reverted.
+  4. Proof after the FCU reboot:
+
+     | Rover facing | GNSS heading | EKF yaw |
+     |---|---|---|
+     | north (offset 0, cables swapped) | 2.7° | 2.8° |
+     | **east (offset 180, cables correct)** | **85.6°** | **85.4°** |
+
+     `cs_gnss_yaw` True, no fault.
+- Lesson: never fix an antenna swap with `GPS_YAW_OFFSET` alone; fix the wiring, then prove the heading against a
+  compass in two directions.
+- **Live parameter dump** refreshed: `config/px4/2026-10-10.params` (917 params). The PX4-learned IMU bias and baro
+  offsets differ from this morning (`SENS_IMU_AUTOCAL 1`); `MIS_DIST_1WP` and `MIS_TKO_LAND_REQ` appeared (mission
+  module defaults).
+- **Next:** step 4, PX4 Mission mode (4-point square): motor output, fusion, position rate, turns, stopping distance.
