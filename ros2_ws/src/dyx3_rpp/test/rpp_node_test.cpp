@@ -14,6 +14,7 @@
 #include <sstream>
 #include <vector>
 
+#include "dds_test_support.hpp"
 #include "dyx3_mission/path_artifact.hpp"
 #include "dyx3_mission/sha256.hpp"
 
@@ -100,9 +101,7 @@ struct Rig {
   explicit Rig(const std::vector<rclcpp::Parameter>& params = {}, bool with_artifact = true,
                const std::vector<ArtPoint>& path = north_line()) {
     ctx = std::make_shared<rclcpp::Context>();
-    rclcpp::InitOptions io;
-    io.set_domain_id(120 + (getpid() % 100));
-    ctx->init(0, nullptr, io);
+    dyx3_test::init_isolated(ctx);
     dir = (std::filesystem::temp_directory_path() /
            ("dyx3_rpp_test_" + std::to_string(getpid()) + "_" +
             std::to_string(reinterpret_cast<uintptr_t>(this))))
@@ -146,8 +145,11 @@ struct Rig {
           world->count_subscribers("/dyx3/rtk_status") > 0 &&
           world->count_subscribers("/dyx3/mission/state") > 0 &&
           rpp->count_subscribers("/dyx3/rpp/motion_setpoint") > 0 &&
-          rpp->count_subscribers("/dyx3/rpp/status") > 0)
+          rpp->count_subscribers("/dyx3/rpp/status") > 0) {
+        // every later deliver() relies on synchronous delivery: prove it
+        EXPECT_TRUE(dyx3_test::delivery_is_synchronous(ctx));
         return;
+      }
     }
     ADD_FAILURE() << "DDS discovery did not complete";
   }
@@ -161,10 +163,9 @@ struct Rig {
     std::filesystem::remove_all(dir, ec);
   }
 
-  void pump(int ms = 10) {
-    const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
-    while (std::chrono::steady_clock::now() < end) exec->spin_some(2ms);
-  }
+  // Delivers everything published so far and runs every callback it causes (and the ones those
+  // cause), then returns: nothing is left in flight, so a negative check after it is exact.
+  void deliver() { dyx3_test::drain(*exec); }
 
   void publish_world() {
     if (publish_vehicle) {
@@ -238,22 +239,26 @@ struct Rig {
   void cycle() {
     now += 20'000'000;
     publish_world();
-    pump(6);
+    deliver();
     if (event) {
       rpp->on_watchdog(now);
     } else {
       rpp->step(now);
     }
-    pump(6);
+    deliver();
     integrate(0.02);
   }
+  // Delivers until `done` holds or the wall-clock deadline passes. The injected clock does not
+  // move here; the deadline only bounds a genuinely missing message.
   template <typename Done>
   bool pump_until(Done done, int timeout_ms = 3000) {
     const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     while (std::chrono::steady_clock::now() < end) {
-      exec->spin_some(2ms);
+      deliver();
       if (done()) return true;
+      exec->spin_once(1ms);  // blocks only while nothing is ready
     }
+    deliver();
     return done();
   }
   void run(double seconds) {
@@ -265,9 +270,7 @@ struct Rig {
 
 TEST(RppNode, RejectsAnInvalidParameterAtStartup) {
   auto ctx = std::make_shared<rclcpp::Context>();
-  rclcpp::InitOptions io;
-  io.set_domain_id(120 + (getpid() % 100));
-  ctx->init(0, nullptr, io);
+  dyx3_test::init_isolated(ctx);
   rclcpp::NodeOptions o;
   o.context(ctx);
   o.append_parameter_override("max_linear_vel", -1.0);
@@ -870,10 +873,10 @@ TEST(RppNode, EveryCommandCarriesThePoseSampleItWasComputedFrom) {
   dyx3_interfaces::msg::VehicleState bad;  // position_valid=false: not fed, stamp unchanged
   bad.px4_sample_stamp.sec = 1791590001;
   r.p_veh->publish(bad);
-  r.pump(6);
+  r.deliver();
   r.now += 20'000'000;
   r.rpp->step(r.now);
-  r.pump(6);
+  r.deliver();
   EXPECT_EQ(r.motion.back().source_pose_sample_stamp.sec, 1791590000);
   EXPECT_EQ(r.motion.back().source_pose_sample_stamp.nanosec, 140'000'000U);
 }
@@ -895,13 +898,13 @@ TEST(RppNode, EventDrivenTicksOnceInTheCallbackOfEachNewSample) {
     r.publish_world();
     ASSERT_TRUE(r.pump_until([&] { return r.motion.size() == before + 1; })) << i;
     EXPECT_EQ(r.motion.back().source_pose_sample_stamp, r.sample_stamp) << i;
-    r.pump(10);
+    r.deliver();
     EXPECT_EQ(r.motion.size(), before + 1) << "one tick per sample";
     r.integrate(0.02);
   }
   const size_t before = r.motion.size();
   r.publish_world();  // the same sample again: fed, not ticked
-  r.pump(30);
+  r.deliver();
   EXPECT_EQ(r.motion.size(), before);
 }
 
@@ -922,7 +925,7 @@ TEST(RppNode, EventDrivenWatchdogNeverDoubleTicksASample) {
   const auto watchdog = [&](int64_t at_ns) {
     r.now = at_ns;
     r.rpp->on_watchdog(at_ns);
-    r.pump(10);
+    r.deliver();
     return r.motion.size();
   };
   EXPECT_EQ(watchdog(t0 + 1'000'000), n);       // same instant as the sample: nothing
@@ -950,13 +953,13 @@ TEST(RppNode, AStalePoseStopsOnTheSameDeadlineInBothModes) {
     for (int k = 1; k <= 40 && stale_after_ns[mode] < 0; ++k) {
       r.now = last_sample + 20'000'000LL * k;
       r.publish_world();
-      r.pump(6);
+      r.deliver();
       if (r.event) {
         r.rpp->on_watchdog(r.now);
       } else {
         r.rpp->step(r.now);
       }
-      r.pump(6);
+      r.deliver();
       if (r.status.tick_state == -1) {  // the first STALE tick (none before it, by the loop)
         stale_after_ns[mode] = r.now - last_sample;
         EXPECT_EQ(r.motion.back().mode, MotionSetpoint::MODE_STOP);
@@ -976,7 +979,7 @@ TEST(RppNode, TimerModeTicksOnlyOnTheTimer) {
   const size_t before = r.motion.size();
   r.sample_stamp = stamp_of_ns(r.now + 1);
   r.publish_world();
-  r.pump(50);
+  r.deliver();
   EXPECT_EQ(r.motion.size(), before);
   r.rpp->on_watchdog(r.now + 1'000'000);  // keep-last-1 topic: deliver each before the next
   EXPECT_TRUE(r.pump_until([&] { return r.motion.size() == before + 1; }));

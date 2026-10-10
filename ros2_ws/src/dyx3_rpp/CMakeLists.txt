@@ -57,12 +57,13 @@ if(BUILD_TESTING)
   ament_add_gtest(orchestrator_equivalence_test test/orchestrator_equivalence_test.cpp)
   target_link_libraries(orchestrator_equivalence_test dyx3_rpp_core)
   target_compile_definitions(orchestrator_equivalence_test PRIVATE DYX3_FIXTURES="${FIXTURES}")
-  # Real-time DDS: seconds of wall time per case, above the 60 s ament default for the whole file.
-  ament_add_gtest(rpp_node_test test/rpp_node_test.cpp TIMEOUT 300)
+  # DDS fault injection on an injected clock with work-driven delivery (test/dds_test_support.hpp):
+  # seconds. The timeout only bounds a hang on a loaded runner.
+  ament_add_gtest(rpp_node_test test/rpp_node_test.cpp TIMEOUT 120)
   target_link_libraries(rpp_node_test dyx3_rpp_node_lib)
   ament_target_dependencies(rpp_node_test rclcpp dyx3_interfaces)
   # The same suite in event-driven mode (the production default): every test must pass in both.
-  ament_add_gtest(rpp_node_event_test test/rpp_node_test.cpp TIMEOUT 300)
+  ament_add_gtest(rpp_node_event_test test/rpp_node_test.cpp TIMEOUT 120)
   target_link_libraries(rpp_node_event_test dyx3_rpp_node_lib)
   ament_target_dependencies(rpp_node_event_test rclcpp dyx3_interfaces)
   target_compile_definitions(rpp_node_event_test PRIVATE DYX3_TEST_EVENT_DRIVEN=1)
