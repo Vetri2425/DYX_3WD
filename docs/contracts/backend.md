@@ -54,8 +54,8 @@ thread that shares the GIL with the heartbeat relay:
 ## 1b. App-planned missions (`POST /missions/plan`, mission contract v2)
 
 The tablet owns the trajectory: it parses the file, splits it into runs and sends them. The backend **never re-plans** it; it
-validates, applies only the two lossless normalisations below, and stores the result. Where this section and
-`app_planned_mission.md` (v1.1) differ, this section is the contract.
+validates, applies only the two lossless normalisations below, and stores the result. The endpoint's full rules are in
+`app_planned_mission.md` (v2); this section summarises them with the REST surface.
 
 **Payload.**
 ```json
@@ -66,16 +66,19 @@ validates, applies only the two lossless normalisations below, and stores the re
           {"type": "mark",   "points": [[12.007, 0.0, 3], [14.0, 0.0, 1], [16.0, 0.0, 3]]}]}
 ```
 - `client`, `client_version` (nonempty strings), `frame`, `runs` are required; `name` (<= 128 characters, default
-  `app_planned_mission`) and `origin_ne_m` (`[north, east]`, default `[0, 0]`, recorded as given) are optional.
+  `app_planned_mission`), `anchor` and `origin_ne_m` (`[north, east]`, default `[0, 0]`; see the frame rules) are optional.
 - A run is `{"type": "mark"|"travel", "points": [[north_m, east_m, flags], ...]}`, at least two points; flags 0..3 (bit 0 spray
   intent, bit 1 must-hit). Coordinates are finite and within +-10 000 m; at most 50 000 submitted points.
-- Rules R1-R4 of `app_planned_mission.md` are unchanged (spray bit matches the run type, runs alternate, runs are contiguous, the
+- Rules R1-R4 of `app_planned_mission.md` keep their v1 meaning, with R3's tolerance now the 10 mm snap below (spray bit matches the run type, runs alternate, runs are contiguous, the
   shared boundary point keeps the previous run's coordinates and spray bit and ORs both must-hit bits).
 
 **Frame and anchor (safety-critical).**
 - `frame: "local_ned"` = north/east metres relative to the geodetic `anchor`, the WGS84 position of the trajectory's local
   origin. **An anchor is required**: without one -> 422 `ANCHOR_REQUIRED`. Points relative to an app GPS origin are never
   driven as if they were EKF-local.
+- **The anchor IS the origin:** point `(n, e)` is metres north/east of the anchor. With an anchor, `origin_ne_m` must be
+  absent or exactly `[0, 0]` (stored as `[0.0, 0.0]`); anything else -> 422 `ORIGIN_WITH_ANCHOR`. Without an anchor
+  (`ekf_local_ned`), `origin_ne_m` is recorded as given.
 - `frame: "ekf_local_ned"` = the points are already in the rover's EKF local frame (bench and debug). It takes no anchor
   (an anchor with it -> 422 `INVALID_FRAME`).
 - Any other frame -> 422 `INVALID_FRAME`.
@@ -100,7 +103,8 @@ accepts only that). The canonical meta records:
 | `anchor` | `{"alt": float\|null, "lat": float, "lon": float}` for `local_ned`; `null` for `ekf_local_ned` |
 | `densified_steps` | number of submitted steps that were split |
 | `max_boundary_snap_m` | largest boundary snap in m (`0.0` when every boundary was bit-exact) |
-| `origin_ne_m`, `total_mark_length_m`, `total_transit_length_m`, `num_waypoints`, `source` | as in v1 |
+| `origin_ne_m` | `[0.0, 0.0]` with an anchor; as submitted for `ekf_local_ned` |
+| `total_mark_length_m`, `total_transit_length_m`, `num_waypoints`, `source` | as in v1 |
 
 The same payload always yields the same bytes and sha256; a different anchor is a different mission.
 
@@ -118,7 +122,7 @@ For that payload the stored points (and the preview) are `[[0.0,0.0,2],[4.0,0.0,
 the 12 m travel leg became three 4 m sub-steps, the mark run starts exactly at `[12.0, 0.0]` with the travel run's spray bit
 and the OR of both must-hit bits (R4).
 Errors: `{"ok": false, "code", "reason"}`; 400 `INVALID_PAYLOAD` (invalid JSON, missing or malformed structure), 422 for
-`ANCHOR_REQUIRED`, `INVALID_ANCHOR`, `INVALID_FRAME`, `INVALID_RUN_TYPE`, `INVALID_FLAGS`, `NON_FINITE_COORDINATE`,
+`ANCHOR_REQUIRED`, `INVALID_ANCHOR`, `ORIGIN_WITH_ANCHOR`, `INVALID_FRAME`, `INVALID_RUN_TYPE`, `INVALID_FLAGS`, `NON_FINITE_COORDINATE`,
 `OUT_OF_BOUNDS`, `EMPTY_MISSION`, `RUN_TOO_SHORT`, `POINTS_LIMIT_EXCEEDED`, `mixed_spray_in_run`, `adjacent_runs_same_type`,
 `runs_not_contiguous`; plus the admission and planning-budget answers of section 1.
 
