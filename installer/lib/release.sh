@@ -197,16 +197,20 @@ switch_release() {
 # install_operator_shims: /opt/dyx3/bin/dyx3-* exec into the CURRENT release's scripts, so a
 # release is always operated by its own tooling and the shims never go stale.
 install_operator_shims() {
+  # A target without a directory is an installer script; dyx3-param is the operator's parameter tool
+  # (deployment/scripts/dyx3-param: get / set / save / diff of the live node parameters).
   local pair name target
-  for pair in "dyx3-install:install.sh" "dyx3-upgrade:upgrade.sh" "dyx3-health:verify.sh" "dyx3-rollback:rollback.sh" "dyx3-version:version.sh"; do
+  for pair in "dyx3-install:install.sh" "dyx3-upgrade:upgrade.sh" "dyx3-health:verify.sh" "dyx3-rollback:rollback.sh" "dyx3-version:version.sh" \
+    "dyx3-param:deployment/scripts/dyx3-param"; do
     name="${pair%%:*}"
     target="${pair##*:}"
+    case "${target}" in */*) ;; *) target="installer/${target}" ;; esac
     if [ "${DYX3_DRY_RUN}" = "1" ]; then
-      printf '[dry-run] shim %s -> current/installer/%s\n' "${name}" "${target}" >&2
+      printf '[dry-run] shim %s -> current/%s\n' "${name}" "${target}" >&2
       continue
     fi
     write_atomic 0755 "${DYX3_BIN}/${name}" "#!/usr/bin/env bash
-exec \"${DYX3_CURRENT}/installer/${target}\" \"\$@\"
+exec \"${DYX3_CURRENT}/${target}\" \"\$@\"
 "
   done
 }
@@ -366,6 +370,9 @@ upgrade_to() {
   # .verified outlives a failed health gate (INS-016): a retry of the same SHA reuses the build instead of an hour of
   # colcon. .complete (eligible to be switched to) does not.
   run touch "${DYX3_RELEASES}/${sha}/.verified" "${DYX3_RELEASES}/${sha}/.complete"
+  # pymavlink for the FCU parameter read (REC-025) on the upgrade path too, not only at install; never fatal and
+  # outside the release tree (a staged root has no venv to build).
+  if [ -z "${DYX3_ROOT}" ]; then install_python_tools; fi
 
   # Baseline of the running release, so an existing fault is not blamed on the new one (INS-006).
   local base="${DYX3_VAR_LIB}/state/health_baseline" after="${DYX3_VAR_LIB}/state/health_after"

@@ -278,3 +278,23 @@ Proven on the 3WD rover 2026-10-09. Never configure the receiver: only the read-
 4. Accept when the worker is `INJECTING` with delivered = valid frames and 0 failures, `/dyx3/rtcm` has no
    publisher traffic, and the receiver readback shows GGA quality > 1 with a valid correction age.
    Measured 2026-10-09 indoors: quality 2 (DGPS), correction age 1.2 s, 0 failures.
+
+## FCU read path (pymavlink) and `dyx3-param` (2026-10-10)
+
+* **pymavlink** is installed by `install_python_tools` (`installer/lib/dependencies.sh`, called from `install_apt_packages`) into its own venv,
+  `/opt/dyx3/third_party/pymavlink` (pinned `PYMAVLINK_VERSION=2.4.49`, marker `.dyx3-pymavlink-version`), like the backend's venv and never the
+  system or ROS Python. Not fatal: a failed `pip install` (no WAN) is a warning. It runs on `dyx3-install`, not on `dyx3-upgrade`: a rover installed
+  before this change gets it by re-running `sudo dyx3-install --production` while idle (or once by hand:
+  `sudo python3 -m venv /opt/dyx3/third_party/pymavlink && sudo /opt/dyx3/third_party/pymavlink/bin/pip install pymavlink==2.4.49`).
+  Until then every run records `params_fcu.json` as unavailable with the reason; nothing else depends on it.
+* **`tools/px4/param_dump.py`** (read-only: parameter list/read requests and AUTOPILOT_VERSION, never PARAM_SET, never a heartbeat) ships in every
+  release (the release is a `git archive` of the whole tree). dyx3-recorder runs it at every run start against `mavlink-router`
+  (`tcp:127.0.0.1:5760`; `DYX3_MAVLINK_URL` in `ros.env` overrides it) and writes `params_fcu.json` + `versions_fcu.json` into the run, and the FCU's
+  firmware hash into the run's `versions.json` `firmware_running` (recorder contract REC-025). By hand:
+  `/opt/dyx3/third_party/pymavlink/bin/python3 -I /opt/dyx3/current/tools/px4/param_dump.py --out /tmp/p.json --version-out /tmp/v.json`.
+  `/etc/dyx3/versions.json` itself still says `firmware_running: unavailable` (the installer writes it without asking the FCU).
+* **`dyx3-param get|set|save|diff|nodes`** (`deployment/scripts/dyx3-param`; `docs/tuning/parameter_profiles.md`): every `ros2 param` call as the
+  service user in the services' DDS environment (`ros.env` read like systemd reads it, `dyx3_env_load`, no daemon); `set` prints the node's own
+  refusal verbatim; `save` (root) writes `/etc/dyx3/<stem>.yaml` atomically, without a backup, after printing the diff. It replaces the
+  "not built" row of the command table above once the release installs its operator shim `/opt/dyx3/bin/dyx3-param`. Profiles:
+  `config/profiles/{production,precision,development}/`, installed by hand (the installer never overwrites `/etc/dyx3`).

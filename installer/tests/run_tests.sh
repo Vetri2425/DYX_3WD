@@ -623,7 +623,8 @@ F
   check "current -> A" '[ "$(basename "$(readlink -f "${DYX3_CURRENT}")")" = "${A}" ]'
   check "release has .complete and launchers" '[ -f "${DYX3_RELEASES}/${A}/.complete" ] && [ -x "${DYX3_RELEASES}/${A}/bin/dyx3-platform" ]'
   check "config templates installed" '[ -f "${DYX3_ETC}/platform.env" ] && [ -f "${DYX3_ETC}/mavlink-router.conf" ]'
-  check "operator shims installed" '[ -x "${DYX3_BIN}/dyx3-upgrade" ] && [ -x "${DYX3_BIN}/dyx3-health" ] && [ -x "${DYX3_BIN}/dyx3-install" ] && [ -x "${DYX3_BIN}/dyx3-rollback" ] && [ -x "${DYX3_BIN}/dyx3-version" ]'
+  check "operator shims installed" '[ -x "${DYX3_BIN}/dyx3-upgrade" ] && [ -x "${DYX3_BIN}/dyx3-health" ] && [ -x "${DYX3_BIN}/dyx3-install" ] && [ -x "${DYX3_BIN}/dyx3-rollback" ] && [ -x "${DYX3_BIN}/dyx3-version" ] && [ -x "${DYX3_BIN}/dyx3-param" ]'
+  check "the dyx3-param shim execs the current release's tool" '[ "$(sed -n 2p "${DYX3_BIN}/dyx3-param")" = "exec \"${DYX3_CURRENT}/deployment/scripts/dyx3-param\" \"\$@\"" ]'
   check "a shim execs the current release's script" '[ "$(sed -n 2p "${DYX3_BIN}/dyx3-upgrade")" = "exec \"${DYX3_CURRENT}/installer/upgrade.sh\" \"\$@\"" ]'
   # INS-023: shims and previous_release are replaced by rename, never rewritten in place.
   local shim_inode

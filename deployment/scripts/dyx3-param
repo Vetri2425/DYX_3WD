@@ -1,0 +1,315 @@
+#!/usr/bin/env bash
+# dyx3-param — read, change, save and compare the parameters of the running DYX 3WD ROS nodes, through the nodes' own
+# parameter services (architecture section 12: "dyx3-param get|set|save via the real ROS parameter authority"; section 9:
+# profiles are promoted by explicit save, a live tweak never silently rewrites production config).
+#
+#   dyx3-param get  <node> <param>           the running value (ros2 param get)
+#   dyx3-param set  <node> <param> <value>   ask the node to change it (ros2 param set). The NODE decides: its LIVE /
+#                                            IDLE_ONLY / RESTART class and its validation accept or refuse, and a refusal
+#                                            is printed verbatim (exit 1). An accepted change lives until the node
+#                                            restarts; `save` keeps it.
+#   dyx3-param save <node>                   every running parameter of <node> -> /etc/dyx3/<stem>.yaml: atomic (temp
+#                                            file, sync, rename), no backup kept, the change printed as a diff first.
+#                                            Read at the node's next start; restarting mid-mission aborts the run.
+#   dyx3-param diff <node>                   the running values against /etc/dyx3/<stem>.yaml (exit 1 when they differ)
+#   dyx3-param nodes                         the nodes, their files and what loads them
+#
+# Every ros2 call runs in the services' DDS environment: /etc/dyx3/ros.env (read as systemd's EnvironmentFile reads it,
+# never executed) + dyx3_env_load from dyx3-env.sh, a throw-away ROS_HOME, no ros2 daemon, and, when run as root, as the
+# service user (as dyx3-health --deep does). `save` writes /etc/dyx3 and needs root.
+#
+# Environment: DYX3_ETC (default /etc/dyx3), DYX3_USER (dyx3), DYX3_RELEASE_DIR (the release this script belongs to),
+# DYX3_ENV_SH (that release's dyx3-env.sh), DYX3_PARAM_TIMEOUT_S, DYX3_PARAM_SPIN_S.
+# Exit codes: 0 ok; 1 refused by the node / values differ / ros2 failed; 2 usage; 3 not possible here (see message).
+set -euo pipefail
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+HERE="$(dirname "${SELF}")"
+ETC="${DYX3_ETC:-/etc/dyx3}"
+SVC_USER="${DYX3_USER:-dyx3}"
+# DERIVED — NOT FROM V1 SPEC: command-line timing only, no vehicle effect. One ros2 call may take this long; the
+# daemon-less discovery spin matches dyx3-health's (installer/lib/health_check.sh DYX3_HEALTH_ROS_SPIN_S).
+TIMEOUT_S="${DYX3_PARAM_TIMEOUT_S:-20}"
+SPIN_S="${DYX3_PARAM_SPIN_S:-3}"
+
+# node | parameter-file stem under ${ETC} | what reads <stem>.yaml at the node's start ("" = nothing yet).
+# Graph rows: dyx3_bringup/launch/control_graph.launch.py GRAPH (the launch passes <config_dir>/<stem>.yaml when the file
+# exists). The recorder: start-recorder.sh (DYX3_RECORDER_PARAMS, default /etc/dyx3/recorder.yaml). gnss_rtk and
+# spray_watchdog start with `ros2 run` and no parameter file today, so `save` refuses them.
+NODE_TABLE=(
+  "dyx3_mission|mission|graph launch (control_graph.launch.py GRAPH)"
+  "motion_guard|motion_guard|graph launch (control_graph.launch.py GRAPH)"
+  "px4_link|px4|graph launch (control_graph.launch.py GRAPH)"
+  "rpp|rpp|graph launch (control_graph.launch.py GRAPH)"
+  "spray|spray|graph launch (control_graph.launch.py GRAPH)"
+  "system_gateway|gateway|graph launch (control_graph.launch.py GRAPH)"
+  "gnss_rtk|rtk|"
+  "recorder|recorder|start-recorder.sh (DYX3_RECORDER_PARAMS)"
+  "spray_watchdog|spray_watchdog|"
+)
+
+die() {
+  echo "dyx3-param: $1" >&2
+  exit "${2:-1}"
+}
+
+usage() {
+  sed -n '2,/^# Exit codes/p' "${SELF}" | sed 's/^# \{0,1\}//' >&2
+  exit "${1:-2}"
+}
+
+# The release: <rel>/bin/dyx3-param or <rel>/deployment/scripts/dyx3-param, else the current release.
+release_dir() {
+  if [ -n "${DYX3_RELEASE_DIR:-}" ]; then
+    printf '%s' "${DYX3_RELEASE_DIR}"
+  elif [ -r "${HERE}/../installer/pins/firmware.pin" ]; then
+    (cd "${HERE}/.." && pwd)
+  elif [ -r "${HERE}/../../installer/pins/firmware.pin" ]; then
+    (cd "${HERE}/../.." && pwd)
+  else
+    printf '%s' /opt/dyx3/current
+  fi
+}
+
+env_sh() {
+  if [ -n "${DYX3_ENV_SH:-}" ]; then
+    printf '%s' "${DYX3_ENV_SH}"
+  elif [ -r "${HERE}/dyx3-env.sh" ]; then
+    printf '%s' "${HERE}/dyx3-env.sh"
+  else
+    printf '%s' "$(release_dir)/bin/dyx3-env.sh"
+  fi
+}
+
+# node_row <node>: sets NODE, STEM, LOADER from the table; dies on an unknown node. A leading '/' is accepted.
+node_row() {
+  local want="${1#/}" row
+  [[ "${want}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "invalid node name: '$1'" 2
+  for row in "${NODE_TABLE[@]}"; do
+    if [ "${row%%|*}" = "${want}" ]; then
+      NODE="${want}"
+      STEM="${row#*|}"
+      LOADER="${STEM#*|}"
+      STEM="${STEM%%|*}"
+      return 0
+    fi
+  done
+  die "unknown node '$1' (dyx3-param nodes lists them)" 2
+}
+
+param_file() {
+  local rec=""
+  # start-recorder.sh takes DYX3_RECORDER_PARAMS from its unit's EnvironmentFile, ros.env.
+  [ "${NODE}" = recorder ] && rec="$(ros_env_lines | sed -n 's/^DYX3_RECORDER_PARAMS=//p' | tail -n1)"
+  if [ -n "${rec}" ]; then
+    printf '%s' "${rec}"
+  else
+    printf '%s/%s.yaml' "${ETC}" "${STEM}"
+  fi
+}
+
+check_param_name() {
+  [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_./-]*$ ]] || die "invalid parameter name: '$1'" 2
+}
+
+# ros_env_lines: the KEY=VALUE lines of ros.env as systemd's EnvironmentFile reads them (blank and comment lines
+# skipped, one pair of surrounding quotes removed). Never executed. Same reading as installer/lib/health_check.sh.
+ros_env_lines() {
+  local line k v
+  [ -r "${ETC}/ros.env" ] || return 0
+  while IFS= read -r line || [ -n "${line}" ]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    case "${line}" in '' | '#'* | ';'*) continue ;; esac
+    k="${line%%=*}"
+    [ "${k}" != "${line}" ] && [[ "${k}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    v="${line#*=}"
+    case "${v}" in \"*\" | \'*\') v="${v:1:${#v}-2}" ;; esac
+    printf '%s=%s\n' "${k}" "${v}"
+  done <"${ETC}/ros.env"
+}
+
+# ros2_cli <ros2 args...>: one ros2 call in the services' environment (see the header).
+ros2_cli() {
+  local envsh rel
+  envsh="$(env_sh)"
+  rel="$(release_dir)"
+  [ -r "${envsh}" ] || die "cannot read ${envsh} (set DYX3_ENV_SH or run the release's own dyx3-param)" 3
+  local -a as_user=() envs=()
+  mapfile -t envs < <(ros_env_lines)
+  if [ "$(id -u)" -eq 0 ] && [ "${SVC_USER}" != root ] && id "${SVC_USER}" >/dev/null 2>&1 && command -v sudo >/dev/null; then
+    as_user=(sudo -n -u "${SVC_USER}")
+  fi
+  # shellcheck disable=SC2016  # expanded by the inner shell
+  "${as_user[@]}" env -i PATH="${PATH}" "${envs[@]}" DYX3_RELEASE_DIR="${rel}" bash -c '
+      t="$1" envsh="$2"
+      shift 2
+      h="$(mktemp -d "${TMPDIR:-/tmp}/dyx3-param-ros.XXXXXX")" || exit 1
+      trap "rm -rf \"${h}\"" EXIT
+      export HOME="${h}" ROS_HOME="${h}" ROS_LOG_DIR="${h}/log"
+      . "${envsh}" || exit 3
+      dyx3_env_load >/dev/null || exit 3
+      timeout "${t}" ros2 "$@"' dyx3-param "${TIMEOUT_S}" "${envsh}" "$@"
+}
+
+# running_dump: `ros2 param dump /<node>` (YAML on stdout in Humble), checked to be that node's parameter document.
+running_dump() {
+  local out
+  out="$(ros2_cli param dump "/${NODE}" --no-daemon --spin-time "${SPIN_S}")" ||
+    die "ros2 param dump /${NODE} failed (is the node running?)"
+  case "$(printf '%s\n' "${out}" | head -n1)" in
+    "/${NODE}:" | "${NODE}:") ;;
+    *) die "unexpected ros2 param dump output for /${NODE}: $(printf '%s' "${out}" | head -n1)" ;;
+  esac
+  printf '%s\n' "${out}" | grep -q '^  ros__parameters:' || die "no ros__parameters in the dump of /${NODE}"
+  printf '%s\n' "${out}"
+}
+
+cmd_get() {
+  [ "$#" -eq 2 ] || usage
+  node_row "$1"
+  check_param_name "$2"
+  ros2_cli param get "/${NODE}" "$2" --no-daemon --spin-time "${SPIN_S}"
+}
+
+cmd_set() {
+  [ "$#" -eq 3 ] || usage
+  node_row "$1"
+  check_param_name "$2"
+  local out rc=0
+  out="$(ros2_cli param set "/${NODE}" "$2" "$3" --no-daemon --spin-time "${SPIN_S}" 2>&1)" || rc=$?
+  # ros2 param set exits 0 even when the node refuses: the node's answer is the result.
+  printf '%s\n' "${out}"
+  if [ "${rc}" -ne 0 ] || printf '%s\n' "${out}" | grep -q 'Setting parameter failed'; then
+    if printf '%s\n' "${out}" | grep -q 'is of type {double}' && [[ "$3" =~ ^-?[0-9]+$ ]]; then
+      echo "dyx3-param: hint: ros2 reads '$3' as an integer; write a double as '$3.0'" >&2
+    fi
+    exit 1
+  fi
+  echo "dyx3-param: changed in the running node only; 'dyx3-param save ${NODE}' keeps it across restarts" >&2
+}
+
+# The comment lines of a saved file are provenance, not values: they are left out of every comparison.
+strip_comments() { grep -v '^#' "$1" || true; }
+
+cmd_save() {
+  [ "$#" -eq 1 ] || usage
+  node_row "$1"
+  local target tmp dump
+  target="$(param_file)"
+  [ -n "${LOADER}" ] ||
+    die "refusing: nothing reads ${target} when ${NODE} starts (it is started without a parameter file), so a saved file would be evidence of nothing. Give its launcher a --params-file first." 3
+  if [ ! -d "$(dirname "${target}")" ] || [ ! -w "$(dirname "${target}")" ]; then
+    die "save writes ${target}: run it as root (sudo dyx3-param save ${NODE})" 3
+  fi
+  dump="$(running_dump)"
+  tmp="$(mktemp "$(dirname "${target}")/.$(basename "${target}").XXXXXX")"
+  # shellcheck disable=SC2064  # the path is fixed now
+  trap "rm -f '${tmp}'" EXIT
+  {
+    printf '# Saved by dyx3-param save %s at %s from the running node (release %s).\n' \
+      "${NODE}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(basename "$(readlink -f "$(release_dir)")")"
+    printf '# Read by %s at the next start of %s. Every parameter of the node, not only the changed ones.\n' "${LOADER}" "${NODE}"
+    printf '%s\n' "${dump}"
+  } >"${tmp}"
+  local before=/dev/null
+  [ -f "${target}" ] && before="${target}"
+  if [ "${before}" != /dev/null ] && diff -q <(strip_comments "${before}") <(strip_comments "${tmp}") >/dev/null; then
+    echo "dyx3-param: ${target} already holds the running values of ${NODE}; unchanged"
+    return 0
+  fi
+  diff -u --label "${target} (before)" --label "${target} (saved)" \
+    <(strip_comments "${before}") <(strip_comments "${tmp}") || true
+  chmod 0644 "${tmp}"
+  if [ "$(id -u)" -eq 0 ] && getent group "${SVC_USER}" >/dev/null 2>&1; then chown "root:${SVC_USER}" "${tmp}"; fi
+  sync "${tmp}"
+  mv -f "${tmp}" "${target}"
+  sync "$(dirname "${target}")" 2>/dev/null || true
+  trap - EXIT
+  echo "dyx3-param: saved ${target}; read at the next start of ${NODE} (never restart it mid-mission: that aborts the run)"
+}
+
+cmd_diff() {
+  [ "$#" -eq 1 ] || usage
+  node_row "$1"
+  local target running
+  target="$(param_file)"
+  [ -r "${target}" ] || die "no ${target}: ${NODE} runs on its built-in defaults plus nothing saved" 3
+  running="$(mktemp)"
+  # shellcheck disable=SC2064
+  trap "rm -f '${running}'" EXIT
+  running_dump >"${running}"
+  # Compared as values, not text: a hand-written profile with two keys is compared on those two keys.
+  python3 -I - "${NODE}" "${running}" "${target}" <<'PY'
+import sys
+
+try:
+    import yaml
+except ImportError:
+    print("dyx3-param: diff needs PyYAML (python3-yaml, installed with ROS 2)", file=sys.stderr)
+    sys.exit(3)
+
+node, running_path, file_path = sys.argv[1:4]
+
+
+def params(path):
+    with open(path) as f:
+        doc = yaml.safe_load(f) or {}
+    for key in ("/" + node, node, "/**"):
+        if isinstance(doc.get(key), dict) and isinstance(doc[key].get("ros__parameters"), dict):
+            return flatten(doc[key]["ros__parameters"])
+    sys.exit(f"dyx3-param: {path} has no '/{node}: ros__parameters:' section")
+
+
+def flatten(d, prefix=""):
+    out = {}
+    for k, v in d.items():
+        name = f"{prefix}{k}"
+        if isinstance(v, dict):
+            out.update(flatten(v, name + "."))
+        else:
+            out[name] = v
+    return out
+
+
+run, saved = params(running_path), params(file_path)
+differ = 0
+for name in sorted(saved):
+    if name not in run:
+        print(f"  file only  {name} = {saved[name]!r}  (the node does not declare it: ignored at start)")
+        differ += 1
+    elif type(run[name]) is not type(saved[name]) or run[name] != saved[name]:
+        print(f"  differs    {name}: running {run[name]!r}, file {saved[name]!r}")
+        differ += 1
+extra = len(set(run) - set(saved))
+print(f"{node}: {differ} difference(s) in the {len(saved)} value(s) {file_path} sets; "
+      f"{extra} running parameter(s) not in the file (built-in defaults)")
+sys.exit(1 if differ else 0)
+PY
+}
+
+cmd_nodes() {
+  [ "$#" -eq 0 ] || usage
+  local row n s l
+  for row in "${NODE_TABLE[@]}"; do
+    n="${row%%|*}"
+    s="${row#*|}"
+    l="${s#*|}"
+    s="${s%%|*}"
+    NODE="${n}"
+    STEM="${s}"
+    printf '%-15s %-28s %s\n' "${n}" "$(param_file)" "${l:-not read at start (save refused)}"
+  done
+}
+
+[ "$#" -ge 1 ] || usage
+cmd="$1"
+shift
+case "${cmd}" in
+  get) cmd_get "$@" ;;
+  set) cmd_set "$@" ;;
+  save) cmd_save "$@" ;;
+  diff) cmd_diff "$@" ;;
+  nodes) cmd_nodes "$@" ;;
+  -h | --help | help) usage 0 ;;
+  *) die "unknown command '${cmd}' (get, set, save, diff, nodes)" 2 ;;
+esac

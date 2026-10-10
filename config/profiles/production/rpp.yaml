@@ -1,0 +1,13 @@
+# Profile "production", node rpp. Installed as /etc/dyx3/rpp.yaml (the graph launch reads <config_dir>/rpp.yaml when it
+# exists; docs/tuning/parameter_profiles.md).
+#
+# Only the values this profile decides. Both equal today's built-in defaults (the two production overrides of the
+# prototype values, docs/tuning/parameter_registry.md "Production overrides"; owner decision 2026-10-10: field speed
+# starts at 0.6 m/s, cap 0.85 = PX4 RO_SPEED_LIM). They are written down so that the explicit-save path has a reviewed
+# file to start from and so a change of a built-in default cannot silently change a production rover.
+# Every other rpp parameter keeps its built-in default, carried verbatim from the prototype and NOT re-validated in
+# the NED frame (GATE 4): none of them is copied here until it is.
+/rpp:
+  ros__parameters:
+    mission_speed: 0.6
+    max_linear_vel: 0.85

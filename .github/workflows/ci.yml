@@ -214,7 +214,7 @@ jobs:
         run: |
           pip install shellcheck-py==0.10.0.1
           shellcheck --version
-          shellcheck -x installer/*.sh installer/lib/*.sh installer/ci/*.sh installer/tests/*.sh deployment/scripts/*.sh
+          shellcheck -x installer/*.sh installer/lib/*.sh installer/ci/*.sh installer/tests/*.sh deployment/scripts/*.sh deployment/scripts/dyx3-param
 
       - name: installer tests
         run: bash installer/tests/run_tests.sh

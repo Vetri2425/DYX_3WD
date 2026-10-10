@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -261,6 +262,25 @@ void RecorderNode::declare_params() {
   max_bag_restarts_ = declare_parameter<int64_t>("max_bag_restarts", 1);
   if (max_bag_restarts_ < 0)
     throw std::invalid_argument("recorder parameter invalid: max_bag_restarts");
+  // REC-025: FCU parameters and version, read live over MAVLink at every run start
+  // (architecture 5.4.2: parameters keep MAVLink; 7.9: params_fcu.json "every FCU parameter, read
+  // live"). {python} = fcu_param_dump_python when it is executable, else python3 from PATH;
+  // {script} = tools/px4/param_dump.py of the release this binary belongs to; {dir} = the run
+  // directory. -I: the ROS PYTHONPATH of this service must not leak into the tool.
+  fcu_dump_enabled_ = declare_parameter<bool>("fcu_param_dump_enabled", true);
+  fcu_dump_cmd_ = declare_parameter<std::vector<std::string>>(
+      "fcu_param_dump_cmd", {"{python}", "-I", "{script}", "--out", "{dir}/params_fcu.json",
+                             "--version-out", "{dir}/versions_fcu.json"});
+  // The interpreter the installer gives pymavlink (installer/lib/dependencies.sh
+  // install_python_tools).
+  fcu_dump_python_ = declare_parameter<std::string>("fcu_param_dump_python",
+                                                    "/opt/dyx3/third_party/pymavlink/bin/python3");
+  // DERIVED — NOT FROM V1 SPEC: a backstop above the script's own --timeout (20 s, after which it
+  // writes what it has read). Only a child that is still running at this point is stopped (SIGINT,
+  // then SIGTERM, then SIGKILL).
+  fcu_dump_timeout_s_ = declare_parameter<double>("fcu_param_dump_timeout_s", 30.0);
+  if (fcu_dump_enabled_ && fcu_dump_cmd_.empty())
+    throw std::invalid_argument("recorder parameter invalid: fcu_param_dump_cmd is empty");
   // REC-001: the runs share /var/lib/dyx3 with the missions, the RTK state and the spray-ACK
   // ledger. Below min_free_bytes no run starts and a running bag is stopped (checked at every
   // step); retention keeps the complete runs under max_runs_bytes. 0 disables either.
@@ -272,7 +292,7 @@ void RecorderNode::declare_params() {
   max_runs_bytes_ = static_cast<uint64_t>(max_runs);
   const auto bad = [](double v) { return !std::isfinite(v) || v <= 0.0; };
   if (bad(bag_finalize_timeout_s_) || bad(param_timeout_s_) || bad(status_hz_) ||
-      bad(mission_silence_s_)) {
+      bad(mission_silence_s_) || bad(fcu_dump_timeout_s_)) {
     throw std::invalid_argument(
         "recorder parameter invalid: timeouts and rates must be finite and > 0");
   }
@@ -509,12 +529,23 @@ void RecorderNode::start_run(uint32_t mission_id, uint32_t run_index,
     for (const auto& e : cr.errors) summary.notes.push_back(e);
     summary.provenance_complete = false;
   }
-  write_evidence(
-      dir + "/params_fcu.json",
-      unavailable_json("fcu_parameters", "no FCU parameter read path in this stack yet (OPEN)"),
-      summary);
-  summary.notes.push_back("params_fcu.json: unavailable (no FCU parameter read path yet)");
-  summary.provenance_complete = false;
+  // params_fcu.json / firmware_running (REC-025): placeholders until the FCU read child, started
+  // after the bag, replaces them. A recorder that dies during the read leaves the placeholder,
+  // which says so.
+  std::string fcu_why;
+  const std::vector<std::string> fcu_argv = fcu_dump_argv(dir, &fcu_why);
+  if (fcu_argv.empty()) {
+    write_evidence(dir + "/params_fcu.json", unavailable_json("fcu_parameters", fcu_why), summary);
+    summary.notes.push_back("params_fcu.json: unavailable (" + fcu_why + ")");
+    summary.provenance_complete = false;
+    summary.fcu_params = "unavailable: " + fcu_why;
+    record_firmware_running(dir, "unavailable: " + fcu_why, summary);
+  } else {
+    const std::string pending =
+        "pending: the FCU read has not finished (if this remains, the recorder stopped during it)";
+    write_evidence(dir + "/params_fcu.json", unavailable_json("fcu_parameters", pending), summary);
+    record_firmware_running(dir, "unavailable: " + pending, summary);
+  }
   if (running) {
     summary.running_utc = info.start_utc;
     summary.preroll_s = 0.0;
@@ -553,6 +584,20 @@ void RecorderNode::start_run(uint32_t mission_id, uint32_t run_index,
   }
   RCLCPP_INFO(get_logger(), "run started: %s (%s)", info.run_id.c_str(), info.start_state.c_str());
 
+  // REC-025: the FCU read starts once the bag runs and is never waited for here (step() polls it).
+  if (!fcu_argv.empty()) {
+    if (fcu_dump_.start(fcu_argv, "")) {
+      std::lock_guard<std::mutex> lk(mu_);
+      fcu_dump_pending_ = true;
+      fcu_dump_dir_ = dir;
+      fcu_dump_deadline_s_ = clock_() + fcu_dump_timeout_s_;
+    } else {
+      RCLCPP_ERROR(get_logger(), "FCU read could not be started (%s)", fcu_argv.front().c_str());
+      finish_fcu_dump(
+          dir, "could not be started (" + fcu_argv.front() + " not found or not executable)");
+    }
+  }
+
   // ROS parameters (start): after the bag is running, on their own thread. Up to
   // |param_nodes| x 3 RPCs x param_timeout_s must never delay the first second of the bag.
   const std::string stamp = iso_utc(now);
@@ -580,6 +625,23 @@ void RecorderNode::start_run(uint32_t mission_id, uint32_t run_index,
 
 void RecorderNode::stop_run(const std::string& final_state) {
   join_param_job();  // the start snapshot (and its notes) belongs to this run
+  {
+    // REC-025: an FCU read that outlives its run is stopped (it writes what it has on SIGINT); its
+    // result belongs to this run's summary, so it is finished before the summary is taken.
+    bool pending;
+    std::string fdir;
+    {
+      std::lock_guard<std::mutex> lk(mu_);
+      pending = fcu_dump_pending_;
+      fdir = fcu_dump_dir_;
+    }
+    if (pending) {
+      const bool running = fcu_dump_.running();
+      if (running) fcu_dump_.stop(1.0, 1.0);
+      finish_fcu_dump(fdir,
+                      running ? "was stopped: the run ended before the FCU read finished" : "");
+    }
+  }
   std::string dir, params_start, gaps;
   RunSummary summary;
   RunInfo info;
@@ -728,6 +790,122 @@ void RecorderNode::check_bag(double) {
   }
 }
 
+std::vector<std::string> RecorderNode::fcu_dump_argv(const std::string& dir,
+                                                     std::string* why_not) const {
+  if (!fcu_dump_enabled_) {
+    *why_not = "disabled (fcu_param_dump_enabled is false)";
+    return {};
+  }
+  std::string script;
+  if (argv_uses(fcu_dump_cmd_, "{script}")) {
+    std::error_code ec;
+    const fs::path exe = fs::read_symlink("/proc/self/exe", ec);
+    std::string searched;
+    script = find_param_dump_script(ec ? std::string() : exe.string(),
+                                    std::getenv("DYX3_RELEASE_DIR"), &searched);
+    if (script.empty()) {
+      *why_not = "tools/px4/param_dump.py not found (searched " + searched + ")";
+      return {};
+    }
+  }
+  return expand_dump_argv(fcu_dump_cmd_, resolve_dump_python(fcu_dump_python_), script, dir);
+}
+
+void RecorderNode::record_firmware_running(const std::string& dir, const std::string& text,
+                                           RunSummary& summary) {
+  // The run's versions.json is the installer's file; only its firmware_running member is replaced
+  // (the installer can only write the pinned expectation, the FCU's own identity is read here).
+  summary.firmware_running = text;
+  const std::string path = dir + "/versions.json";
+  std::string updated;
+  if (!json_set_string(read_file(path), "firmware_running", text, &updated)) {
+    summary.notes.push_back(
+        "versions.json is not a JSON object: firmware_running not recorded in it");
+    return;
+  }
+  write_evidence(path, updated, summary);
+}
+
+void RecorderNode::finish_fcu_dump(const std::string& dir, const std::string& stop_reason) {
+  // Called with run_mu_ held (step, start_run, stop_run), so no run transition interleaves; file
+  // I/O outside mu_.
+  const int code = fcu_dump_.last_exit_code();
+  const std::string how =
+      stop_reason.empty() ? "exited with code " + std::to_string(code) : stop_reason;
+  FcuDumpFiles f = read_fcu_dump(dir + "/params_fcu.json", dir + "/versions_fcu.json");
+  RunSummary part;  // what this read adds to the run's summary
+  if (!f.params_written) {
+    f.params_status = "unavailable";
+    f.params_reason = "the FCU read " + how + " without writing params_fcu.json";
+    write_evidence(dir + "/params_fcu.json", unavailable_json("fcu_parameters", f.params_reason),
+                   part);
+  }
+  if (!f.version_written) {
+    f.version_reason = "the FCU read " + how + " without writing versions_fcu.json";
+    write_evidence(dir + "/versions_fcu.json", unavailable_json("fcu_version", f.version_reason),
+                   part);
+  }
+  if (f.params_complete) {
+    part.fcu_params = "complete";
+  } else {
+    part.fcu_params = (f.params_status.empty() ? std::string("unavailable") : f.params_status) +
+                      ": " + (f.params_reason.empty() ? how : f.params_reason);
+    part.notes.push_back("params_fcu.json " + part.fcu_params);
+    part.provenance_complete = false;
+  }
+  const std::string fw =
+      f.firmware_git_hash.empty() ? "unavailable: " + f.version_reason : f.firmware_git_hash;
+  if (f.firmware_git_hash.empty()) {
+    part.notes.push_back("firmware_running " + fw);
+    part.provenance_complete = false;
+  }
+  if (!stop_reason.empty()) {
+    part.notes.push_back("the FCU read " + stop_reason);
+  } else if (code != 0) {
+    part.notes.push_back("the FCU read exited with code " + std::to_string(code));
+  }
+  record_firmware_running(dir, fw, part);
+  std::string raw, expected;
+  if (json_member(read_file(dir + "/versions.json"), "firmware_expected_sha", &raw) &&
+      json_string(raw, &expected) && firmware_mismatch(f.firmware_git_hash, expected)) {
+    part.notes.push_back("the FCU runs firmware " + f.firmware_git_hash + ", the release expects " +
+                         expected);
+  }
+  RCLCPP_INFO(get_logger(), "FCU read: parameters %s, firmware %s", part.fcu_params.c_str(),
+              fw.c_str());
+  std::lock_guard<std::mutex> lk(mu_);
+  fcu_dump_pending_ = false;
+  if (run_dir_ != dir) return;
+  summary_.fcu_params = part.fcu_params;
+  summary_.firmware_running = part.firmware_running;
+  if (!part.provenance_complete) summary_.provenance_complete = false;
+  for (auto& n : part.notes) summary_.notes.push_back(std::move(n));
+}
+
+void RecorderNode::check_fcu_dump(double now_s) {
+  // Called from step() with run_mu_ held.
+  std::string dir;
+  double deadline;
+  {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!fcu_dump_pending_) return;
+    dir = fcu_dump_dir_;
+    deadline = fcu_dump_deadline_s_;
+  }
+  if (fcu_dump_.running()) {
+    if (now_s < deadline) return;
+    RCLCPP_WARN(get_logger(), "FCU read still running after %.1f s: stopping it",
+                fcu_dump_timeout_s_);
+    fcu_dump_.stop(1.0, 1.0);
+    char b[96];
+    std::snprintf(b, sizeof b, "was stopped after fcu_param_dump_timeout_s %.1f s",
+                  fcu_dump_timeout_s_);
+    finish_fcu_dump(dir, b);
+    return;
+  }
+  finish_fcu_dump(dir, "");
+}
+
 void RecorderNode::check_mission_silence(double now_s) {
   // Called from step() with run_mu_ held.
   double silent_s;
@@ -782,6 +960,7 @@ void RecorderNode::step(double now_s) {
     if (tl.owns_lock()) {
       check_disk(now_s);
       check_bag(now_s);
+      check_fcu_dump(now_s);
       check_mission_silence(now_s);
     }
   }

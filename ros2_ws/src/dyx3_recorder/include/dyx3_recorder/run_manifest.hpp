@@ -69,6 +69,11 @@ struct RunSummary {
                                      // "complete" or "incomplete: ..." (UlogCapture::header_status)
   bool bag_healthy_throughout{true};
   bool provenance_complete{true};
+  // REC-025: the FCU read (tools/px4/param_dump.py). firmware_running is the 16-hex-character git
+  // hash the FCU reports (AUTOPILOT_VERSION) or "unavailable: <reason>"; fcu_params is
+  // params_fcu.json's status ("complete", "incomplete: <reason>", "unavailable: <reason>").
+  std::string firmware_running{"unavailable: not recorded"};
+  std::string fcu_params{"unavailable: not recorded"};
   bool timesync_valid_end{false};
   int64_t timesync_offset_us_end{0};
   uint32_t timesync_round_trip_us_end{0};

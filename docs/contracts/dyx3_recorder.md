@@ -11,11 +11,13 @@ recorder only observes; it publishes `RecorderStatus` and nothing else, runs as 
 ├── rosbag2/ [rosbag2_2/ ...] # produced by a supervised `ros2 bag record` child (sqlite3 WAL, a split every 300 s, closed splits zstd-compressed: *.db3.zstd)
 ├── ulog/stream.ulg          # cached ULog header + whole messages from /dyx3/ulog_chunk (section 3); ulog/gaps.json: header status + every missing chunk range
 ├── manifest.json             # run id, mission id/index, execution and source artifact sha256, vehicle, operator, host, start time, FCU timesync at start
-├── versions.json             # copy of the installer's versions file (stack SHA, px4_msgs SHA, firmware SHA, overlay hash) or {"status":"unavailable",...}
+├── versions.json             # copy of the installer's versions file (stack SHA, px4_msgs SHA, firmware SHA, overlay hash) or {"status":"unavailable",...};
+│                             #   its "firmware_running" is replaced by the firmware the FCU reports (REC-025)
 ├── params_ros.json           # every ROS parameter of the configured nodes: "start" and "end"
-├── params_fcu.json           # FCU parameters read live, or {"status":"unavailable","reason":...}
+├── params_fcu.json           # every FCU parameter read live over MAVLink at run start (REC-025), or {"status":"unavailable","reason":...}
+├── versions_fcu.json         # the FCU's AUTOPILOT_VERSION (firmware git hash, board, vendor/product, uid), or unavailable with the reason
 ├── config_snapshot/          # copy of the config directory with secrets excluded
-└── summary.json              # end time, final mission state, bytes, ulog gaps, bag health, provenance_complete, notes[]
+└── summary.json              # end time, final mission state, bytes, ulog gaps, bag health, provenance_complete, firmware_running, fcu_params, notes[]
 ```
 
 Directory names are collision-free (a numeric suffix is appended if the name exists). Files are written atomically and durably (temp file written, `fsync`, close, rename, `fsync` of the directory; every step checked — REC-010)
@@ -28,7 +30,8 @@ except the bag/ulog streams; the ULog file is `fsync`ed on close (REC-011). A fa
   message with no open run (e.g. the recorder restarted mid-mission) also opens one (`start_state` RUNNING, note "no pre-roll"). The first `RUNNING`
   of the open run is recorded in `summary.json` as `running_utc` and `preroll_s` (bag time before motion). **Stop** when a run is open and the state is
   `COMPLETED`, `ABORTED`, `ERROR` or `IDLE`. A run that never reached `RUNNING` closes as **`NOT_STARTED`** (with a note naming the state that closed it).
-  `PAUSED`, `LOADING` and `READY` of the same run do not stop it. A `READY` or `RUNNING` message with a **different `mission_id` or `run_index`**
+  `PAUSED`, `LOADING`, `PLACING`, `ARMING`, `ENGAGING` and `READY` of the same run do not stop it, and none of them but `READY` opens one
+  (`PLACING`/`ARMING`/`ENGAGING` are named in notes since 2026-10-10, open item 15; they used to read `UNKNOWN`). A `READY` or `RUNNING` message with a **different `mission_id` or `run_index`**
   (DERIVED: one run directory per run of a mission) while recording closes the old run (`SUPERSEDED`, or `NOT_STARTED` if it never ran) and opens a new one.
 * **Lost MissionState (REC-008).** If no `MissionState` arrives for `mission_silence_s` (default 3 s; the mission publishes at 10 Hz) while a
   run is open, the run is closed as **`MISSION_STATE_LOST`** with a note; when the mission comes back, its next `READY`/`RUNNING` opens a new run.
@@ -42,8 +45,9 @@ except the bag/ulog streams; the ULog file is `fsync`ed on close (REC-011). A fa
   bytes found, and a note (plus "metadata.yaml missing … `ros2 bag reindex`" when the bag was not finalised). Such runs then count as complete for
   retention.
 * `record_idle` (default false) is not implemented: recording outside missions is an **open question**.
-* Start order: directory -> manifest -> versions -> config snapshot -> `params_fcu.json` -> ulog -> bag -> `params_ros.json` start **collected
-  on its own thread after the bag runs** (parameter RPCs never delay the bag). Stop joins that thread first, so its notes belong to the run. A step that fails is
+* Start order: directory -> manifest -> versions -> config snapshot -> `params_fcu.json` placeholder -> ulog -> bag -> the **FCU read child**
+  (REC-025, polled from `step()`, never waited for) and `params_ros.json` start **collected on its own thread after the bag runs** (parameter RPCs
+  never delay the bag). Stop joins that thread first and finishes the FCU read (stopping it if it still runs), so their notes belong to the run. A step that fails is
   recorded in `summary.notes` and clears `provenance_complete`; only a bag that cannot be started sets `RecorderStatus.state = ERROR`.
   The recorder never blocks, delays or gates the mission: if it is dead or in ERROR the mission runs on, and the absence of evidence is itself visible (`RecorderStatus`, summary).
 * Stop order: bag finalised (SIGINT to its process group, wait `bag_finalize_timeout_s`, then SIGTERM, then SIGKILL; any escalation, or a
@@ -70,7 +74,7 @@ since the recorder started (or a gap hit the definitions), the file has no heade
 |---|---|---|
 | `versions.json` | `versions_file` (default `/etc/dyx3/versions.json`), written by the installer / `dyx3-version` (P11) | file format is defined by P11; missing -> "unavailable" |
 | `params_ros.json` | `SyncParametersClient` per node in `param_nodes` (a helper node on its own executor); values stored as `{type, value-as-string}`; doubles and double arrays use `%.17g` (exact round trip, PC-8 precision), other types `rclcpp::to_string` | nodes that do not answer within `param_timeout_s` are listed `"reachable": false` with a `"note"` (no service, a list/get timeout or exception, or fewer values than names — `get_parameters` returns an empty vector on a timeout). The collector never throws out of the node (a discovered but stalled node used to crash the recorder) |
-| `params_fcu.json` | **no FCU parameter read path exists in this stack yet** (DDS does not carry parameters; MAVLink is the service plane) | recorded as unavailable with this reason. **OPEN (human):** how to read FCU parameters live |
+| `params_fcu.json`, `versions_fcu.json` (REC-025) | `tools/px4/param_dump.py` of the release the recorder binary belongs to, a child process started after the bag at every run start: MAVLink through `mavlink-router` (`tcp:127.0.0.1:5760`, or `DYX3_MAVLINK_URL` in `ros.env`), architecture 5.4.2 (DDS carries no parameters). It sends only `PARAM_REQUEST_LIST`, `PARAM_REQUEST_READ` (once per index the stream lost) and `MAV_CMD_REQUEST_MESSAGE(AUTOPILOT_VERSION)` (legacy `REQUEST_AUTOPILOT_CAPABILITIES` as fallback), never `PARAM_SET` and never a HEARTBEAT (a GCS heartbeat that stops would look like a datalink loss to PX4). `params_fcu.json`: `{schema, source:"mavlink", url, collected_utc, status: complete\|incomplete\|unavailable, complete, count_expected, count_received, params{NAME: value} (sorted; INT32 as integers from the byte-wise encoding taken from the wire bytes, REAL32 as the exact float32 value), types{}, missing_indices[], hash_check, reason}`. `versions_fcu.json`: `firmware_git_hash` = the 16 hex characters of `flight_custom_version` in commit order (the start of what `ver git` prints, comparable with the firmware pin), `flight_sw_version(_str)`, `board_version`, `vendor_id`, `product_id`, `uid` (hex). The run's `versions.json` `firmware_running` and `summary.json` `firmware_running` = that hash, `summary.json` `fcu_params` = the status; a hash that disagrees with `versions.json` `firmware_expected_sha` is a note | until the child finishes both files say `pending` (a recorder that dies mid-read leaves that). Link unreachable, no autopilot heartbeat, `pymavlink` missing, script missing, interpreter not startable, a child stopped at `fcu_param_dump_timeout_s` or when the run ends first, a child that wrote nothing: each is recorded in `params_fcu.json`/`versions_fcu.json` as `unavailable` (or `incomplete`, with `missing_indices`) **with the reason**, `firmware_running` = `unavailable: <reason>`, a note, `provenance_complete` false. The run itself is never affected. FCU parameters are read once, at run start (a change during the run is in the ULog `P` messages, not here) |
 | `path_artifact_sha256`, `source_artifact_sha256` (`manifest.json`) | `MissionState` at the message that opens the run (mission contract v2): `path_artifact_sha256` = the **execution** artifact RPP loads (the trajectory placed in the EKF frame); `source_artifact_sha256` = the artifact the operator started. The two are equal for a source already in the EKF frame (`ekf_local_ned`). Both are the run's evidence of what was driven and from what | empty if `MissionState` carried none (recorded as the empty string, not omitted) |
 | `conditioned_execution_sha256` (`manifest.json` / `summary.json`) | `/dyx3/rpp/status` (REC-016): the id of the conditioned execution geometry RPP executes, for the run's `mission_id` only; manifest = value at run start, summary = value during the run (a change is a note) | not reported for the mission -> empty, a note, `provenance_complete` false |
 | timesync (`manifest.json` / `summary.json`) | `Px4LinkStatus.timesync_*` (interfaces 0.7.0), recorded at run start and end; a sample older than 1 s is recorded as `timesync_valid: false` (never as a number) with a note | F-tasks A1.4: the offset can be ~40 ms for minutes after boot; no gate consumes it (OPEN, see `dyx3_px4_link.md`) |
@@ -86,6 +90,11 @@ last split is uncompressed, and it is a valid WAL database). These options are a
 container (22 topics at production rates, 60 s, every float field noisy): default sqlite3 153 MB/h, these defaults **60 MB/h** (zstd per message: 108 MB/h).
 The payload alone compresses to ~30 MB/h; the rest is the sqlite row/index overhead. **OPEN (owner):** for < 50 MB/h install
 `ros-humble-rosbag2-storage-mcap` and set `bag_storage: mcap`, `bag_storage_preset: zstd_small`, `bag_compression_mode: none` (chunk compression; not measured here) ·
+`fcu_param_dump_enabled` true · `fcu_param_dump_cmd` `["{python}", "-I", "{script}", "--out", "{dir}/params_fcu.json", "--version-out", "{dir}/versions_fcu.json"]`
+(`{python}` = `fcu_param_dump_python` when executable, else `python3` from `PATH`; `{script}` = `$DYX3_RELEASE_DIR/tools/px4/param_dump.py`, else the
+nearest ancestor of the running binary holding `tools/px4/param_dump.py`, else `/opt/dyx3/current/tools/px4/param_dump.py`; `{dir}` = the run directory) ·
+`fcu_param_dump_python` `/opt/dyx3/third_party/pymavlink/bin/python3` (the venv `installer/lib/dependencies.sh` creates) · `fcu_param_dump_timeout_s` 30
+(DERIVED: a backstop above the script's own 20 s `--timeout`, after which it writes what it has; the child is then stopped SIGINT -> SIGTERM -> SIGKILL, 1 s each) ·
 `bag_finalize_timeout_s` 10 (DERIVED: the last split is compressed while finalising) · `param_timeout_s` 2 (DERIVED) · `status_hz` 2 (DERIVED) · `min_free_bytes` **2 GiB** (REC-001, DERIVED; 0 = off) · `max_runs_bytes` **20 GiB** (retention budget, DERIVED; 0 = off) · `mission_silence_s` 3 (REC-008, DERIVED) · `max_bag_restarts` 1 (REC-012, DERIVED) · `bag_stall_s` **0 = off** (rosbag2's sqlite file does not grow every second; no source).
 **OPEN:** whether to also bag the raw `/fmu/out/**` topics (default: not recorded; the `/dyx3/vehicle_state` fan-out is).
 
@@ -93,7 +102,12 @@ The payload alone compresses to ~30 MB/h; the rest is the sqlite row/index overh
 
 Off-target: manifest/summary JSON (escaping, determinism, non-finite -> null), run naming and collision, config snapshot secret exclusion, ULog reassembly (wrap, duplicate, gap, out-of-order),
 bag supervision against a fake child (start, finalise on SIGINT, escalation on a child that ignores SIGINT, death detected), the lifecycle table, a node test with a fake bag command and an injected clock.
-**Not provable off-target:** `ros2 bag record` itself (rosbag2 is not installed in CI), disk-full behaviour, the systemd unit, real FCU ULog bytes.
+FCU read (REC-025): `param_dump.py` against a fake MAVLink connection (`tools/tests/test_param_dump.py`: a lost index re-read, byte-wise INT32,
+exact REAL32, AUTOPILOT_VERSION bytes -> hash, REQUEST_MESSAGE fallback, timeout, unreachable link, no pymavlink, interrupt) and the recorder against
+fake dump children (written, mismatch note, hung child stopped at the timeout, child outliving its run, unstartable, disabled).
+**Not provable off-target:** `ros2 bag record` itself (rosbag2 is not installed in CI), disk-full behaviour, the systemd unit, real FCU ULog bytes,
+the FCU read against real PX4 through `mavlink-router` (parameter count, duration, `_HASH_CHECK`, the hash of firmware `8279fa4be3`), and whether a
+parameter stream at READY changes any `/fmu` topic rate on the shared Ethernet link (**measure on the bench before relying on it in the field**).
 
 ## 7. Disk safety and retention (REC-001)
 

@@ -129,6 +129,8 @@ std::string summary_json(const RunSummary& s) {
       .str("conditioned_execution_sha256", s.conditioned_execution_sha256)
       .boolean("bag_healthy_throughout", s.bag_healthy_throughout)
       .boolean("provenance_complete", s.provenance_complete)
+      .str("firmware_running", s.firmware_running)
+      .str("fcu_params", s.fcu_params)
       .boolean("timesync_valid_end", s.timesync_valid_end)
       .integer("timesync_offset_us_end", s.timesync_offset_us_end)
       .integer("timesync_round_trip_us_end", s.timesync_round_trip_us_end)
