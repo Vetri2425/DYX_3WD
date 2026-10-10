@@ -12,6 +12,11 @@ struct HandshakeTopic {
   std::string request_name;  // base topic name sent in the request, e.g. "/fmu/in/vehicle_command"
   uint32_t expected_hash{0};
   bool definition_missing{false};  // the installed px4_msgs had no .msg for it: permanent mismatch
+  // Optional topic (contract section 6): requested and proven like the others, but its state never
+  // enters state() or pending_count(), so an unanswered or mismatched optional topic can never
+  // hold the link in Pending or Mismatch. The node uses the topic's data only while
+  // topic_state(i) == Ok; Pending (no response yet) and Mismatch both mean "unusable".
+  bool optional{false};
 };
 
 enum class HandshakeState : uint8_t { Pending = 0, Ok, Mismatch };
@@ -32,17 +37,29 @@ public:
   // may be on the other side. Returns nothing; call after StalenessMonitor::consume_reset().
   void rearm();
 
-  HandshakeState state() const;  // Mismatch if any mismatched, Ok if all Ok, else Pending
-  size_t pending_count() const;
+  // Required topics only: Mismatch if any mismatched, Ok if all Ok (and there is at least one),
+  // else Pending. Optional topics never change it.
+  HandshakeState state() const;
+  size_t pending_count() const;  // required topics still Pending
+  // Reason of the latest mismatch of a required topic (empty if none).
   const std::string& first_mismatch_reason() const { return mismatch_reason_; }
   uint32_t generation() const { return generation_; }
+
+  // Per-topic view, `i` as in due_requests() (constructor order).
+  size_t size() const { return e_.size(); }
+  const HandshakeTopic& topic(size_t i) const { return e_[i].t; }
+  HandshakeState topic_state(size_t i) const { return e_[i].s; }
+  // Why topic `i` is Mismatch in this generation (empty otherwise).
+  const std::string& topic_mismatch_reason(size_t i) const { return e_[i].reason; }
 
 private:
   struct Entry {
     HandshakeTopic t;
     HandshakeState s{HandshakeState::Pending};
     double last_sent_s{-1.0e18};
+    std::string reason;  // set when s becomes Mismatch
   };
+  void mark_mismatch(Entry& en, std::string why);
   std::vector<Entry> e_;
   double retry_s_;
   std::string mismatch_reason_;

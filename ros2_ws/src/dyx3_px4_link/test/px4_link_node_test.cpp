@@ -15,6 +15,7 @@
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <set>
 #include <thread>
 
 #include "dds_test_support.hpp"
@@ -52,7 +53,8 @@ const std::map<std::string, std::string> kTopicType = {
     {"/fmu/out/vehicle_gps_position", "SensorGps"},
     {"/fmu/out/ulog_stream", "UlogStream"},
     {"/fmu/out/vehicle_command_ack", "VehicleCommandAck"},
-    {"/fmu/out/battery_status", "BatteryStatus"}};
+    {"/fmu/out/battery_status", "BatteryStatus"},
+    {"/fmu/out/failsafe_flags", "FailsafeFlags"}};  // optional topic of the link
 
 void init_ctx(const std::shared_ptr<rclcpp::Context>& ctx) { dyx3_test::init_isolated(ctx); }
 
@@ -84,6 +86,7 @@ struct Rig {
   rclcpp::Publisher<px4_msgs::msg::VehicleLocalPosition>::SharedPtr p_lp;
   rclcpp::Publisher<px4_msgs::msg::VehicleStatus>::SharedPtr p_st;
   rclcpp::Publisher<px4_msgs::msg::BatteryStatus>::SharedPtr p_bat;
+  rclcpp::Publisher<px4_msgs::msg::FailsafeFlags>::SharedPtr p_ff;
   rclcpp::Publisher<px4_msgs::msg::VehicleAttitude>::SharedPtr p_att;
   rclcpp::Publisher<px4_msgs::msg::EstimatorStatusFlags>::SharedPtr p_fl;
   rclcpp::Publisher<px4_msgs::msg::SensorGps>::SharedPtr p_gps;
@@ -114,7 +117,9 @@ struct Rig {
   rclcpp::Client<dyx3_interfaces::srv::ArmDisarm>::SharedPtr cli_arm;
   uint64_t seq{0};
   bool fcu_answers_handshake{true};
-  int hash_error_on{-1};  // lie about this topic's hash
+  int hash_error_on{-1};             // lie about this topic's hash
+  std::string hash_lie_topic;        // lie about this topic's hash (by request name)
+  std::set<std::string> unanswered;  // the FCU never answers these handshake requests
   bool alive{true}, lp_alive{true}, att_alive{true};
   double att_yaw_rate{0.0};  // rad/s, NED (clockwise positive); yaw = rate * (now - 100)
   uint8_t nav_state{0}, arming_state{1};
@@ -160,6 +165,7 @@ struct Rig {
         fcu->create_publisher<px4_msgs::msg::VehicleStatus>("/fmu/out/vehicle_status_v1", sensor);
     p_bat =
         fcu->create_publisher<px4_msgs::msg::BatteryStatus>("/fmu/out/battery_status_v1", sensor);
+    p_ff = fcu->create_publisher<px4_msgs::msg::FailsafeFlags>("/fmu/out/failsafe_flags", sensor);
     p_att =
         fcu->create_publisher<px4_msgs::msg::VehicleAttitude>("/fmu/out/vehicle_attitude", sensor);
     p_fl = fcu->create_publisher<px4_msgs::msg::EstimatorStatusFlags>(
@@ -253,6 +259,7 @@ struct Rig {
           link->count_subscribers("/dyx3/px4_link/status") > 0 &&
           fcu->count_subscribers("/dyx3/motion_guard/command") > 0 &&
           fcu->count_subscribers("/fmu/out/vehicle_status_v1") > 0 &&
+          fcu->count_subscribers("/fmu/out/failsafe_flags") > 0 &&
           fcu->count_subscribers("/fmu/out/message_format_response") > 0 &&
           cli_off->service_is_ready() && cli_arm->service_is_ready() &&
           link->count_publishers("/dyx3/vehicle_state") > 0 &&
@@ -274,6 +281,7 @@ struct Rig {
     size_t n = 0;
     while (n < rq.topic_name.size() && rq.topic_name[n] != 0) ++n;
     const std::string name(rq.topic_name.begin(), rq.topic_name.begin() + n);
+    if (unanswered.count(name) != 0) return;  // this topic's response never arrives
     px4_msgs::msg::MessageFormatResponse r;
     r.protocol_version = 1;
     r.topic_name = rq.topic_name;
@@ -286,6 +294,7 @@ struct Rig {
         if (kv.first == name && idx == hash_error_on) r.message_hash ^= 0x1U;
         ++idx;
       }
+      if (name == hash_lie_topic) r.message_hash ^= 0x1U;
     }
     p_resp->publish(r);
   }
@@ -2403,4 +2412,110 @@ TEST(Px4LinkNode, TimerModeWritesOnlyOnTheWriterTick) {
   r.link->on_timer(r.now + 0.001);
   ASSERT_TRUE(r.pump_until([&] { return !r.speed.empty(); }));
   EXPECT_FLOAT_EQ(r.speed.back().speed_body_x, 0.4F);
+}
+
+// --- RC link (interfaces 0.17.0): optional failsafe_flags, never a link fault or a gate ----------
+namespace {
+constexpr const char* kFailsafeTopic = "/fmu/out/failsafe_flags";
+HandshakeState failsafe_entry_state(Rig& r) {
+  const auto& h = r.link->handshake();
+  for (size_t i = 0; i < h.size(); ++i) {
+    if (h.topic(i).request_name == kFailsafeTopic) return h.topic_state(i);
+  }
+  ADD_FAILURE() << "failsafe_flags is not requested in the handshake";
+  return HandshakeState::Mismatch;
+}
+void publish_failsafe(Rig& r, bool rc_lost) {
+  px4_msgs::msg::FailsafeFlags f;
+  f.manual_control_signal_lost = rc_lost;
+  r.p_ff->publish(f);
+}
+size_t failsafe_requests(const Rig& r) {
+  size_t n = 0;
+  for (const auto& q : r.reqs) {
+    if (std::strcmp(reinterpret_cast<const char*>(q.topic_name.data()), kFailsafeTopic) == 0) ++n;
+  }
+  return n;
+}
+}  // namespace
+
+TEST(Px4LinkNode, RcLinkFollowsFailsafeFlagsOnlyWhileFreshAndProven) {
+  Rig r;
+  r.fcu_answers_handshake = false;
+  publish_failsafe(r, false);  // a sample before its format is proven is not used
+  r.run(0.1);
+  ASSERT_GT(r.state_count, 0);
+  EXPECT_FALSE(r.state.rc_link_valid);
+  EXPECT_FALSE(r.state.rc_link_ok);
+  r.fcu_answers_handshake = true;
+  r.bring_up();
+  r.run(3.2);  // the early sample has aged out
+  ASSERT_EQ(failsafe_entry_state(r), HandshakeState::Ok);
+  EXPECT_FALSE(r.state.rc_link_valid);  // proven format, no fresh sample: unknown
+  EXPECT_FALSE(r.state.rc_link_ok);
+
+  publish_failsafe(r, false);
+  r.run(0.1);
+  EXPECT_TRUE(r.state.rc_link_valid);
+  EXPECT_TRUE(r.state.rc_link_ok);
+  publish_failsafe(r, true);  // PX4: manual control (RC) signal lost
+  r.run(0.1);
+  EXPECT_TRUE(r.state.rc_link_valid);
+  EXPECT_FALSE(r.state.rc_link_ok);
+  publish_failsafe(r, false);
+  r.run(0.1);
+  ASSERT_TRUE(r.state.rc_link_ok);
+  r.run(3.2);  // no sample for longer than 3 s: unknown, never the last value
+  EXPECT_FALSE(r.state.rc_link_valid);
+  EXPECT_FALSE(r.state.rc_link_ok);
+  // The silence is no link fault: no staleness bit, the handshake and the session are unaffected.
+  EXPECT_TRUE(r.status.handshake_ok);
+  EXPECT_TRUE(r.status.session_alive);
+  EXPECT_EQ(r.status.stale_topics_mask, 0U);
+}
+
+TEST(Px4LinkNode, UnansweredOptionalTopicNeverHoldsTheLinkOrTheSetpointStream) {
+  Rig r;
+  r.unanswered.insert(kFailsafeTopic);  // firmware without failsafe_flags on DDS
+  activate(r);                          // handshake_ok and an Active OFFBOARD session without it
+  EXPECT_TRUE(r.status.handshake_ok);
+  EXPECT_EQ(failsafe_entry_state(r), HandshakeState::Pending);
+  r.clear();
+  r.guard(2, 0.3F, NaN, 0.1F);
+  r.tick();
+  ASSERT_FALSE(r.speed.empty());
+  EXPECT_FLOAT_EQ(r.speed.back().speed_body_x, 0.3F);  // the guard command is forwarded
+  EXPECT_NE(r.status.fault, dyx3_interfaces::msg::Px4LinkStatus::FAULT_HANDSHAKE_PENDING);
+  publish_failsafe(r, false);  // a sample of an unproven format is never used
+  r.run(0.1);
+  EXPECT_FALSE(r.state.rc_link_valid);
+  EXPECT_FALSE(r.state.rc_link_ok);
+  r.reqs.clear();
+  r.run(1.5);
+  EXPECT_GE(failsafe_requests(r), 1U);  // still re-requested every handshake_retry_s
+  EXPECT_TRUE(r.status.handshake_ok);
+  EXPECT_FALSE(r.ocm.empty());  // the heartbeat keeps running
+}
+
+TEST(Px4LinkNode, OptionalTopicMismatchKeepsTheLinkAndLeavesRcInvalid) {
+  Rig r;
+  r.hash_lie_topic = kFailsafeTopic;
+  activate(r);
+  EXPECT_EQ(failsafe_entry_state(r), HandshakeState::Mismatch);
+  EXPECT_EQ(r.link->handshake().state(), HandshakeState::Ok);
+  EXPECT_TRUE(r.status.handshake_ok);
+  EXPECT_NE(r.status.fault, dyx3_interfaces::msg::Px4LinkStatus::FAULT_HANDSHAKE_MISMATCH);
+  r.clear();
+  r.guard(2, 0.3F, NaN, 0.1F);
+  r.tick();
+  ASSERT_FALSE(r.speed.empty());
+  EXPECT_FLOAT_EQ(r.speed.back().speed_body_x, 0.3F);
+  publish_failsafe(r, false);  // decoded with a definition that differs: unusable
+  r.run(0.1);
+  EXPECT_FALSE(r.state.rc_link_valid);
+  EXPECT_FALSE(r.state.rc_link_ok);
+  r.reqs.clear();
+  r.run(1.5);
+  EXPECT_EQ(failsafe_requests(r), 0U);  // latched for this generation: never re-asked
+  EXPECT_TRUE(r.status.handshake_ok);
 }

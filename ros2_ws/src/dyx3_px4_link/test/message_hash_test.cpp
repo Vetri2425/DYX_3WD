@@ -80,6 +80,17 @@ TEST(MessageHash, NestedTypesAreExpanded) {
   }
 }
 
+// failsafe_flags is an optional topic of the link (contract section 6): its fixture definition is
+// the pinned firmware's msg/FailsafeFlags.msg verbatim, proven against the firmware's vector.
+TEST(MessageHash, FailsafeFlagsFixtureMatchesFirmware) {
+  const auto res = dir_resolver(std::string(DYX3_FIXTURES) + "/msgdefs");
+  std::string err;
+  const auto h = message_hash("FailsafeFlags", res, &err);
+  ASSERT_TRUE(h.has_value()) << err;
+  EXPECT_EQ(*h, vectors().at("FailsafeFlags"));
+  EXPECT_EQ(*h, 1776302583U);  // test/fixtures/px4_msg_hash_vectors.txt
+}
+
 TEST(MessageHash, MissingDefinitionIsAnError) {
   const auto res = dir_resolver(std::string(DYX3_FIXTURES) + "/msgdefs");
   std::string err;

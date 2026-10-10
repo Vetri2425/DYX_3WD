@@ -37,6 +37,12 @@ the DDS topic when the version is above 0:
 | out | `/fmu/out/vehicle_command_ack` | VehicleCommandAck | best effort | spray ACK matching (section 14) |
 | out | `/fmu/out/message_format_response` | MessageFormatResponse | best effort, depth 10 | handshake; a lost response is re-requested |
 | out | `/fmu/out/ulog_stream` | UlogStream | best effort, depth 16 | no firmware rate limit |
+| out | `/fmu/out/failsafe_flags` | FailsafeFlags (v0) | best effort | **optional** (0.17.0): handshake requested but never required (section 6), no staleness bit, no fault, no gate; RC link only (section 8) |
+
+`failsafe_flags` is listed in the pinned firmware's `dds_topics.yaml` (rate limit 5 Hz)
+but has **not been observed on the rover's DDS session**; it is therefore optional: if it never arrives, is not
+answered or does not match, nothing changes except `VehicleState.rc_link_valid = false`. The one-time INFO
+"first /fmu/out/failsafe_flags sample" in the journal shows that the topic exists on a rover.
 
 **QoS of `/fmu/in`:** reliable. DERIVED — NOT FROM V1 SPEC: the XRCE agent's reader is reliable (the
 stock PX4 offboard examples publish with the default reliable QoS); a best-effort writer would not
@@ -189,6 +195,14 @@ equal to the hash it computes from the **installed** `px4_msgs` `.msg` definitio
   Until all responses arrive the fault is `FAULT_HANDSHAKE_PENDING` (not permanent).
 - `.msg` definitions come from the installed `px4_msgs` (`share/px4_msgs/msg/*.msg`). A missing
   definition is a mismatch, not a skip.
+- **Optional topics** (0.17.0: `/fmu/out/failsafe_flags` only). Requested and proven exactly like the used set
+  (same request, same hash, same retry, same latching, re-armed by a session reset), but an optional entry never enters
+  the aggregate state: `handshake_ok`, `FAULT_HANDSHAKE_PENDING`/`FAULT_HANDSHAKE_MISMATCH`, link health, the setpoint
+  gate and RTCM forwarding depend on the used set only. The topic's data is used only while its own entry is proven in
+  the current generation. No response yet: unknown, the data is not used, the request is re-sent every
+  `handshake_retry_s` (indefinitely while the firmware does not answer). `success=false`, a different hash or no local
+  definition: the topic is unusable for this generation, one `WARN` per generation, never `ERROR`, never a fault.
+  Without the handshake an optional topic could decode a different definition silently; this is the guard against it.
 - The pure hash function is proven against the firmware's own Python implementation, run
   unmodified through a parsing shim over every message of the pinned firmware
   (`tools/px4_msg_hash/`); vectors in `test/fixtures/px4_msg_hash_vectors.txt`.
@@ -245,6 +259,14 @@ above, the same convention as `heading_rad`. It is published only while `attitud
 estimate is running; otherwise it is **0, which also means "unknown"** (field semantics unchanged;
 no validity flag depends on it). Quantisation: float32 quaternions limit a single 10 ms delta to
 about 1e-5 rad, i.e. about 1 mrad/s of noise before the filter.
+
+`rc_link_valid`, `rc_link_ok` (0.17.0, RC link as PX4 sees it): from the optional `failsafe_flags` (sections 1 and 6).
+`rc_link_valid` is true only while a `failsafe_flags` sample is at most 3.0 s old **and** the topic's handshake entry
+is proven in the current generation (unanswered or mismatched: false, whatever arrives). `rc_link_ok =
+rc_link_valid && !manual_control_signal_lost`; it is never true without `rc_link_valid`. px4_link gates nothing on
+either field and `Px4LinkStatus` is unchanged; the consumer decides (the guard may require `rc_link_ok` before arming,
+`VehicleState.msg`). DERIVED — NOT FROM V1 SPEC: the 3.0 s freshness reuses the display-only battery freshness; the
+firmware rate limit is 5 Hz and the period has not been measured on the rover (re-validate from a recorded bag).
 
 ## 9. Arm and mode
 
