@@ -10,10 +10,11 @@ or tablet E-stop is a **request** to `dyx3_motion_guard`. If the gateway is not 
 | Route | Role | Notes |
 |---|---|---|
 | `GET /ping` | none | liveness, plus `rover_id` and `rover_name` (identity, no secret; see 1a) |
-| `GET /health` | viewer | backend, gateway connection, age of the last telemetry, tablet heartbeat, `relay_running` (the relay task is alive), `operator_alive` (relay running, tablet fresh, and a relayed heartbeat acknowledged by the gateway within `tablet_heartbeat_timeout_s`; the gateway's own timer stays authoritative) |
+| `GET /health` | viewer | backend, gateway connection, age of the last telemetry, tablet heartbeat, `relay_running` (the relay task is alive), `operator_alive` (relay running, tablet fresh, and a relayed heartbeat acknowledged by the gateway within `tablet_heartbeat_timeout_s`; the gateway's own timer stays authoritative), and a diagnostic `mission` block (section 1c) |
 | `POST /missions` (multipart: `file` + optional `origin_n`, `origin_e`, `rotation_deg`, `unit_scale`, `close_loop`, `anchor`) | operator | upload -> path engine -> `DYX3PATH 1` artifact stored by sha256 (idempotent) -> summary |
-| `GET /missions`, `GET /missions/{sha}`, `GET /missions/{sha}/path` | viewer | stored artifacts, summary, points |
-| `POST /missions/{sha}/start` | operator | gateway `start_mission` |
+| `POST /missions/plan` (JSON) | operator | app-planned mission (section 1b) -> `DYX3PATH 1` artifact stored by sha256 -> **201** `{ok, mission, normalisation}` |
+| `GET /missions`, `GET /missions/{sha}`, `GET /missions/{sha}/path` | viewer | stored artifacts, summary, points; `/path` also returns `frame` and `anchor` (section 1b) |
+| `POST /missions/{sha}/start` `{request_id?}` | operator | gateway `start_mission`; **202** accepted (section 1c) |
 | `POST /mission/abort` `{reason}` / `pause` / `resume` / `skip_point` | operator | gateway |
 | `POST /estop` `{asserted}` | **assert: any authenticated role; clear: operator** | gateway `estop` with `source = "tablet"` |
 | `POST /vehicle/arm` `{arm}`, `POST /vehicle/offboard` `{enable}`, `POST /spray/manual` `{on}` | operator | gateway |
@@ -21,7 +22,7 @@ or tablet E-stop is a **request** to `dyx3_motion_guard`. If the gateway is not 
 | `GET /telemetry` | viewer | the latest gateway snapshot, with its age |
 | `GET /runs`, `GET /runs/{id}` | viewer | the recorder's `summary.json` / `manifest.json` (read-only) |
 
-Error mapping of a gateway verdict: `ok` -> 200; downstream `rejected` -> 409 (body carries the downstream `reason_code`, verbatim); `invalid_command` -> 400; `service_unavailable` -> 503;
+Error mapping of a gateway verdict: `ok` -> 200 (`start`: 202, section 1c); downstream `rejected` -> 409 (body carries the downstream `reason_code`, verbatim); `invalid_command` -> 400; `service_unavailable` -> 503;
 `timeout` -> 504; gateway not connected -> 503 with `"delivered": false`. Every error body: `{"ok":false,"code":...,"reason":...,"delivered":bool,"data":...}`.
 An upload is rejected (413/415/422) for: size over `upload_max_bytes`, extension not `.dxf`/`.csv`/`.waypoints`, an engine error (message returned), or an artifact the reader would refuse. The uploaded name is never used as a path.
 
@@ -49,6 +50,110 @@ thread that shares the GIL with the heartbeat relay:
 - point budget `plan_max_points` (`DYX3_PLAN_MAX_POINTS`, default 200 000, DERIVED) for a DXF plan -> **422** `points_limit_exceeded`
   (an app plan keeps its own 50 000-point limit);
 - a JSON body nested too deeply -> **400** `INVALID_PAYLOAD`; a planning process that dies without a result -> **500** `planner_crashed`.
+
+## 1b. App-planned missions (`POST /missions/plan`, mission contract v2)
+
+The tablet owns the trajectory: it parses the file, splits it into runs and sends them. The backend **never re-plans** it; it
+validates, applies only the two lossless normalisations below, and stores the result. Where this section and
+`app_planned_mission.md` (v1.1) differ, this section is the contract.
+
+**Payload.**
+```json
+{"client": "Three_Wheel_v2", "client_version": "2.0.0", "name": "Pitch_A",
+ "frame": "local_ned", "anchor": {"lat": 48.137154, "lon": 11.576124, "alt": 519.5},
+ "origin_ne_m": [0.0, 0.0],
+ "runs": [{"type": "travel", "points": [[0.0, 0.0, 2], [12.0, 0.0, 2]]},
+          {"type": "mark",   "points": [[12.007, 0.0, 3], [14.0, 0.0, 1], [16.0, 0.0, 3]]}]}
+```
+- `client`, `client_version` (nonempty strings), `frame`, `runs` are required; `name` (<= 128 characters, default
+  `app_planned_mission`) and `origin_ne_m` (`[north, east]`, default `[0, 0]`, recorded as given) are optional.
+- A run is `{"type": "mark"|"travel", "points": [[north_m, east_m, flags], ...]}`, at least two points; flags 0..3 (bit 0 spray
+  intent, bit 1 must-hit). Coordinates are finite and within +-10 000 m; at most 50 000 submitted points.
+- Rules R1-R4 of `app_planned_mission.md` are unchanged (spray bit matches the run type, runs alternate, runs are contiguous, the
+  shared boundary point keeps the previous run's coordinates and spray bit and ORs both must-hit bits).
+
+**Frame and anchor (safety-critical).**
+- `frame: "local_ned"` = north/east metres relative to the geodetic `anchor`, the WGS84 position of the trajectory's local
+  origin. **An anchor is required**: without one -> 422 `ANCHOR_REQUIRED`. Points relative to an app GPS origin are never
+  driven as if they were EKF-local.
+- `frame: "ekf_local_ned"` = the points are already in the rover's EKF local frame (bench and debug). It takes no anchor
+  (an anchor with it -> 422 `INVALID_FRAME`).
+- Any other frame -> 422 `INVALID_FRAME`.
+- `anchor` = `{lat, lon, alt?}`: WGS84 degrees, finite numbers (not booleans or strings), `|lat| <= 90`, `|lon| <= 180`;
+  `alt` optional (ellipsoid height in m, finite, `|alt| <= 10 000`, DERIVED). Unknown keys, a missing `lat`/`lon` or a
+  non-object -> 422 `INVALID_ANCHOR`. `anchor: null` counts as no anchor.
+
+**Normalisation (lossless, reported).**
+1. **Densify:** a step longer than 5 m (`MAX_STEP_M`) is split into `ceil(length / 5)` equal collinear sub-steps. The
+   inserted points lie on the submitted segment, carry the run's spray bit and never the must-hit bit (they are not app
+   vertices). The mark/transit lengths are the drawn lengths (unchanged). This replaces v1's `STEP_TOO_LARGE` refusal.
+   At most 200 000 points are stored after densify (DERIVED) -> otherwise 422 `POINTS_LIMIT_EXCEEDED`.
+2. **Boundary snap:** a run whose first point is within **10 mm** (Euclidean) of the previous run's end is moved exactly onto
+   it (v1: 1 mm per axis). Over 10 mm -> 422 `runs_not_contiguous`.
+
+**Artifact.** `DYX3PATH 1` (`path_artifact.md`), `engine app_v1`, header line `frame local_ned` unchanged (the C++ reader
+accepts only that). The canonical meta records:
+
+| meta key | value |
+|---|---|
+| `frame` | `"local_ned"` or `"ekf_local_ned"`, as submitted |
+| `anchor` | `{"alt": float\|null, "lat": float, "lon": float}` for `local_ned`; `null` for `ekf_local_ned` |
+| `densified_steps` | number of submitted steps that were split |
+| `max_boundary_snap_m` | largest boundary snap in m (`0.0` when every boundary was bit-exact) |
+| `origin_ne_m`, `total_mark_length_m`, `total_transit_length_m`, `num_waypoints`, `source` | as in v1 |
+
+The same payload always yields the same bytes and sha256; a different anchor is a different mission.
+
+**Response** `201`:
+```json
+{"ok": true,
+ "mission": {"sha256": "45f5de73589602a4e0edaa26f0ac43a41e4215ed4afe2f027db42dccf3db49db", "engine_id": "app_v1",
+             "num_points": 6, "num_spray_points": 2,
+             "mark_length_m": 4.0, "transit_length_m": 12.0, "bbox_ne_m": [0.0, 0.0, 16.0, 0.0],
+             "source": {"type": "app_planned", "client": "Three_Wheel_v2", "client_version": "2.0.0",
+                        "name": "Pitch_A", "num_runs": 2}},
+ "normalisation": {"densified_steps": 1, "max_boundary_snap_m": 0.006999999999999673}}
+```
+For that payload the stored points (and the preview) are `[[0.0,0.0,2],[4.0,0.0,0],[8.0,0.0,0],[12.0,0.0,2],[14.0,0.0,1],[16.0,0.0,3]]`:
+the 12 m travel leg became three 4 m sub-steps, the mark run starts exactly at `[12.0, 0.0]` with the travel run's spray bit
+and the OR of both must-hit bits (R4).
+Errors: `{"ok": false, "code", "reason"}`; 400 `INVALID_PAYLOAD` (invalid JSON, missing or malformed structure), 422 for
+`ANCHOR_REQUIRED`, `INVALID_ANCHOR`, `INVALID_FRAME`, `INVALID_RUN_TYPE`, `INVALID_FLAGS`, `NON_FINITE_COORDINATE`,
+`OUT_OF_BOUNDS`, `EMPTY_MISSION`, `RUN_TOO_SHORT`, `POINTS_LIMIT_EXCEEDED`, `mixed_spray_in_run`, `adjacent_runs_same_type`,
+`runs_not_contiguous`; plus the admission and planning-budget answers of section 1.
+
+**Preview** `GET /missions/{sha}/path` returns the stored geometry, bit-exact what is driven before placement:
+`{"sha256", "frame", "anchor", "points": [[north_m, east_m, flags], ...]}`, e.g.
+`{"sha256": "45f5…", "frame": "local_ned", "anchor": {"alt": 519.5, "lat": 48.137154, "lon": 11.576124}, "points": [...]}`. `frame` and `anchor` come from the meta; an
+artifact without them (a DXF upload) reads `"frame": "local_ned", "anchor": null`.
+
+## 1c. Mission start and health (mission contract v2)
+
+**Start** `POST /missions/{sha}/start`, optional JSON body `{"request_id": "<id>"}` and/or header `Idempotency-Key: <id>`.
+- `<id>`: 1-64 characters of `A-Z a-z 0-9 . _ : -`; if both are given they must be equal. Otherwise 422
+  `invalid_request_id` (an unknown body key is FastAPI's 422). Nothing reaches the gateway.
+- The artifact must be readable here first (400 `bad_id`, 404 `not_found`).
+- Gateway command: `{"cmd": "start_mission", "args": {"path_artifact_sha256": "<sha>", "request_id": "<id>"}}`;
+  `request_id` is present only when the client sent one (the backend never invents one). The mission side owns
+  idempotency: a duplicate id returns the same execution and starts nothing new. The backend keeps no state for it.
+- Accepted -> **202**: an acknowledgement only; the lifecycle (loading, placing, arming, ...) arrives as Socket.IO events,
+  never by polling.
+  ```json
+  {"ok": true, "accepted": true,
+   "execution": {"mission_id": 7, "request_id": "tab-1:9f2c"},
+   "data": {"accepted": true, "reason_code": 0, "mission_id": 7}}
+  ```
+  `execution.mission_id` is the gateway reply's `data.mission_id` (null if absent); `execution.request_id` is the id sent
+  (null without one); `data` is the gateway reply's `data`, untouched.
+- Errors, typed `{"ok": false, "code", "reason", "delivered", "data"}` with the gateway's `data` (including the mission's
+  `reason_code`) untouched: `rejected` -> **409**; `invalid_command` -> 400; `service_unavailable` / `busy` -> 503;
+  gateway not connected -> **503** `"delivered": false` (not delivered: nothing started); `timeout` or no reply in time ->
+  **504** `"delivered": null` (unknown: re-read the mission state before retrying with the same `request_id`).
+
+**Health** `GET /health` includes a diagnostic `mission` block copied from the latest gateway snapshot's `mission` source:
+`{"lifecycle_state": str|null, "last_error": any|null, "age_s": float|null, "fresh": bool}`. A field the snapshot does not
+carry is null; `fresh` is true only when the snapshot is fresh (`telemetry_stale_s`) and its mission source is `fresh`.
+Diagnostic only: nothing depends on polling it.
 
 
 ## 1a. Rover identity and LAN discovery
@@ -106,6 +211,7 @@ Client -> server: `heartbeat` (operator only, as above), `estop` `{asserted}` (s
 ## 6. Acceptance
 
 Off-target: token store (hashing, roles, fail-closed), gateway client against a fake socket server (framing, reconnect, timeout, pending requests failed on disconnect, telemetry cache), the REST surface with a fake gateway
-(auth matrix, error mapping, estop role rule, delivered:false), upload (size, extension, engine error, idempotent store, summary), the heartbeat relay timing, the Socket.IO hub with a fake emitter.
+(auth matrix, error mapping, estop role rule, delivered:false, start 202 / request id / typed start errors, the health mission block),
+app-plan admission (densify on the segment, boundary snap and its limit, frame and anchor rules, meta), upload (size, extension, engine error, idempotent store, summary), the heartbeat relay timing, the Socket.IO hub with a fake emitter.
 The Python client was also run once against the REAL C++ gateway node in the Humble container (`tools/gateway_smoke.py`): framing, replies, `service_unavailable` for every service command, `invalid_command` for an unknown one, telemetry push, all as specified.
 **Not provable off-target:** the gateway socket's permissions under systemd, the real tablet, WiFi behaviour, uvicorn under systemd.
