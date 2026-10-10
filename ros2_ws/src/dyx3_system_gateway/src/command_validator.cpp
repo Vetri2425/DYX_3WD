@@ -144,7 +144,7 @@ ParseResult parse_command(const std::string& line) {
   if (c == "spray_manual") return bool_arg(CmdKind::SprayManual, "on");
 
   if (c == "start_mission") {
-    if (!only_keys(*args, {"path_artifact_sha256", "request_id"}, &bad))
+    if (!only_keys(*args, {"path_artifact_sha256", "request_id", "resume"}, &bad))
       return fail(r, "invalid_command", "unknown argument '" + bad + "'");
     const JsonValue* s = need(*args, "path_artifact_sha256", JsonValue::Type::String);
     if (s == nullptr || !is_hex64(s->s)) {
@@ -157,6 +157,11 @@ ParseResult parse_command(const std::string& line) {
                         " characters of [A-Za-z0-9._:-]");
       }
       out.request_id = rid->s;
+    }
+    if (const JsonValue* rs = args->get("resume")) {
+      if (rs->type != JsonValue::Type::Bool)
+        return fail(r, "invalid_command", "resume must be a boolean");
+      out.resume = rs->b;
     }
     out.kind = CmdKind::StartMission;
     out.sha256 = s->s;

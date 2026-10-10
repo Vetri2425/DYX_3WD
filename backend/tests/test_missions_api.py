@@ -104,9 +104,10 @@ def plan_mission(c) -> str:
     return r.json()["mission"]["sha256"]
 
 
-def accepted(mission_id: int, duplicate: bool = False) -> dict:
+def accepted(mission_id: int, duplicate: bool = False, resumed_run_index: int = 0) -> dict:
     return {"v": 1, "ok": True, "code": "ok", "reason": "",
-            "data": {"accepted": True, "reason_code": 0, "mission_id": mission_id, "duplicate": duplicate, "gate_reason_code": 0}}
+            "data": {"accepted": True, "reason_code": 0, "mission_id": mission_id, "duplicate": duplicate, "gate_reason_code": 0,
+                     "resumed_run_index": resumed_run_index}}
 
 
 def test_start_answers_202_accepted_with_the_execution(rig):
@@ -116,9 +117,56 @@ def test_start_answers_202_accepted_with_the_execution(rig):
     r = c.post(f"/api/missions/{sha}/start", headers=H("oper-tok"))
     assert r.status_code == 202, r.text
     assert r.json() == {"ok": True, "accepted": True,
-                        "execution": {"mission_id": 7, "request_id": None, "duplicate": False, "gate_reason_code": 0},
-                        "data": {"accepted": True, "reason_code": 0, "mission_id": 7, "duplicate": False, "gate_reason_code": 0}}
-    assert gw.calls[-1] == ("start_mission", {"path_artifact_sha256": sha})  # no id: none is invented
+                        "execution": {"mission_id": 7, "request_id": None, "duplicate": False, "gate_reason_code": 0,
+                                      "resumed_run_index": 0},
+                        "data": {"accepted": True, "reason_code": 0, "mission_id": 7, "duplicate": False, "gate_reason_code": 0,
+                                 "resumed_run_index": 0}}
+    assert gw.calls[-1] == ("start_mission", {"path_artifact_sha256": sha})  # no id and no resume: none is invented
+
+
+@pytest.mark.parametrize("resume", [True, False])
+def test_start_passes_resume_through_and_reports_the_resumed_run(rig, resume):
+    c, gw, _ = rig
+    sha = plan_mission(c)
+    gw.replies["start_mission"] = accepted(8, resumed_run_index=3 if resume else 0)
+    r = c.post(f"/api/missions/{sha}/start", headers=H("oper-tok"), json={"request_id": "tab-2:1", "resume": resume})
+    assert r.status_code == 202, r.text
+    assert gw.calls[-1] == ("start_mission", {"path_artifact_sha256": sha, "request_id": "tab-2:1", "resume": resume})
+    assert r.json()["execution"] == {"mission_id": 8, "request_id": "tab-2:1", "duplicate": False, "gate_reason_code": 0,
+                                     "resumed_run_index": 3 if resume else 0}
+    assert r.json()["data"]["resumed_run_index"] == (3 if resume else 0)  # the gateway's data, untouched
+
+
+def test_start_resume_alone_and_an_older_gateway_reply(rig):
+    c, gw, _ = rig
+    sha = plan_mission(c)
+    gw.replies["start_mission"] = accepted(9, resumed_run_index=1)
+    r = c.post(f"/api/missions/{sha}/start", headers=H("oper-tok"), json={"resume": True})
+    assert r.status_code == 202, r.text
+    assert gw.calls[-1] == ("start_mission", {"path_artifact_sha256": sha, "resume": True})
+    assert r.json()["execution"]["resumed_run_index"] == 1
+    # a reply without the field (a gateway older than interfaces 0.17.0) reads null, never an invented 0
+    reply = accepted(9)
+    del reply["data"]["resumed_run_index"]
+    gw.replies["start_mission"] = reply
+    r = c.post(f"/api/missions/{sha}/start", headers=H("oper-tok"), json={"resume": True})
+    assert r.status_code == 202, r.text
+    assert r.json()["execution"]["resumed_run_index"] is None
+
+
+@pytest.mark.parametrize("value", [1, 0, "true", "yes", None, [], {}])
+def test_a_resume_that_is_not_a_boolean_is_422_and_never_reaches_the_gateway(rig, value):
+    c, gw, _ = rig
+    sha = plan_mission(c)
+    gw.calls.clear()
+    r = c.post(f"/api/missions/{sha}/start", headers=H("oper-tok"), json={"resume": value})
+    if value is None:
+        # an explicit null is the same as absent: a fresh start, nothing forwarded for resume
+        assert r.status_code == 202, r.text
+        assert gw.calls[-1] == ("start_mission", {"path_artifact_sha256": sha})
+        return
+    assert r.status_code == 422, r.text
+    assert gw.calls == []
 
 
 def test_start_passes_the_request_id_through_also_on_a_duplicate(rig):
@@ -131,7 +179,8 @@ def test_start_passes_the_request_id_through_also_on_a_duplicate(rig):
                   json={"request_id": "tab-1:9f2c"})
     for r in (first, again, both):
         assert r.status_code == 202, r.text
-        assert r.json()["execution"] == {"mission_id": 7, "request_id": "tab-1:9f2c", "duplicate": True, "gate_reason_code": 0}
+        assert r.json()["execution"] == {"mission_id": 7, "request_id": "tab-1:9f2c", "duplicate": True, "gate_reason_code": 0,
+                                         "resumed_run_index": 0}
     assert gw.calls[-3:] == [("start_mission", {"path_artifact_sha256": sha, "request_id": "tab-1:9f2c"})] * 3
 
 

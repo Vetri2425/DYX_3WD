@@ -181,10 +181,11 @@ def test_health_names_every_v2_state_reason_and_step(rig):
     from dyx3_backend.api.routes import MISSION_REASONS, MISSION_STATES, MISSION_WAITING_ON
 
     c, gw, _ = rig
-    # the numbers of interfaces 0.15.0: states 0..10, reasons 0..17, steps 0..8 (MissionState.msg)
+    # the numbers of interfaces 0.17.0: states 0..10, reasons 0..18, steps 0..8 (MissionState.msg)
     assert MISSION_STATES == {0: "IDLE", 1: "LOADING", 2: "READY", 3: "RUNNING", 4: "PAUSED", 5: "COMPLETED", 6: "ABORTED",
                               7: "ERROR", 8: "PLACING", 9: "ARMING", 10: "ENGAGING"}
-    assert list(MISSION_REASONS) == list(range(18)) and MISSION_REASONS[6] == "EKF_RESET" and MISSION_REASONS[17] == "RPP_STALE"
+    assert list(MISSION_REASONS) == list(range(19)) and MISSION_REASONS[6] == "EKF_RESET" and MISSION_REASONS[17] == "RPP_STALE"
+    assert MISSION_REASONS[18] == "RPP_PIVOT_TIMEOUT"
     assert list(MISSION_WAITING_ON) == list(range(9)) and MISSION_WAITING_ON[5] == "RPP_ACK"
     for state, name in MISSION_STATES.items():
         gw.snapshot, gw._age = {"mission": {"state": state, "reason_code": 0, "waiting_on": 0, "age_s": 0.1, "fresh": True}}, 0.2
