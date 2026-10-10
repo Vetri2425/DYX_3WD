@@ -15,6 +15,7 @@
 namespace {
 struct Sock {
   int fd{-1};
+  mutable std::string partial;  // bytes after the last newline seen by read_lines
   explicit Sock(const std::string& path) {
     fd = socket(AF_UNIX, SOCK_STREAM, 0);
     sockaddr_un a{};
@@ -30,10 +31,12 @@ struct Sock {
   }
   bool ok() const { return fd >= 0; }
   void write_all(const std::string& s) const { (void)!write(fd, s.data(), s.size()); }
-  // read until `want` newline-terminated lines or timeout
+  // Read until `want` newline-terminated lines or timeout. A read() can end inside a line (the
+  // kernel returns whatever bytes are there); that partial line is kept for the next call, never
+  // dropped. One read can also complete more than `want` lines: all of them are returned.
   std::vector<std::string> read_lines(size_t want, int timeout_ms = 2000) const {
     std::vector<std::string> out;
-    std::string buf;
+    std::string& buf = partial;
     const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     while (out.size() < want && std::chrono::steady_clock::now() < end) {
       pollfd p{fd, POLLIN, 0};
