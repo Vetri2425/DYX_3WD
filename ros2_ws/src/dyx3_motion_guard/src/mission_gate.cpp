@@ -8,16 +8,14 @@ constexpr uint8_t kOffboard = 14;
 constexpr uint8_t kMissionRunning = 3;
 
 // Shared by the full and the pre-arm gate: one definition of every gate, one priority order.
-// Owner decision 2026-10-10: the operator link (tablet heartbeat) is required to START, not to keep
-// running: the rover works on its own once started, so a tablet dropout never stops a run.
-Reason first_failing(const GateInputs& in, const GateConfig& cfg, bool require_armed_offboard,
-                     bool require_operator_link) {
+// Owner decision 2026-10-10: the tablet heartbeat (operator link) is not a gate at all, as in the
+// prototype: the rover starts, runs and stops on its own; E-stop and the RC kill are the stops.
+Reason first_failing(const GateInputs& in, const GateConfig& cfg, bool require_armed_offboard) {
   if (in.estop) return Reason::Estop;
   if (!in.link.fresh || !in.link.session_alive || !in.link.handshake_ok ||
       in.link.stale_topics_mask != 0U) {
     return Reason::Px4LinkUnhealthy;
   }
-  if (require_operator_link && (!in.op.fresh || !in.op.alive)) return Reason::OperatorLinkLost;
   if (!in.vehicle.fresh || in.vehicle.failsafe ||
       (require_armed_offboard &&
        (in.vehicle.arming_state != kArmed || in.vehicle.nav_state != kOffboard))) {
@@ -38,12 +36,11 @@ Reason first_failing(const GateInputs& in, const GateConfig& cfg, bool require_a
 }  // namespace
 
 Reason first_failing_safety_gate(const GateInputs& in, const GateConfig& cfg) {
-  return first_failing(in, cfg, /*require_armed_offboard=*/true, /*require_operator_link=*/false);
+  return first_failing(in, cfg, /*require_armed_offboard=*/true);
 }
 
 Reason first_failing_pre_arm_gate(const GateInputs& in, const GateConfig& cfg) {
-  const Reason r =
-      first_failing(in, cfg, /*require_armed_offboard=*/false, /*require_operator_link=*/true);
+  const Reason r = first_failing(in, cfg, /*require_armed_offboard=*/false);
   if (r != Reason::Ok) return r;
   return in.vehicle.global_reference_valid ? Reason::Ok : Reason::GlobalReferenceInvalid;
 }

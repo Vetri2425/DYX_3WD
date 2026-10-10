@@ -11,7 +11,6 @@
 #include "dyx3_interfaces/msg/mission_state.hpp"
 #include "dyx3_interfaces/msg/motion_setpoint.hpp"
 #include "dyx3_interfaces/msg/motion_setpoint_status.hpp"
-#include "dyx3_interfaces/msg/operator_link_status.hpp"
 #include "dyx3_interfaces/msg/px4_link_status.hpp"
 #include "dyx3_interfaces/msg/rtk_status.hpp"
 #include "dyx3_interfaces/msg/safety_gate_status.hpp"
@@ -31,7 +30,6 @@ struct MaxAges {
   double vehicle{0.5};
   double rtk{0.5};
   double estimator{0.5};
-  double operator_link{0.5};
   double px4_link{0.5};
   double mission{0.5};
 };
@@ -76,11 +74,10 @@ private:
   EstopLatch estop_;
 
   // latest inputs + arrival
-  Watch w_cmd_, w_veh_, w_rtk_, w_est_, w_op_, w_link_, w_mission_;
+  Watch w_cmd_, w_veh_, w_rtk_, w_est_, w_link_, w_mission_;
   VehicleIn veh_;
   RtkIn rtk_;
   EstimatorIn est_;
-  OperatorIn op_;
   Px4LinkIn link_;
   MissionIn mission_;
   // IF-003: px4_sample_stamp of the newest VehicleState; stamps the guard's own canonical STOP.
@@ -101,7 +98,6 @@ private:
   rclcpp::Subscription<dyx3_interfaces::msg::VehicleState>::SharedPtr sub_vehicle_;
   rclcpp::Subscription<dyx3_interfaces::msg::EstimatorHealth>::SharedPtr sub_est_;
   rclcpp::Subscription<dyx3_interfaces::msg::RtkStatus>::SharedPtr sub_rtk_;
-  rclcpp::Subscription<dyx3_interfaces::msg::OperatorLinkStatus>::SharedPtr sub_op_;
   rclcpp::Subscription<dyx3_interfaces::msg::Px4LinkStatus>::SharedPtr sub_link_;
   rclcpp::Service<dyx3_interfaces::srv::SetEmergencyStop>::SharedPtr srv_estop_;
   rclcpp::Publisher<dyx3_interfaces::msg::MotionSetpoint>::SharedPtr pub_cmd_;

@@ -1,8 +1,8 @@
 """Tablet heartbeat -> gateway heartbeat relay. Contract: docs/contracts/backend.md section 3.
 
 The relay forwards a gateway ``heartbeat`` only while the TABLET heartbeat is fresh, so a tablet dropout propagates to the gateway's
-operator-link timeout: ``dyx3_motion_guard`` then refuses a new start (pre-arm gate); a running mission continues (owner decision
-2026-10-10). The numbers are DERIVED (OPEN).
+operator-link timeout. The operator link is shown to the tablet; it is not a motion gate (owner decision 2026-10-10). The numbers
+are DERIVED (OPEN).
 """
 
 from __future__ import annotations

@@ -133,12 +133,6 @@ MotionGuardNode::MotionGuardNode(const rclcpp::NodeOptions& options, ClockFn clo
         rtk_.horizontal_accuracy_m = m->horizontal_accuracy_m;
         w_rtk_.touch(clock_());
       });
-  sub_op_ = create_subscription<dyx3_interfaces::msg::OperatorLinkStatus>(
-      "/dyx3/operator_link", rel1,
-      [this](dyx3_interfaces::msg::OperatorLinkStatus::ConstSharedPtr m) {
-        op_.alive = m->alive;
-        w_op_.touch(clock_());
-      });
   sub_link_ = create_subscription<dyx3_interfaces::msg::Px4LinkStatus>(
       "/dyx3/px4_link/status", rel1, [this](dyx3_interfaces::msg::Px4LinkStatus::ConstSharedPtr m) {
         link_.session_alive = m->session_alive;
@@ -203,11 +197,10 @@ void MotionGuardNode::declare_and_validate_params() {
   age_.vehicle = d("vehicle_state_max_age_s", 0.5);
   age_.rtk = d("rtk_status_max_age_s", 0.5);
   age_.estimator = d("estimator_health_max_age_s", 0.5);
-  age_.operator_link = d("operator_link_max_age_s", 0.5);
   age_.px4_link = d("px4_link_max_age_s", 0.5);
   age_.mission = d("mission_state_max_age_s", 0.5);
-  for (const double v : {age_.command, age_.vehicle, age_.rtk, age_.estimator, age_.operator_link,
-                         age_.px4_link, age_.mission}) {
+  for (const double v :
+       {age_.command, age_.vehicle, age_.rtk, age_.estimator, age_.px4_link, age_.mission}) {
     require(std::isfinite(v) && v > 0.0, "every *_max_age_s must be finite and > 0");
   }
   const int fix = static_cast<int>(declare_parameter<int>("rtk_min_fix_type", 6));
@@ -230,8 +223,6 @@ GateInputs MotionGuardNode::gather(double now_s) const {
   g.estop = estop_.asserted();
   g.link = link_;
   g.link.fresh = w_link_.fresh(now_s, age_.px4_link);
-  g.op = op_;
-  g.op.fresh = w_op_.fresh(now_s, age_.operator_link);
   g.vehicle = veh_;
   g.vehicle.fresh = w_veh_.fresh(now_s, age_.vehicle);
   g.rtk = rtk_;
@@ -242,7 +233,6 @@ GateInputs MotionGuardNode::gather(double now_s) const {
   g.mission.fresh = w_mission_.fresh(now_s, age_.mission);
   // A source that was never heard keeps its fail-safe defaults (struct defaults are all "failing").
   if (!w_link_.seen) g.link = Px4LinkIn{};
-  if (!w_op_.seen) g.op = OperatorIn{};
   if (!w_veh_.seen) g.vehicle = VehicleIn{};
   if (!w_rtk_.seen) g.rtk = RtkIn{};
   if (!w_est_.seen) g.est = EstimatorIn{};

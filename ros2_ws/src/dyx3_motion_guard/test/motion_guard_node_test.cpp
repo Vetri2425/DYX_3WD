@@ -40,7 +40,6 @@ struct Rig {
   rclcpp::Publisher<dyx3_interfaces::msg::VehicleState>::SharedPtr p_veh;
   rclcpp::Publisher<dyx3_interfaces::msg::EstimatorHealth>::SharedPtr p_est;
   rclcpp::Publisher<dyx3_interfaces::msg::RtkStatus>::SharedPtr p_rtk;
-  rclcpp::Publisher<dyx3_interfaces::msg::OperatorLinkStatus>::SharedPtr p_op;
   rclcpp::Publisher<dyx3_interfaces::msg::Px4LinkStatus>::SharedPtr p_link;
   rclcpp::Client<dyx3_interfaces::srv::SetEmergencyStop>::SharedPtr cli_estop;
   std::vector<rclcpp::SubscriptionBase::SharedPtr> keep;
@@ -55,7 +54,7 @@ struct Rig {
   uint64_t seq{0};
   builtin_interfaces::msg::Time rpp_stamp{}, veh_stamp{};  // IF-003 pose sample stamps
   bool event{false};                                       // the node's mode (event_driven)
-  bool veh_ok{true}, rtk_ok{true}, op_ok{true}, link_ok{true}, est_ok{true}, mission_running{true};
+  bool veh_ok{true}, rtk_ok{true}, link_ok{true}, est_ok{true}, mission_running{true};
   bool veh_armed_offboard{true}, veh_global_ref{true};  // pre-arm gate inputs (0.15.0)
 
   explicit Rig(const std::vector<rclcpp::Parameter>& params = {}) {
@@ -88,8 +87,6 @@ struct Rig {
     p_est = world->create_publisher<dyx3_interfaces::msg::EstimatorHealth>("/dyx3/estimator_health",
                                                                            r1);
     p_rtk = world->create_publisher<dyx3_interfaces::msg::RtkStatus>("/dyx3/rtk_status", r1);
-    p_op = world->create_publisher<dyx3_interfaces::msg::OperatorLinkStatus>("/dyx3/operator_link",
-                                                                             r1);
     p_link =
         world->create_publisher<dyx3_interfaces::msg::Px4LinkStatus>("/dyx3/px4_link/status", r1);
     keep.push_back(world->create_subscription<MotionSetpoint>(
@@ -125,7 +122,6 @@ struct Rig {
           world->count_subscribers("/dyx3/vehicle_state") > 0 &&
           world->count_subscribers("/dyx3/estimator_health") > 0 &&
           world->count_subscribers("/dyx3/rtk_status") > 0 &&
-          world->count_subscribers("/dyx3/operator_link") > 0 &&
           world->count_subscribers("/dyx3/px4_link/status") > 0 && cli_estop->service_is_ready()) {
         // every later deliver() relies on synchronous delivery: prove it
         EXPECT_TRUE(dyx3_test::delivery_is_synchronous(ctx));
@@ -185,11 +181,6 @@ struct Rig {
       r.corrections_fresh = true;
       r.horizontal_accuracy_m = 0.02F;
       p_rtk->publish(r);
-    }
-    if (op_ok) {
-      dyx3_interfaces::msg::OperatorLinkStatus o;
-      o.alive = true;
-      p_op->publish(o);
     }
     if (link_ok) {
       dyx3_interfaces::msg::Px4LinkStatus l;
@@ -324,19 +315,15 @@ TEST(MotionGuardNode, ForwardsAfterSessionAcceptanceWhenAllGatesPass) {
   EXPECT_FLOAT_EQ(r.last_out.speed_body_x, -0.08F);
 }
 
-// Owner decision 2026-10-10: the tablet heartbeat is a START condition only. While RUNNING, a lost
-// operator link keeps the rover tracking; the pre-arm gate reports it so a new start is refused.
-TEST(MotionGuardNode, OperatorLinkLossKeepsARunningMissionAndBlocksStart) {
+// Owner decision 2026-10-10: the tablet heartbeat is not a gate (prototype behaviour). The guard
+// does not even subscribe to it: a silent tablet changes nothing, running or before a start.
+TEST(MotionGuardNode, TheOperatorLinkIsNotAGate) {
   Rig r;
   r.run(0.3);
   ASSERT_EQ(r.last_out.mode, MotionSetpoint::MODE_TRACK_RATE);
-  r.op_ok = false;  // the tablet goes silent
-  r.run(1.0);
-  EXPECT_EQ(r.last_out.mode, MotionSetpoint::MODE_TRACK_RATE);
-  EXPECT_FLOAT_EQ(r.last_out.speed_body_x, 0.3F);
+  EXPECT_EQ(r.world->count_publishers("/dyx3/operator_link"), 0U);
+  EXPECT_EQ(r.guard->count_subscribers("/dyx3/operator_link"), 0U);
   EXPECT_TRUE(r.last_gate.ok);
-  EXPECT_FALSE(r.last_gate.pre_arm_ok);
-  EXPECT_EQ(r.last_gate.pre_arm_reason_code, dyx3_interfaces::msg::MotionSetpointStatus::REASON_OPERATOR_LINK_LOST);
 }
 
 TEST(MotionGuardNode, EachInputLossZeroesWithItsReasonAndRecovers) {

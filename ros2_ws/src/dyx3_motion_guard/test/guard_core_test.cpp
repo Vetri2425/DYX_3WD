@@ -27,7 +27,6 @@ GateInputs good_gates() {
   GateInputs g;
   g.estop = false;
   g.link = {true, true, true, 0U};
-  g.op = {true, true};
   g.vehicle = {true, 2, 14, false, true, true, true};
   g.rtk = {true, 6, true, 0.02F};
   g.est = {true, true, true, false, false, false, false, false};
@@ -397,19 +396,6 @@ TEST(Decision, GatePriorityOrder) {
   gi.estop = true;
   EXPECT_EQ(g.decide(0.05, 0.02, gi).reason, Reason::Estop);
 }
-// Owner decision 2026-10-10: a tablet dropout never stops a running mission; it only blocks a start.
-TEST(Decision, OperatorLinkLossDoesNotStopARunningMission) {
-  for (const auto& lose : {+[](GateInputs& g) { g.op.fresh = false; },
-                           +[](GateInputs& g) { g.op.alive = false; }}) {
-    auto g = accepting_core();
-    GateInputs gi = good_gates();
-    lose(gi);
-    EXPECT_EQ(first_failing_safety_gate(gi, GateConfig{}), Reason::Ok);
-    const auto d = g.decide(0.05, 0.02, gi);
-    EXPECT_TRUE(d.accepted);
-    EXPECT_EQ(d.reason, Reason::Ok);
-  }
-}
 TEST(Decision, NeverHeardGatesFail) {
   EXPECT_NE(first_failing_safety_gate(GateInputs{}, GateConfig{}), Reason::Ok);
   EXPECT_FALSE(mission_running(MissionIn{}));
@@ -436,16 +422,6 @@ TEST(PreArmGate, EveryNonArmingGateFailsItWithTheSameReason) {
     gc.break_it(g);
     EXPECT_EQ(first_failing_pre_arm_gate(g, GateConfig{}), gc.expect) << gc.name;
   }
-}
-TEST(PreArmGate, OperatorLinkIsRequiredToStart) {
-  GateInputs g = pre_arm_gates();
-  g.op.alive = false;
-  EXPECT_EQ(first_failing_pre_arm_gate(g, GateConfig{}), Reason::OperatorLinkLost);
-  g = pre_arm_gates();
-  g.op.fresh = false;
-  EXPECT_EQ(first_failing_pre_arm_gate(g, GateConfig{}), Reason::OperatorLinkLost);
-  g.link.handshake_ok = false;  // the PX4 link is checked before it
-  EXPECT_EQ(first_failing_pre_arm_gate(g, GateConfig{}), Reason::Px4LinkUnhealthy);
 }
 TEST(PreArmGate, GlobalReferenceIsRequiredAndCheckedLast) {
   GateInputs g = pre_arm_gates();

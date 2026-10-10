@@ -5,7 +5,7 @@
 **Authority:** the last software authority before PX4. It validates, limits, gates and fails to
 zero. **It never invents a correction**: if RPP is wrong the guard stops the rover, it does not
 steer. It is the single owner of every safety gate (E-stop, RTK, arming, heading, estimator,
-operator link, PX4 link, mission). `dyx3_mission` consumes `SafetyGateStatus` and never
+PX4 link, mission). `dyx3_mission` consumes `SafetyGateStatus` and never
 re-implements a gate. A backend or tablet E-stop is a *request* to this node.
 
 ## 1. Interfaces
@@ -17,7 +17,6 @@ re-implements a gate. A backend or tablet E-stop is a *request* to this node.
 | in | `/dyx3/vehicle_state` | VehicleState | arming, nav state, estimate validity |
 | in | `/dyx3/estimator_health` | EstimatorHealth | heading and estimator gates |
 | in | `/dyx3/rtk_status` | RtkStatus | RTK gate |
-| in | `/dyx3/operator_link` | OperatorLinkStatus | tablet heartbeat (gateway owns the timeout) |
 | in | `/dyx3/px4_link/status` | Px4LinkStatus | link gate |
 | service | `/dyx3/motion_guard/set_emergency_stop` | SetEmergencyStop | latch / clear |
 | out | `/dyx3/motion_guard/command` | MotionSetpoint | consumed only by `dyx3_px4_link`. `source_pose_sample_stamp` (IF-003, 0.14.0): preserved unchanged on every command forwarded from RPP (accepted, clamped, clean STOP); on the guard's own canonical STOP (any refusal, no command, `shutdown_stop`) the `px4_sample_stamp` of the newest `VehicleState` received (zero when that message had no fresh local position), zero if none was ever received. Never used for a decision |
@@ -57,7 +56,7 @@ For the freshest RPP command, the first failing check wins and yields STOP with 
 | — | a clean STOP command is forwarded as STOP here, whatever the gates say, `accepted=true`, reason `OK` | |
 | 4 | E-stop latched | `ESTOP` (5) |
 | 5 | PX4 link: session alive, handshake ok, no stale topic, status fresh | `PX4_LINK_UNHEALTHY` (8) |
-| 6 | operator link: **not checked for commands** (owner decision 2026-10-10: the tablet is required to START a mission, not to keep it running). It is part of the pre-arm gate only (`pre_arm_reason_code` 10) | — |
+| 6 | operator link: **not a gate** (owner decision 2026-10-10, prototype behaviour). The guard does not subscribe to `/dyx3/operator_link`; the reason code 10 stays reserved on the wire | — |
 | 7 | arming: `arming_state == ARMED`, `nav_state == OFFBOARD`, no PX4 failsafe, vehicle state fresh | `ARMING_GATE` (11) |
 | 8 | RTK: fix RTK_FLOAT/RTK_FIXED at or above `rtk_min_fix_type`, corrections fresh, horizontal accuracy known and within `rtk_max_hrms_m`, status fresh | `RTK_GATE` (6) |
 | 9 | heading: estimator health fresh and `flags_valid`, GNSS yaw fusion intended and not faulted, yaw not rejected, `VehicleState.attitude_valid` | `HEADING_UNHEALTHY` (9) |
@@ -132,7 +131,7 @@ the old limiter mechanics directly testable; it is not a second production contr
 | `command_max_age_s` | 0.2 | RESTART | DERIVED from prototype `input_max_age_s`; re-validate GATE 4 |
 | `session_accept_count` | 3 | RESTART | DERIVED — Phase plan leaves the count to this phase |
 | `vehicle_state_max_age_s`, `rtk_status_max_age_s` | 0.5 | RESTART | prototype `pose_max_age_s` / `rtk_fix_timeout_s` |
-| `estimator_health_max_age_s`, `operator_link_max_age_s`, `px4_link_max_age_s`, `mission_state_max_age_s` | 0.5 | RESTART | DERIVED, same convention |
+| `estimator_health_max_age_s`, `px4_link_max_age_s`, `mission_state_max_age_s` | 0.5 | RESTART | DERIVED, same convention |
 | `rtk_min_fix_type` | 6 | RESTART | prototype `min_fix_type` |
 | `rtk_max_hrms_m` | 0.10 | RESTART | prototype `rtk_max_hrms_m` |
 | `require_gnss_yaw_fusion` | true | RESTART | DERIVED: CLAUDE.md §3, dual-antenna heading is first-class |
@@ -149,7 +148,6 @@ that is compared with a producer period. 0.5 s is a loss detector, not a sample-
 | `vehicle_state_max_age_s` | 50 Hz (`px4_link`) | 25 periods | the loosest limit. Arming, nav state and estimate validity do not change because the publisher went silent; the silent producer is `px4_link`, whose loss also fails the link gate. May be tightened together with RPP's `pose_max_age_s`. |
 | `estimator_health_max_age_s` | 10 Hz (`px4_link`) | 5 periods | tolerates three consecutive lost samples with margin |
 | `px4_link_max_age_s` | 10 Hz (`px4_link/status`) | 5 periods | same |
-| `operator_link_max_age_s` | 10 Hz (gateway) | 5 periods | the gateway owns the heartbeat-loss timeout and reports `alive=false`; this limit only covers the gateway itself going silent |
 | `mission_state_max_age_s` | 10 Hz (mission) | 5 periods | a silent mission node fails the mission gate; the physical state does not change |
 | `rtk_status_max_age_s` | 5 Hz (`rtk_node`) | 2.5 periods | the tightest ratio. One lost sample (a 0.4 s gap) is tolerated, two are not; do not tighten it below about 0.45 s |
 
