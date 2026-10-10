@@ -285,14 +285,21 @@ libs() {
   check "pins: XRCE agent v2.4.3 pinned to a commit" '(load_pin microxrce_agent; [ "${XRCE_TAG}" = v2.4.3 ] && [ ${#XRCE_COMMIT} -eq 40 ])'
   check "pins: firmware SHA is the flashed 27a7ac92" '(load_pin firmware; [ "${FIRMWARE_SHA}" = 27a7ac92845317b0276776242c504215809b2a0f ])'
 
-  # dry-run of the whole install flow must complete and mention every required step
-  local out
-  out="$(DYX3_ALLOW_ANY_OS=1 DYX3_DRY_RUN=1 "${REPO}/installer/install.sh" --production --dry-run --ref HEAD 2>&1)"
+  # dry-run of the whole install flow must complete and mention every required step.
+  # PC-7c: the user step asks the HOST whether the service user exists, so a host with a dyx3 user skipped useradd and
+  # failed this test. The fresh-install run names a user that cannot exist here; a second run takes the other branch.
+  local out nouser="dyx3-absent-$$"
+  while id "${nouser}" >/dev/null 2>&1; do nouser="${nouser}x"; done
+  out="$(DYX3_USER="${nouser}" DYX3_ALLOW_ANY_OS=1 DYX3_DRY_RUN=1 "${REPO}/installer/install.sh" --production --dry-run --ref HEAD 2>&1)"
   rc=$?
   check "install --dry-run completes" '[ "${rc}" -eq 0 ]'
   for s in "useradd" "apt-get install" "MicroXRCEAgent" "mavlink-router" "nmcli connection add" "colcon build" "git archive"; do
     check "install dry-run mentions: ${s}" 'printf "%s" "${out}" | grep -q -- "${s}"'
   done
+  check "install dry-run creates an absent service user as a system user with its own group" 'printf "%s" "${out}" | grep -q -- "useradd --system .* --user-group ${nouser}$"'
+  local out_user
+  out_user="$(DYX3_ROOT="${T}/root-user" DYX3_USER="$(id -un)" DYX3_ALLOW_ANY_OS=1 DYX3_DRY_RUN=1 "${REPO}/installer/install.sh" --production --dry-run --ref HEAD 2>&1)"
+  check "install dry-run keeps an existing service user (no useradd)" 'printf "%s" "${out_user}" | grep -q "user $(id -un) exists" && ! printf "%s" "${out_user}" | grep -q useradd'
   check "install without --production is refused" '! "${REPO}/installer/install.sh" >/dev/null 2>&1'
   if [ "$(id -u)" -ne 0 ]; then
     out="$(env -u DYX3_ROOT "${REPO}/installer/verify.sh" 2>&1)"
