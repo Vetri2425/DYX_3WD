@@ -99,26 +99,16 @@ TEST(Projection, InverseOfPx4Reproject) {
 }
 
 // ---- WGS84 tangent plane (the tablet's model) and the one placement path
-TEST(Wgs84, RadiiOfCurvature) {
-  const Wgs84Radii r13 = wgs84_radii(13.0);
-  EXPECT_NEAR(r13.meridian_m, kM13, 1e-5);
-  EXPECT_NEAR(r13.prime_vertical_m, kN13, 1e-5);
-  const Wgs84Radii eq = wgs84_radii(0.0);  // equator: N = a, M = a (1 - e2)
-  EXPECT_NEAR(eq.prime_vertical_m, 6378137.0, 1e-6);
-  EXPECT_NEAR(eq.meridian_m, 6335439.327, 1e-3);
-  const Wgs84Radii pole = wgs84_radii(90.0);  // pole: M = N = a / sqrt(1 - e2)
-  EXPECT_NEAR(pole.meridian_m, pole.prime_vertical_m, 1e-6);
-  EXPECT_NEAR(pole.meridian_m, 6399593.626, 1e-3);
-}
-
+// The exact ENU tangent plane at the anchor, inverted (ENU -> ECEF -> geodetic). Expected values:
+// an independent implementation (forward geodetic -> ECEF -> ENU round-trips them to 0.3 um).
 TEST(Wgs84, TangentPlaneInverse) {
   const GeoPoint anchor{13.0, 77.5};
   const GeoPoint g = tangent_plane_to_geo(anchor, {100.0, -250.0});
-  EXPECT_NEAR((g.lat_deg - 13.0) * kDeg * kM13, 100.0, 1e-6);
-  EXPECT_NEAR((g.lon_deg - 77.5) * kDeg * kN13 * std::cos(13.0 * kDeg), -250.0, 1e-6);
+  EXPECT_NEAR(g.lat_deg, 13.000903899721, 1e-11);  // 1e-11 deg ~ 1 um
+  EXPECT_NEAR(g.lon_deg, 77.497695520421, 1e-11);
   const GeoPoint same = tangent_plane_to_geo(anchor, {0.0, 0.0});
-  EXPECT_EQ(same.lat_deg, 13.0);
-  EXPECT_EQ(same.lon_deg, 77.5);
+  EXPECT_NEAR(same.lat_deg, 13.0, 1e-12);
+  EXPECT_NEAR(same.lon_deg, 77.5, 1e-12);
   EXPECT_FALSE(std::isfinite(tangent_plane_to_geo({90.0, 0.0}, {0.0, 1.0}).lon_deg));
 }
 
@@ -129,22 +119,18 @@ TEST(Placement, EllipsoidScaleAtThirteenDegreesNorth) {
   const GeoPoint ref{13.0, 77.5};
   const NePoint north = place_point(ref, ref, {100.0, 0.0});
   EXPECT_NEAR(north.north_m, 100.0 * kR / kM13, 1e-4);  // 100.510203 m
-  EXPECT_NEAR(north.north_m, 100.510203441, 1e-6);
+  EXPECT_NEAR(north.north_m, 100.510199941, 1e-6);
   EXPECT_NEAR(north.east_m, 0.0, 1e-9);
   const NePoint east = place_point(ref, ref, {0.0, 100.0});
   EXPECT_NEAR(east.east_m, 100.0 * kR / kN13, 1e-4);  // 99.871182 m
-  EXPECT_NEAR(east.east_m, 99.871181863, 1e-6);
-  // The parallel through the reference is not the azimuthal projection's east axis: it lies
-  // R sin(phi0) cos(phi0) (1 - cos dlambda) north of it (0.18 mm at 100 m, hand formula).
-  const double dlon = 100.0 / (kN13 * std::cos(13.0 * kDeg));
-  EXPECT_NEAR(east.north_m,
-              kR * std::sin(13.0 * kDeg) * std::cos(13.0 * kDeg) * (1.0 - std::cos(dlon)), 1e-9);
-  EXPECT_NEAR(east.north_m, 0.000180720, 1e-9);
-  // Both at once: the same scales plus the second-order terms of the projection (0.18 mm north,
-  // -0.36 mm east at 141 m, meridian convergence); independent reference implementation values.
+  EXPECT_NEAR(east.east_m, 99.871181856, 1e-6);
+  // The tangent plane's east axis and the azimuthal projection's east axis agree (both are
+  // tangent at the reference): 1 um apart at 100 m.
+  EXPECT_NEAR(east.north_m, -0.000001157, 1e-8);
+  // Both at once; independent reference implementation values.
   const NePoint both = place_point(ref, ref, {100.0, 100.0});
-  EXPECT_NEAR(both.north_m, 100.510384164, 1e-6);
-  EXPECT_NEAR(both.east_m, 99.870818102, 1e-6);
+  EXPECT_NEAR(both.north_m, 100.510198776, 1e-6);
+  EXPECT_NEAR(both.east_m, 99.871179534, 1e-6);
   EXPECT_NEAR(both.north_m, 100.0 * kR / kM13, 0.5e-3);
   EXPECT_NEAR(both.east_m, 100.0 * kR / kN13, 0.5e-3);
   // (0, 0) at the reference is the origin, exactly.
@@ -157,7 +143,7 @@ TEST(Placement, EllipsoidScaleAtThirteenDegreesNorth) {
 // Hand check of the anchor on the sphere (k = c / sin c = 1 + 1e-11 here): north = R dlat plus
 // the parallel's offset R sin(lat_r) cos(lat_r) dlon^2 / 2 (29 micrometres), east =
 // R cos(lat_anchor) sin(dlon). The points: independent reference implementation (WGS84 inverse at
-// the anchor, then PX4 MapProjection::project in double), to 1 micrometre.
+// the anchor, exact ENU -> ECEF -> geodetic, then PX4 MapProjection::project in double), to 1 um.
 TEST(Placement, AnchorAwayFromTheReferenceHandComputed) {
   const GeoPoint ref{13.0, 77.5};
   const GeoPoint anchor{13.00027, 77.50037};
@@ -171,11 +157,11 @@ TEST(Placement, AnchorAwayFromTheReferenceHandComputed) {
   EXPECT_NEAR(a.east_m, kR * std::cos(13.00027 * kDeg) * std::sin(dlon), 1e-6);
   EXPECT_NEAR(a.east_m, 40.087609302, 1e-6);
   const NePoint p = place_point(ref, anchor, {10.0, -20.0});
-  EXPECT_NEAR(p.north_m, 40.073657660, 1e-6);
-  EXPECT_NEAR(p.east_m, 20.113365742, 1e-6);
+  EXPECT_NEAR(p.north_m, 40.073650350, 1e-6);
+  EXPECT_NEAR(p.east_m, 20.113358512, 1e-6);
   const NePoint q = place_point(ref, anchor, {-50.0, 30.0});
-  EXPECT_NEAR(q.north_m, -20.232381578, 1e-6);
-  EXPECT_NEAR(q.east_m, 70.049091221, 1e-6);
+  EXPECT_NEAR(q.north_m, -20.232398818, 1e-6);
+  EXPECT_NEAR(q.east_m, 70.049037002, 1e-6);
   // The same through place_artifact (the node's path) and in the stored bytes.
   const auto src = make_source(anchored_meta(13.00027, 77.50037),
                                {{0.0, 0.0, 0}, {10.0, -20.0, 1}, {-50.0, 30.0, 3}});
@@ -184,11 +170,11 @@ TEST(Placement, AnchorAwayFromTheReferenceHandComputed) {
   const auto back = parse_artifact(pl.bytes, pl.execution.sha256);
   ASSERT_TRUE(back.ok) << back.error;
   ASSERT_EQ(back.artifact.points.size(), 3U);
-  EXPECT_NEAR(back.artifact.points[1].north_m, 40.073657660, 1e-6);
-  EXPECT_NEAR(back.artifact.points[1].east_m, 20.113365742, 1e-6);
-  EXPECT_NEAR(back.artifact.points[2].north_m, -20.232381578, 1e-6);
-  EXPECT_NEAR(back.artifact.points[2].east_m, 70.049091221, 1e-6);
-  EXPECT_NE(back.artifact.meta_json.find("wgs84_tangent_plane_to_px4_map_projection"),
+  EXPECT_NEAR(back.artifact.points[1].north_m, 40.073650350, 1e-6);
+  EXPECT_NEAR(back.artifact.points[1].east_m, 20.113358512, 1e-6);
+  EXPECT_NEAR(back.artifact.points[2].north_m, -20.232398818, 1e-6);
+  EXPECT_NEAR(back.artifact.points[2].east_m, 70.049037002, 1e-6);
+  EXPECT_NE(back.artifact.meta_json.find("wgs84_enu_tangent_plane_to_px4_map_projection"),
             std::string::npos);
 }
 

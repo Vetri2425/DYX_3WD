@@ -162,13 +162,15 @@ The artifact meta (canonical JSON) decides:
 | `"frame":"ekf_local_ned"`, anchor null or absent | **passthrough**: already EKF local NED; execution sha = source sha, nothing written |
 | no `"frame"` (old / planner artifacts), `local_ned` without anchor, `ekf_local_ned` with one, unknown frame, a placed execution (`"ekf_execution"`) | ERROR(NO_PLACEMENT_FRAME): EKF-local is never assumed |
 
-**Coordinates of an anchored artifact (owner decision 2026-10-10).** Point (n, e) values are **true ground metres in the WGS84
-local tangent plane at the anchor**, exactly the tablet's model:
-`north = Δφ · M(φ0)`, `east = Δλ · N(φ0) · cos φ0`, WGS84 `a = 6378137`, `f = 1/298.257223563`, `e² = f(2 − f)`,
-`M(φ) = a(1 − e²)/(1 − e² sin²φ)^{3/2}`, `N(φ) = a/√(1 − e² sin²φ)`, both at the anchor latitude φ0.
+**Coordinates of an anchored artifact (owner decision 2026-10-10).** Point (n, e) values are **metres in the WGS84 ENU
+local tangent plane at the anchor** (anchor at ellipsoid height 0), exactly the tablet's model: a CAD drawing is a flat
+plane, and this plane is tangent to the ellipsoid at the anchor. WGS84 `a = 6378137`, `f = 1/298.257223563`,
+`e² = f(2 − f)`. A small-distance approximation (`north = Δφ · M(φ0)`, `east = Δλ · N(φ0) cos φ0`) is NOT used: it drifts
+18 mm at 1 km east and 36 mm at 1 km × 1 km from the plane at 13° N, over the 1 cm goal.
 
 **One function, one path — `place_point(ekf_ref, anchor, (n, e))`, for every point (the anchor is (0, 0)):**
-1. invert the tablet model at the anchor: `φ = φ0 + n / M(φ0)`, `λ = λ0 + e / (N(φ0) cos φ0)` (exact closed form);
+1. invert the tablet model at the anchor: the plane point `(e, n, u = 0)` rotated from ENU at the anchor into ECEF, plus the
+   anchor's ECEF, then ECEF → geodetic (latitude iterated to convergence, height dropped). Exact, no distance limit;
 2. project (φ, λ) into the EKF frame with **PX4's own `MapProjection::project`** (`src/lib/geo/geo.cpp` of the pinned
    firmware, ported verbatim in double precision): azimuthal equidistant on the sphere `R = 6 371 000 m`
    (`CONSTANTS_RADIUS_OF_EARTH`) about the live EKF reference `VehicleState.reference_latitude_deg/longitude_deg`:
@@ -179,18 +181,18 @@ This is the function EKF2 uses to turn a GNSS fix into a local position, so a pl
 report the rover when its GNSS reads that point's latitude/longitude. There is no flag and no "simple translation"
 fallback.
 
-**Why not a translation.** EKF metres are sphere metres. At 13° N, `M = 6 338 659.94 m`, `N = 6 379 217.59 m`, so 100 m of
-ground north is `100 R/M = 100.510203 m` of EKF (+0.510 %) and 100 m of ground east is `100 R/N = 99.871182 m` (−0.129 %).
+**Why not a translation.** EKF metres are sphere metres. At 13° N the WGS84 radii are `M = 6 338 659.94 m` (meridian) and
+`N = 6 379 217.59 m` (prime vertical), so 100 m of ground north is `100.510200 m` of EKF (`≈ 100 R/M`, +0.510 %) and 100 m of
+ground east is `99.871182 m` (`≈ 100 R/N`, −0.129 %).
 Translating the design by the projected anchor would paint it 51.0 cm short north-south and 12.9 cm long east-west per
 100 m (`EllipsoidScaleAtThirteenDegreesNorth`).
 
-**Accuracy.** Step 1 is exact for the defined model (double rounding, < 1 nm). Step 2 is PX4's projection itself; the only
+**Accuracy.** Step 1 is exact for the defined model (round trip with the forward ENU < 0.03 mm at 1 km, 1.5 mm at 5 km). Step 2 is PX4's projection itself; the only
 difference from the EKF is that PX4 returns `float`: within 1 km a float32 has a resolution of ≤ 6.1e-5 m, so the EKF's own
 positions are quantised to ≤ 0.06 mm. **The placed point matches the EKF's placement of the same latitude/longitude to
 < 0.1 mm within 1 km (well under 1 mm per km).** The pipeline does not add the sphere-versus-ellipsoid error, because it uses
-the same sphere as the EKF. The remaining terms are properties of the two *models*, not of the implementation: the
-azimuthal projection's second-order terms (the parallel through the reference lies `R sin φ0 cos φ0 (1 − cos Δλ)` north of
-the projection's east axis: 0.18 mm at 100 m east at 13° N) appear in the EKF frame exactly as the EKF sees them.
+the same sphere as the EKF. The azimuthal projection's own second-order terms appear in the EKF frame exactly as the EKF
+sees them (the plane's east axis and the projection's agree to 1 µm at 100 m).
 
 **Bounds and failures.** The anchor and every **placed** point must lie within `placement_max_distance_m` (≤ 1000 m) of the
 EKF origin (the projection accuracy statement above holds there), else ERROR(PLACEMENT_OUT_OF_BOUNDS); an anchor at a pole
@@ -199,7 +201,7 @@ EKF origin (the projection accuracy statement above holds there), else ERROR(PLA
 **Execution artifact.** DYX3PATH 1, canonical (`serialize_artifact`, Python `repr` floats), re-read by the same reader RPP uses
 before it is accepted, written as `<missions_dir>/<sha256>.dyx3path` (temporary file + rename, so RPP never sees a partial
 file). Meta (sorted keys): `{"execution":{"anchor_ekf_ne_m":[n,e],"ekf_reference":{"lat","lon"},"method":
-"wgs84_tangent_plane_to_px4_map_projection","source_sha256":…},"frame":"ekf_execution","source_meta":{…}}`. The same source
+"wgs84_enu_tangent_plane_to_px4_map_projection","source_sha256":…},"frame":"ekf_execution","source_meta":{…}}`. The same source
 and reference give the same bytes and sha. An execution artifact is never accepted as a source (frame `ekf_execution`).
 
 **EKF reset after placement.** The placement records `xy_reset_counter` and the reference. A change while READY, RUNNING

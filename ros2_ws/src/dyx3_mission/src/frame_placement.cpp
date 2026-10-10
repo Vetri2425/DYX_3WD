@@ -24,7 +24,7 @@ constexpr double kWgs84A = 6378137.0;
 constexpr double kWgs84F = 1.0 / 298.257223563;
 constexpr double kWgs84E2 = kWgs84F * (2.0 - kWgs84F);  // first eccentricity squared
 // Recorded in the execution meta (provenance of the placed coordinates).
-constexpr const char* kPlacementMethod = "wgs84_tangent_plane_to_px4_map_projection";
+constexpr const char* kPlacementMethod = "wgs84_enu_tangent_plane_to_px4_map_projection";
 
 // ---- minimal JSON reader for the two meta keys (the meta was already verified canonical) ----
 struct JsonValue {
@@ -178,24 +178,44 @@ NePoint project_to_ekf(const GeoPoint& ref, const GeoPoint& p) {
   return out;
 }
 
-Wgs84Radii wgs84_radii(double lat_deg) {
-  const double s = std::sin(lat_deg * kDegToRad);
-  const double w = 1.0 - kWgs84E2 * s * s;
-  Wgs84Radii r;
-  r.prime_vertical_m = kWgs84A / std::sqrt(w);
-  r.meridian_m = kWgs84A * (1.0 - kWgs84E2) / (w * std::sqrt(w));
-  return r;
-}
-
 GeoPoint tangent_plane_to_geo(const GeoPoint& anchor, const NePoint& ne) {
-  const Wgs84Radii r = wgs84_radii(anchor.lat_deg);
-  const double cos_lat0 = std::cos(anchor.lat_deg * kDegToRad);
-  GeoPoint g;
-  g.lat_deg = anchor.lat_deg + (ne.north_m / r.meridian_m) / kDegToRad;
+  const double lat0 = anchor.lat_deg * kDegToRad;
+  const double lon0 = anchor.lon_deg * kDegToRad;
+  const double sin_lat0 = std::sin(lat0);
+  const double cos_lat0 = std::cos(lat0);
   // At a pole there is no east: report it as non-finite (placement refuses it).
-  g.lon_deg = std::fabs(cos_lat0) > 1e-12
-                  ? anchor.lon_deg + (ne.east_m / (r.prime_vertical_m * cos_lat0)) / kDegToRad
-                  : std::numeric_limits<double>::quiet_NaN();
+  if (std::fabs(cos_lat0) <= 1e-12) {
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    return GeoPoint{nan, nan};
+  }
+  const double sin_lon0 = std::sin(lon0);
+  const double cos_lon0 = std::cos(lon0);
+  // Anchor (height 0) in ECEF.
+  const double n0 = kWgs84A / std::sqrt(1.0 - kWgs84E2 * sin_lat0 * sin_lat0);
+  const double x0 = n0 * cos_lat0 * cos_lon0;
+  const double y0 = n0 * cos_lat0 * sin_lon0;
+  const double z0 = n0 * (1.0 - kWgs84E2) * sin_lat0;
+  // The plane point (east, north, up = 0) rotated from ENU at the anchor into ECEF.
+  const double e = ne.east_m;
+  const double n = ne.north_m;
+  const double x = x0 - sin_lon0 * e - sin_lat0 * cos_lon0 * n;
+  const double y = y0 + cos_lon0 * e - sin_lat0 * sin_lon0 * n;
+  const double z = z0 + cos_lat0 * n;
+  // ECEF -> geodetic (iterated to convergence); the point's height above the ellipsoid is dropped.
+  const double p = std::hypot(x, y);
+  double lat = std::atan2(z, p * (1.0 - kWgs84E2));
+  for (int i = 0; i < 10; ++i) {
+    const double sin_lat = std::sin(lat);
+    const double nn = kWgs84A / std::sqrt(1.0 - kWgs84E2 * sin_lat * sin_lat);
+    const double h = p / std::cos(lat) - nn;
+    const double next = std::atan2(z, p * (1.0 - kWgs84E2 * nn / (nn + h)));
+    const double step = std::fabs(next - lat);
+    lat = next;
+    if (step < 1e-15) break;
+  }
+  GeoPoint g;
+  g.lat_deg = lat / kDegToRad;
+  g.lon_deg = std::atan2(y, x) / kDegToRad;
   return g;
 }
 

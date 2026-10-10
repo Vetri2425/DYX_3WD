@@ -3,11 +3,10 @@
 //
 // Pure C++ (no ROS). The rule (owner decisions, mission contract v2, 2026-10-10):
 //  * meta "frame" == "local_ned" with an "anchor" {lat, lon}: the points (n, e) are TRUE ground
-//    metres in the WGS84 local tangent plane at the anchor, exactly the tablet's model
-//    (north = dphi * M(phi0), east = dlambda * N(phi0) * cos(phi0), M and N at the anchor
-//    latitude). Each point is placed by ONE path, place_point():
-//      1. invert that model to lat/lon (phi = phi0 + n / M(phi0), lambda = lambda0 + e /
-//         (N(phi0) cos(phi0))), then
+//    metres in the WGS84 local tangent plane (ENU) at the anchor, exactly the tablet's model.
+//    Each point is placed by ONE path, place_point():
+//      1. invert that model to lat/lon (ENU at the anchor -> ECEF -> geodetic, height dropped;
+//         exact, no small-distance approximation), then
 //      2. project lat/lon into the EKF frame with PX4's own MapProjection::project (azimuthal
 //         equidistant on the 6371000 m sphere about the live EKF reference), the exact function
 //         EKF2 uses to turn a GNSS fix into a local position.
@@ -42,15 +41,8 @@ struct NePoint {
 /// `p` in the local frame whose origin is `ref`.
 NePoint project_to_ekf(const GeoPoint& ref, const GeoPoint& p);
 
-/// WGS84 radii of curvature at a latitude: meridian M and prime vertical N (metres).
-struct Wgs84Radii {
-  double meridian_m = 0.0;
-  double prime_vertical_m = 0.0;
-};
-Wgs84Radii wgs84_radii(double lat_deg);
-
-/// Step 1: the tablet's WGS84 tangent-plane model at `anchor`, inverted: (n, e) ground metres ->
-/// lat/lon. Non-finite when the anchor is at a pole (no east direction).
+/// Step 1: the tablet's WGS84 ENU tangent plane at `anchor`, inverted exactly: (n, e) plane metres
+/// -> ECEF -> lat/lon. Non-finite when the anchor is at a pole (no east direction).
 GeoPoint tangent_plane_to_geo(const GeoPoint& anchor, const NePoint& ne);
 
 /// THE placement of one point: tangent_plane_to_geo(anchor, ne) projected with project_to_ekf
