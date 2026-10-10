@@ -27,7 +27,10 @@ enum class Reason : uint8_t {
   ArmingGate = 11,
   EstimatorUnhealthy = 12,
   // Pre-arm only (SafetyGateStatus.pre_arm_reason_code): never a command decision reason.
-  GlobalReferenceInvalid = 13
+  GlobalReferenceInvalid = 13,
+  // 0.17.0: commanded motion not executed (actuator_plausibility.hpp). A command decision reason,
+  // also published as SafetyGateStatus.reason_code while latched; never a pre-arm reason.
+  ActuatorStall = 14
 };
 
 struct Motion {

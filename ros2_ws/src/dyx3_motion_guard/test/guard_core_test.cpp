@@ -461,6 +461,54 @@ TEST(PreArmGate, NeverSeenVehicleStateFailsForTheExistingReason) {
   g.vehicle.fresh = false;  // stale with the flag true: same reason
   EXPECT_EQ(first_failing_pre_arm_gate(g, GateConfig{}), Reason::ArmingGate);
 }
+// PX4 sets pre_flight_checks_pass = canArm(current nav_state) (Commander.cpp:1874): false in
+// OFFBOARD without an offboard signal. dyx3_px4_link leaves OFFBOARD for MANUAL before it arms, so
+// the pre-arm verdict does not require the flag while PX4 sits in OFFBOARD.
+TEST(PreArmGate, PreflightFlagIsNotRequiredWhilePx4SitsInOffboard) {
+  GateInputs g = pre_arm_gates();
+  g.vehicle.nav_state = 14;  // OFFBOARD, disarmed: the state after a run whose release did not take
+  g.vehicle.preflight_checks_pass = false;
+  EXPECT_EQ(first_failing_pre_arm_gate(g, GateConfig{}), Reason::Ok);
+  g.vehicle.preflight_checks_pass = true;
+  EXPECT_EQ(first_failing_pre_arm_gate(g, GateConfig{}), Reason::Ok);
+  g.vehicle.nav_state = 0;  // MANUAL: the flag is PX4's real verdict and is required
+  g.vehicle.preflight_checks_pass = false;
+  EXPECT_EQ(first_failing_pre_arm_gate(g, GateConfig{}), Reason::ArmingGate);
+  g.vehicle.preflight_checks_pass = true;
+  EXPECT_EQ(first_failing_pre_arm_gate(g, GateConfig{}), Reason::Ok);
+  // OFFBOARD does not excuse the other arming checks.
+  g.vehicle.nav_state = 14;
+  g.vehicle.preflight_checks_pass = false;
+  g.vehicle.failsafe = true;
+  EXPECT_EQ(first_failing_pre_arm_gate(g, GateConfig{}), Reason::ArmingGate);
+}
+TEST(PreArmGate, RcLinkIsRequiredOnlyWithRequireRcLink) {
+  for (const bool require : {false, true}) {
+    GateConfig c;
+    c.require_rc_link = require;
+    for (const bool valid : {false, true}) {
+      for (const bool ok : {false, true}) {
+        GateInputs g = pre_arm_gates();
+        g.vehicle.rc_link_valid = valid;
+        g.vehicle.rc_link_ok = ok;
+        const Reason want = (!require || (valid && ok)) ? Reason::Ok : Reason::ArmingGate;
+        EXPECT_EQ(first_failing_pre_arm_gate(g, c), want)
+            << "require " << require << " valid " << valid << " ok " << ok;
+        // An earlier gate keeps its priority over the RC requirement.
+        g.link.handshake_ok = false;
+        EXPECT_EQ(first_failing_pre_arm_gate(g, c), Reason::Px4LinkUnhealthy);
+      }
+    }
+  }
+}
+TEST(PreArmGate, TheFullGateIgnoresTheRcLink) {
+  DecisionConfig c = cfg();
+  c.gates.require_rc_link = true;
+  GateInputs full = good_gates();  // armed + OFFBOARD, rc_link_valid/ok false
+  EXPECT_EQ(first_failing_safety_gate(full, c.gates), Reason::Ok);
+  auto core = accepting_core(c);
+  EXPECT_TRUE(core.decide(0.05, 0.02, full).accepted);
+}
 TEST(PreArmGate, NeverHeardFails) {
   EXPECT_NE(first_failing_pre_arm_gate(GateInputs{}, GateConfig{}), Reason::Ok);
 }
@@ -527,22 +575,25 @@ TEST(Decision, FailToZeroResetsTheTestModeShaper) {
   c.limits.max_accel_mps2 = 0.2F;
   GuardCore g(1, c);
   g.on_command(cmd(1, Mode::TrackRate, 0.35F, NaN, 0.1F), 0.0);
+  // The rover moves (1.2 s of a still vehicle under this demand would be an actuator stall).
+  GateInputs moving = good_gates();
+  moving.vehicle.measured_speed_mps = 0.3F;
   double t = 0.0;
   float v = 0.0F;
   for (int i = 0; i < 60; ++i) {
     t += 0.02;
     g.on_command(cmd(2 + static_cast<uint64_t>(i), Mode::TrackRate, 0.35F, NaN, 0.1F), t);
-    v = g.decide(t, 0.02, good_gates()).out.speed_body_x;
+    v = g.decide(t, 0.02, moving).out.speed_body_x;
   }
   EXPECT_GT(v, 0.2F);
-  GateInputs bad = good_gates();
+  GateInputs bad = moving;
   bad.rtk.fix_type = 3;
   t += 0.02;
   g.on_command(cmd(100, Mode::TrackRate, 0.35F, NaN, 0.1F), t);
   EXPECT_EQ(g.decide(t, 0.02, bad).out.speed_body_x, 0.0F);  // immediate, not ramped
   t += 0.02;
   g.on_command(cmd(101, Mode::TrackRate, 0.35F, NaN, 0.1F), t);
-  EXPECT_LE(g.decide(t, 0.02, good_gates()).out.speed_body_x,
+  EXPECT_LE(g.decide(t, 0.02, moving).out.speed_body_x,
             0.2F * 0.02F + 1e-6F);  // restarts from zero
 }
 
@@ -592,6 +643,237 @@ TEST(Decision, RandomisedNoMotionLeaksThroughAFailure) {
       ASSERT_GE(d.out.speed_body_x, -0.3F - 1e-6F);
     }
   }
+}
+
+// ---- actuator plausibility (REASON_ACTUATOR_STALL, 0.17.0) -------------------------------------
+namespace {
+// One RPP command and one decision per tick on an exact binary step (1/64 s), so the stall_time_s
+// boundary is exact: 64 ticks are exactly 1.0 s.
+constexpr double kTick = 1.0 / 64.0;
+struct Drive {
+  explicit Drive(const DecisionConfig& c = cfg()) : g(3, c) {}
+  GuardCore g;
+  uint64_t seq{0};
+  double t{0.0};
+  Decision step(Mode m, float v, float rate, const GateInputs& gi) {
+    t += kTick;
+    const float yaw = m == Mode::TrackHeading ? 1.0F : NaN;
+    g.on_command(cmd(++seq, m, v, yaw, m == Mode::TrackHeading ? NaN : rate), t);
+    return g.decide(t, kTick, gi);
+  }
+  // Two Sequence ticks, then accepting: returns the time of the first forwarded tick.
+  double accept(Mode m, float v, float rate, const GateInputs& gi) {
+    step(m, v, rate, gi);
+    step(m, v, rate, gi);
+    const auto d = step(m, v, rate, gi);
+    EXPECT_TRUE(d.accepted);
+    return t;
+  }
+};
+}  // namespace
+
+TEST(ActuatorStall, ConfigDefaultsAreTheRppParametersAndValidate) {
+  const PlausibilityConfig c;
+  EXPECT_TRUE(c.enabled);
+  EXPECT_FLOAT_EQ(c.demand_yaw_rate_radps, 0.4F);  // segment_nominal_pivot_rate_rad_s
+  EXPECT_FLOAT_EQ(c.demand_speed_mps, 0.1F);       // min_approach_linear_velocity
+  EXPECT_FLOAT_EQ(c.still_yaw_rate_radps, 0.05F);  // segment_stop_yaw_rate_threshold
+  EXPECT_FLOAT_EQ(c.still_speed_mps, 0.02F);       // segment_stop_speed_threshold
+  EXPECT_DOUBLE_EQ(c.stall_time_s, 1.0);           // segment_pivot_spinup_margin_s
+  EXPECT_TRUE(plausibility_config_valid(c));
+  PlausibilityConfig b = c;
+  b.stall_time_s = 0.0;
+  EXPECT_FALSE(plausibility_config_valid(b));
+  b = c;
+  b.still_speed_mps = 0.1F;  // not below the demand
+  EXPECT_FALSE(plausibility_config_valid(b));
+  b = c;
+  b.demand_yaw_rate_radps = NaN;
+  EXPECT_FALSE(plausibility_config_valid(b));
+}
+TEST(ActuatorStall, DemandAndMeasurementPredicates) {
+  const PlausibilityConfig c;
+  const auto m = [](Mode mode, float v, float yaw, float rate) {
+    Motion x;
+    x.mode = mode;
+    x.speed_body_x = v;
+    x.yaw_setpoint = yaw;
+    x.yaw_rate_setpoint = rate;
+    return x;
+  };
+  EXPECT_FALSE(demands_motion(canonical_stop(), c));
+  EXPECT_TRUE(demands_motion(m(Mode::Pivot, 0.0F, NaN, -0.45F), c));
+  EXPECT_TRUE(demands_motion(m(Mode::Pivot, 0.0F, NaN, 0.4F), c));    // at the threshold
+  EXPECT_FALSE(demands_motion(m(Mode::Pivot, 0.0F, NaN, 0.39F), c));  // fine pivot: below
+  EXPECT_TRUE(demands_motion(m(Mode::TrackRate, 0.1F, NaN, 0.0F), c));
+  EXPECT_TRUE(demands_motion(m(Mode::TrackRate, -0.1F, NaN, 0.0F), c));
+  EXPECT_FALSE(demands_motion(m(Mode::TrackRate, 0.08F, NaN, 0.2F), c));
+  EXPECT_TRUE(demands_motion(m(Mode::Creep, 0.1F, NaN, 0.0F), c));
+  EXPECT_TRUE(demands_motion(m(Mode::TrackHeading, 0.3F, 1.0F, NaN), c));
+  EXPECT_FALSE(demands_motion(m(Mode::TrackHeading, 0.05F, 1.0F, NaN), c));  // rate is NaN
+  VehicleIn v = good_gates().vehicle;
+  EXPECT_TRUE(measurement_usable(v));
+  EXPECT_TRUE(measured_still(v, c));
+  v.measured_speed_mps = 0.02F;  // not below the threshold: moving
+  EXPECT_FALSE(measured_still(v, c));
+  v.measured_speed_mps = 0.0F;
+  v.measured_yaw_rate_radps = -0.05F;
+  EXPECT_FALSE(measured_still(v, c));
+  v.measured_yaw_rate_radps = NaN;
+  EXPECT_FALSE(measurement_usable(v));
+  v = good_gates().vehicle;
+  v.fresh = false;
+  EXPECT_FALSE(measurement_usable(v));
+  v = good_gates().vehicle;
+  v.velocity_valid = false;
+  EXPECT_FALSE(measurement_usable(v));
+  v = good_gates().vehicle;
+  v.attitude_valid = false;
+  EXPECT_FALSE(measurement_usable(v));
+}
+// 2026-10-10: a -0.45 rad/s pivot with the drivetrain powered off, measured yaw rate and speed 0.
+TEST(ActuatorStall, PivotStallFiresAfterStallTimeAndNotBefore) {
+  Drive dr;
+  const GateInputs still = good_gates();
+  const double t0 = dr.accept(Mode::Pivot, 0.0F, -0.45F, still);
+  for (int k = 1; k <= 64; ++k) {  // up to exactly 1.0 s after the first forwarded tick
+    const auto d = dr.step(Mode::Pivot, 0.0F, -0.45F, still);
+    ASSERT_EQ(d.reason, Reason::Ok) << "tick " << k;
+    ASSERT_EQ(d.out.mode, Mode::Pivot);
+    EXPECT_FLOAT_EQ(d.out.yaw_rate_setpoint, -0.45F);
+  }
+  EXPECT_DOUBLE_EQ(dr.t - t0, 1.0);
+  EXPECT_FALSE(dr.g.actuator_stalled());
+  const auto d = dr.step(Mode::Pivot, 0.0F, -0.45F, still);  // longer than 1.0 s
+  EXPECT_EQ(d.reason, Reason::ActuatorStall);
+  EXPECT_FALSE(d.accepted);
+  expect_stop(d.out);
+  EXPECT_TRUE(dr.g.actuator_stalled());
+  // The stall never enters the gate functions: the pre-arm and full gates are unchanged.
+  EXPECT_EQ(first_failing_safety_gate(still, GateConfig{}), Reason::Ok);
+}
+TEST(ActuatorStall, LatchHoldsStopUntilTheDemandDrops) {
+  Drive dr;
+  const GateInputs still = good_gates();
+  dr.accept(Mode::Pivot, 0.0F, 0.45F, still);
+  for (int k = 0; k < 65; ++k) dr.step(Mode::Pivot, 0.0F, 0.45F, still);
+  ASSERT_TRUE(dr.g.actuator_stalled());
+  // No flap: the same demand stays stopped for many stall times, whatever the measurement does.
+  GateInputs moving = still;
+  moving.vehicle.measured_yaw_rate_radps = 0.3F;
+  for (int k = 0; k < 400; ++k) {
+    const auto d = dr.step(Mode::Pivot, 0.0F, 0.45F, k % 2 ? moving : still);
+    ASSERT_EQ(d.reason, Reason::ActuatorStall) << k;
+    ASSERT_EQ(d.out.mode, Mode::Stop);
+  }
+  // A different mode with a demand still demands: the latch holds.
+  EXPECT_EQ(dr.step(Mode::TrackRate, 0.3F, 0.0F, still).reason, Reason::ActuatorStall);
+  // An earlier gate refusing in between does not clear it (the demand did not drop).
+  GateInputs paused = still;
+  paused.mission.state = 4;
+  EXPECT_EQ(dr.step(Mode::Pivot, 0.0F, 0.45F, paused).reason, Reason::MissionGate);
+  EXPECT_TRUE(dr.g.actuator_stalled());
+  EXPECT_EQ(dr.step(Mode::Pivot, 0.0F, 0.45F, still).reason, Reason::ActuatorStall);
+  // A smaller command (below both demand thresholds) clears it and is forwarded.
+  auto d = dr.step(Mode::Pivot, 0.0F, 0.3F, still);
+  EXPECT_EQ(d.reason, Reason::Ok);
+  EXPECT_EQ(d.out.mode, Mode::Pivot);
+  EXPECT_FALSE(dr.g.actuator_stalled());
+  // The full demand again: a fresh stall time before it stops again.
+  for (int k = 0; k <= 64; ++k)
+    ASSERT_EQ(dr.step(Mode::Pivot, 0.0F, 0.45F, still).reason, Reason::Ok) << k;
+  EXPECT_EQ(dr.step(Mode::Pivot, 0.0F, 0.45F, still).reason, Reason::ActuatorStall);
+  // A clean STOP clears it too (what RPP sends once the mission has paused).
+  d = dr.step(Mode::Stop, 0.0F, 0.0F, still);
+  EXPECT_EQ(d.reason, Reason::Ok);
+  EXPECT_TRUE(d.accepted);
+  EXPECT_FALSE(dr.g.actuator_stalled());
+  EXPECT_EQ(dr.step(Mode::Pivot, 0.0F, 0.45F, still).reason, Reason::Ok);
+}
+TEST(ActuatorStall, SpeedDemandStallFires) {
+  Drive dr;
+  const GateInputs still = good_gates();
+  dr.accept(Mode::TrackRate, 0.6F, 0.0F, still);
+  for (int k = 0; k < 64; ++k)
+    ASSERT_EQ(dr.step(Mode::TrackRate, 0.6F, 0.0F, still).reason, Reason::Ok) << k;
+  EXPECT_EQ(dr.step(Mode::TrackRate, 0.6F, 0.0F, still).reason, Reason::ActuatorStall);
+  // TRACK_HEADING: only the speed is judged.
+  Drive hd;
+  hd.accept(Mode::TrackHeading, 0.3F, 0.0F, still);
+  for (int k = 0; k < 64; ++k) hd.step(Mode::TrackHeading, 0.3F, 0.0F, still);
+  EXPECT_EQ(hd.step(Mode::TrackHeading, 0.3F, 0.0F, still).reason, Reason::ActuatorStall);
+}
+// A speed demand of 0.6 m/s from rest: the measured speed rises through 0.02 m/s just inside the
+// stall time. The condition is "still for the whole window", so this never fires.
+TEST(ActuatorStall, LegitimateRampDoesNotFire) {
+  Drive dr;
+  GateInputs gi = good_gates();
+  const double t0 = dr.accept(Mode::TrackRate, 0.6F, 0.0F, gi);
+  for (int k = 0; k < 64 * 4; ++k) {
+    const double age = dr.t + kTick - t0;
+    gi.vehicle.measured_speed_mps = static_cast<float>(0.021 * age);  // 0.02 m/s at ~0.95 s
+    const auto d = dr.step(Mode::TrackRate, 0.6F, 0.0F, gi);
+    ASSERT_EQ(d.reason, Reason::Ok) << "tick " << k;
+    ASSERT_EQ(d.out.mode, Mode::TrackRate);
+  }
+  // A pivot whose measured rate passes the still threshold inside the window: no stall either.
+  Drive pv;
+  GateInputs p = good_gates();
+  const double p0 = pv.accept(Mode::Pivot, 0.0F, 0.45F, p);
+  for (int k = 0; k < 64 * 4; ++k) {
+    p.vehicle.measured_yaw_rate_radps = (pv.t + kTick - p0) > 0.9 ? 0.37F : 0.0F;
+    ASSERT_EQ(pv.step(Mode::Pivot, 0.0F, 0.45F, p).reason, Reason::Ok) << k;
+  }
+}
+// A stale or invalid measurement does not count as "still": the timer restarts.
+TEST(ActuatorStall, StaleOrInvalidMeasurementResetsTheTimer) {
+  struct Case {
+    const char* name;
+    void (*spoil)(GateInputs&);
+    Reason expect;  // the tick's reason: an earlier gate, or Ok (forwarded, not judged)
+  };
+  const Case cases[] = {
+      {"vehicle stale", [](GateInputs& g) { g.vehicle.fresh = false; }, Reason::ArmingGate},
+      {"attitude invalid", [](GateInputs& g) { g.vehicle.attitude_valid = false; },
+       Reason::HeadingUnhealthy},
+      {"velocity invalid", [](GateInputs& g) { g.vehicle.velocity_valid = false; },
+       Reason::EstimatorUnhealthy},
+      {"yaw rate NaN", [](GateInputs& g) { g.vehicle.measured_yaw_rate_radps = NaN; }, Reason::Ok},
+      {"speed NaN", [](GateInputs& g) { g.vehicle.measured_speed_mps = NaN; }, Reason::Ok},
+  };
+  for (const auto& c : cases) {
+    Drive dr;
+    const GateInputs still = good_gates();
+    GateInputs bad = still;
+    c.spoil(bad);
+    dr.accept(Mode::Pivot, 0.0F, 0.45F, still);
+    for (int k = 0; k < 48; ++k) dr.step(Mode::Pivot, 0.0F, 0.45F, still);  // 0.75 s still
+    EXPECT_EQ(dr.step(Mode::Pivot, 0.0F, 0.45F, bad).reason, c.expect) << c.name;
+    // 0.75 s still again: 1.5 s in total, but not continuous.
+    for (int k = 0; k < 48; ++k)
+      ASSERT_EQ(dr.step(Mode::Pivot, 0.0F, 0.45F, still).reason, Reason::Ok) << c.name << k;
+    // The restarted timer still fires once a full stall time is continuous.
+    for (int k = 0; k < 17; ++k) dr.step(Mode::Pivot, 0.0F, 0.45F, still);
+    EXPECT_EQ(dr.step(Mode::Pivot, 0.0F, 0.45F, still).reason, Reason::ActuatorStall) << c.name;
+    // A spoiled measurement for the whole window never fires.
+    Drive sp;
+    sp.accept(Mode::Pivot, 0.0F, 0.45F, still);
+    for (int k = 0; k < 64 * 3; ++k)
+      ASSERT_EQ(sp.step(Mode::Pivot, 0.0F, 0.45F, bad).reason, c.expect) << c.name << k;
+  }
+}
+TEST(ActuatorStall, RequireActuatorPlausibilityFalseDisablesIt) {
+  DecisionConfig c = cfg();
+  c.plausibility.enabled = false;
+  Drive dr(c);
+  const GateInputs still = good_gates();
+  dr.accept(Mode::Pivot, 0.0F, -0.45F, still);
+  for (int k = 0; k < 64 * 30; ++k) {  // the 25.8 s of 2026-10-10
+    const auto d = dr.step(Mode::Pivot, 0.0F, -0.45F, still);
+    ASSERT_EQ(d.reason, Reason::Ok) << k;
+    ASSERT_EQ(d.out.mode, Mode::Pivot);
+  }
+  EXPECT_FALSE(dr.g.actuator_stalled());
 }
 
 // ---- e-stop latch -------------------------------------------------------------------------------

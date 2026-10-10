@@ -70,6 +70,7 @@ private:
   MaxAges age_;
   GateConfig gate_cfg_;
   Limits limits_;
+  PlausibilityConfig plausibility_;
   std::unique_ptr<GuardCore> core_;
   EstopLatch estop_;
 

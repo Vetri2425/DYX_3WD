@@ -57,6 +57,9 @@ struct Rig {
   bool veh_ok{true}, rtk_ok{true}, link_ok{true}, est_ok{true}, mission_running{true};
   bool veh_armed_offboard{true}, veh_global_ref{true};  // pre-arm gate inputs (0.15.0)
   bool veh_preflight_pass{true};                        // pre-arm gate input
+  int veh_nav{-1};  // >= 0: nav_state override (otherwise from veh_armed_offboard)
+  bool veh_rc_valid{false}, veh_rc_ok{false};            // RC link (0.17.0)
+  float veh_vn{0.0F}, veh_ve{0.0F}, veh_yaw_rate{0.0F};  // measured motion (actuator plausibility)
 
   explicit Rig(const std::vector<rclcpp::Parameter>& params = {}) {
     ctx = std::make_shared<rclcpp::Context>();
@@ -164,7 +167,12 @@ struct Rig {
     if (veh_ok) {
       dyx3_interfaces::msg::VehicleState v;
       v.arming_state = veh_armed_offboard ? 2 : 1;
-      v.nav_state = veh_armed_offboard ? 14 : 4;
+      v.nav_state = veh_nav >= 0 ? static_cast<uint8_t>(veh_nav) : (veh_armed_offboard ? 14 : 4);
+      v.rc_link_valid = veh_rc_valid;
+      v.rc_link_ok = veh_rc_ok;
+      v.velocity_north_mps = veh_vn;
+      v.velocity_east_mps = veh_ve;
+      v.yaw_rate_radps = veh_yaw_rate;
       v.global_reference_valid = veh_global_ref;
       v.preflight_checks_pass = veh_preflight_pass;
       v.position_valid = v.velocity_valid = v.attitude_valid = true;
@@ -246,6 +254,15 @@ TEST(MotionGuardNode, RejectsBadParameters) {
   no2.context(ctx);
   no2.append_parameter_override("rtk_min_fix_type", 3);
   EXPECT_THROW(MotionGuardNode(no2, nullptr, false), std::invalid_argument);
+  for (const auto& bad :
+       {rclcpp::Parameter("stall_time_s", 0.0), rclcpp::Parameter("stall_yaw_rate_radps", -0.4),
+        rclcpp::Parameter("stall_measured_speed_mps", 0.2),  // >= stall_speed_mps
+        rclcpp::Parameter("stall_measured_yaw_rate_radps", 0.4)}) {
+    rclcpp::NodeOptions o;
+    o.context(ctx);
+    o.append_parameter_override(bad.get_name(), bad.get_parameter_value());
+    EXPECT_THROW(MotionGuardNode(o, nullptr, false), std::invalid_argument) << bad.get_name();
+  }
   ctx->shutdown("test done");
 }
 
@@ -255,7 +272,9 @@ TEST(MotionGuardNode, RuntimeParameterChangesCannotMisstateEffectiveLimits) {
        {rclcpp::Parameter("max_forward_speed_mps", 0.2),
         rclcpp::Parameter("max_reverse_speed_mps", 0.01),
         rclcpp::Parameter("max_yaw_rate_radps", 0.1), rclcpp::Parameter("rtk_max_hrms_m", -1.0),
-        rclcpp::Parameter("command_max_age_s", 2.0), rclcpp::Parameter("publish_rate_hz", 100.0)}) {
+        rclcpp::Parameter("command_max_age_s", 2.0), rclcpp::Parameter("publish_rate_hz", 100.0),
+        rclcpp::Parameter("require_actuator_plausibility", false),
+        rclcpp::Parameter("stall_time_s", 5.0), rclcpp::Parameter("require_rc_link", true)}) {
     const auto result = r.guard->set_parameters_atomically({change});
     EXPECT_FALSE(result.successful) << change.get_name();
     EXPECT_NE(result.reason.find("startup-only"), std::string::npos);
@@ -676,6 +695,134 @@ TEST(MotionGuardNode, PreArmGateFailsWithArmingReasonWithoutAnyVehicleState) {
   r.run(0.5, false);
   EXPECT_FALSE(r.last_gate.pre_arm_ok);
   EXPECT_EQ(r.last_gate.pre_arm_reason_code, S::REASON_ARMING_GATE);
+}
+
+// 2026-10-10: PX4 left in OFFBOARD after a run whose MANUAL release did not take reports
+// pre_flight_checks_pass = false (canArm(OFFBOARD), Commander.cpp:1874). dyx3_px4_link leaves
+// OFFBOARD for MANUAL before it arms, so the pre-arm verdict must not refuse the Start there.
+TEST(MotionGuardNode, PreArmGatePassesInOffboardWithPreflightFalse) {
+  using S = dyx3_interfaces::msg::MotionSetpointStatus;
+  Rig r;
+  r.veh_armed_offboard = false;  // disarmed
+  r.veh_nav = 14;                // but PX4 still in OFFBOARD
+  r.veh_preflight_pass = false;
+  r.mission_running = false;
+  r.run(0.5, false);
+  EXPECT_TRUE(r.last_gate.pre_arm_ok);
+  EXPECT_FALSE(r.last_gate.ok);  // the full gate still needs armed
+  r.veh_nav = 0;                 // MANUAL: the flag is PX4's real verdict
+  r.run(0.3, false);
+  EXPECT_FALSE(r.last_gate.pre_arm_ok);
+  EXPECT_EQ(r.last_gate.pre_arm_reason_code, S::REASON_ARMING_GATE);
+}
+
+// 0.17.0 require_rc_link: a pre-arm requirement only, off by default.
+TEST(MotionGuardNode, RequireRcLinkGatesOnlyThePreArmVerdict) {
+  using S = dyx3_interfaces::msg::MotionSetpointStatus;
+  {
+    Rig off;  // default false: the RC fields are ignored
+    off.veh_armed_offboard = false;
+    off.mission_running = false;
+    off.run(0.5, false);
+    EXPECT_TRUE(off.last_gate.pre_arm_ok);
+  }
+  Rig r({rclcpp::Parameter("require_rc_link", true)});
+  r.veh_armed_offboard = false;
+  r.mission_running = false;
+  struct Combo {
+    bool valid, ok, pre_arm_ok;
+  };
+  for (const Combo c : {Combo{false, false, false}, Combo{false, true, false},
+                        Combo{true, false, false}, Combo{true, true, true}}) {
+    r.veh_rc_valid = c.valid;
+    r.veh_rc_ok = c.ok;
+    r.run(0.3, false);
+    EXPECT_EQ(r.last_gate.pre_arm_ok, c.pre_arm_ok) << c.valid << c.ok;
+    if (!c.pre_arm_ok) {
+      EXPECT_EQ(r.last_gate.pre_arm_reason_code, S::REASON_ARMING_GATE) << c.valid << c.ok;
+    }
+  }
+  // Running (armed + OFFBOARD): RC loss is not a stop and does not fail the full gate.
+  r.veh_armed_offboard = true;
+  r.mission_running = true;
+  r.veh_rc_valid = false;
+  r.veh_rc_ok = false;
+  r.veh_vn = 0.3F;  // moving
+  r.run(0.3);
+  EXPECT_TRUE(r.last_gate.ok);
+  EXPECT_EQ(r.last_out.mode, MotionSetpoint::MODE_TRACK_RATE);
+}
+
+// 0.17.0 actuator plausibility, measured 2026-10-10: a -0.45 rad/s pivot commanded with the
+// drivetrain powered off, measured yaw rate and speed 0. STOP after the 1.0 s stall time, held
+// until the demand drops, and published as the safety-gate verdict so the mission pauses.
+TEST(MotionGuardNode, ActuatorStallStopsAndFailsTheSafetyGateUntilTheDemandDrops) {
+  using S = dyx3_interfaces::msg::MotionSetpointStatus;
+  Rig r;
+  const auto pivot = [&r]() { r.tick(0.02, true, MotionSetpoint::MODE_PIVOT, 0.0F, NaN, -0.45F); };
+  double first_forward = -1.0, stalled_at = -1.0;
+  for (int i = 0; i < 150 && stalled_at < 0.0; ++i) {
+    pivot();
+    if (first_forward < 0.0 && r.last_out.mode == MotionSetpoint::MODE_PIVOT) first_forward = r.now;
+    if (r.last_status.reason_code == S::REASON_ACTUATOR_STALL) stalled_at = r.now;
+  }
+  ASSERT_GE(first_forward, 0.0);
+  ASSERT_GE(stalled_at, 0.0);
+  // Longer than 1.0 s of still measurement, within one tick of it (injected clock).
+  EXPECT_GT(stalled_at - first_forward, 1.0 - 1e-6);
+  EXPECT_LE(stalled_at - first_forward, 1.0 + 0.02 + 1e-6);
+  EXPECT_EQ(r.last_out.mode, MotionSetpoint::MODE_STOP);
+  EXPECT_EQ(r.last_out.speed_body_x, 0.0F);
+  EXPECT_EQ(r.last_out.yaw_rate_setpoint, 0.0F);
+  EXPECT_FALSE(r.last_status.accepted);
+  // The latch is published at once on the safety gate (no wait for the 10 Hz slot).
+  ASSERT_FALSE(r.gates.empty());
+  EXPECT_FALSE(r.gates.back().ok);
+  EXPECT_EQ(r.gates.back().reason_code, S::REASON_ACTUATOR_STALL);
+  EXPECT_TRUE(r.gates.back().pre_arm_ok);  // never a pre-arm reason
+  // Held: the same demand never gets through again, no STOP/PIVOT flapping.
+  const size_t n = r.outs.size();
+  for (int i = 0; i < 100; ++i) pivot();
+  for (size_t i = n; i < r.outs.size(); ++i)
+    ASSERT_EQ(r.outs[i].mode, MotionSetpoint::MODE_STOP) << i;
+  EXPECT_EQ(r.last_status.reason_code, S::REASON_ACTUATOR_STALL);
+  EXPECT_FALSE(r.last_gate.ok);
+  EXPECT_EQ(r.last_gate.reason_code, S::REASON_ACTUATOR_STALL);
+  // The mission pauses, RPP sends STOP: the latch clears and the gate passes again at once.
+  r.tick(0.02, true, MotionSetpoint::MODE_STOP, 0.0F, NaN, 0.0F);
+  EXPECT_EQ(r.last_status.reason_code, S::REASON_OK);
+  EXPECT_TRUE(r.gates.back().ok);
+  pivot();  // a new demand starts a new stall time
+  EXPECT_EQ(r.last_out.mode, MotionSetpoint::MODE_PIVOT);
+}
+
+TEST(MotionGuardNode, ActuatorStallIgnoresALegitimateRampAndAMovingVehicle) {
+  using S = dyx3_interfaces::msg::MotionSetpointStatus;
+  Rig r;
+  // 0.6 m/s demand from rest; the measured speed passes 0.02 m/s at 0.9 s.
+  double t = 0.0;
+  for (int i = 0; i < 150; ++i) {
+    t += 0.02;
+    r.veh_vn = t > 0.9 ? 0.05F : 0.0F;
+    r.tick(0.02, true, MotionSetpoint::MODE_TRACK_RATE, 0.6F, NaN, 0.0F);
+  }
+  EXPECT_EQ(r.last_out.mode, MotionSetpoint::MODE_TRACK_RATE);
+  for (const auto& s : r.statuses) EXPECT_NE(s.reason_code, S::REASON_ACTUATOR_STALL);
+  EXPECT_TRUE(r.last_gate.ok);
+  // Speed is horizontal: east-only motion counts as moving.
+  r.veh_vn = 0.0F;
+  r.veh_ve = -0.3F;
+  r.run(1.5);
+  EXPECT_EQ(r.last_out.mode, MotionSetpoint::MODE_TRACK_RATE);
+}
+
+TEST(MotionGuardNode, RequireActuatorPlausibilityFalseDisablesTheStall) {
+  using S = dyx3_interfaces::msg::MotionSetpointStatus;
+  Rig r({rclcpp::Parameter("require_actuator_plausibility", false)});
+  for (int i = 0; i < 150; ++i) r.tick(0.02, true, MotionSetpoint::MODE_PIVOT, 0.0F, NaN, -0.45F);
+  EXPECT_EQ(r.last_out.mode, MotionSetpoint::MODE_PIVOT);
+  for (const auto& s : r.statuses) EXPECT_NE(s.reason_code, S::REASON_ACTUATOR_STALL);
+  EXPECT_TRUE(r.last_gate.ok);
 }
 
 // --- C3: decide and forward on each RPP command

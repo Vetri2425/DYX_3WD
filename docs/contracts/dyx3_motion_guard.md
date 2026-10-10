@@ -14,14 +14,14 @@ re-implements a gate. A backend or tablet E-stop is a *request* to this node.
 |---|---|---|---|
 | in | `/dyx3/rpp/motion_setpoint` | MotionSetpoint | the only motion source. (The quarantined legacy node's `output_topic` is set to this name in config.) |
 | in | `/dyx3/mission/state` | MissionState | mission gate |
-| in | `/dyx3/vehicle_state` | VehicleState | arming, nav state, estimate validity |
+| in | `/dyx3/vehicle_state` | VehicleState | arming, nav state, estimate validity; RC link (pre-arm, 0.17.0); measured horizontal speed and yaw rate (actuator plausibility, 0.17.0) |
 | in | `/dyx3/estimator_health` | EstimatorHealth | heading and estimator gates |
 | in | `/dyx3/rtk_status` | RtkStatus | RTK gate |
 | in | `/dyx3/px4_link/status` | Px4LinkStatus | link gate |
 | service | `/dyx3/motion_guard/set_emergency_stop` | SetEmergencyStop | latch / clear |
 | out | `/dyx3/motion_guard/command` | MotionSetpoint | consumed only by `dyx3_px4_link`. `source_pose_sample_stamp` (IF-003, 0.14.0): preserved unchanged on every command forwarded from RPP (accepted, clamped, clean STOP); on the guard's own canonical STOP (any refusal, no command, `shutdown_stop`) the `px4_sample_stamp` of the newest `VehicleState` received (zero when that message had no fresh local position), zero if none was ever received. Never used for a decision |
 | out | `/dyx3/motion_guard/status` | MotionSetpointStatus | per decision: input seq, reason, applied command |
-| out | `/dyx3/safety_gate` | SafetyGateStatus | fixed 10 Hz, independent of RPP; full gate (`ok`, `reason_code`) and pre-arm gate (`pre_arm_ok`, `pre_arm_reason_code`, 0.15.0) |
+| out | `/dyx3/safety_gate` | SafetyGateStatus | fixed 10 Hz, independent of RPP; full gate (`ok`, `reason_code`) and pre-arm gate (`pre_arm_ok`, `pre_arm_reason_code`, 0.15.0); also published at once when the E-stop latch or the actuator-stall latch (section 3.1) changes |
 | out | `/dyx3/emergency_stop_state` | EmergencyStopState | fixed 10 Hz |
 
 ## 2. Fixed-rate decision loop
@@ -62,10 +62,12 @@ For the freshest RPP command, the first failing check wins and yields STOP with 
 | 9 | heading: estimator health fresh and `flags_valid`, GNSS yaw fusion intended and not faulted, yaw not rejected, `VehicleState.attitude_valid` | `HEADING_UNHEALTHY` (9) |
 | 10 | estimator: position and velocity valid, no inertial dead reckoning, no horizontal position/velocity rejection | `ESTIMATOR_UNHEALTHY` (12) |
 | 11 | mission: `MissionState` fresh and `RUNNING` | `MISSION_GATE` (4) |
+| 11a | actuator plausibility (section 3.1, 0.17.0): the command about to be forwarded is executed by the drivetrain | `ACTUATOR_STALL` (14) |
 | 12 | hard envelopes (section 5): clamp, never refuse | `LIMIT_CLAMPED` (7) with `accepted=true`, `clamped=true` |
 
 `SafetyGateStatus` is the aggregate of checks 4–10 (everything except check 6, the mission gate and the
-command's own validity) at a fixed 10 Hz with the same priority order; `ok=false` is
+command's own validity) at a fixed 10 Hz with the same priority order, followed by the actuator-stall latch of
+check 11a (`ok=false`, `reason_code=ACTUATOR_STALL` while it is set and checks 4–10 pass; section 3.1); `ok=false` is
 authoritative and default. A gate input that was never received or is older than its limit is
 **failing**, never "assumed fine". A gate failing on a non-STOP command always zeroes the output at
 the same tick: there is no ramp-down, because fail-to-zero is immediate (a ramp would be a
@@ -74,14 +76,82 @@ guard-invented motion).
 **Pre-arm verdict (0.15.0, mission contract v2).** The same `SafetyGateStatus` message also carries `pre_arm_ok` and
 `pre_arm_reason_code`: checks 4–10 in the same priority order **except** "armed" and "nav_state == OFFBOARD" (check 7
 keeps "vehicle state fresh, no PX4 failsafe" and adds `VehicleState.preflight_checks_pass` — PX4's own pre-flight checks verdict, so a Start is refused before an arm PX4 would deny; the full gate, which runs while armed, ignores it → `ARMING_GATE`), followed by `VehicleState.global_reference_valid`
-(`GLOBAL_REFERENCE_INVALID` (13), checked last). `dyx3_mission` admits a start and calls `/dyx3/px4_link/arm` only while
+(`GLOBAL_REFERENCE_INVALID` (13), checked last). **Exception (master review of `20f6c3c`):** `preflight_checks_pass`
+is **not** required while `nav_state == OFFBOARD` (14). PX4 sets `vehicle_status.pre_flight_checks_pass =
+canArm(current nav_state)` (`Commander.cpp:1874`), which is false in OFFBOARD without an offboard signal — the state
+after a run whose MANUAL release did not take. `dyx3_px4_link` leaves OFFBOARD for MANUAL before it arms (`fe1770b`),
+and PX4 re-evaluates the flag there and still denies an arm it would refuse; refusing the Start here would block that
+path. In every other nav state the flag is required. `dyx3_mission` admits a start and calls `/dyx3/px4_link/arm` only while
 it is true; it never re-implements a gate. Default false. `GLOBAL_REFERENCE_INVALID` is a pre-arm reason only: the full
 gate and the decision order above (fail-to-zero) are unchanged and do not use the global reference. Implementation:
 `first_failing_pre_arm_gate()` in `mission_gate.cpp` (one shared gate definition with `first_failing_safety_gate()`).
 
-Recovery has no latch other than the E-stop and the sequence rule: when every check passes
+**RC link (0.17.0, `require_rc_link`, default false).** When true, check 7 of the **pre-arm** verdict also requires
+`VehicleState.rc_link_valid && rc_link_ok` (→ `ARMING_GATE`), so the RC kill switch is a guaranteed stop for every
+autonomous run. It is never a gate while running: by owner decision an RC loss in OFFBOARD is not a stop, and the full
+gate and the decision order ignore both fields. The default is false because `rc_link_valid` depends on PX4 publishing
+`failsafe_flags` on DDS, which is unproven on the flashed firmware (with the flag on and no `failsafe_flags`, every
+Start would be refused). Turn it on once `rc_link_valid` is observed true on the rover.
+
+Recovery has no latch other than the E-stop, the actuator-stall latch (section 3.1) and the sequence rule: when every check passes
 again the next valid RPP command is forwarded. A *mission* must not silently resume after a
 safety pause: that is `dyx3_mission`'s FSM (never auto-resume), not this node's.
+
+### 3.1 Actuator plausibility (`ACTUATOR_STALL`, 0.17.0)
+
+**Why.** Measured 2026-10-10 (`docs/analysis/2026-10-10_last_two_missions_controller_robustness.md` §2): RPP commanded
+a −0.45 rad/s pivot for 25.8 s with the RoboClaw powered off; measured yaw rate 0, speed 0, every gate green, the
+mission `RUNNING`, and the rover started turning on its own when the link came back. The guard never invents a
+correction, but it may refuse: a command the drivetrain demonstrably does not execute is stopped with its own reason.
+
+**Rule.** Evaluated on the command the guard is about to forward (after checks 1–11, before the hard envelopes, on the
+RPP values before any clamp). The command **demands motion** when |`yaw_rate_setpoint`| ≥ `stall_yaw_rate_radps` in a
+rate mode (`TRACK_RATE`, `PIVOT`, `CREEP`), or |`speed_body_x`| ≥ `stall_speed_mps` in any moving mode (in
+`TRACK_HEADING` only the speed counts: the rate is NaN by contract and the heading loop is PX4's). The vehicle is
+**still** when the measured horizontal speed hypot(`velocity_north_mps`, `velocity_east_mps`) <
+`stall_measured_speed_mps` **and** |`VehicleState.yaw_rate_radps`| < `stall_measured_yaw_rate_radps`. The measurement
+is **usable** only while `VehicleState` is fresh, `velocity_valid` and `attitude_valid` hold and both values are finite.
+A timer runs only while the forwarded command demands motion and a usable measurement shows the vehicle still; any
+other tick resets it — a tick on which an earlier check refused the command, a tick with an unusable measurement, a
+tick on which the vehicle moves, a tick without demand. When it has run **longer than** `stall_time_s`, the guard fails
+to zero with `ACTUATOR_STALL` (14).
+
+**Latch.** Once stalled, STOP is held **until the forwarded demand drops**: a clean STOP command, or a command below
+both demand thresholds, clears it. The same demand — or another demanding command, e.g. PIVOT → TRACK_RATE — stays
+stopped with reason 14, whatever the measurement does meanwhile, so a stalled pivot does not flap between STOP and
+PIVOT every `stall_time_s` (and the rover does not lurch off when a dead link recovers, the second failure mode of the
+2026-10-10 log). An earlier check refusing the command in between (mission paused, stale RPP) restarts the timer but
+does not clear the latch. Only a process restart clears it otherwise.
+
+**A legitimate ramp never fires.** The still condition must hold for the whole window: a 0.6 m/s demand from rest whose
+measured speed rises through 0.02 m/s within 1.0 s does not count, nor does a pivot whose measured rate reaches
+0.05 rad/s within 1.0 s. RPP's own active brake (≤ 0.08 m/s reverse) and fine pivot (below 0.4 rad/s) are below the
+demand thresholds.
+
+**How the mission sees it.** `dyx3_mission` pauses on `SafetyGateStatus` only. While the latch is set the published
+full verdict is `ok=false`, `reason_code=ACTUATOR_STALL` (after checks 4–10, which keep their priority), published at
+once on the latch change, not at the next 10 Hz slot. The mission therefore goes `RUNNING → PAUSED` with
+`REASON_SAFETY` and `gate_reason_code=14`; on the pause RPP sends STOP, which clears the latch, and the gate passes
+again — the mission never auto-resumes (operator Resume). `MotionSetpointStatus.reason_code=14` is on
+`/dyx3/motion_guard/status` for every stopped tick. The stall is **never** a pre-arm reason: nothing is commanded before
+the arm. It is a command-path reason like `STALE` / `SEQUENCE`, not a gate function (`first_failing_safety_gate()` is
+unchanged); the latch lives in `GuardCore` (`actuator_plausibility.hpp`, `StallDetector`).
+
+| Parameter | Default | Class | Source |
+|---|---|---|---|
+| `require_actuator_plausibility` | true | RESTART | switches the check off (then 2026-10-10 is invisible again) |
+| `stall_yaw_rate_radps` | 0.4 | RESTART | DERIVED — NOT FROM V1 SPEC: = `dyx3_rpp` `segment_nominal_pivot_rate_rad_s` |
+| `stall_speed_mps` | 0.1 | RESTART | DERIVED — NOT FROM V1 SPEC: = `dyx3_rpp` `min_approach_linear_velocity` |
+| `stall_measured_yaw_rate_radps` | 0.05 | RESTART | DERIVED — NOT FROM V1 SPEC: = `dyx3_rpp` `segment_stop_yaw_rate_threshold` |
+| `stall_measured_speed_mps` | 0.02 | RESTART | DERIVED — NOT FROM V1 SPEC: = `dyx3_rpp` `segment_stop_speed_threshold` |
+| `stall_time_s` | 1.0 | RESTART | DERIVED — NOT FROM V1 SPEC: = `dyx3_rpp` `segment_pivot_spinup_margin_s` |
+
+The values are re-declared, not read from RPP (one owner each: RPP owns its FSM thresholds, the guard owns this
+check); if an RPP value is retuned, retune the guard's copy with it. Validation at start: every value finite and > 0,
+each measured threshold strictly below its demand threshold; otherwise the node throws. Not proven off-target: the
+false-positive rate on real spin-up (PX4 rate loop and RoboClaw latency) and the value of `yaw_rate_radps` when
+`dyx3_px4_link`'s yaw-rate source is invalid while `attitude_valid` is true (the link then publishes 0, which reads as
+"still": a fail-to-zero direction, but a possible false stall) — field-validate at the next run.
 
 ## 4. Emergency stop
 
@@ -135,6 +205,8 @@ the old limiter mechanics directly testable; it is not a second production contr
 | `rtk_min_fix_type` | 6 | RESTART | prototype `min_fix_type` |
 | `rtk_max_hrms_m` | 0.10 | RESTART | prototype `rtk_max_hrms_m` |
 | `require_gnss_yaw_fusion` | true | RESTART | DERIVED: CLAUDE.md §3, dual-antenna heading is first-class |
+| `require_rc_link` | false | RESTART | 0.17.0, pre-arm only (section 3); turn on once `rc_link_valid` is observed true on the rover |
+| `require_actuator_plausibility`, `stall_*` | section 3.1 | RESTART | 0.17.0; each `stall_*` default is the named `dyx3_rpp` parameter |
 | hard envelopes | section 5 | RESTART (LIVE target) | spec §9 lists speed limits as LIVE |
 
 ### 6.1 Rationale of each freshness limit
@@ -183,6 +255,7 @@ matters most is in `dyx3_px4_link`, the last hop; this burst only helps if `px4_
 ## 8. Not proven off-target
 
 Loop jitter, behaviour under DDS reordering, the real tablet heartbeat path, the interaction with the
-firmware's own offboard-loss handling. Off-target proof: every row of the decision table, the
-sequence rule, the limiter, and a randomised property test that no non-STOP command ever leaves the
-guard while any gate fails.
+firmware's own offboard-loss handling, the actuator-stall false-positive rate on real spin-up, and
+`rc_link_valid` on the flashed firmware. Off-target proof: every row of the decision table, the
+sequence rule, the limiter, the actuator-stall timer boundary and latch (exact 1/64 s clock), and a
+randomised property test that no non-STOP command ever leaves the guard while any gate fails.
