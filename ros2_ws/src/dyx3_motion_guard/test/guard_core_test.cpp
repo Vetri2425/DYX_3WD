@@ -406,6 +406,7 @@ GateInputs pre_arm_gates() {
   g.vehicle.arming_state = 1;  // disarmed, not in OFFBOARD: what the rover looks like before ARMING
   g.vehicle.nav_state = 4;
   g.vehicle.global_reference_valid = true;
+  g.vehicle.preflight_checks_pass = true;
   g.mission.state = 0;
   return g;
 }
@@ -433,6 +434,32 @@ TEST(PreArmGate, GlobalReferenceIsRequiredAndCheckedLast) {
   GateInputs full = good_gates();
   full.vehicle.global_reference_valid = false;
   EXPECT_EQ(first_failing_safety_gate(full, GateConfig{}), Reason::Ok);
+}
+TEST(PreArmGate, Px4PreflightChecksRefuseTheStartWithTheArmingReason) {
+  GateInputs g = pre_arm_gates();
+  g.vehicle.preflight_checks_pass = false;  // everything else OK: PX4 would deny the arm
+  EXPECT_EQ(first_failing_pre_arm_gate(g, GateConfig{}), Reason::ArmingGate);
+  // Arming is checked before RTK, heading and the estimator: a later failure does not mask it,
+  // and an earlier one (link) wins over it.
+  g.rtk.fix_type = 3;
+  EXPECT_EQ(first_failing_pre_arm_gate(g, GateConfig{}), Reason::ArmingGate);
+  g.link.handshake_ok = false;
+  EXPECT_EQ(first_failing_pre_arm_gate(g, GateConfig{}), Reason::Px4LinkUnhealthy);
+}
+TEST(PreArmGate, PreflightChecksFlagDoesNotTouchTheFullGate) {
+  GateInputs full = good_gates();  // armed + OFFBOARD
+  full.vehicle.preflight_checks_pass = false;
+  EXPECT_EQ(first_failing_safety_gate(full, GateConfig{}), Reason::Ok);
+  auto core = accepting_core();
+  EXPECT_TRUE(core.decide(0.05, 0.02, full).accepted);
+}
+TEST(PreArmGate, NeverSeenVehicleStateFailsForTheExistingReason) {
+  GateInputs g = pre_arm_gates();
+  g.vehicle = VehicleIn{};  // never heard: not fresh, preflight false
+  EXPECT_EQ(first_failing_pre_arm_gate(g, GateConfig{}), Reason::ArmingGate);
+  g = pre_arm_gates();
+  g.vehicle.fresh = false;  // stale with the flag true: same reason
+  EXPECT_EQ(first_failing_pre_arm_gate(g, GateConfig{}), Reason::ArmingGate);
 }
 TEST(PreArmGate, NeverHeardFails) {
   EXPECT_NE(first_failing_pre_arm_gate(GateInputs{}, GateConfig{}), Reason::Ok);

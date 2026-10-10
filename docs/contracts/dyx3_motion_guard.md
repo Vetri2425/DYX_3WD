@@ -73,7 +73,7 @@ guard-invented motion).
 
 **Pre-arm verdict (0.15.0, mission contract v2).** The same `SafetyGateStatus` message also carries `pre_arm_ok` and
 `pre_arm_reason_code`: checks 4–10 in the same priority order **except** "armed" and "nav_state == OFFBOARD" (check 7
-keeps only "vehicle state fresh, no PX4 failsafe" → `ARMING_GATE`), followed by `VehicleState.global_reference_valid`
+keeps "vehicle state fresh, no PX4 failsafe" and adds `VehicleState.preflight_checks_pass` — PX4's own pre-flight checks verdict, so a Start is refused before an arm PX4 would deny; the full gate, which runs while armed, ignores it → `ARMING_GATE`), followed by `VehicleState.global_reference_valid`
 (`GLOBAL_REFERENCE_INVALID` (13), checked last). `dyx3_mission` admits a start and calls `/dyx3/px4_link/arm` only while
 it is true; it never re-implements a gate. Default false. `GLOBAL_REFERENCE_INVALID` is a pre-arm reason only: the full
 gate and the decision order above (fail-to-zero) are unchanged and do not use the global reference. Implementation:

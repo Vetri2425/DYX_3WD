@@ -56,6 +56,7 @@ struct Rig {
   bool event{false};                                       // the node's mode (event_driven)
   bool veh_ok{true}, rtk_ok{true}, link_ok{true}, est_ok{true}, mission_running{true};
   bool veh_armed_offboard{true}, veh_global_ref{true};  // pre-arm gate inputs (0.15.0)
+  bool veh_preflight_pass{true};                        // pre-arm gate input
 
   explicit Rig(const std::vector<rclcpp::Parameter>& params = {}) {
     ctx = std::make_shared<rclcpp::Context>();
@@ -165,6 +166,7 @@ struct Rig {
       v.arming_state = veh_armed_offboard ? 2 : 1;
       v.nav_state = veh_armed_offboard ? 14 : 4;
       v.global_reference_valid = veh_global_ref;
+      v.preflight_checks_pass = veh_preflight_pass;
       v.position_valid = v.velocity_valid = v.attitude_valid = true;
       v.px4_sample_stamp = veh_stamp;
       p_veh->publish(v);
@@ -641,6 +643,39 @@ TEST(MotionGuardNode, PreArmGateIsPublishedAndIgnoresArmedAndOffboard) {
   r.run(0.3, false);
   EXPECT_TRUE(r.last_gate.ok);
   EXPECT_FALSE(r.last_gate.pre_arm_ok);
+}
+
+// PX4's pre-flight checks verdict refuses the pre-arm verdict only; the full gate (armed) ignores
+// it.
+TEST(MotionGuardNode, PreArmGateRefusesWhenPx4PreflightChecksFail) {
+  using S = dyx3_interfaces::msg::MotionSetpointStatus;
+  Rig r;
+  r.veh_armed_offboard = false;
+  r.mission_running = false;
+  r.run(0.5, false);
+  ASSERT_TRUE(r.last_gate.pre_arm_ok);
+  r.veh_preflight_pass = false;
+  r.run(0.3, false);
+  EXPECT_FALSE(r.last_gate.pre_arm_ok);
+  EXPECT_EQ(r.last_gate.pre_arm_reason_code, S::REASON_ARMING_GATE);
+  r.veh_preflight_pass = true;
+  r.run(0.3, false);
+  EXPECT_TRUE(r.last_gate.pre_arm_ok);
+  // Armed + OFFBOARD with the flag false: the full gate still passes.
+  r.veh_armed_offboard = true;
+  r.veh_preflight_pass = false;
+  r.run(0.3, false);
+  EXPECT_TRUE(r.last_gate.ok);
+}
+// A never-seen vehicle state still fails pre-arm, with the existing reason.
+TEST(MotionGuardNode, PreArmGateFailsWithArmingReasonWithoutAnyVehicleState) {
+  using S = dyx3_interfaces::msg::MotionSetpointStatus;
+  Rig r;
+  r.veh_ok = false;
+  r.mission_running = false;
+  r.run(0.5, false);
+  EXPECT_FALSE(r.last_gate.pre_arm_ok);
+  EXPECT_EQ(r.last_gate.pre_arm_reason_code, S::REASON_ARMING_GATE);
 }
 
 // --- C3: decide and forward on each RPP command
