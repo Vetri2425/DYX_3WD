@@ -1,1 +1,1 @@
-{"client":"Three_Wheel_v2","client_version":"1.0.0","name":"Test_Marking_Job","frame":"local_ned","origin_ne_m":[0.0,0.0],"runs":[{"type":"travel","points":[[0.0,0.0,2],[2.0,0.0,2]]},{"type":"mark","points":[[2.0,0.0,3],[6.0,0.0,1],[10.0,0.0,3]]}]}
+{"client":"Three_Wheel_v2","client_version":"1.0.0","name":"Test_Marking_Job","frame":"local_ned","anchor":{"lat":48.137154,"lon":11.576124,"alt":519.5},"origin_ne_m":[0.0,0.0],"runs":[{"type":"travel","points":[[0.0,0.0,2],[2.0,0.0,2]]},{"type":"mark","points":[[2.0,0.0,3],[6.0,0.0,1],[10.0,0.0,3]]}]}

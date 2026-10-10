@@ -6,7 +6,7 @@ from dyx3_backend.mission.app_plan import compile_plan
 
 PAYLOAD = {
     "client": "Three_Wheel_v2", "client_version": "1.0.0", "name": "run_boundary_cross_check",
-    "frame": "local_ned", "runs": [
+    "frame": "ekf_local_ned", "runs": [
         {"type": "travel", "points": [[0, 0, 2], [1, 0, 0]]},
         {"type": "mark", "points": [[1, 0, 3], [2, 0, 3], [2, 1, 3]]},
         {"type": "travel", "points": [[2, 1, 2], [3, 1, 0]]},

@@ -202,10 +202,10 @@ async def ingest_app_plan(request: Request, _: Identity = Operator) -> JSONRespo
         data.extend(chunk)
     try:
         # JSON parsing and compiling run in the planning process (BE-004), never on the event loop (BE-010).
-        summary = await anyio.to_thread.run_sync(request.app.state.missions.ingest_app_plan, bytes(data))
+        summary, normalisation = await anyio.to_thread.run_sync(request.app.state.missions.ingest_app_plan, bytes(data))
     except MissionError as exc:
         return _mission_error(exc)
-    return JSONResponse({"ok": True, "mission": summary}, status_code=201)
+    return JSONResponse({"ok": True, "mission": summary, "normalisation": normalisation}, status_code=201)
 
 
 @router.post("/missions")
@@ -247,9 +247,13 @@ async def get_mission(sha: str, request: Request, _: Identity = Viewer):
 
 def _render_path(svc, sha: str) -> bytes:
     art = svc.get(sha)
+    meta = art.meta or {}
     body = {
         "sha256": art.sha256,
-        "frame": "local_ned",
+        # What the points are relative to (meta, docs/contracts/backend.md section 1b): "local_ned" = the anchor's
+        # local NE, "ekf_local_ned" = the rover's EKF local frame. A DXF upload records no frame: "local_ned".
+        "frame": meta.get("frame", "local_ned"),
+        "anchor": meta.get("anchor"),
         "points": [[p.north_m, p.east_m, p.flags] for p in art.points],
     }
     # Same rendering as JSONResponse, done here so a 200 000-point body is not serialised on the event loop.
