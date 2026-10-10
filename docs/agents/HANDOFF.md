@@ -2835,3 +2835,43 @@ at 10 Hz): healthy client 48–49 events / 5 s for 170 s, backend ping 1–3 ms,
 **Process (Claude)**
 23. A subagent pushed `Trajectory` once without permission (heartbeat fix, `ac3adf5`): verify `origin` after every
     agent run; agents never push.
+
+## 2026-10-10 (night) — Claude — production review: transport, timing, event handling, backend ↔ tablet
+
+**Branch:** `claude/funny-sagan-upnenq` (on `master` `750784c`). Docs only; no code changed, nothing built or run.
+
+**Deliverable:** `docs/reviews/2026-10-10_production_blockers_transport_timing_review.md`. Method: four read-only
+code traces (px4_link + DDS environment; rpp/guard/mission timing; gateway + backend + Socket.IO; RTK/spray/recorder/
+bringup), every finding re-read in the source, cross-checked against the 2026-10-10 field entries and against
+`docs/reviews/production/open_items.md` (all `hardening/2026-10-10` SHAs confirmed ancestors of `750784c`).
+
+**Verdict (short):** the motion safety chain is sound and event-driven end to end (X-003 structurally addressed; one bag
+measurement, `pose_to_write_age`, closes it). What blocks *reliable operation* is recovery, not safety:
+- **P1** PX4 arm/mode refusals are invisible (no ack matching for 400/176; `REASON_REJECTED_BY_FCU` never set).
+- **P2** no recovery from a transient: progress in memory (MS-002), no re-engage from PAUSED, any node exit restarts the
+  whole graph and disarms (`control_graph.launch.py:65`).
+- **P3** the DDS transport is right on rover 01 by hand: `ros.env.tmpl` still ships `#DYX3_ROS_LOCALHOST_ONLY=1`
+  commented out (HANDOFF:979 item 1, localhost half still open); no RMW / Fast DDS profile pinned anywhere (architecture
+  §8 `fastdds_no_shm.xml` reason never re-derived); domain match only inferred (PC-7a).
+- **P4** px4_link is the only non-RT hop; `/fmu/in` writers are reliable KEEP_LAST(1) (can block on an unacking agent —
+  unproven, bench test M2); the one agent-loss test ran with no OFFBOARD session, so the writer path was never exercised;
+  ULog streaming now works (XR-GPX-004) and loads the same executor.
+- **P5** (owner) the only software stop goes through the tablet's JS thread; RC kill is the only other stop.
+New MEDIUM/HIGH: mission node runs every timeout on the ROS/wall clock (T1); RTK `SET_CONFIG` during a run can STOP the
+rover via `getaddrinfo` under `lifecycle_m_` (S1, RTK-001 ↑); telemetry frames carry no seq/stamp (G1); spray ships the
+known boundary defect enabled (`projection_direction_gate_deg` 0, S3); health check covers no RTK/recorder/watchdog state (S4).
+
+**Measurements to run (review §6):** M1 `pose_to_write_age` from the 2026-10-10 bags; M2 agent `SIGSTOP`/kill with
+OFFBOARD Active; M3 companion-loss stop distance at 0.6 m/s; M4 RPP `step()` duration under load; M5 ≥ 4 h soak;
+M6 wall-clock step while Active; M7 RTK config change with DNS black-holed.
+
+**Fix order (review §7):** P1 ack matching → P3 env/profile pinning → P4 px4_link RT + ULog off → T1 steady clock →
+S1 RTK config guard → G1 telemetry seq → P2 (owner decision) → spray items before the paint milestone.
+
+**DERIVED — NOT FROM V1 SPEC:** severity ratings reuse the register's scale; the Fast DDS blocking claim (P4) is from
+vendor docs for KEEP_ALL and reasoning for KEEP_LAST, flagged as needing M2.
+
+**In flight:** an architecture-completeness audit (spec §4–§14 deliverables vs code and gate records) is being added as
+review §8 in a follow-up commit on the same branch.
+
+**Open for the human:** P2 (persisted progress + re-engage + unit split) and P5 (stop policy) are decisions, not code.
