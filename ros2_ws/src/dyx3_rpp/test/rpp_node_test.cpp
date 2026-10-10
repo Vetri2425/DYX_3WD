@@ -780,3 +780,22 @@ TEST(RppNode, ANonFiniteVehicleStateIsNeverFed) {
   EXPECT_EQ(r.motion.back().mode, MotionSetpoint::MODE_STOP);
   EXPECT_EQ(r.status.tick_state, -1) << "stale, not a tracking tick on a NaN pose";
 }
+
+// XR-RPP-010: a filesystem error while storing the conditioned artifact never escapes the load.
+// The stored artifact is replaced by a symlink to itself: the throwing std::filesystem::exists
+// raised ELOOP out of the mission callback and ended the process; the error_code overload does
+// not, and the load either succeeds (the link is replaced) or fails to STOP.
+TEST(RppNode, AFilesystemErrorInTheLoadNeverEscapes) {
+  Rig r;
+  r.run(0.3);
+  ASSERT_EQ(r.status.state, RppStatus::STATE_LOADED);
+  const std::string cond = r.dir + "/" + r.status.conditioned_execution_sha256 + ".dyx3cond";
+  std::filesystem::remove(cond);
+  std::filesystem::create_symlink(cond, cond);  // a loop: stat() fails with ELOOP
+  r.mission_id = 8;                             // a new mission id loads again
+  EXPECT_NO_THROW(r.run(0.5));
+  EXPECT_EQ(r.status.mission_id, 8U);
+  EXPECT_TRUE(r.status.state == RppStatus::STATE_LOADED || r.status.state == RppStatus::STATE_ERROR)
+      << int(r.status.state);
+  EXPECT_EQ(r.motion.back().mode, MotionSetpoint::MODE_STOP);
+}

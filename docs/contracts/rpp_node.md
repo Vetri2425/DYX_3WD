@@ -19,7 +19,9 @@
   with the same reader `dyx3_mission` uses (the hash is verified), turns the points into runs with `condition_path` (the proven port of `_path_cb`),
   and installs those exact runs in `RppCore`. It writes an immutable `DYX3COND 1` artifact from the installed runs and publishes its content hash in
   `RppStatus.conditioned_execution_sha256`. Spray uses that artifact for projection. A **new mission id** loads again even for the same source file.
-  A missing or corrupt file, or a path that conditions to nothing, is `STATE_ERROR` (STOP) and is retried once a second.
+  A missing or corrupt file, or a path that conditions to nothing, is `STATE_ERROR` (STOP) and is retried once a second. Filesystem
+  calls use the `error_code` overloads and any exception inside the load is a failed load (XR-RPP-010); `main` sends its bounded STOP
+  burst even when spinning ended with an exception.
 * **Not RUNNING** (loaded and waiting, or paused): STOP every tick, `STATE_LOADED`. On the RUNNING to not-RUNNING edge the core forgets its motion
   memory (`pause()`: speed memory, hard-curvature latch, stop confirmation; and, XR-RPP-008, the jump-guard position, the tick period,
   the projection hint of an open run, the precise-stop engagement and its timer, the stop latch: a resume is a fresh start of the same run, so a
@@ -65,7 +67,7 @@ shared with motion_guard, comes from the launch prefix in `dyx3_bringup/launch/c
 
 ## 5. Proof
 
-`rpp_node_test` (in-process, private DDS domain, injected monotonic clock, a kinematic stand-in vehicle): 22 cases — startup validation; load by id and
+`rpp_node_test` (in-process, private DDS domain, injected monotonic clock, a kinematic stand-in vehicle): 23 cases — startup validation; load by id and
 acknowledgement; a missing artifact; a **whole mission driven to COMPLETE** (the line is marked where the planner says, stops on the final point within 6 cm);
 stale pose; RTK drop with the reason; pause and resume from rest; entry pivot; parameter classes; the unported feature; every emitted mode contract-conforming; a final approach 3 cm to the side of the endpoint completes within 10 s
 with at most 2 speed reversals (XR-RPP-001); on an L-shaped mission the first heading after the corner pivot is the exit leg (XR-RPP-007).

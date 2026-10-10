@@ -45,6 +45,7 @@ private:
   ConditionParams condition_params() const;
   void on_mission_state(const dyx3_interfaces::msg::MissionState& m);
   void load_mission(uint32_t mission_id, const std::string& sha);
+  void load_mission_impl(uint32_t mission_id, const std::string& sha);
   void unload_mission();
   void publish_motion(const MotionCommand& c);
   void publish_status(uint8_t state, const TickOutput* out, const MotionCommand& cmd);

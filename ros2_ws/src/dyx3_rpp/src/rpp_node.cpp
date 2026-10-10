@@ -220,6 +220,20 @@ void RppNode::unload_mission() {
 }
 
 void RppNode::load_mission(uint32_t mission_id, const std::string& sha) {
+  // XR-RPP-010: a failure anywhere in the load (I/O, allocation) is a failed load: STOP, ERROR,
+  // retried once a second. It never escapes into the executor, where it would end the process
+  // without its STOP burst.
+  try {
+    load_mission_impl(mission_id, sha);
+  } catch (const std::exception& e) {
+    loaded_ = false;
+    load_failed_ = true;
+    conditioned_sha_.clear();
+    RCLCPP_ERROR(get_logger(), "rpp path %s load failed: %s", sha.c_str(), e.what());
+  }
+}
+
+void RppNode::load_mission_impl(uint32_t mission_id, const std::string& sha) {
   mission_id_ = mission_id;
   sha_ = sha;
   loaded_ = false;
@@ -285,7 +299,8 @@ void RppNode::load_mission(uint32_t mission_id, const std::string& sha) {
   const auto conditioned_path =
       std::filesystem::path(artifact_dir_) / (conditioned_sha_ + ".dyx3cond");
   bool valid_existing = false;
-  if (std::filesystem::exists(conditioned_path)) {
+  std::error_code exists_ec;  // XR-RPP-010: the non-throwing overloads only
+  if (std::filesystem::exists(conditioned_path, exists_ec) && !exists_ec) {
     const auto existing = dyx3_mission::load_conditioned_artifact(artifact_dir_, conditioned_sha_);
     valid_existing = existing.ok && existing.artifact.source_sha256 == sha;
   }
@@ -302,7 +317,8 @@ void RppNode::load_mission(uint32_t mission_id, const std::string& sha) {
     std::error_code ec;
     std::filesystem::rename(temp_path, conditioned_path, ec);
     if (ec) {
-      std::filesystem::remove(temp_path);
+      std::error_code rm_ec;
+      std::filesystem::remove(temp_path, rm_ec);
       conditioned_sha_.clear();
       RCLCPP_ERROR(get_logger(), "cannot publish conditioned artifact: %s", ec.message().c_str());
       return;
