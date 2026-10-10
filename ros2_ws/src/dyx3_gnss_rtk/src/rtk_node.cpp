@@ -75,6 +75,14 @@ RtkNode::RtkNode(const rclcpp::NodeOptions& options, ClockFn clock, bool create_
         link_status_at_s_ = clock_();
         have_link_status_ = true;
       });
+  sub_mission_state_ = create_subscription<dyx3_interfaces::msg::MissionState>(
+      "/dyx3/mission/state", rclcpp::QoS(1).reliable(),
+      [this](dyx3_interfaces::msg::MissionState::ConstSharedPtr state) {
+        std::lock_guard<std::mutex> lk(m_);
+        mission_state_ = state->state;
+        mission_state_at_s_ = clock_();
+        have_mission_state_ = true;
+      });
 
   std::string startup_error;
   if (test_config) {
@@ -229,25 +237,52 @@ void RtkNode::activate_config() {
 }
 
 void RtkNode::apply_config(Json candidate) {
-  std::lock_guard<std::mutex> lk(lifecycle_m_);
-  const uint64_t old_revision = config_.at("revision").get<uint64_t>();
-  if (!candidate.contains("revision") || !candidate.at("revision").is_number_integer() ||
-      candidate.at("revision").get<uint64_t>() != old_revision)
-    throw ConfigError("configuration revision conflict");
-  candidate = RtkConfigStore::merge_write_only_passwords(config_, std::move(candidate));
-  candidate["revision"] = old_revision + 1;
-  candidate["updated_at"] = utc_now();
-  RtkConfigStore::validate(candidate);
-  transition(WorkerState::Reconfiguring, "CONFIG_CHANGE", "operator changed RTK configuration");
+  // One reconfiguration at a time. The control socket is single-threaded, but this keeps the
+  // invariant local to the function that depends on it.
+  std::lock_guard<std::mutex> reconfig(reconfig_m_);
+  // The old source workers are joined WITHOUT lifecycle_m_. Joining under it stalled
+  // publish_status() (it needs lifecycle_m_) for as long as a worker took to stop, RtkStatus then
+  // went silent and the motion guard's RTK gate stopped the rover mid-line. Chosen over a
+  // try-lock/"reconfiguring" republish path because RtkStatus has no field to carry such a flag
+  // (no message changes) and, with the join outside the lock, the status timer never waits on a
+  // worker at all: lifecycle_m_ is held only for field updates, so the 200 ms cadence holds and
+  // the published values stay truthful (corrections go stale once the old stream is gone).
+  std::unique_ptr<NtripClient> old_client;
+  std::unique_ptr<LoraSource> old_lora;
+  {
+    std::lock_guard<std::mutex> lk(lifecycle_m_);
+    const uint64_t old_revision = config_.at("revision").get<uint64_t>();
+    if (!candidate.contains("revision") || !candidate.at("revision").is_number_integer() ||
+        candidate.at("revision").get<uint64_t>() != old_revision)
+      throw ConfigError("configuration revision conflict");
+    candidate = RtkConfigStore::merge_write_only_passwords(config_, std::move(candidate));
+    candidate["revision"] = old_revision + 1;
+    candidate["updated_at"] = utc_now();
+    RtkConfigStore::validate(candidate);
+    transition(WorkerState::Reconfiguring, "CONFIG_CHANGE", "operator changed RTK configuration");
+    reconfiguring_ = true;
+    old_client = std::move(client_);
+    old_lora = std::move(lora_);
+  }
   // Break before make. A callback already in deliver completes before stop returns. Old
   // callbacks waiting behind it fail the generation check. Join source before replacing sinks.
+  // authority_ is only ever replaced by activate_config() below, on this same (serialized) path.
   authority_->stop();
-  stop_selected_source();
+  if (old_client) old_client->stop();
+  if (old_lora) old_lora->stop();
+  old_client.reset();
+  old_lora.reset();
+  {
+    std::lock_guard<std::mutex> lk(m_);
+    health_.reset_stream();
+  }
   try {
     config_store_.save(candidate);
   } catch (...) {
     // A failure before rename leaves the old file. A directory-fsync error after rename
     // may leave the new file. Reload it so runtime and persistent authority agree.
+    std::lock_guard<std::mutex> lk(lifecycle_m_);
+    reconfiguring_ = false;
     try {
       if (auto persisted = config_store_.load()) config_ = *persisted;
       activate_config();
@@ -256,12 +291,26 @@ void RtkNode::apply_config(Json candidate) {
     }
     throw;
   }
+  std::lock_guard<std::mutex> lk(lifecycle_m_);
+  reconfiguring_ = false;
   config_ = std::move(candidate);
   activate_config();
 }
 
 Json RtkNode::handle_control(const Json& request) {
   const std::string command = request.at("cmd").get<std::string>();
+  // While a mission occupies the system the RTK source, transport and worker are not to be
+  // touched: SET_CONFIG, START and STOP all restart the worker. Reads stay available. The check
+  // is advisory against a mission that becomes active a moment later; the reconfiguration
+  // itself no longer starves RtkStatus (apply_config), so that residual race cannot stop the rover.
+  if ((command == "SET_CONFIG" || command == "START" || command == "STOP") &&
+      mission_active(clock_())) {
+    RCLCPP_WARN(get_logger(), "%s refused: mission active", command.c_str());
+    return {{"v", 1},
+            {"ok", false},
+            {"code", "conflict"},
+            {"reason", "mission active: configuration is locked"}};
+  }
   if (command == "GET_STATUS") return {{"v", 1}, {"ok", true}, {"data", status_json(clock_())}};
   if (command == "GET_CONFIG") {
     std::lock_guard<std::mutex> lk(lifecycle_m_);
@@ -288,6 +337,32 @@ Json RtkNode::handle_control(const Json& request) {
           {"ok", false},
           {"code", "unknown_command"},
           {"reason", "unsupported RTK control command"}};
+}
+
+bool RtkNode::mission_active(double now_s) const {
+  std::lock_guard<std::mutex> lk(m_);
+  // A mission state never seen (the RTK service starts before the graph) or gone stale is NOT
+  // active. DERIVED — NOT FROM V1 SPEC: freshness reuses gnss_report_max_age_s_, the 1.0 s limit
+  // this node already applies to the px4_link status; dyx3_mission republishes at state_publish_hz
+  // (10 Hz default), well inside it.
+  if (!have_mission_state_ || now_s < mission_state_at_s_ ||
+      now_s - mission_state_at_s_ > gnss_report_max_age_s_)
+    return false;
+  // The states for which dyx3_mission's MissionFsm::active() is true and no terminal state:
+  // LOADING, PLACING, ARMING, ENGAGING, READY, RUNNING, PAUSED.
+  using dyx3_interfaces::msg::MissionState;
+  switch (mission_state_) {
+    case MissionState::STATE_LOADING:
+    case MissionState::STATE_PLACING:
+    case MissionState::STATE_ARMING:
+    case MissionState::STATE_ENGAGING:
+    case MissionState::STATE_READY:
+    case MissionState::STATE_RUNNING:
+    case MissionState::STATE_PAUSED:
+      return true;
+    default:
+      return false;
+  }
 }
 
 bool RtkNode::report_fresh(double now_s) const {
@@ -440,6 +515,7 @@ void RtkNode::publish_ntrip_status(double now_s) {
 
 void RtkNode::update_worker_state(double now_s) {
   std::lock_guard<std::mutex> lk(lifecycle_m_);
+  if (reconfiguring_) return;  // apply_config owns the state until the new config is active
   if (config_.at("desired_state") == "STOPPED") return;
   if (!configured_) {
     transition(WorkerState::WaitSource, "SOURCE_NOT_CONFIGURED", config_error_);
@@ -508,6 +584,7 @@ Json RtkNode::status_json(double now_s) {
         {"resync_bytes", config.at("source") == "NTRIP" ? ntrip.resync_bytes : lora.resync_bytes},
         {"partial_timeouts",
          config.at("source") == "NTRIP" ? ntrip.partial_timeouts : lora.partial_timeouts},
+        {"frame_timeouts", config.at("source") == "NTRIP" ? ntrip.frame_timeouts : 0},
         {"last_message_type",
          config.at("source") == "NTRIP" ? ntrip.last_message_type : lora.last_message_type},
         {"read_errors", lora.read_errors},

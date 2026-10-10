@@ -18,6 +18,7 @@
 #include "dyx3_gnss_rtk/rtk_config.hpp"
 #include "dyx3_gnss_rtk/worker_state.hpp"
 #include "dyx3_interfaces/msg/gnss_report.hpp"
+#include "dyx3_interfaces/msg/mission_state.hpp"
 #include "dyx3_interfaces/msg/ntrip_status.hpp"
 #include "dyx3_interfaces/msg/px4_link_status.hpp"
 #include "dyx3_interfaces/msg/rtcm_data.hpp"
@@ -47,6 +48,8 @@ public:
 private:
   std::optional<std::string> gga_for_caster();
   bool report_fresh(double now_s) const;  // requires m_ held
+  // True while a fresh MissionState says an execution occupies the system. Locks m_.
+  bool mission_active(double now_s) const;
   void on_source_frame(uint64_t generation, const std::vector<uint8_t>& frame);
   void start_selected_source(uint64_t generation);
   void stop_selected_source();
@@ -64,7 +67,11 @@ private:
   bool start_client_{true};
   RtkConfigStore config_store_;
   Json config_;
+  // Serializes whole reconfigurations (apply_config). Never taken by a status path, so it can be
+  // held across the worker join; lifecycle_m_ (which the 200 ms status timer needs) cannot.
+  std::mutex reconfig_m_;
   std::mutex lifecycle_m_;
+  bool reconfiguring_{false};  // guarded by lifecycle_m_
   std::mutex state_m_;
   WorkerStateMachine state_;
   std::unique_ptr<ControlSocket> control_;
@@ -76,6 +83,9 @@ private:
   dyx3_interfaces::msg::Px4LinkStatus link_status_;
   bool have_link_status_{false};
   double link_status_at_s_{0};
+  uint8_t mission_state_{dyx3_interfaces::msg::MissionState::STATE_IDLE};
+  bool have_mission_state_{false};
+  double mission_state_at_s_{0};
   double started_at_s_{0};
 
   mutable std::mutex m_;
@@ -92,6 +102,7 @@ private:
   rclcpp::Publisher<dyx3_interfaces::msg::NtripStatus>::SharedPtr pub_ntrip_;
   rclcpp::Subscription<dyx3_interfaces::msg::GnssReport>::SharedPtr sub_report_;
   rclcpp::Subscription<dyx3_interfaces::msg::Px4LinkStatus>::SharedPtr sub_link_status_;
+  rclcpp::Subscription<dyx3_interfaces::msg::MissionState>::SharedPtr sub_mission_state_;
   rclcpp::TimerBase::SharedPtr t_rtk_, t_ntrip_;
 };
 
