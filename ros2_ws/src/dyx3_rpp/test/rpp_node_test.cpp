@@ -6,12 +6,11 @@
 #include <gtest/gtest.h>
 #include <unistd.h>
 
-#include <charconv>
 #include <chrono>
 #include <cmath>
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <locale>
 #include <sstream>
 #include <vector>
@@ -40,45 +39,14 @@ std::vector<ArtPoint> north_line() {
   return pts;
 }
 
-// Python repr() of a finite double: the only coordinate spelling the artifact reader accepts
-// (MS-005, dyx3_mission/src/path_artifact.cpp). Shortest round-trip digits, positional notation
-// for 1e-4 <= |v| < 1e16, otherwise d[.ddd]e+XX.
-std::string python_repr(double v) {
-  char buf[64];
-  const auto r = std::to_chars(buf, buf + sizeof(buf), v, std::chars_format::scientific);
-  const std::string sci(buf, r.ptr);
-  const bool neg = sci[0] == '-';
-  const std::size_t epos = sci.find('e');
-  std::string digits;
-  for (std::size_t k = neg ? 1 : 0; k < epos; ++k)
-    if (sci[k] != '.') digits += sci[k];
-  std::string out = neg ? "-" : "";
-  if (digits == "0") return out + "0.0";
-  const int decpt = std::atoi(sci.c_str() + epos + 1) + 1;
-  const int nd = static_cast<int>(digits.size());
-  if (decpt > -4 && decpt <= 16) {
-    if (decpt <= 0) return out + "0." + std::string(static_cast<std::size_t>(-decpt), '0') + digits;
-    if (decpt >= nd)
-      return out + digits + std::string(static_cast<std::size_t>(decpt - nd), '0') + ".0";
-    return out + digits.substr(0, static_cast<std::size_t>(decpt)) + "." +
-           digits.substr(static_cast<std::size_t>(decpt));
-  }
-  out += digits.substr(0, 1);
-  if (nd > 1) out += "." + digits.substr(1);
-  const int e = decpt - 1;
-  out += e < 0 ? "e-" : "e+";
-  if (std::abs(e) < 10) out += '0';
-  return out + std::to_string(std::abs(e));
-}
-
 // The points as a content-addressed DYX3PATH artifact.
 std::string write_artifact(const std::string& dir, const std::vector<ArtPoint>& pts) {
   std::ostringstream body;
   body.imbue(std::locale::classic());
   body << "DYX3PATH 1\nframe local_ned\nengine 0123456789abcdef\nmeta {}\npoints " << pts.size()
        << "\n";
-  for (const auto& p : pts)
-    body << python_repr(p.n) << " " << python_repr(p.e) << " " << p.flag << "\n";
+  body << std::setprecision(17);
+  for (const auto& p : pts) body << p.n << " " << p.e << " " << p.flag << "\n";
   body << "end " << pts.size() << "\n";
   const std::string text = body.str();
   const std::string sha = dyx3_mission::sha256_hex(text);
