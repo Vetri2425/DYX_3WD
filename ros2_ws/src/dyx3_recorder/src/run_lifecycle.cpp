@@ -20,6 +20,12 @@ const char* mission_state_name(uint8_t s) {
       return "ABORTED";
     case kMissionError:
       return "ERROR";
+    case kMissionPlacing:
+      return "PLACING";
+    case kMissionArming:
+      return "ARMING";
+    case kMissionEngaging:
+      return "ENGAGING";
     default:
       return "UNKNOWN";
   }
@@ -59,7 +65,8 @@ LifecycleAction RunLifecycle::on_mission(uint8_t state, uint32_t mission_id, uin
       a.running = true;
       running_seen_ = true;
     }
-    return a;  // PAUSED / LOADING / READY / RUNNING of the same run: keep recording
+    return a;  // PAUSED / LOADING / PLACING / ARMING / ENGAGING / READY / RUNNING of the same run:
+               // keep recording
   }
   if (state == kMissionReady || state == kMissionRunning) {
     a.start = true;

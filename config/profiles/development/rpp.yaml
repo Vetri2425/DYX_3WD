@@ -1,0 +1,14 @@
+# Profile "development", node rpp: a copy of production. NO divergent development value is decided yet: spec section 9
+# names the profile, but no field evidence or owner decision gives it different values. Change a value here only
+# together with its evidence (docs/tuning/parameter_profiles.md).
+#
+# The production values, unchanged. Both equal today's built-in defaults (the two production overrides of the
+# prototype values, docs/tuning/parameter_registry.md "Production overrides"; owner decision 2026-10-10: field speed
+# starts at 0.6 m/s, cap 0.85 = PX4 RO_SPEED_LIM). They are written down so that the explicit-save path has a reviewed
+# file to start from and so a change of a built-in default cannot silently change a production rover.
+# Every other rpp parameter keeps its built-in default, carried verbatim from the prototype and NOT re-validated in
+# the NED frame (GATE 4): none of them is copied here until it is.
+/rpp:
+  ros__parameters:
+    mission_speed: 0.6
+    max_linear_vel: 0.85

@@ -15,6 +15,7 @@
 #include "dyx3_interfaces/msg/rpp_status.hpp"
 #include "dyx3_interfaces/msg/ulog_chunk.hpp"
 #include "dyx3_recorder/bag_writer.hpp"
+#include "dyx3_recorder/fcu_provenance.hpp"
 #include "dyx3_recorder/param_snapshot.hpp"
 #include "dyx3_recorder/run_lifecycle.hpp"
 #include "dyx3_recorder/run_manifest.hpp"
@@ -74,6 +75,12 @@ private:
   void check_disk(double now_s);
   void check_mission_silence(double now_s);
   void check_bag(double now_s);
+  // REC-025: the FCU parameter + version read, a child process polled from step().
+  std::vector<std::string> fcu_dump_argv(const std::string& dir, std::string* why_not) const;
+  void check_fcu_dump(double now_s);
+  void finish_fcu_dump(const std::string& dir, const std::string& stop_reason);
+  void record_firmware_running(const std::string& dir, const std::string& text,
+                               RunSummary& summary);
   std::vector<std::string> bag_argv(const std::string& bag_dir) const;
   uint64_t free_space() const;
   void publish_status(double now_s);
@@ -88,6 +95,10 @@ private:
   double bag_finalize_timeout_s_{10.0}, param_timeout_s_{2.0}, status_hz_{2.0};
   double mission_silence_s_{3.0};
   int64_t max_bag_restarts_{1};
+  bool fcu_dump_enabled_{true};
+  std::vector<std::string> fcu_dump_cmd_;
+  std::string fcu_dump_python_;
+  double fcu_dump_timeout_s_{30.0};
   uint64_t min_free_bytes_{0}, max_runs_bytes_{0};
   FreeSpaceFn free_fn_;  // guarded by mu_
 
@@ -98,6 +109,15 @@ private:
   mutable std::mutex mu_;
   RunLifecycle lifecycle_;
   BagWriter bag_;
+  // REC-025: the FCU read child (tools/px4/param_dump.py), supervised like the bag (own process
+  // group, SIGINT -> SIGTERM -> SIGKILL). Started after the bag, never waited for by the mission
+  // callback: step() polls it, kills it at fcu_param_dump_timeout_s, and stop_run() stops one that
+  // outlives its run.
+  BagWriter fcu_dump_;
+  // A child runs for fcu_dump_dir_ (this and the two below: guarded by mu_).
+  bool fcu_dump_pending_{false};
+  double fcu_dump_deadline_s_{0.0};
+  std::string fcu_dump_dir_;
   UlogCapture ulog_;
   std::string run_dir_;
   RunInfo info_;

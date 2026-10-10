@@ -11,6 +11,7 @@
 #include <thread>
 
 #include "dyx3_recorder/bag_writer.hpp"
+#include "dyx3_recorder/fcu_provenance.hpp"
 #include "dyx3_recorder/param_snapshot.hpp"
 #include "dyx3_recorder/run_lifecycle.hpp"
 #include "dyx3_recorder/run_manifest.hpp"
@@ -501,4 +502,164 @@ TEST(BagWriter, StatusPollingDuringStopIsSafe) {
     EXPECT_FALSE(w.running());
     EXPECT_EQ(w.last_exit_code(), 0);  // the child's own exit code, reaped exactly once
   }
+}
+
+// Open item 15 (2026-10-10): the v2 mission states PLACING / ARMING / ENGAGING are named, never
+// "UNKNOWN", and they neither open nor close a run.
+TEST(Lifecycle, V2PreReadyStatesAreNamedAndKeepAnOpenRun) {
+  EXPECT_STREQ(mission_state_name(kMissionPlacing), "PLACING");
+  EXPECT_STREQ(mission_state_name(kMissionArming), "ARMING");
+  EXPECT_STREQ(mission_state_name(kMissionEngaging), "ENGAGING");
+  EXPECT_STREQ(mission_state_name(11), "UNKNOWN");
+  RunLifecycle l;
+  for (uint8_t s : {kMissionLoading, kMissionPlacing, kMissionArming, kMissionEngaging})
+    EXPECT_FALSE(l.on_mission(s, 5, 0).start) << int(s);
+  EXPECT_TRUE(l.on_mission(kMissionReady, 5, 0).start);
+  for (uint8_t s : {kMissionPlacing, kMissionArming, kMissionEngaging}) {
+    const auto a = l.on_mission(s, 5, 0);
+    EXPECT_FALSE(a.start || a.stop || a.running) << int(s);
+  }
+  EXPECT_TRUE(l.recording());
+}
+
+// REC-025: the small JSON access the FCU read needs.
+TEST(FcuProvenance, JsonMemberStringAndSet) {
+  const std::string v =
+      "{\n  \"schema\": 1,\n  \"stack_sha\": \"abc\",\n  \"nested\": {\"firmware_running\": [1, "
+      "\"x\"]},"
+      "\n  \"firmware_running\": \"unavailable: no FCU read path in this stack yet\",\n"
+      "  \"esc\": \"a\\\"b\\\\c\\u0041\"\n}\n";
+  std::string raw, str;
+  ASSERT_TRUE(json_member(v, "stack_sha", &raw));
+  EXPECT_EQ(raw, "\"abc\"");
+  ASSERT_TRUE(json_member(v, "esc", &raw));
+  ASSERT_TRUE(json_string(raw, &str));
+  EXPECT_EQ(str, "a\"b\\cA");
+  ASSERT_TRUE(json_member(v, "schema", &raw));
+  EXPECT_EQ(raw, "1");
+  EXPECT_FALSE(json_string(raw, &str));  // not a string
+  EXPECT_FALSE(json_member(v, "absent", &raw));
+  // only the top-level member is replaced, never the nested one; every other byte is kept
+  std::string out;
+  ASSERT_TRUE(json_set_string(v, "firmware_running", "8279fa4be33d5fc2", &out));
+  EXPECT_NE(out.find("\"nested\": {\"firmware_running\": [1, \"x\"]}"), std::string::npos);
+  EXPECT_NE(out.find("\"firmware_running\": \"8279fa4be33d5fc2\",\n"), std::string::npos);
+  EXPECT_EQ(out.find("no FCU read path"), std::string::npos);
+  EXPECT_EQ(out.size(),
+            v.size() - std::string("unavailable: no FCU read path in this stack yet").size() + 16);
+  ASSERT_TRUE(json_member(out, "firmware_running", &raw));
+  // absent: appended; empty object: no stray comma; the result is still an object
+  ASSERT_TRUE(json_set_string("{\"a\": 1}\n", "firmware_running", "x\"y", &out));
+  EXPECT_EQ(out, "{\"a\": 1,\n  \"firmware_running\": \"x\\\"y\"\n}\n");
+  ASSERT_TRUE(json_member(out, "a", &raw));
+  ASSERT_TRUE(json_set_string("{}", "k", "v", &out));
+  EXPECT_EQ(out, "{\n  \"k\": \"v\"\n}");
+  ASSERT_TRUE(json_member(out, "k", &raw));
+  // not an object / malformed / trailing garbage: refused, never half-edited
+  for (const char* bad :
+       {"", "[]", "\"x\"", "{\"a\": }", "{\"a\": 1", "{\"a\": 1} x", "{\"a\" 1}", "{\"a\": tru}"}) {
+    EXPECT_FALSE(json_set_string(bad, "k", "v", &out)) << bad;
+    EXPECT_FALSE(json_member(bad, "a", &raw)) << bad;
+  }
+}
+
+TEST(FcuProvenance, ReadsWhatTheDumpWroteAndTellsItFromThePlaceholder) {
+  TmpDir d;
+  const std::string p = d.path + "/params_fcu.json", v = d.path + "/versions_fcu.json";
+  FcuDumpFiles f = read_fcu_dump(p, v);  // nothing written at all
+  EXPECT_FALSE(f.params_written || f.version_written);
+  write_file_atomic(
+      p, unavailable_json("fcu_parameters", "pending: ..."));  // the recorder's placeholder
+  EXPECT_FALSE(read_fcu_dump(p, v).params_written);
+  write_file_atomic(
+      p,
+      "{\"schema\": 1, \"source\": \"mavlink\", \"status\": \"incomplete\", \"complete\": false, "
+      "\"reason\": \"3 of 900 parameters missing\", \"params\": {\"A\": 1}}\n");
+  write_file_atomic(v,
+                    "{\"schema\": 1, \"source\": \"mavlink\", \"status\": \"ok\", "
+                    "\"firmware_git_hash\": \"8279fa4be33d5fc2\"}\n");
+  f = read_fcu_dump(p, v);
+  EXPECT_TRUE(f.params_written);
+  EXPECT_FALSE(f.params_complete);
+  EXPECT_EQ(f.params_status, "incomplete");
+  EXPECT_EQ(f.params_reason, "3 of 900 parameters missing");
+  EXPECT_TRUE(f.version_written);
+  EXPECT_EQ(f.firmware_git_hash, "8279fa4be33d5fc2");
+  write_file_atomic(p, "{\"source\": \"mavlink\", \"status\": \"complete\", \"complete\": true}");
+  write_file_atomic(
+      v, "{\"source\": \"mavlink\", \"status\": \"unavailable\", \"reason\": \"unanswered\"}");
+  f = read_fcu_dump(p, v);
+  EXPECT_TRUE(f.params_complete);
+  EXPECT_TRUE(f.firmware_git_hash.empty());
+  EXPECT_EQ(f.version_reason, "unanswered");
+  write_file_atomic(
+      v, "{\"source\": \"mavlink\", \"status\": \"ok\", \"firmware_git_hash\": \"not hex!\"}");
+  EXPECT_TRUE(read_fcu_dump(p, v).firmware_git_hash.empty());
+}
+
+TEST(FcuProvenance, FirmwareComparisonUsesTheCommonPrefix) {
+  const std::string pin = "8279fa4be33d5fc26c3b895c7e4a0a8660fcfff1";
+  EXPECT_FALSE(firmware_mismatch("8279fa4be33d5fc2", pin));
+  EXPECT_FALSE(firmware_mismatch("8279FA4BE33D5FC2", pin));
+  EXPECT_TRUE(firmware_mismatch("d6f12ad1c4000000", pin));
+  EXPECT_FALSE(firmware_mismatch("", pin));
+  EXPECT_FALSE(firmware_mismatch("8279fa4be33d5fc2", ""));
+}
+
+TEST(FcuProvenance, ScriptIsFoundInTheReleaseTheBinaryBelongsTo) {
+  TmpDir d;
+  const std::string rel = d.path + "/releases/abc";
+  const std::string exe = rel + "/ros2_ws/install/dyx3_recorder/lib/dyx3_recorder/recorder_node";
+  fs::create_directories(fs::path(exe).parent_path());
+  std::string searched;
+  if (!fs::exists("/opt/dyx3/current/tools/px4/param_dump.py")) {  // a dev machine, not a rover
+    EXPECT_EQ(find_param_dump_script(exe, nullptr, &searched), "");
+    EXPECT_NE(searched.find("the ancestors of " + exe), std::string::npos);
+  }
+  fs::create_directories(rel + "/tools/px4");
+  std::ofstream(rel + "/tools/px4/param_dump.py") << "#\n";
+  EXPECT_EQ(find_param_dump_script(exe, nullptr, &searched), rel + "/tools/px4/param_dump.py");
+  EXPECT_EQ(find_param_dump_script(exe, "", &searched), rel + "/tools/px4/param_dump.py");
+  // DYX3_RELEASE_DIR wins when it holds the script
+  const std::string other = d.path + "/other";
+  fs::create_directories(other + "/tools/px4");
+  std::ofstream(other + "/tools/px4/param_dump.py") << "#\n";
+  EXPECT_EQ(find_param_dump_script(exe, other.c_str(), &searched),
+            other + "/tools/px4/param_dump.py");
+  EXPECT_EQ(find_param_dump_script(exe, (d.path + "/none").c_str(), &searched),
+            rel + "/tools/px4/param_dump.py");
+}
+
+TEST(FcuProvenance, ArgvPlaceholdersAndInterpreter) {
+  const std::vector<std::string> t = {"{python}",
+                                      "-I",
+                                      "{script}",
+                                      "--out",
+                                      "{dir}/params_fcu.json",
+                                      "--version-out",
+                                      "{dir}/versions_fcu.json"};
+  EXPECT_TRUE(argv_uses(t, "{script}"));
+  EXPECT_FALSE(argv_uses({"/bin/sh", "-c", "x"}, "{script}"));
+  const auto a =
+      expand_dump_argv(t, "/usr/bin/python3", "/r/tools/px4/param_dump.py", "/runs/{dir}x");
+  ASSERT_EQ(a.size(), t.size());
+  EXPECT_EQ(a[0], "/usr/bin/python3");
+  EXPECT_EQ(a[2], "/r/tools/px4/param_dump.py");
+  EXPECT_EQ(a[4], "/runs/{dir}x/params_fcu.json");  // a value is never expanded again
+  EXPECT_EQ(resolve_dump_python("/nonexistent/venv/bin/python3"), "python3");
+  EXPECT_EQ(resolve_dump_python("/bin/sh"), "/bin/sh");
+  TmpDir d;
+  std::ofstream(d.path + "/not_exec") << "x";
+  EXPECT_EQ(resolve_dump_python(d.path + "/not_exec"), "python3");
+}
+
+TEST(FcuProvenance, SummaryCarriesTheFirmwareAndTheParameterStatus) {
+  RunSummary s;
+  EXPECT_NE(summary_json(s).find("\"firmware_running\": \"unavailable: not recorded\""),
+            std::string::npos);
+  s.firmware_running = "8279fa4be33d5fc2";
+  s.fcu_params = "complete";
+  const std::string j = summary_json(s);
+  EXPECT_NE(j.find("\"firmware_running\": \"8279fa4be33d5fc2\""), std::string::npos);
+  EXPECT_NE(j.find("\"fcu_params\": \"complete\""), std::string::npos);
 }

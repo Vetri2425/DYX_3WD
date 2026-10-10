@@ -41,6 +41,20 @@ const char* kGoodBag =
     "trap 'echo m > \"$0/metadata.yaml\"; exit 0' INT; mkdir -p \"$0\"; while :; do echo "
     "xxxxxxxxxx >> \"$0/data\"; sleep 0.05; done";
 
+// REC-025 fakes of tools/px4/param_dump.py, run as `/bin/sh -c <script> <run dir>`. The default
+// rig's fake exits at once without writing anything (no real MAVLink, no Python in these tests).
+const char* kDumpNothing = "exit 0";
+const char* kDumpOk =
+    "printf '{\"schema\": 1, \"source\": \"mavlink\", \"status\": \"complete\", \"complete\": "
+    "true, "
+    "\"count_expected\": 1, \"count_received\": 1, \"params\": {\"RO_SPEED_LIM\": 0.85}}\\n' > "
+    "\"$0/params_fcu.json\"; printf '{\"schema\": 1, \"source\": \"mavlink\", \"status\": \"ok\", "
+    "\"firmware_git_hash\": \"8279fa4be33d5fc2\"}\\n' > \"$0/versions_fcu.json\"";
+rclcpp::Parameter dump_cmd(const std::string& script) {
+  return rclcpp::Parameter("fcu_param_dump_cmd",
+                           std::vector<std::string>{"/bin/sh", "-c", script, "{dir}"});
+}
+
 struct Rig {
   std::shared_ptr<rclcpp::Context> ctx;
   std::string root;
@@ -80,6 +94,8 @@ struct Rig {
     o.append_parameter_override("bag_finalize_timeout_s", 3.0);
     // the test machine's /tmp may have less than the 2 GiB production default
     o.append_parameter_override("min_free_bytes", int64_t{1} << 20);
+    const rclcpp::Parameter dump = dump_cmd(kDumpNothing);
+    o.append_parameter_override(dump.get_name(), dump.get_parameter_value());
     for (const auto& p : extra) o.append_parameter_override(p.get_name(), p.get_parameter_value());
     opts = o;
     rec = std::make_shared<RecorderNode>(
@@ -214,7 +230,10 @@ TEST(RecorderNode, FullRunProducesAnEvidenceDirectoryWithProvenance) {
                 .find("\"source_artifact_sha256\": \"" + std::string(64, 'a') + "\""),
             std::string::npos);
   EXPECT_NE(slurp(d + "/versions.json").find("abc"), std::string::npos);
+  // REC-025: until the FCU read finishes, params_fcu.json and firmware_running say it is pending
   EXPECT_NE(slurp(d + "/params_fcu.json").find("unavailable"), std::string::npos);
+  EXPECT_NE(slurp(d + "/versions.json").find("\"firmware_running\": \"unavailable: "),
+            std::string::npos);
   EXPECT_NE(slurp(d + "/params_ros.json").find("max_xtrack_error_m"), std::string::npos);
 
   for (; ci < st.chunks.size(); ++ci) {
@@ -253,8 +272,11 @@ TEST(RecorderNode, FullRunProducesAnEvidenceDirectoryWithProvenance) {
   EXPECT_NE(slurp(d + "/params_ros.json").find("\"end\": {"),
             std::string::npos);  // end snapshot recorded
   EXPECT_TRUE(fs::exists(d + "/rosbag2/data"));
-  // provenance is honestly incomplete (no FCU parameter read path yet)
+  // provenance is honestly incomplete: the rig's fake FCU read wrote nothing (and RPP reported no
+  // geometry id)
   EXPECT_NE(summary.find("\"provenance_complete\": false"), std::string::npos);
+  EXPECT_NE(summary.find("without writing params_fcu.json"), std::string::npos);
+  EXPECT_NE(summary.find("\"firmware_running\": \"unavailable: "), std::string::npos);
   r.rec->step(r.now += 1.0);
   r.deliver();
   EXPECT_EQ(r.status.state, RecorderStatus::STATE_IDLE);
@@ -773,4 +795,130 @@ TEST(RecorderNode, AFailedRunDirectoryIsRetriedWithBackoff) {
   r.mission(MissionState::STATE_IDLE, 0);
   std::error_code ec;
   fs::remove_all(blocker, ec);
+}
+
+// Open item 15: the recorder's state names follow dyx3_interfaces/MissionState.
+static_assert(kMissionPlacing == MissionState::STATE_PLACING, "PLACING");
+static_assert(kMissionArming == MissionState::STATE_ARMING, "ARMING");
+static_assert(kMissionEngaging == MissionState::STATE_ENGAGING, "ENGAGING");
+static_assert(kMissionError == MissionState::STATE_ERROR, "ERROR");
+
+namespace {
+// Polls the recorder until the FCU read child has been reaped and its result merged (real time: it
+// is a process). The run's versions.json says "pending" until the merge, which happens after the
+// child's own files are written.
+bool fcu_read_done(Rig& r, const std::string& d) {
+  return r.pump_until([&]() {
+    r.rec->step(r.now);
+    return slurp(d + "/versions.json").find("pending") == std::string::npos;
+  });
+}
+}  // namespace
+
+// REC-025: the FCU parameters and the firmware the FCU reports are part of every run.
+TEST(RecorderNode, FcuReadIsRecordedInTheRunAndTheVersionsFile) {
+  Rig r(kGoodBag, true, "/bin/sh", {dump_cmd(kDumpOk)});
+  std::ofstream(r.root + "/versions.json")
+      << "{\n  \"schema\": 1,\n  \"stack_sha\": \"abc\",\n  \"firmware_expected_sha\": "
+         "\"8279fa4be33d5fc26c3b895c7e4a0a8660fcfff1\",\n  \"firmware_running\": \"unavailable: no "
+         "FCU read path in "
+         "this stack yet\"\n}\n";
+  r.mission(MissionState::STATE_READY);
+  const std::string d = r.run_dir();
+  ASSERT_TRUE(fcu_read_done(r, d));
+  EXPECT_NE(slurp(d + "/params_fcu.json").find("RO_SPEED_LIM"), std::string::npos);
+  const std::string v = slurp(d + "/versions.json");
+  EXPECT_NE(v.find("\"firmware_running\": \"8279fa4be33d5fc2\""), std::string::npos);
+  EXPECT_NE(v.find("\"stack_sha\": \"abc\""),
+            std::string::npos);  // the installer's content is kept
+  EXPECT_EQ(v.find("no FCU read path"), std::string::npos);
+  r.mission(MissionState::STATE_RUNNING);
+  r.mission(MissionState::STATE_COMPLETED);
+  const std::string summary = slurp(d + "/summary.json");
+  EXPECT_NE(summary.find("\"firmware_running\": \"8279fa4be33d5fc2\""), std::string::npos);
+  EXPECT_NE(summary.find("\"fcu_params\": \"complete\""), std::string::npos);
+  EXPECT_EQ(summary.find("params_fcu.json"), std::string::npos);  // no FCU note
+  EXPECT_EQ(summary.find("release expects"), std::string::npos);  // the pin matches
+
+  // A release that expects other firmware: the run says so (the evidence itself is complete).
+  std::ofstream(r.root + "/versions.json")
+      << "{\"firmware_expected_sha\": \"d6f12ad1c4000000000000000000000000000000\"}\n";
+  r.mission(MissionState::STATE_READY, 43);
+  std::string d2;
+  for (const auto& e : fs::directory_iterator(r.root + "/runs"))
+    if (e.path().string() != d) d2 = e.path().string();
+  ASSERT_TRUE(fcu_read_done(r, d2));
+  r.mission(MissionState::STATE_ABORTED, 43);
+  EXPECT_NE(slurp(d2 + "/summary.json")
+                .find("the FCU runs firmware 8279fa4be33d5fc2, the release expects d6f12ad1c4"),
+            std::string::npos);
+}
+
+TEST(RecorderNode, AHangingFcuReadIsStoppedAtItsTimeoutAndTheRunGoesOn) {
+  Rig r(kGoodBag, true, "/bin/sh",
+        {dump_cmd("exec sleep 30"), rclcpp::Parameter("fcu_param_dump_timeout_s", 0.5)});
+  r.mission(MissionState::STATE_READY);
+  const std::string d = r.run_dir();
+  r.rec->step(r.now += 0.2);  // before the deadline: still running, nothing decided
+  EXPECT_NE(slurp(d + "/params_fcu.json").find("pending"), std::string::npos);
+  const auto t0 = std::chrono::steady_clock::now();
+  r.rec->step(r.now += 1.0);  // past it: stopped (SIGINT ends sleep at once)
+  EXPECT_LT(std::chrono::steady_clock::now() - t0, 3s);
+  const std::string p = slurp(d + "/params_fcu.json");
+  EXPECT_NE(p.find("was stopped after fcu_param_dump_timeout_s 0.5 s"), std::string::npos) << p;
+  EXPECT_NE(slurp(d + "/versions_fcu.json").find("unavailable"), std::string::npos);
+  EXPECT_TRUE(r.rec->recording());  // the run is untouched
+  r.mission(MissionState::STATE_RUNNING);
+  r.mission(MissionState::STATE_COMPLETED);
+  const std::string summary = slurp(d + "/summary.json");
+  EXPECT_NE(summary.find("\"final_state\": \"COMPLETED\""), std::string::npos);
+  EXPECT_NE(summary.find("\"provenance_complete\": false"), std::string::npos);
+  EXPECT_NE(summary.find("\"fcu_params\": \"unavailable: the FCU read was stopped after"),
+            std::string::npos);
+  EXPECT_NE(summary.find("\"bag_healthy_throughout\": true"), std::string::npos);
+}
+
+TEST(RecorderNode, AnFcuReadThatOutlivesItsRunIsStoppedWhenTheRunCloses) {
+  Rig r(kGoodBag, true, "/bin/sh", {dump_cmd("exec sleep 30")});
+  r.mission(MissionState::STATE_READY);
+  const std::string d = r.run_dir();
+  const auto t0 = std::chrono::steady_clock::now();
+  r.mission(MissionState::STATE_ABORTED);
+  EXPECT_LT(std::chrono::steady_clock::now() - t0, 8s);
+  const std::string summary = slurp(d + "/summary.json");
+  EXPECT_NE(summary.find("\"final_state\": \"NOT_STARTED\""), std::string::npos);
+  EXPECT_NE(summary.find("the run ended before the FCU read finished"), std::string::npos);
+  EXPECT_NE(slurp(d + "/params_fcu.json").find("the run ended before the FCU read finished"),
+            std::string::npos);
+  EXPECT_EQ(slurp(d + "/params_fcu.json").find("pending"), std::string::npos);
+}
+
+TEST(RecorderNode, AnUnstartableOrDisabledFcuReadIsRecordedAndTheRunStillRecords) {
+  {
+    Rig r(kGoodBag, true, "/bin/sh",
+          {rclcpp::Parameter("fcu_param_dump_cmd",
+                             std::vector<std::string>{"/nonexistent/venv/bin/python3", "{dir}"})});
+    r.mission(MissionState::STATE_READY);
+    const std::string d = r.run_dir();
+    EXPECT_NE(
+        slurp(d + "/params_fcu.json").find("could not be started (/nonexistent/venv/bin/python3"),
+        std::string::npos);
+    EXPECT_TRUE(r.pump_until([&]() { return fs::exists(d + "/rosbag2/data"); }));
+    r.mission(MissionState::STATE_ABORTED);
+    EXPECT_NE(slurp(d + "/summary.json")
+                  .find("\"firmware_running\": \"unavailable: the FCU read could not"),
+              std::string::npos);
+  }
+  {
+    Rig r(kGoodBag, true, "/bin/sh", {rclcpp::Parameter("fcu_param_dump_enabled", false)});
+    r.mission(MissionState::STATE_READY);
+    const std::string d = r.run_dir();
+    EXPECT_NE(slurp(d + "/params_fcu.json").find("disabled (fcu_param_dump_enabled is false)"),
+              std::string::npos);
+    EXPECT_NE(slurp(d + "/versions.json").find("\"firmware_running\": \"unavailable: disabled"),
+              std::string::npos);
+    r.mission(MissionState::STATE_ABORTED);
+    EXPECT_NE(slurp(d + "/summary.json").find("\"fcu_params\": \"unavailable: disabled"),
+              std::string::npos);
+  }
 }

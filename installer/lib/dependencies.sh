@@ -13,6 +13,29 @@ install_apt_packages() {
   log "apt: base packages"
   run apt-get update
   run env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${APT_PACKAGES[@]}"
+  # Here because install.sh installs the dependencies through this function; needs python3-venv from above.
+  install_python_tools
+}
+
+# pymavlink: the FCU parameter and version read (tools/px4/param_dump.py), run by dyx3-recorder at every run start
+# (fcu_param_dump_python) and by hand. In its own venv, like the backend's: never the system or ROS Python. Pinned
+# (2.4.49 publishes cp310 aarch64 wheels; its dependencies lxml and fastcrc are resolved by pip). NOT fatal: without it
+# every run records params_fcu.json as unavailable with the reason; nothing else depends on it.
+PYMAVLINK_VERSION="2.4.49"
+install_python_tools() {
+  local venv="${DYX3_PREFIX}/third_party/pymavlink"
+  local marker="${venv}/.dyx3-pymavlink-version"
+  if _marker_ok "${marker}" "${PYMAVLINK_VERSION}" && [ -x "${venv}/bin/python3" ]; then
+    log "pymavlink ${PYMAVLINK_VERSION} already installed"
+    return 0
+  fi
+  log "installing pymavlink ${PYMAVLINK_VERSION} into ${venv}"
+  if ! run rm -rf "${venv}" || ! run python3 -m venv "${venv}" ||
+    ! run "${venv}/bin/pip" install --quiet --disable-pip-version-check "pymavlink==${PYMAVLINK_VERSION}"; then
+    warn "pymavlink install FAILED (no network?); runs record params_fcu.json as unavailable until it is installed"
+    return 0
+  fi
+  if [ "${DYX3_DRY_RUN}" != "1" ]; then printf '%s' "${PYMAVLINK_VERSION}" >"${marker}"; fi
 }
 
 # _marker_ok <marker-file> <expected-commit>

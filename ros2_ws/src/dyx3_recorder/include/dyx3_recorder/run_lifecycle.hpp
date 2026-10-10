@@ -7,9 +7,12 @@
 
 namespace dyx3_recorder {
 
-// Values of dyx3_interfaces/MissionState.state.
+// Values of dyx3_interfaces/MissionState.state. PLACING, ARMING and ENGAGING (interfaces 0.15.0)
+// come between LOADING and READY; they never open or close a run (a run already open keeps
+// recording through them).
 constexpr uint8_t kMissionIdle = 0, kMissionLoading = 1, kMissionReady = 2, kMissionRunning = 3,
-                  kMissionPaused = 4, kMissionCompleted = 5, kMissionAborted = 6, kMissionError = 7;
+                  kMissionPaused = 4, kMissionCompleted = 5, kMissionAborted = 6, kMissionError = 7,
+                  kMissionPlacing = 8, kMissionArming = 9, kMissionEngaging = 10;
 
 const char* mission_state_name(uint8_t s);
 
