@@ -93,10 +93,15 @@ bool PivotWatchdog::timed_out(int64_t now_ns, double turn_angle_rad, const StopP
   return true;
 }
 
+void CornerFsm::record(FsmState from, FsmState to, const char* reason, int64_t now_ns) {
+  log_[log_head_] = Transition{++seq_, from, to, reason, now_ns};
+  log_head_ = (log_head_ + 1) % kLogCapacity;
+  if (log_count_ < kLogCapacity) ++log_count_;
+}
+
 void CornerFsm::go(FsmState to, const char* reason, int64_t now_ns) {
   if (to == state_) return;
-  log_.push_back({++seq_, state_, to, reason, now_ns});
-  if (log_.size() > 256) log_.erase(log_.begin());
+  record(state_, to, reason, now_ns);
   state_ = to;
 }
 
@@ -179,7 +184,7 @@ CornerOutput CornerFsm::step(const CornerInput& in) {
       return out;
     }
     stop_complete_ = true;
-    log_.push_back({++seq_, state_, state_, "stop confirmed", in.now_ns});
+    record(state_, state_, "stop confirmed", in.now_ns);
   }
 
   go(FsmState::Pivot, "stopped, heading outside release band", in.now_ns);

@@ -1,5 +1,6 @@
 #include "dyx3_rpp/rpp_params.hpp"
 
+#include <climits>
 #include <cmath>
 #include <cstring>
 #include <sstream>
@@ -87,6 +88,12 @@ SetResult ParamSet::validate(const Descriptor& d, double num, const std::string&
   }
   if (d.kind == Kind::Int && num != std::floor(num)) {
     r.reason = std::string(d.name) + " must be an integer";
+    return r;
+  }
+  // XR-RPP-009: an Int must fit an int whatever its table bound says (integer() never overflows).
+  if (d.kind == Kind::Int &&
+      (num < static_cast<double>(INT_MIN) || num > static_cast<double>(INT_MAX))) {
+    r.reason = std::string(d.name) + " out of range";
     return r;
   }
   if (d.kind != Kind::Bool) {

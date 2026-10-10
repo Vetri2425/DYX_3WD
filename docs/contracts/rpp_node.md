@@ -50,11 +50,15 @@ atomically in the set-callback, recorded in the journal, and **refused** (never 
 (`require_rtk_fix`, `pose_max_age_s`, `rtk_*`, `ekf_*`, ...), so a change accepted while PAUSED would switch a safety gate on resume; the
 conditioning subset would silently wait for the next load. Change them with no mission (IDLE, or after COMPLETED / ABORTED / ERROR).
 Startup values (launch file) go through `init_many`: any class, same validation, fail loud (the constructor throws) — never a silent fallback to a default.
+XR-RPP-009 sanity upper bounds (DERIVED, defined in `tools/gen_param_tables.py`): `pose_max_age_s`, `rtk_fix_timeout_s` and
+`curvature_baseline_m` at most 2.0; `preview_curvature_n` and `corner_smooth_arc_pts` at most 64 (the core also caps the preview count at
+64); every Int must fit an `int`.
 Node-level: `tick_hz` (50, in [20, 100]; DERIVED from the prototype's `CONTROL_HZ`), `artifact_dir` (`/var/lib/dyx3/missions`).
 
 ## 4. Real-time discipline
 
-`main` calls `mlockall` (best effort: a container without the capability continues and says so). The core allocates nothing in `tick()`; the node's publishes
+`main` calls `mlockall` (best effort: a container without the capability continues and says so). The core allocates nothing in `tick()` (`rpp_core_test` TickNeverAllocates counts heap allocations through a corner pivot, the precise stop
+and completion; the corner-FSM transition log is a fixed ring of string literals, XR-RPP-009); the node's publishes
 use the middleware's normal path (small fixed-size messages, no strings on the hot path); logging happens only on a state transition. SCHED_FIFO 80 on CPU 4,
 shared with motion_guard, comes from the launch prefix in `dyx3_bringup/launch/control_graph.launch.py` (DERIVED, 2026-10-09). The main loop blocks in
 `spin_once(5 ms)`: it must never poll, because it shares a FIFO core with the guard. **Not done:** the measurement of any of this (timing is not provable off-target).

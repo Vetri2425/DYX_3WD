@@ -16,6 +16,9 @@ namespace {
 
 constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
 constexpr double kPi = M_PI;
+// XR-RPP-009: upper bound of the smooth-profile curvature preview count (= the parameter bound of
+// preview_curvature_n). DERIVED — NOT FROM V1 SPEC.
+constexpr int kMaxPreviewN = 64;
 // _CORNER_MAX_BEARING_OFFSET_RAD = math.radians(75.0)
 constexpr double kMaxBearingOffsetRad = 75.0 * (M_PI / 180.0);
 
@@ -998,8 +1001,14 @@ void RppCore::control_smooth(double pos_n, double pos_e, double yaw_ned, double 
 
   int n_eff = n_preview;
   const double preview_dist_m = params_.num(P::preview_curvature_distance_m);
-  if (preview_dist_m > 0.0 && l_d > 1e-9)
-    n_eff = std::max(n_preview, static_cast<int>(std::ceil(preview_dist_m / l_d)));
+  if (preview_dist_m > 0.0 && l_d > 1e-9) {
+    // XR-RPP-009: bounded per-tick work. The distance / lookahead ratio is computed in double and
+    // capped before the int conversion (a large distance over a small lookahead overflowed).
+    const double want =
+        std::min(std::ceil(preview_dist_m / l_d), static_cast<double>(kMaxPreviewN));
+    n_eff = std::max(n_preview, static_cast<int>(want));
+  }
+  n_eff = std::min(n_eff, kMaxPreviewN);
   const double kappa_speed =
       n_eff > 1 ? dyx3_geometry::max_preview_curvature(path, seg_idx, foot, l_d, n_eff)
                 : std::fabs(kappa);

@@ -8,6 +8,7 @@
 #pragma once
 
 #include <array>
+#include <climits>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -76,7 +77,13 @@ public:
   // Hot-path accessors: array index, no allocation, no hashing.
   double num(P id) const { return num_[static_cast<size_t>(id)]; }
   bool flag(P id) const { return num_[static_cast<size_t>(id)] != 0.0; }
-  int integer(P id) const { return static_cast<int>(std::llround(num_[static_cast<size_t>(id)])); }
+  // XR-RPP-009: saturates instead of overflowing (validate() already keeps an Int inside int).
+  int integer(P id) const {
+    const double v = num_[static_cast<size_t>(id)];
+    if (!(v > static_cast<double>(INT_MIN))) return INT_MIN;  // also NaN
+    if (!(v < static_cast<double>(INT_MAX))) return INT_MAX;
+    return static_cast<int>(std::lround(v));
+  }
   const std::string& str(P id) const { return str_[static_cast<size_t>(id)]; }
 
   // Validate and apply one change / an atomic batch (all or nothing, cross-parameter relations

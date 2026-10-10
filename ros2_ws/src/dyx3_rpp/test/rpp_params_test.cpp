@@ -158,3 +158,26 @@ TEST(RppParams, ChangesAreRecorded) {
   EXPECT_FALSE(p.set({"segment_yaw_rate_gain", -1.0, ""}, c).ok);
   EXPECT_EQ(p.journal().size(), 1U);  // a refusal leaves no trace in the journal
 }
+
+// XR-RPP-009: sane upper bounds on the freshness gates, the per-tick geometry walk and the loop
+// counts; an Int never overflows int.
+TEST(RppParams, UpperBoundsAndIntegerRange) {
+  ParamSet p;
+  SetContext c;
+  EXPECT_TRUE(p.set({"pose_max_age_s", 2.0, ""}, c).ok);
+  EXPECT_FALSE(p.set({"pose_max_age_s", 2.01, ""}, c).ok);
+  EXPECT_DOUBLE_EQ(p.num(P::pose_max_age_s), 2.0);
+  EXPECT_FALSE(p.set({"rtk_fix_timeout_s", 2.5, ""}, c).ok);
+  EXPECT_FALSE(p.set({"curvature_baseline_m", 2.5, ""}, c).ok);
+  EXPECT_TRUE(p.set({"curvature_baseline_m", 2.0, ""}, c).ok);
+  EXPECT_TRUE(p.set({"preview_curvature_n", 64.0, ""}, c).ok);
+  EXPECT_FALSE(p.set({"preview_curvature_n", 65.0, ""}, c).ok);
+  EXPECT_FALSE(p.set({"corner_smooth_arc_pts", 1e12, ""}, c).ok);
+  EXPECT_EQ(p.integer(P::preview_curvature_n), 64);
+  // structural: an Int outside int is refused whatever its table bound says
+  Descriptor wide = descriptors()[static_cast<size_t>(P::preview_curvature_n)];
+  wide.hi = HUGE_VAL;
+  EXPECT_TRUE(ParamSet::validate(wide, 1000.0, "").ok);
+  EXPECT_FALSE(ParamSet::validate(wide, 1e300, "").ok);
+  EXPECT_FALSE(ParamSet::validate(wide, 4294967296.0, "").ok);
+}

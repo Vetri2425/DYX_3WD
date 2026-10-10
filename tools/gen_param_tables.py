@@ -47,8 +47,14 @@ ALLOWED = {
     "path_frame_id": None,  # any non-empty string
     "actuator_backend": ["mavlink_actuator", "mavlink_servo_pwm"],
 }
+# DERIVED sanity upper bounds (XR-RPP-009), not tuning values: a freshness bound beyond a couple of
+# seconds is no longer a freshness gate, and a geometry baseline or loop count beyond these makes a
+# per-tick (or per-load) walk unbounded. Each is far above the prototype default.
+UPPER = {  # float name -> hi (inclusive)
+    "pose_max_age_s": 2.0, "rtk_fix_timeout_s": 2.0, "curvature_baseline_m": 2.0,
+}
 INT_RANGE = {  # name -> (lo, hi)
-    "preview_curvature_n": (1, None), "corner_smooth_arc_pts": (1, None),
+    "preview_curvature_n": (1, 64), "corner_smooth_arc_pts": (1, 64),
     "actuator_set_index": (1, 6), "servo_instance": (1, 16), "off_pwm_us": (0, 2200), "on_pwm_us": (0, 2200),
     "spray_min_fix_type": (5, 6), "debounce_samples": (0, 100),
 }
@@ -131,6 +137,8 @@ def render(pkg):
                 lo = "0.0"
                 if name in POSITIVE:
                     pos = "true"
+            if name in UPPER:
+                hi = repr(float(UPPER[name]))
         if typ == "int":
             ilo, ihi = INT_RANGE.get(name, (0, None))
             lo = repr(float(ilo))

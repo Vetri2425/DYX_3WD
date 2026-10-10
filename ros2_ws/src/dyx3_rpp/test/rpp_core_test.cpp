@@ -5,12 +5,28 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 #include <memory>
+#include <new>
 #include <vector>
 
 using namespace dyx3_rpp;
+
+// Global allocation counter (replaceable operator new): counts only while armed.
+namespace {
+std::atomic<bool> g_count_allocs{false};
+std::atomic<long> g_allocs{0};
+}  // namespace
+void* operator new(std::size_t n) {
+  if (g_count_allocs.load(std::memory_order_relaxed)) g_allocs.fetch_add(1);
+  if (void* p = std::malloc(n == 0 ? 1 : n)) return p;
+  throw std::bad_alloc();
+}
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t) noexcept { std::free(p); }
 
 namespace {
 
@@ -210,4 +226,52 @@ TEST(RppCore, ANegativePoseAgeStops) {
   const TickOutput& o = r.core->tick(r.now);
   EXPECT_EQ(o.state, StateCode::Stale);
   EXPECT_EQ(o.cmd, CmdKind::Stop);
+}
+
+// XR-RPP-009 / CLAUDE.md section 7: tick() allocates nothing, including through a hard corner
+// (brake, stop confirmation, pivot, settle, advance: every CornerFsm transition is recorded) and
+// the endpoint precise stop and completion.
+TEST(RppCore, TickNeverAllocates) {
+  ConditionedRun run;
+  run.profile = Profile::Segment;
+  run.pts = {{0.0, 0.0}, {3.0, 0.0}, {3.0, 3.0}};
+  run.flags = {0, 0, 0};
+  run.must_hit = {0, 0, 0};
+  run.cum_s = {0.0, 3.0, 6.0};
+  run.length = 6.0;
+  CoreRig r({run}, {{"mission_speed", 0.4, ""}});
+  r.feed_pose = r.feed_vel = false;
+  long allocs = 0;
+  bool pivoted = false;
+  int i = 0;
+  for (; i < 3000 && !r.core->path_done(); ++i) {
+    r.now += kTickNs;
+    r.core->on_pose(NedPose{r.n, r.e, r.yaw}, r.now);
+    r.core->on_velocity(r.vn, r.ve, 0.0, r.now);
+    g_allocs = 0;
+    g_count_allocs = i >= 5;  // the first ticks may warm up lazily initialised statics
+    const TickOutput& o = r.core->tick(r.now);
+    g_count_allocs = false;
+    allocs += g_allocs;
+    // a kinematic vehicle: the ground velocity slews toward the core's vector at 1 m/s^2 (a
+    // brake decelerates through zero instead of reversing at once); a pivot turns in place
+    const double dt = 0.02;
+    double tn = o.v_n, te = o.v_e;
+    if (o.cmd == CmdKind::Pivot) {
+      pivoted = true;
+      r.yaw += std::max(-0.45, std::min(0.45, 1.5 * o.pivot_heading_err)) * dt;
+      tn = te = 0.0;
+    } else if (o.cmd == CmdKind::Track && std::hypot(o.v_n, o.v_e) > 1e-3) {
+      r.yaw = std::atan2(o.v_e, o.v_n);
+    }
+    const double dn = tn - r.vn, de = te - r.ve, dv = std::hypot(dn, de), step = 1.0 * dt;
+    const double k = dv > step ? step / dv : 1.0;
+    r.vn += dn * k;
+    r.ve += de * k;
+    r.n += r.vn * dt;
+    r.e += r.ve * dt;
+  }
+  EXPECT_TRUE(pivoted) << "the corner was not pivoted";
+  EXPECT_TRUE(r.core->path_done()) << "not done after " << i << " ticks at " << r.n << ", " << r.e;
+  EXPECT_EQ(allocs, 0) << "heap allocations inside tick()";
 }

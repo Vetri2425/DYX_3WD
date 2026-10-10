@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <cstring>
 #include <limits>
 
 #include "dyx3_rpp/guidance.hpp"
@@ -267,8 +268,29 @@ TEST(CornerFsm, HardCornerWalksBrakePivotSettleAdvance) {
   EXPECT_FALSE(o.collinear);
   EXPECT_EQ(f.state(), FsmState::Tracking);  // reset for the next corner
   // every transition was logged with a reason
-  ASSERT_GE(f.log().size(), 4U);
-  for (const auto& tr : f.log()) EXPECT_FALSE(tr.reason.empty());
+  ASSERT_GE(f.log_size(), 4U);
+  for (size_t i = 0; i < f.log_size(); ++i) {
+    ASSERT_NE(f.log_entry(i).reason, nullptr);
+    EXPECT_GT(std::strlen(f.log_entry(i).reason), 0U);
+    if (i > 0) EXPECT_EQ(f.log_entry(i).seq, f.log_entry(i - 1).seq + 1);  // oldest first
+  }
+}
+// XR-RPP-009: the transition log is a fixed ring: it keeps the newest kLogCapacity entries.
+TEST(CornerFsm, TheTransitionLogIsABoundedRing) {
+  StopPivotParams p;
+  CornerFsm f(p);
+  int64_t t = 0;
+  for (int corner = 0; corner < 200; ++corner) {  // brake -> pivot -> settle -> advance, repeated
+    CornerOutput o;
+    for (int k = 0; k < 200 && o.action != CornerAction::Advance; ++k, t += 20) {
+      const double err = k < 30 ? 1.0 : 0.01;
+      o = f.step(corner_in(t, err, 90.0, stopped()));
+    }
+  }
+  ASSERT_EQ(f.log_size(), CornerFsm::kLogCapacity);
+  for (size_t i = 1; i < f.log_size(); ++i)
+    EXPECT_EQ(f.log_entry(i).seq, f.log_entry(i - 1).seq + 1);
+  EXPECT_GT(f.log_entry(0).seq, 1U);  // the oldest entries were overwritten
 }
 TEST(CornerFsm, NeverReleasesGrosslyMisheadedEvenAfterTheWatchdog) {
   StopPivotParams p;
