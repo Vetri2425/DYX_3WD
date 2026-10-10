@@ -213,33 +213,182 @@ health_extras() {
   fi
 }
 
-# health_graph: deep. The control graph's nodes are visible (WARN, not FAIL: needs ROS and a running graph).
+# ---- deep checks (HEALTH-DDS). The services run as ${DYX3_USER} with /etc/dyx3/ros.env (systemd EnvironmentFile) and
+# dyx3_env_load (ROS_DOMAIN_ID; DYX3_ROS_LOCALHOST_ONLY=1 -> ROS_LOCALHOST_ONLY=1). dyx3-health runs as root without that
+# file, so its ros2 calls looked at domain 0 and warned "no /fmu topics" and "node /px4_link not visible" on a healthy rover
+# (2026-10-10). Every ros2 call below runs as the service user, in the services' environment, with a private ROS_HOME.
+
+# _ros_env_lines: the KEY=VALUE lines of ros.env as systemd's EnvironmentFile reads them (blank and comment lines skipped,
+# one pair of surrounding quotes removed). Never executed.
+_ros_env_lines() {
+  local line k v
+  [ -r "${DYX3_ETC}/ros.env" ] || return 0
+  while IFS= read -r line || [ -n "${line}" ]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    case "${line}" in '' | '#'* | ';'*) continue ;; esac
+    k="${line%%=*}"
+    [ "${k}" != "${line}" ] && [[ "${k}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    v="${line#*=}"
+    case "${v}" in \"*\" | \'*\') v="${v:1:${#v}-2}" ;; esac
+    printf '%s=%s\n' "${k}" "${v}"
+  done <"${DYX3_ETC}/ros.env"
+}
+_ros_env_value() { _ros_env_lines | sed -n "s/^$1=//p" | tail -n1; }
+
+# _ros_env_desc: "ROS_DOMAIN_ID=<n>, ROS_LOCALHOST_ONLY=<0|1>" as the launchers set them.
+_ros_env_desc() {
+  local lo=0
+  if [ "$(_ros_env_value DYX3_ROS_LOCALHOST_ONLY)" = 1 ] || [ "$(_ros_env_value ROS_LOCALHOST_ONLY)" = 1 ]; then lo=1; fi
+  printf 'ROS_DOMAIN_ID=%s, ROS_LOCALHOST_ONLY=%s' "$(_ros_env_value ROS_DOMAIN_ID)" "${lo}"
+}
+
+# _ros_cli <release-dir> <timeout-s> <ros2 args...>: one ros2 call as ${DYX3_USER} (sudo -n when run as root), with only
+# ros.env and the launcher's own dyx3_env_load (the release's bin/dyx3-env.sh), a throw-away ROS_HOME and ROS_LOG_DIR.
+_ros_cli() {
+  local rel="$1" t="$2" envsh
+  shift 2
+  envsh="${rel}/bin/dyx3-env.sh"
+  [ -f "${envsh}" ] || envsh="${rel}/deployment/scripts/dyx3-env.sh"
+  local -a as_user=() envs=()
+  mapfile -t envs < <(_ros_env_lines)
+  if [ "$(id -u)" -eq 0 ] && [ "${DYX3_USER}" != root ] && have sudo; then as_user=(sudo -n -u "${DYX3_USER}"); fi
+  # shellcheck disable=SC2016  # expanded by the inner shell
+  "${as_user[@]}" env -i PATH="${PATH}" "${envs[@]}" DYX3_RELEASE_DIR="${rel}" DYX3_ROS_SETUP="${ROS_SETUP}" \
+    DYX3_PX4_MSGS_DIR="${DYX3_PX4_MSGS_DIR}" bash -c '
+      t="$1" envsh="$2"
+      shift 2
+      h="$(mktemp -d /tmp/dyx3-health-ros.XXXXXX)" || exit 1
+      export HOME="${h}" ROS_HOME="${h}" ROS_LOG_DIR="${h}/log"
+      rc=1
+      if . "${envsh}" && dyx3_env_load >/dev/null; then
+        timeout "${t}" ros2 "$@"
+        rc=$?
+      fi
+      rm -rf "${h}"
+      exit "${rc}"' dyx3-health-ros "${t}" "${envsh}" "$@"
+}
+
+# DERIVED — NOT FROM V1 SPEC: discovery spin for the daemon-less ros2 calls (the rover's graph is on loopback; seconds,
+# not a tuning value of the vehicle).
+DYX3_HEALTH_ROS_SPIN_S="${DYX3_HEALTH_ROS_SPIN_S:-3}"
+
+# health_graph: deep. The control graph's nodes are visible (WARN, not FAIL: needs ROS and a running graph). Secondary to
+# the px4_link sample in health_dds. `ros2 node list` under-reports right after a start: up to three asks, no daemon.
 health_graph() {
-  local rel="${1:-${DYX3_CURRENT}}" pm nodes
+  local rel="${1:-${DYX3_CURRENT}}" nodes="" n i missing
+  local -a want=(/dyx3_mission /motion_guard /px4_link /rpp /spray /system_gateway)
   _enabled dyx3-ros "${rel}/installer/manifests/production.manifest" || return 0
   [ -f "${ROS_SETUP}" ] || {
     _warn "ROS not installed; graph check skipped"
     return 0
   }
-  pm="$(px4_msgs_dir)"
-  nodes="$(bash -c "set +u; . '${ROS_SETUP}'; . '${pm}/install/setup.bash'; . '${rel}/ros2_ws/install/setup.bash' 2>/dev/null; timeout 15 ros2 node list 2>/dev/null" || true)"
-  local n
+  for i in 1 2 3; do
+    nodes="$(_ros_cli "${rel}" 15 node list --no-daemon --spin-time "${DYX3_HEALTH_ROS_SPIN_S}" 2>/dev/null || true)"
+    missing=0
+    for n in "${want[@]}"; do printf '%s\n' "${nodes}" | grep -qx "${n}" || missing=1; done
+    [ "${missing}" -eq 0 ] && break
+  done
   # Every node control_graph.launch.py starts, /rpp included (X-013).
-  for n in /dyx3_mission /motion_guard /px4_link /rpp /spray /system_gateway; do
-    if printf '%s\n' "${nodes}" | grep -qx "${n}"; then _pass "node ${n} up"; else _warn "node ${n} not visible"; fi
+  for n in "${want[@]}"; do
+    if printf '%s\n' "${nodes}" | grep -qx "${n}"; then _pass "node ${n} up"; else _warn "node ${n} not visible (ros2 as ${DYX3_USER}, $(_ros_env_desc), ${i} tries)"; fi
   done
 }
 
-# health_dds: live /fmu topics (needs ROS + a running FCU session).
-health_dds() {
-  local rel="${1:-${DYX3_CURRENT}}" pm n
-  pm="$(px4_msgs_dir)"
-  if [ ! -f "${ROS_SETUP}" ]; then
-    _warn "ROS not installed; DDS check skipped"
+# _px4_link_sample <release-dir>: one /dyx3/px4_link/status sample, as
+# "session_alive=<b> handshake_ok=<b> fault=<n> stale_topics_mask=<n> source=<gateway|ros2>". First from the gateway's
+# get_snapshot (the INS-005 query: root-readable, no DDS discovery); when it has no fresh px4_link entry, from one
+# `ros2 topic echo --once` in the services' environment. rc 1 when neither has a sample.
+_px4_link_sample() {
+  local rel="$1" line y sa ho f m
+  if [ -S "${DYX3_GATEWAY_SOCK}" ] && have python3 && line="$(_gateway_query px4_link 2>/dev/null)"; then
+    printf '%s source=gateway\n' "${line#* }"
     return 0
   fi
-  n="$(bash -c "set +u; . '${ROS_SETUP}'; . '${pm}/install/setup.bash'; . '${rel}/ros2_ws/install/setup.bash' 2>/dev/null; timeout 15 ros2 topic list 2>/dev/null | grep -c '^/fmu/'" || true)"
-  if [ "${n:-0}" -gt 0 ]; then _pass "DDS: ${n} /fmu topics visible"; else _warn "DDS: no /fmu topics visible (FCU session not up?)"; fi
+  [ -f "${ROS_SETUP}" ] || return 1
+  y="$(_ros_cli "${rel}" 15 topic echo --once --no-daemon --qos-reliability reliable --qos-durability volatile \
+    /dyx3/px4_link/status dyx3_interfaces/msg/Px4LinkStatus 2>/dev/null || true)"
+  sa="$(sed -n 's/^session_alive: //p' <<<"${y}" | head -n1)"
+  ho="$(sed -n 's/^handshake_ok: //p' <<<"${y}" | head -n1)"
+  f="$(sed -n 's/^fault: //p' <<<"${y}" | head -n1)"
+  m="$(sed -n 's/^stale_topics_mask: //p' <<<"${y}" | head -n1)"
+  [ -n "${sa}" ] || return 1
+  printf 'session_alive=%s handshake_ok=%s fault=%s stale_topics_mask=%s source=ros2\n' "${sa}" "${ho:-?}" "${f:-?}" "${m:-?}"
+}
+
+# _kv <key> <line>: the value of key=value in a px4_link sample line.
+_kv() {
+  local w
+  local -a ws
+  read -ra ws <<<"$2"
+  for w in "${ws[@]}"; do
+    if [ "${w%%=*}" = "$1" ]; then
+      printf '%s' "${w#*=}"
+      return 0
+    fi
+  done
+}
+
+# _px4_fault_name <n> / _px4_stale_names <mask>: Px4LinkStatus.msg constants and the frozen stale-topic bits.
+_px4_fault_name() {
+  case "$1" in
+    0) echo NONE ;; 1) echo NO_SESSION ;; 2) echo HANDSHAKE_MISMATCH ;; 3) echo TOPIC_STALE ;;
+    4) echo COMMAND_STALE ;; 5) echo LOOP_OVERRUN ;; 6) echo HANDSHAKE_PENDING ;; *) echo UNKNOWN ;;
+  esac
+}
+_px4_stale_names() {
+  local -a bits=(timesync_status vehicle_local_position vehicle_status vehicle_attitude estimator_status_flags vehicle_gps_position)
+  local i out=""
+  case "$1" in '' | *[!0-9]*) return 0 ;; esac
+  for i in "${!bits[@]}"; do [ $(($1 >> i & 1)) -eq 1 ] && out="${out} ${bits[i]}"; done
+  printf '%s' "${out# }"
+}
+
+# _xrce_port / _xrce_listening: the agent's UDP port (platform.env, read not executed); rc 0 something listens on it,
+# 1 nothing does, 2 ss is missing.
+_xrce_port() {
+  local p
+  p="$(sed -n 's/^DYX3_XRCE_PORT=//p' "${DYX3_ETC}/platform.env" 2>/dev/null | tail -n1)"
+  printf '%s' "${DYX3_XRCE_PORT:-${p:-8888}}"
+}
+_xrce_listening() {
+  have ss || return 2
+  ss -H -lun "sport = :$(_xrce_port)" 2>/dev/null | grep -q .
+}
+
+# health_dds: deep. Is the FCU session up? Authoritative: one /dyx3/px4_link/status sample (WARN, never FAIL); it replaces
+# counting /fmu topics, which said nothing about the link and under-reported right after a start.
+# DERIVED — NOT FROM V1 SPEC: the sample is healthy with session_alive, handshake_ok and no stale topic. `fault` is
+# reported, not judged: COMMAND_STALE is what px4_link reports while no guard command flows.
+# PC-7a: px4_link sees /fmu only when PX4's UXRCE_DDS_DOM_ID equals ROS_DOMAIN_ID and UXRCE_DDS_PTCFG=1 matches the
+# localhost-only graph. A live session therefore proves the domains match; a dead one while the agent listens names the
+# likely causes. No FCU parameter is read.
+health_dds() {
+  local rel="${1:-${DYX3_CURRENT}}" s sa ho f m stale detail dom rc=0
+  _enabled dyx3-ros "${rel}/installer/manifests/production.manifest" || return 0
+  if ! s="$(_px4_link_sample "${rel}")"; then
+    _warn "px4_link: no /dyx3/px4_link/status sample from the gateway or from ros2 as ${DYX3_USER} ($(_ros_env_desc)); dyx3-ros down?"
+    return 0
+  fi
+  sa="$(_kv session_alive "${s}")"
+  ho="$(_kv handshake_ok "${s}")"
+  f="$(_kv fault "${s}")"
+  m="$(_kv stale_topics_mask "${s}")"
+  stale="$(_px4_stale_names "${m}")"
+  detail="session_alive=${sa} handshake_ok=${ho} fault=${f} $(_px4_fault_name "${f}") stale_topics_mask=${m}${stale:+ (${stale})}; via $(_kv source "${s}")"
+  dom="$(_ros_env_value ROS_DOMAIN_ID)"
+  dom="${dom:-unset}"
+  if [ "${sa}" = true ]; then
+    if [ "${ho}" = true ] && [ "${m}" = 0 ]; then _pass "px4_link: FCU session alive (${detail})"; else _warn "px4_link: FCU session alive but not healthy (${detail})"; fi
+    _pass "DDS domain: px4_link sees PX4 on ROS_DOMAIN_ID ${dom}, so PX4 UXRCE_DDS_DOM_ID matches"
+    return 0
+  fi
+  _warn "px4_link: FCU session down (${detail})"
+  _xrce_listening || rc=$?
+  case "${rc}" in
+    0) _warn "DDS domain: the XRCE agent listens on udp/$(_xrce_port) but px4_link sees no PX4 session on ROS_DOMAIN_ID ${dom}; likely PX4 UXRCE_DDS_DOM_ID != ${dom} or UXRCE_DDS_PTCFG != 1 (localhost-only); else FCU power or the Ethernet cable" ;;
+    1) _warn "DDS domain: no PX4 session and nothing listens on udp/$(_xrce_port): the XRCE agent is down (dyx3-platform)" ;;
+    *) _warn "DDS domain: no PX4 session on ROS_DOMAIN_ID ${dom}; likely the XRCE agent is down, PX4 UXRCE_DDS_DOM_ID != ${dom}, or UXRCE_DDS_PTCFG != 1 (localhost-only)" ;;
+  esac
 }
 
 # ---- baseline (INS-006): a check that already fails on the running release (a second CH340, an unplugged receiver)

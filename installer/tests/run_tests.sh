@@ -283,16 +283,23 @@ libs() {
   check "os_check rejects debian" '! (DYX3_OS_RELEASE="${T}/osdeb" DYX3_ARCH=aarch64 os_check) 2>/dev/null'
 
   check "pins: XRCE agent v2.4.3 pinned to a commit" '(load_pin microxrce_agent; [ "${XRCE_TAG}" = v2.4.3 ] && [ ${#XRCE_COMMIT} -eq 40 ])'
-  check "pins: firmware SHA is the flashed 27a7ac92" '(load_pin firmware; [ "${FIRMWARE_SHA}" = 27a7ac92845317b0276776242c504215809b2a0f ])'
+  check "pins: firmware SHA is the rover firmware 8279fa4b" '(load_pin firmware; [ "${FIRMWARE_SHA}" = 8279fa4be33d5fc26c3b895c7e4a0a8660fcfff1 ])'
 
-  # dry-run of the whole install flow must complete and mention every required step
-  local out
-  out="$(DYX3_ALLOW_ANY_OS=1 DYX3_DRY_RUN=1 "${REPO}/installer/install.sh" --production --dry-run --ref HEAD 2>&1)"
+  # dry-run of the whole install flow must complete and mention every required step.
+  # PC-7c: the user step asks the HOST whether the service user exists, so a host with a dyx3 user skipped useradd and
+  # failed this test. The fresh-install run names a user that cannot exist here; a second run takes the other branch.
+  local out nouser="dyx3-absent-$$"
+  while id "${nouser}" >/dev/null 2>&1; do nouser="${nouser}x"; done
+  out="$(DYX3_USER="${nouser}" DYX3_ALLOW_ANY_OS=1 DYX3_DRY_RUN=1 "${REPO}/installer/install.sh" --production --dry-run --ref HEAD 2>&1)"
   rc=$?
   check "install --dry-run completes" '[ "${rc}" -eq 0 ]'
   for s in "useradd" "apt-get install" "MicroXRCEAgent" "mavlink-router" "nmcli connection add" "colcon build" "git archive"; do
     check "install dry-run mentions: ${s}" 'printf "%s" "${out}" | grep -q -- "${s}"'
   done
+  check "install dry-run creates an absent service user as a system user with its own group" 'printf "%s" "${out}" | grep -q -- "useradd --system .* --user-group ${nouser}$"'
+  local out_user
+  out_user="$(DYX3_ROOT="${T}/root-user" DYX3_USER="$(id -un)" DYX3_ALLOW_ANY_OS=1 DYX3_DRY_RUN=1 "${REPO}/installer/install.sh" --production --dry-run --ref HEAD 2>&1)"
+  check "install dry-run keeps an existing service user (no useradd)" 'printf "%s" "${out_user}" | grep -q "user $(id -un) exists" && ! printf "%s" "${out_user}" | grep -q useradd'
   check "install without --production is refused" '! "${REPO}/installer/install.sh" >/dev/null 2>&1'
   if [ "$(id -u)" -ne 0 ]; then
     out="$(env -u DYX3_ROOT "${REPO}/installer/verify.sh" 2>&1)"
@@ -814,7 +821,7 @@ F
 
   # ---- dyx3-version / dyx3-rollback
   (print_version) >"${T}/ver" 2>&1
-  check "dyx3-version prints the stack SHA, the firmware pin and the message-set hash" 'grep -q "^stack_sha=${D}$" "${T}/ver" && grep -q "^firmware_expected_sha=27a7ac92" "${T}/ver" && grep -q "^px4_msgs_msg_set_sha256=abc123def456$" "${T}/ver"'
+  check "dyx3-version prints the stack SHA, the firmware pin and the message-set hash" 'grep -q "^stack_sha=${D}$" "${T}/ver" && grep -q "^firmware_expected_sha=8279fa4b" "${T}/ver" && grep -q "^px4_msgs_msg_set_sha256=abc123def456$" "${T}/ver"'
   check "dyx3-version admits the running firmware identity is unreadable" 'grep -q "^firmware_running=unavailable" "${T}/ver"'
 
   (rollback_release) >"${T}/rb1" 2>&1
@@ -915,10 +922,11 @@ F
   printf '#!/usr/bin/env bash\n[ "$1 $2" = "node list" ] && cat "%s"\n' "${T}/nodes" >"${fakebin}/ros2"
   chmod +x "${fakebin}/ros2"
   printf '%s\n' /dyx3_mission /motion_guard /px4_link /spray /system_gateway >"${T}/nodes"
-  (health_graph "${REPO}") >"${T}/graph_out" 2>&1
+  make_ros_rel "${T}/x013_rel"
+  (health_graph "${T}/x013_rel") >"${T}/graph_out" 2>&1
   check "deep health warns when /rpp is not in the graph" 'grep -q "^WARN  node /rpp not visible" "${T}/graph_out"'
   echo /rpp >>"${T}/nodes"
-  (health_graph "${REPO}") >"${T}/graph_out" 2>&1
+  (health_graph "${T}/x013_rel") >"${T}/graph_out" 2>&1
   check "deep health reports /rpp with the other control nodes" 'grep -q "^PASS  node /rpp up" "${T}/graph_out" && [ "$(grep -c "^PASS  node" "${T}/graph_out")" -eq 6 ]'
 
   # ---- INS-005: a service must stay up through the hold with no restart; the gateway must answer
@@ -1217,6 +1225,132 @@ PY
   check "prebuilt: download state cleaned up" '[ ! -e "${DYX3_VAR_LIB}/state/artifacts-${sha}" ]'
 }
 
+# ---------------------------------------------------------------- HEALTH-DDS: deep health in the services' DDS environment
+# make_ros_rel <dir>: a staged release the deep checks can load: the real manifest (dyx3-ros enabled), the firmware pin,
+# bin/dyx3-env.sh and an empty workspace setup.
+make_ros_rel() {
+  mkdir -p "$1/installer/manifests" "$1/installer/pins" "$1/bin" "$1/ros2_ws/install"
+  cp "${REPO}/installer/manifests/production.manifest" "$1/installer/manifests/"
+  cp "${REPO}/installer/pins/firmware.pin" "$1/installer/pins/"
+  cp "${REPO}/deployment/scripts/dyx3-env.sh" "$1/bin/"
+  : >"$1/ros2_ws/install/setup.bash"
+}
+
+health_ros_env() {
+  local fb="${T}/hd_bin" rel="${T}/hd_rel" out
+  make_fakebin "${fb}"
+  # sudo -n -u <user> <cmd...>: records the call, then runs <cmd...> (no real user switch).
+  cat >"${fb}/sudo" <<F
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"${T}/hd_sudo"
+[ "\$1" = -n ] && [ "\$2" = -u ] || exit 1
+shift 3
+exec "\$@"
+F
+  # ros2: a graph that exists only on ROS_DOMAIN_ID 42 with ROS_LOCALHOST_ONLY=1, as on the rover; any other DDS
+  # environment sees nothing, as the root shell did. Every call's environment and arguments are recorded.
+  cat >"${fb}/ros2" <<F
+#!/usr/bin/env bash
+printf 'domain=%s localhost=%s home=%s args=%s\n' "\${ROS_DOMAIN_ID:-}" "\${ROS_LOCALHOST_ONLY:-}" "\${ROS_HOME:-}" "\$*" >>"${T}/hd_ros2"
+[ "\${ROS_DOMAIN_ID:-}" = 42 ] && [ "\${ROS_LOCALHOST_ONLY:-}" = 1 ] || exit 0
+case "\$1 \$2" in
+  "node list") if [ -f "${T}/hd_nodes_once" ]; then cat "${T}/hd_nodes_once"; rm -f "${T}/hd_nodes_once"; else cat "${T}/hd_nodes"; fi ;;
+  "topic echo") [ -f "${T}/hd_status" ] && cat "${T}/hd_status" ;;
+esac
+exit 0
+F
+  chmod +x "${fb}"/*
+  export PATH="${fb}:${PATH}" INSTALLER_DIR="${REPO}/installer" DYX3_ROOT="${T}/hd" ROS_SETUP="${T}/hd_ros_setup.bash"
+  # shellcheck disable=SC1091
+  . "${INSTALLER_DIR}/lib/common.sh"
+  for l in os_check dependencies ros_install permissions network_install systemd_install health_check release; do
+    # shellcheck disable=SC1090
+    . "${INSTALLER_DIR}/lib/${l}.sh"
+  done
+  set +e
+  load_pin firmware
+  mkdir -p "${DYX3_PX4_MSGS_DIR}/${FIRMWARE_SHA}/install" "${DYX3_ETC}"
+  : >"${DYX3_PX4_MSGS_DIR}/${FIRMWARE_SHA}/install/setup.bash"
+  : >"${ROS_SETUP}"
+  make_ros_rel "${rel}"
+  printf '# fleet domain\nROS_DOMAIN_ID=42\n\nDYX3_ROS_LOCALHOST_ONLY="1"\n' >"${DYX3_ETC}/ros.env"
+  printf '%s\n' /dyx3_mission /motion_guard /px4_link /rpp /spray /system_gateway >"${T}/hd_nodes"
+  # The root shell's own DDS environment must not leak into the query.
+  export ROS_DOMAIN_ID=0 ROS_LOCALHOST_ONLY=0
+  # as_root <cmd...>: run <cmd...> with `id -u` reporting 0, as dyx3-health under sudo.
+  as_root() { (id() { if [ "$*" = -u ]; then echo 0; else command id "$@"; fi; }; "$@"); }
+
+  # ---- the node list (secondary)
+  as_root health_graph "${rel}" >"${T}/hd_graph" 2>&1
+  check "deep health as root: ros2 runs as dyx3 through sudo -n" 'grep -q "^-n -u dyx3 env -i PATH=" "${T}/hd_sudo"'
+  check "deep health: the query runs with ros.env (domain 42, localhost-only), not the root shell's DDS environment" 'grep -q "^domain=42 localhost=1 " "${T}/hd_ros2" && ! grep -q "^domain=0" "${T}/hd_ros2" && grep -q "ROS_DOMAIN_ID=42 DYX3_ROS_LOCALHOST_ONLY=1" "${T}/hd_sudo"'
+  check "deep health: a private ROS_HOME, removed afterwards" 'h="$(sed -n "s/.* home=\([^ ]*\) .*/\1/p" "${T}/hd_ros2" | head -n1)"; case "${h}" in /tmp/dyx3-health-ros.*) [ ! -e "${h}" ] ;; *) false ;; esac'
+  check "deep health: node list without the ros2 daemon" 'grep -q "args=node list --no-daemon --spin-time " "${T}/hd_ros2"'
+  check "deep health: the six control nodes are seen in the services' environment" '[ "$(grep -c "^PASS  node" "${T}/hd_graph")" -eq 6 ] && ! grep -q "^WARN" "${T}/hd_graph"'
+  : >"${T}/hd_ros2"
+  echo /px4_link >"${T}/hd_nodes_once"
+  as_root health_graph "${rel}" >"${T}/hd_graph" 2>&1
+  check "deep health: a node list that under-reports after a start is asked again" '[ "$(grep -c "args=node list" "${T}/hd_ros2")" -eq 2 ] && [ "$(grep -c "^PASS  node" "${T}/hd_graph")" -eq 6 ]'
+  : >"${T}/hd_sudo"
+  health_graph "${rel}" >"${T}/hd_graph" 2>&1
+  check "deep health not as root: no sudo, same environment" '[ ! -s "${T}/hd_sudo" ] && [ "$(grep -c "^PASS  node" "${T}/hd_graph")" -eq 6 ]'
+  printf 'ROS_DOMAIN_ID=42\n' >"${DYX3_ETC}/ros.env"
+  as_root health_graph "${rel}" >"${T}/hd_graph" 2>&1
+  check "deep health: a graph missed in another DDS environment names that environment" 'grep -q "^WARN  node /px4_link not visible (ros2 as dyx3, ROS_DOMAIN_ID=42, ROS_LOCALHOST_ONLY=0, 3 tries)" "${T}/hd_graph"'
+  printf 'ROS_DOMAIN_ID=42\nDYX3_ROS_LOCALHOST_ONLY=1\n' >"${DYX3_ETC}/ros.env"
+
+  # ---- the px4_link sample (authoritative)
+  hd_status() { printf 'stamp:\n  sec: 1760000000\n  nanosec: 0\nsession_alive: %s\nhandshake_ok: %s\noffboard_heartbeat_active: false\nfailing_to_zero: true\nfault: %s\nstale_topics_mask: %s\nworst_topic_age_s: 0.02\n---\n' "$@" >"${T}/hd_status"; }
+  : >"${T}/hd_sudo"
+  : >"${T}/hd_ros2"
+  hd_status true true 4 0
+  as_root health_dds "${rel}" >"${T}/hd_dds" 2>&1
+  check "px4_link: one status sample, as dyx3 in the services' environment" 'grep -q "^-n -u dyx3 env -i " "${T}/hd_sudo" && grep -q "^domain=42 localhost=1 .*args=topic echo --once --no-daemon .*/dyx3/px4_link/status dyx3_interfaces/msg/Px4LinkStatus" "${T}/hd_ros2"'
+  check "px4_link: a live session passes and reports the fields" 'grep -q "^PASS  px4_link: FCU session alive (session_alive=true handshake_ok=true fault=4 COMMAND_STALE stale_topics_mask=0; via ros2)" "${T}/hd_dds"'
+  check "px4_link: /fmu topics are no longer counted" '! grep -q "topic list" "${T}/hd_ros2" && ! grep -q "/fmu topics" "${T}/hd_dds"'
+  hd_status false false 1 63
+  as_root health_dds "${rel}" >"${T}/hd_dds" 2>&1
+  check "px4_link: a dead session warns with the stale topics named" 'grep -q "^WARN  px4_link: FCU session down (session_alive=false handshake_ok=false fault=1 NO_SESSION stale_topics_mask=63 (timesync_status vehicle_local_position vehicle_status vehicle_attitude estimator_status_flags vehicle_gps_position); via ros2)" "${T}/hd_dds"'
+  hd_status true false 2 0
+  as_root health_dds "${rel}" >"${T}/hd_dds" 2>&1
+  check "px4_link: a live session with a handshake mismatch warns" 'grep -q "^WARN  px4_link: FCU session alive but not healthy (.*fault=2 HANDSHAKE_MISMATCH" "${T}/hd_dds"'
+  rm -f "${T}/hd_status"
+  as_root health_dds "${rel}" >"${T}/hd_dds" 2>&1
+  check "px4_link: no sample at all warns and names the environment" 'grep -q "^WARN  px4_link: no /dyx3/px4_link/status sample from the gateway or from ros2 as dyx3 (ROS_DOMAIN_ID=42, ROS_LOCALHOST_ONLY=1)" "${T}/hd_dds" && ! grep -q "^FAIL" "${T}/hd_dds"'
+
+  # ---- PC-7a: a live session proves PX4 UXRCE_DDS_DOM_ID = ROS_DOMAIN_ID; a dead one names the likely causes
+  hd_status true true 0 0
+  as_root health_dds "${rel}" >"${T}/hd_dds" 2>&1
+  check "PC-7a: a live session proves the PX4 DDS domain matches ROS_DOMAIN_ID 42" 'grep -q "^PASS  DDS domain: px4_link sees PX4 on ROS_DOMAIN_ID 42, so PX4 UXRCE_DDS_DOM_ID matches" "${T}/hd_dds"'
+  hd_status false false 1 1
+  rm -f "${T}/hd_agent_down"
+  FAKE_NO_AGENT="${T}/hd_agent_down" as_root health_dds "${rel}" >"${T}/hd_dds" 2>&1
+  check "PC-7a: session down while the agent listens names UXRCE_DDS_DOM_ID and UXRCE_DDS_PTCFG" 'grep -q "^WARN  DDS domain: the XRCE agent listens on udp/8888 but px4_link sees no PX4 session on ROS_DOMAIN_ID 42; likely PX4 UXRCE_DDS_DOM_ID != 42 or UXRCE_DDS_PTCFG != 1" "${T}/hd_dds" && ! grep -q "^PASS  DDS domain" "${T}/hd_dds"'
+  : >"${T}/hd_agent_down"
+  FAKE_NO_AGENT="${T}/hd_agent_down" as_root health_dds "${rel}" >"${T}/hd_dds" 2>&1
+  check "PC-7a: session down with nothing on the agent port says the agent is down" 'grep -q "^WARN  DDS domain: no PX4 session and nothing listens on udp/8888: the XRCE agent is down" "${T}/hd_dds"'
+  printf 'DYX3_XRCE_PORT=9999\n' >"${DYX3_ETC}/platform.env"
+  (have() { [ "$1" != ss ] && command -v "$1" >/dev/null 2>&1; }; as_root health_dds "${rel}") >"${T}/hd_dds" 2>&1
+  check "PC-7a: without ss all three causes are named" 'grep -q "^WARN  DDS domain: no PX4 session on ROS_DOMAIN_ID 42; likely the XRCE agent is down, PX4 UXRCE_DDS_DOM_ID != 42, or UXRCE_DDS_PTCFG != 1" "${T}/hd_dds" && ! grep -q "^FAIL" "${T}/hd_dds"'
+  rm -f "${DYX3_ETC}/platform.env" "${T}/hd_agent_down"
+
+  # ---- the same sample from the gateway's get_snapshot (INS-005 query), ros2 only when it has no fresh entry
+  local gwf="${T}/hd_gw"
+  export DYX3_GATEWAY_QUERY_TIMEOUT_S=1
+  printf '{"v":1,"id":1,"ok":true,"code":"ok","reason":"","data":{"px4_link":{"age_s":0.1,"fresh":true,"data":{"session_alive":true,"handshake_ok":true,"fault":0,"stale_topics_mask":0}},"gateway":{}}}\n' >"${gwf}"
+  fake_gateway_start "${DYX3_GATEWAY_SOCK}" "${gwf}"
+  : >"${T}/hd_ros2"
+  as_root health_dds "${rel}" >"${T}/hd_dds" 2>&1
+  check "px4_link: a fresh gateway entry is the sample; no ros2 call" 'grep -q "^PASS  px4_link: FCU session alive (session_alive=true handshake_ok=true fault=0 NONE stale_topics_mask=0; via gateway)" "${T}/hd_dds" && [ ! -s "${T}/hd_ros2" ]'
+  sed -i.bak 's/"fresh":true/"fresh":false/' "${gwf}" && rm -f "${gwf}.bak"
+  hd_status true true 0 0
+  as_root health_dds "${rel}" >"${T}/hd_dds" 2>&1
+  check "px4_link: a stale gateway entry falls back to ros2" 'grep -q "^PASS  px4_link: FCU session alive (.*; via ros2)" "${T}/hd_dds"'
+  kill "${FAKE_GW_PID}" 2>/dev/null
+  wait "${FAKE_GW_PID}" 2>/dev/null
+  rm -f "${DYX3_GATEWAY_SOCK}"
+}
+
 sup
 recorder_launcher
 (libs)
@@ -1224,6 +1358,7 @@ recorder_launcher
 (handoff)
 (locking)
 (prebuilt)
+(health_ros_env)
 pass="$(grep -c '^ok' "${RESULTS}")"
 fail="$(grep -c '^bad' "${RESULTS}")"
 [ -n "${SHOW_LOGS:-}" ] && tail -n +1 "${T}"/up_* 2>/dev/null

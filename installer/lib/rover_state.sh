@@ -20,6 +20,8 @@ DYX3_GATEWAY_SOCK="${DYX3_GATEWAY_SOCK:-${DYX3_RUN}/gateway.sock}"
 # _gateway_query <mode>: one get_snapshot round trip. Prints "<verdict> <detail>" on one line.
 #   mode=idle  rc 0 idle, 1 busy, 2 unknown, 3 nothing listening (no socket file / connection refused)
 #   mode=ping  rc 0 the gateway answered get_snapshot with ok:true, 2 otherwise, 3 nothing listening
+#   mode=px4_link  rc 0 with "ok session_alive=<b> handshake_ok=<b> fault=<n> stale_topics_mask=<n>" from a FRESH px4_link
+#                  entry (one /dyx3/px4_link/status sample), 2 when it is missing or stale, 3 nothing listening
 _gateway_query() {
   python3 - "${DYX3_GATEWAY_SOCK}" "${DYX3_GATEWAY_QUERY_TIMEOUT_S:-5}" "$1" <<'PY'
 import json
@@ -94,6 +96,21 @@ def source(name):
 def as_int(v):
     return v if isinstance(v, int) and not isinstance(v, bool) else None
 
+
+if mode == "px4_link":
+    link, link_fresh = source("px4_link")
+    if link is None or not link_fresh:
+        out("unknown", "no fresh px4_link entry in the gateway snapshot", 2)
+
+    def b(v):
+        return "true" if v is True else "false"
+
+    def n(v):
+        v = as_int(v)
+        return "?" if v is None else v
+
+    out("ok", f"session_alive={b(link.get('session_alive'))} handshake_ok={b(link.get('handshake_ok'))} "
+        f"fault={n(link.get('fault'))} stale_topics_mask={n(link.get('stale_topics_mask'))}", 0)
 
 vs, vs_fresh = source("vehicle_state")
 ms, ms_fresh = source("mission")

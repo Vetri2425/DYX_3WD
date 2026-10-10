@@ -3,7 +3,9 @@
 # (spec 4.6, risk R4). Changing FIRMWARE_SHA triggers a px4_msgs rebuild at next upgrade.
 FIRMWARE_REPO=https://github.com/Vetri2425/PX4-Autopilot-3WD-Prod.git
 FIRMWARE_BRANCH=dyx-3wd-production
-FIRMWARE_SHA=27a7ac92845317b0276776242c504215809b2a0f
+# 8279fa4be3 = the firmware on the rover (PC-9, 2026-10-10). Its msg/, srv/ and dds_topics.yaml are identical to the
+# previous pin 27a7ac9284, so the generated px4_msgs content is unchanged.
+FIRMWARE_SHA=8279fa4be33d5fc26c3b895c7e4a0a8660fcfff1
 # px4_msgs repository supplies only the package skeleton (CMakeLists.txt, package.xml);
 # its msg/ and srv/ are replaced wholesale by the firmware's. v1.17.0 tag == release/1.17 tip.
 PX4_MSGS_REPO=https://github.com/PX4/px4_msgs.git
