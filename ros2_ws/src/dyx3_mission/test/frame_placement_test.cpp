@@ -233,8 +233,10 @@ TEST(Placement, AnchoredTrajectoryIsPlacedThroughTheEllipsoid) {
   ASSERT_EQ(p.execution.points.size(), 2U);
   EXPECT_NEAR(p.execution.points[0].north_m, 111.194927, 1e-6);
   EXPECT_NEAR(p.execution.points[0].east_m, 0.0, 1e-9);
-  EXPECT_NEAR(p.execution.points[1].north_m, 121.200609211, 1e-6);
-  EXPECT_NEAR(p.execution.points[1].east_m, -4.986031366, 1e-6);
+  // Independent implementation (exact ENU -> ECEF -> geodetic, then PX4's projection). The former
+  // radii-at-the-anchor model gave 121.200609211 / -4.986031366: 2 um and 8 um away.
+  EXPECT_NEAR(p.execution.points[1].north_m, 121.200607173, 1e-6);
+  EXPECT_NEAR(p.execution.points[1].east_m, -4.986039170, 1e-6);
   EXPECT_EQ(p.execution.points[0].flags, 2);  // flags travel unchanged
   EXPECT_EQ(p.execution.points[1].flags, 3);
   // The bytes are a canonical DYX3PATH 1 that the reader (RPP's) accepts under the new sha.
