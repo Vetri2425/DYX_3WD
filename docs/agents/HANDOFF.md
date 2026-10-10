@@ -2617,3 +2617,17 @@ Not blocking: availability only, and the rover disarms 0.5 s after offboard loss
   offsets differ from this morning (`SENS_IMU_AUTOCAL 1`); `MIS_DIST_1WP` and `MIS_TKO_LAND_REQ` appeared (mission
   module defaults).
 - **Next:** step 4, PX4 Mission mode (4-point square): motor output, fusion, position rate, turns, stopping distance.
+
+## 2026-10-10 (13:00) — Claude — Owner changed rover accel/decel limits
+
+**Change (owner):** `RO_ACCEL_LIM` 0.2 → **0.5** m/s², `RO_DECEL_LIM` 0.3 → **2.0** m/s². Verified live and persisted
+to the baseline and `config/px4/2026-10-10.params`; no other parameter changed.
+
+**Effect:**
+- 0 → 1 m/s in about 2 s.
+- A stick release or a Jetson STOP brings it from 1 m/s to rest in about 0.5 s / 0.25 m, down from about
+  3.3 s / 1.7 m. That greatly reduces XR-GPX-002. The owner's decision that the E-stop disarms still stands and is
+  queued for step 7.
+- Mission mode still plans waypoint braking with `RO_JERK_LIM` 0.3, so the approach stays gentle: braking from
+  1 m/s starts about 0.8 m before the point.
+- **To verify:** the step 4 Mission log, and a measured stop from about 1 m/s (`wheel_encoders` and local position).
