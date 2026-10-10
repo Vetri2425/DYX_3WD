@@ -5,8 +5,10 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <limits>
 #include <memory>
@@ -47,6 +49,31 @@ ConditionedRun north_run(double len, Profile profile, double step) {
   return r;
 }
 
+// A straight segment-profile run from `a` to `b` with points every `step` metres.
+ConditionedRun leg_run(dyx3_geometry::Point a, dyx3_geometry::Point b, double step) {
+  ConditionedRun r;
+  r.profile = Profile::Segment;
+  const double len = std::hypot(b.n - a.n, b.e - a.e);
+  const int n = std::max(1, static_cast<int>(std::lround(len / step)));
+  for (int i = 0; i <= n; ++i) {
+    const double f = static_cast<double>(i) / n;
+    r.pts.push_back({a.n + f * (b.n - a.n), a.e + f * (b.e - a.e)});
+    r.flags.push_back(0);
+    r.must_hit.push_back(0);
+    r.cum_s.push_back(len * f);
+  }
+  r.length = len;
+  return r;
+}
+
+// Three 2 m runs with 90 deg run boundaries: North, then East, then South.
+std::vector<ConditionedRun> three_runs() {
+  return {leg_run({0.0, 0.0}, {2.0, 0.0}, 0.5), leg_run({2.0, 0.0}, {2.0, 2.0}, 0.5),
+          leg_run({2.0, 2.0}, {0.0, 2.0}, 0.5)};
+}
+
+double wrap(double a) { return std::atan2(std::sin(a), std::cos(a)); }
+
 struct CoreRig {
   ParamSet params;
   std::unique_ptr<RppCore> core;
@@ -85,6 +112,7 @@ TEST(RppCore, APreciseStopPastItsTimeoutBrakesAndCompletes) {
     const TickOutput& o = r.step();
     engaged = engaged || r.core->snapshot().endpoint_stop_active;
     EXPECT_NE(o.cmd, CmdKind::Brake) << "tick " << i;
+    EXPECT_FALSE(o.pivot_timed_out) << "no pivot at the endpoint, tick " << i;
   }
   ASSERT_TRUE(engaged);
   CmdKind last = CmdKind::Stop;
@@ -96,7 +124,7 @@ TEST(RppCore, APreciseStopPastItsTimeoutBrakesAndCompletes) {
   EXPECT_TRUE(r.core->path_done());
 }
 
-// ---- Endpoint precise stop: dead band, brake-hold hysteresis, band-edge feed-forward ----------
+// ---- Endpoint precise stop: dead band, brake-hold hysteresis, feed-forward to the plane -------
 // BEHAVIOUR CHANGE, not in the prototype (2026-10-10, mission 0001 run 3, recorder bag): the final
 // endpoint rocked through the end plane, 14 forward/reverse command reversals in 8.6 s (+0.07 /
 // -0.085 m/s at dist_to_goal 0.000-0.010 m, measured speed up to 0.125 m/s) until the 8 s timeout
@@ -177,35 +205,36 @@ TEST(RppCore, AnEndpointStoppedOffTheMarkStillGetsTheCreepNudge) {
   EXPECT_FALSE(r.core->path_done());
 }
 
-TEST(RppCore, TheEndpointFeedForwardReachesZeroAtTheEdgeOfTheArrivalBand) {
-  // Approaching from 3 cm short (outside the band): the feed-forward speed is
-  // sqrt(2 * decel * (distance - along_tol)) = 0.084 m/s, zero at 2 cm short instead of at the
-  // plane (the old law: sqrt(2 * 0.35 * 0.03) = 0.145 m/s, held to the 0.1 m/s creep cap).
+TEST(RppCore, TheEndpointFeedForwardOutsideTheBandIsEvaluatedToThePlane) {
+  // Approaching from 3 cm short (outside the band) at 0.2 m/s: the feed-forward speed is
+  // sqrt(2 * decel * distance-to-the-plane) = 0.145 m/s (under the cap max(speed, creep)), exactly
+  // the prototype law. The band-edge variant (sqrt(2 * decel * (distance - along_tol)) = 0.084
+  // m/s) aims the stop short of the point; it was taken back (stop-position distribution below).
   CoreRig r({north_run(6.0, Profile::Segment, 6.0)});
   r.n = 6.0 - 0.03;
-  r.vn = 0.05;
+  r.vn = 0.2;
   const TickOutput& o = r.step();
   EXPECT_EQ(o.cmd, CmdKind::Creep);
-  EXPECT_NEAR(o.creep_speed, std::sqrt(2.0 * 0.35 * (0.03 - 0.02)), 1e-9);
+  EXPECT_NEAR(o.creep_speed, std::sqrt(2.0 * 0.35 * 0.03), 1e-9);
   CoreRig e({north_run(6.0, Profile::Segment, 6.0)});
-  e.n = 6.0 - 0.0201;  // just outside the band: a vanishing creep, not 0.084 m/s
-  e.vn = 0.05;
-  EXPECT_LT(e.step().creep_speed, 0.02);
+  e.n = 6.0 - 0.0201;  // just outside the band: still the plane law, not a vanishing creep
+  e.vn = 0.2;
+  EXPECT_NEAR(e.step().creep_speed, std::sqrt(2.0 * 0.35 * 0.0201), 1e-9);
 }
 
-// Closed loop on a first-order vehicle: the speed follows the commanded body speed with a 0.2 s
-// time constant, the position integrates, 50 Hz ticks. DERIVED — NOT FROM V1 SPEC: test-only lag
-// taken from the rover's measured speed-loop/drivetrain response in the same bag (0.1-0.3 s; the
-// heading lags the command by 0-0.4 s, irrelevant on a straight leg). The old law
-// (min(sqrt(2*decel*|residual|), cap) toward residual = 0 with a sign flip at the plane) rocks
-// this model through the end plane and only the 8 s timeout ends it; the new law settles inside
-// the arrival band.
+// Closed loop on a first-order vehicle: the speed follows the commanded body speed with a time
+// constant tau, optionally behind a pure command latency, the position integrates, 50 Hz ticks.
+// DERIVED — NOT FROM V1 SPEC: test-only lags taken from the rover's measured speed-loop /
+// drivetrain response in the mission 0001 bag (0.1-0.3 s; the heading lags the command by 0-0.4 s,
+// irrelevant on a straight leg). The old law (min(sqrt(2*decel*|residual|), cap) toward residual =
+// 0 with a sign flip at the plane, no brake in the band) rocks this model through the end plane
+// and only the 8 s timeout ends it; the shipped law settles inside the arrival band.
 namespace {
 struct EndpointRun {
   bool completed{false};
-  double t_complete{0.0};
-  int sign_changes{0};
-  double residual{0.0};
+  double t_complete{0.0};  // s from the start of the approach to the completion latch
+  int sign_changes{0};     // forward/reverse reversals of the commanded speed (|v| >= 2 cm/s)
+  double residual{0.0};    // signed distance to the end plane at rest (+ short, - past)
 };
 EndpointRun run_endpoint(double tau_s, int delay_ticks) {
   CoreRig r({north_run(6.0, Profile::Segment, 6.0)});
@@ -216,13 +245,15 @@ EndpointRun run_endpoint(double tau_s, int delay_ticks) {
   int last_sign = 0;
   std::vector<double> queue(static_cast<size_t>(delay_ticks), 0.45);
   size_t qi = 0;
-  for (int i = 0; i < 400 && !res.completed; ++i) {  // 8 s
+  int rest_ticks = -1;  // after path_done: 1 s of STOP so the residual is the rest position
+  for (int i = 0; i < 500 && rest_ticks != 0; ++i) {  // 10 s
     const TickOutput& o = r.step();
-    if (r.core->snapshot().completion_stop_pending || r.core->path_done()) {
+    if (!res.completed && (r.core->snapshot().completion_stop_pending || r.core->path_done())) {
       res.completed = true;
       res.t_complete = (i + 1) * dt;
-      break;
     }
+    if (r.core->path_done() && rest_ticks < 0) rest_ticks = 50;
+    if (rest_ticks > 0) --rest_ticks;
     double cmd = o.v_n;  // heading 0: the commanded NED vector is the body speed
     if (delay_ticks > 0) {
       const double delayed = queue[qi];
@@ -243,18 +274,51 @@ EndpointRun run_endpoint(double tau_s, int delay_ticks) {
 }
 }  // namespace
 
-TEST(RppCore, TheEndpointSettlesWithoutRockingOnAFirstOrderVehicle) {
-  const EndpointRun a = run_endpoint(0.2, 0);
-  EXPECT_TRUE(a.completed) << "not complete in 8 s, residual " << a.residual;
-  EXPECT_LE(a.t_complete, 4.0) << "tc " << a.t_complete;
-  EXPECT_LE(a.sign_changes, 2) << "sc " << a.sign_changes;
-  EXPECT_LE(std::fabs(a.residual), 0.02);
-  // a harsher drivetrain: 0.3 s time constant plus 0.1 s of command latency (looser time bound)
-  const EndpointRun b = run_endpoint(0.3, 5);
-  EXPECT_TRUE(b.completed) << "not complete in 8 s, residual " << b.residual;
-  EXPECT_LE(b.t_complete, 5.0) << "tc " << b.t_complete;
-  EXPECT_LE(b.sign_changes, 2) << "sc " << b.sign_changes;
-  EXPECT_LE(std::fabs(b.residual), 0.02);
+// Stop-position distribution over the drivetrain lags (docs/contracts/rpp_stop_pivot_fsm.md
+// section 3.6). Both variants keep the brake inside the arrival band and the brake-hold
+// hysteresis; they differ only in where the feed-forward outside the band reaches zero. Measured
+// with this harness (residual at rest, + short of the plane, - past it):
+//
+//   lag                      | feed-forward to the band EDGE   | feed-forward to the PLANE (ships)
+//                            | residual  reversals  complete   | residual  reversals  complete
+//   tau 0.1 s                |  +16.4 mm  1          3.66 s   |  +13.6 mm  1          3.64 s
+//   tau 0.2 s                |   +6.8 mm  1          3.44 s   |   +1.0 mm  1          3.44 s
+//   tau 0.3 s                |   -6.6 mm  1          3.42 s   |  -15.0 mm  1          3.44 s
+//   tau 0.1 s + 0.1 s delay  |   +7.6 mm  2          3.56 s   |   -0.1 mm  2          3.58 s
+//   tau 0.2 s + 0.1 s delay  |   -5.8 mm  1          3.28 s   |  -16.7 mm  1          3.32 s
+//   tau 0.3 s + 0.1 s delay  |  -10.7 mm  2          4.06 s   |   -4.7 mm  2          4.32 s
+//   mean residual            |   +1.3 mm                       |   -3.6 mm
+//   max |residual|, rms      |   16.4 mm, 9.7 mm               |   16.7 mm, 10.9 mm
+//
+// In this model neither variant is biased short: the spread (about +/- 1.7 cm) comes from the
+// in-band brake and the coast behind the lag, not from where the feed-forward reaches zero. The
+// plane variant ships (review decision 2026-10-10: the prototype law, no stop short of the point
+// by construction): it completes within 5 s with at most 2 reversals and |residual| <= along_tol
+// for every lag, and its mean rest position is within 1 cm of the plane. Field re-validation of
+// the stop position on the rover is still owed.
+TEST(RppCore, TheEndpointStopPositionDistributionOnAFirstOrderVehicle) {
+  struct Lag {
+    double tau_s;
+    int delay_ticks;
+  };
+  const Lag lags[] = {{0.1, 0}, {0.2, 0}, {0.3, 0}, {0.1, 5}, {0.2, 5}, {0.3, 5}};
+  double sum = 0.0;
+  int n = 0;
+  for (const Lag& l : lags) {
+    const EndpointRun a = run_endpoint(l.tau_s, l.delay_ticks);
+    std::printf("endpoint tau %.1f s delay %.2f s: residual %+.1f mm, %d reversals, %s %.2f s\n",
+                l.tau_s, l.delay_ticks * 0.02, a.residual * 1000.0, a.sign_changes,
+                a.completed ? "complete" : "NOT complete", a.t_complete);
+    EXPECT_TRUE(a.completed) << "tau " << l.tau_s << " delay " << l.delay_ticks;
+    EXPECT_LE(a.t_complete, 5.0) << "tau " << l.tau_s << " delay " << l.delay_ticks;
+    EXPECT_LE(a.sign_changes, 2) << "tau " << l.tau_s << " delay " << l.delay_ticks;
+    EXPECT_LE(std::fabs(a.residual), 0.02) << "tau " << l.tau_s << " delay " << l.delay_ticks;
+    sum += a.residual;
+    ++n;
+  }
+  const double mean = sum / n;
+  std::printf("endpoint mean residual %+.1f mm\n", mean * 1000.0);
+  EXPECT_LE(std::fabs(mean), 0.01) << "mean rest position " << mean << " m from the plane";
 }
 
 // XR-RPP-005: RppStatus.cross_track_right_m is right-positive (frames.md). The precise stop's
@@ -394,6 +458,155 @@ TEST(RppCore, ANegativePoseAgeStops) {
 // XR-RPP-009 / CLAUDE.md section 7: tick() allocates nothing, including through a hard corner
 // (brake, stop confirmation, pivot, settle, advance: every CornerFsm transition is recorded) and
 // the endpoint precise stop and completion.
+// ---- RppStatus.pivot_timed_out (interfaces 0.17.0) --------------------------------------------
+// Measured 2026-10-10: 25.8 s in PIVOT with an 86 deg heading error and every gate green, with no
+// signal: the watchdog widened the band and nothing else happened. The core now exports it on
+// every pivot tick past the budget while the heading is outside the release band; it keeps
+// pivoting (the mission decides to pause). Budgets (defaults): max(segment_pivot_spinup_margin_s
+// + angle / segment_nominal_pivot_rate_rad_s, segment_turn_timeout_s) = max(1.0 + (pi/2) / 0.4,
+// 5.0) = 5.0 s for a 90 deg turn, counted from the first pivot tick.
+TEST(RppCore, ACornerPivotThatNeverTurnsReportsTheTimeoutUntilReleased) {
+  // One run, North 2 m then East 2 m: the rover stands still at the corner with its nose North.
+  ConditionedRun r;
+  r.profile = Profile::Segment;
+  r.pts = {{0.0, 0.0}, {2.0, 0.0}, {2.0, 2.0}};
+  r.flags = {0, 0, 0};
+  r.must_hit = {0, 0, 0};
+  r.cum_s = {0.0, 2.0, 4.0};
+  r.length = 4.0;
+  CoreRig g({r});
+  g.n = 2.0;
+  double t_pivot = -1.0;
+  bool fired = false;
+  for (int i = 0; i < 400; ++i) {  // 8 s, the heading never changes
+    const TickOutput& o = g.step();
+    const double t = (i + 1) * 0.02;
+    if (o.cmd == CmdKind::Pivot && t_pivot < 0.0) t_pivot = t;
+    if (t_pivot < 0.0) {
+      EXPECT_FALSE(o.pivot_timed_out) << "braking for the corner, t " << t;
+      continue;
+    }
+    ASSERT_EQ(o.cmd, CmdKind::Pivot) << "t " << t;
+    EXPECT_NEAR(o.pivot_heading_err, M_PI / 2, 1e-6);
+    if (t - t_pivot < 5.0 - 1e-9) {
+      EXPECT_FALSE(o.pivot_timed_out) << "inside the budget, t " << t;
+    } else if (t - t_pivot > 5.0 + 0.02 + 1e-9) {
+      EXPECT_TRUE(o.pivot_timed_out) << "past the budget, t " << t;
+    }
+    fired = fired || o.pivot_timed_out;
+  }
+  ASSERT_GT(t_pivot, 0.0);
+  EXPECT_TRUE(fired);
+  // The heading reaches the release band: settle brake, then the next leg. Not reported again.
+  const TickOutput& o0 = g.step();
+  ASSERT_EQ(o0.cmd, CmdKind::Pivot);
+  g.yaw = wrap(g.yaw + o0.pivot_heading_err);
+  bool tracked = false;
+  for (int i = 0; i < 100 && !tracked; ++i) {
+    const TickOutput& o = g.step();
+    EXPECT_FALSE(o.pivot_timed_out) << "released, tick " << i;
+    EXPECT_NE(o.cmd, CmdKind::Pivot) << "released, tick " << i;
+    tracked = o.cmd == CmdKind::Track;
+  }
+  EXPECT_TRUE(tracked) << "the next leg never started";
+}
+
+// ---- MissionState.start_run_index (interfaces 0.17.0) -----------------------------------------
+TEST(RppCore, AStartAtRunNBeginsWithTheEntryAlignmentOfRunN) {
+  CoreRig g(three_runs());
+  ASSERT_TRUE(g.core->start_at_run(2));
+  // The state a hard run boundary leaves behind (apply_run(2, pre_stopped = true)): the entry
+  // alignment is pending with the stop already confirmed. The entry pose is unknown, so the
+  // watchdog budgets the worst case (pi), as run 0 does, not the 90 deg boundary turn.
+  const CoreState st = g.core->snapshot();
+  EXPECT_EQ(st.run_idx, 2);
+  EXPECT_TRUE(st.run_align_pending);
+  EXPECT_TRUE(st.corner_stop_complete);
+  EXPECT_NEAR(st.run_align_turn_rad, M_PI, 1e-12);
+  // The rover stands still at an arbitrary pose, nose North; run 2 heads South.
+  g.n = 1.0;
+  g.e = 1.0;
+  const TickOutput& o = g.step();
+  EXPECT_EQ(o.cmd, CmdKind::Pivot) << "the first command is the alignment pivot of run 2";
+  EXPECT_GT(std::fabs(o.pivot_heading_err), M_PI / 4) << o.pivot_heading_err;
+  EXPECT_EQ(g.core->run_index(), 2u);
+  EXPECT_FALSE(o.pivot_timed_out);
+  // A stationary rover that never turns: the alignment watchdog fires after its budget
+  // (max(1.0 + pi / 0.4, 5.0) = 8.85 s, under the 9.0 s clamp) and is reported while the heading
+  // is outside the band.
+  bool fired = false;
+  double t_fired = 0.0;
+  for (int i = 1; i < 500; ++i) {
+    const TickOutput& p = g.step();
+    ASSERT_EQ(p.cmd, CmdKind::Pivot) << "tick " << i;
+    EXPECT_EQ(g.core->run_index(), 2u) << "never a command for an earlier run";
+    if (p.pivot_timed_out && !fired) t_fired = i * 0.02;
+    fired = fired || p.pivot_timed_out;
+    if (fired) EXPECT_TRUE(p.pivot_timed_out) << "tick " << i;
+  }
+  EXPECT_TRUE(fired);
+  EXPECT_NEAR(t_fired, 1.0 + M_PI / 0.4, 0.03);
+  // Aligned: released, then tracking run 2 (South). Never reported once released.
+  const TickOutput& q = g.step();
+  g.yaw = wrap(g.yaw + q.pivot_heading_err);
+  bool tracked = false;
+  for (int i = 0; i < 100 && !tracked; ++i) {
+    const TickOutput& p = g.step();
+    EXPECT_FALSE(p.pivot_timed_out) << "tick " << i;
+    tracked = p.cmd == CmdKind::Track;
+  }
+  EXPECT_TRUE(tracked);
+  EXPECT_EQ(g.core->run_index(), 2u);
+}
+
+TEST(RppCore, AStartAtRunNEqualsTheStateOfRunNReachedAtAHardBoundary) {
+  // Reference: run 1 reached normally. The rover tracks run 0 to its end, the boundary hold stops
+  // it (stationary), the core advances with pre_stopped.
+  CoreRig a(three_runs());
+  a.n = 2.0;  // at the end of run 0, standing still
+  for (int i = 0; i < 100 && a.core->run_index() == 0; ++i) a.step();
+  ASSERT_EQ(a.core->run_index(), 1u);
+  CoreRig b(three_runs());
+  ASSERT_TRUE(b.core->start_at_run(1));
+  const CoreState sa = a.core->snapshot();
+  const CoreState sb = b.core->snapshot();
+  EXPECT_EQ(sb.run_idx, sa.run_idx);
+  EXPECT_EQ(sb.segment_idx, sa.segment_idx);
+  EXPECT_EQ(sb.segment_state, sa.segment_state);
+  EXPECT_EQ(sb.run_align_pending, sa.run_align_pending);
+  EXPECT_EQ(sb.corner_stop_complete, sa.corner_stop_complete);
+  // the one difference: the resumed entry pose is unknown, the watchdog budgets pi
+  EXPECT_NEAR(sa.run_align_turn_rad, M_PI / 2, 1e-12);
+  EXPECT_NEAR(sb.run_align_turn_rad, M_PI, 1e-12);
+  EXPECT_EQ(sb.run_boundary_stop_pending, sa.run_boundary_stop_pending);
+  EXPECT_EQ(sb.completion_stop_pending, sa.completion_stop_pending);
+  EXPECT_EQ(sb.endpoint_stop_active, sa.endpoint_stop_active);
+  EXPECT_EQ(sb.path_done, sa.path_done);
+  EXPECT_DOUBLE_EQ(sb.path_travel_m, sa.path_travel_m);
+  EXPECT_EQ(sb.hint_seg, sa.hint_seg);
+  EXPECT_EQ(sb.hint_valid, sa.hint_valid);
+  // From the same pose both publish the same first command of run 1.
+  a.n = b.n = 2.0;
+  const TickOutput oa = a.step();
+  const TickOutput ob = b.step();
+  EXPECT_EQ(ob.cmd, CmdKind::Pivot);
+  EXPECT_EQ(ob.cmd, oa.cmd);
+  EXPECT_DOUBLE_EQ(ob.pivot_heading_err, oa.pivot_heading_err);
+}
+
+TEST(RppCore, AnInvalidStartRunIsRefusedAndChangesNothing) {
+  CoreRig g(three_runs());
+  EXPECT_FALSE(g.core->start_at_run(3));
+  EXPECT_FALSE(g.core->start_at_run(1000));
+  EXPECT_EQ(g.core->run_index(), 0u);
+  EXPECT_TRUE(g.core->start_at_run(0));  // the plain start
+  EXPECT_EQ(g.core->run_index(), 0u);
+  EXPECT_FALSE(g.core->snapshot().corner_stop_complete)
+      << "run 0 is a fresh start, not pre-stopped";
+  RppCore empty(g.params);
+  EXPECT_FALSE(empty.start_at_run(0)) << "no mission installed";
+}
+
 TEST(RppCore, TickNeverAllocates) {
   ConditionedRun run;
   run.profile = Profile::Segment;

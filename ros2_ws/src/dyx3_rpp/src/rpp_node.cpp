@@ -216,14 +216,33 @@ void RppNode::on_mission_state(const MissionState& m) {
   wants_mission_ = active;
   pending_mission_id_ = m.mission_id;
   pending_sha_ = m.path_artifact_sha256;
+  pending_start_run_ = m.start_run_index;
   if (!active) {
     if (loaded_ || load_failed_) unload_mission();
     return;
   }
   // A new mission id loads again even when the artifact is the same file: the run starts from
-  // scratch.
+  // scratch (or from the message's start_run_index).
   if (!(loaded_ || load_failed_) || mission_id_ != m.mission_id || sha_ != m.path_artifact_sha256) {
-    load_mission(m.mission_id, m.path_artifact_sha256);
+    load_mission(m.mission_id, m.path_artifact_sha256, m.start_run_index);
+  } else if (loaded_ && m.start_run_index != start_run_index_) {
+    if (!was_running && mission_running_ && !start_run_locked_) {
+      // The RUNNING transition carries the start run and nothing of this load has been driven
+      // yet: begin there instead.
+      if (core_.start_at_run(m.start_run_index)) {
+        start_run_index_ = m.start_run_index;
+        RCLCPP_INFO(get_logger(), "rpp mission %u starts at run %u", mission_id_,
+                    static_cast<unsigned>(start_run_index_));
+      } else {
+        refuse_start_run(m.start_run_index, core_.run_count());
+      }
+    } else if (!start_run_change_logged_) {
+      start_run_change_logged_ = true;
+      RCLCPP_WARN(get_logger(),
+                  "rpp mission %u: start_run_index %u ignored, run %u latched at the load",
+                  mission_id_, static_cast<unsigned>(m.start_run_index),
+                  static_cast<unsigned>(start_run_index_));
+    }
   }
   if (was_running && !mission_running_ && loaded_)
     core_.pause();  // paused: forget the motion memory
@@ -234,17 +253,20 @@ void RppNode::unload_mission() {
   loaded_ = false;
   load_failed_ = false;
   mission_id_ = 0;
+  start_run_index_ = 0;
+  start_run_locked_ = false;
+  start_run_change_logged_ = false;
   sha_.clear();
   conditioned_sha_.clear();
   RCLCPP_INFO(get_logger(), "rpp path cleared");
 }
 
-void RppNode::load_mission(uint32_t mission_id, const std::string& sha) {
+void RppNode::load_mission(uint32_t mission_id, const std::string& sha, uint32_t start_run) {
   // XR-RPP-010: a failure anywhere in the load (I/O, allocation) is a failed load: STOP, ERROR,
   // retried once a second. It never escapes into the executor, where it would end the process
   // without its STOP burst.
   try {
-    load_mission_impl(mission_id, sha);
+    load_mission_impl(mission_id, sha, start_run);
   } catch (const std::exception& e) {
     loaded_ = false;
     load_failed_ = true;
@@ -253,10 +275,27 @@ void RppNode::load_mission(uint32_t mission_id, const std::string& sha) {
   }
 }
 
-void RppNode::load_mission_impl(uint32_t mission_id, const std::string& sha) {
+// An invalid start run (not a run of the conditioned mission) is refused like a bad artifact:
+// STOP, STATE_ERROR. It is not retried: the same artifact conditions to the same runs (the
+// conditioning parameters are IDLE_ONLY while a mission is loaded), so a retry would only repeat
+// the refusal. A new mission id loads again.
+void RppNode::refuse_start_run(uint32_t start_run, size_t n_runs) {
+  loaded_ = false;
+  load_failed_ = true;
+  conditioned_sha_.clear();
+  repeat_available_ = false;
+  retry_load_at_ns_ = std::numeric_limits<int64_t>::max();
+  RCLCPP_ERROR(get_logger(), "rpp mission %u refused: start_run_index %u, the path has %zu runs",
+               mission_id_, static_cast<unsigned>(start_run), n_runs);
+}
+
+void RppNode::load_mission_impl(uint32_t mission_id, const std::string& sha, uint32_t start_run) {
   mission_id_ = mission_id;
   sha_ = sha;
   loaded_ = false;
+  start_run_index_ = start_run;
+  start_run_locked_ = false;
+  start_run_change_logged_ = false;
   repeat_available_ = false;
   load_failed_ = true;  // until proven otherwise; step() retries
   retry_load_at_ns_ = clock_() + 1'000'000'000;
@@ -273,6 +312,10 @@ void RppNode::load_mission_impl(uint32_t mission_id, const std::string& sha) {
   auto runs = condition_path(raw, condition_params(), nullptr, &dropped);
   if (runs.empty()) {
     RCLCPP_ERROR(get_logger(), "rpp path %s: conditioning produced no usable run", sha.c_str());
+    return;
+  }
+  if (start_run >= runs.size()) {
+    refuse_start_run(start_run, runs.size());
     return;
   }
   std::vector<dyx3_mission::ConditionedRunArtifact> artifact_runs;
@@ -346,11 +389,17 @@ void RppNode::load_mission_impl(uint32_t mission_id, const std::string& sha) {
   }
   const size_t n_runs = runs.size();
   core_.install_mission(std::move(runs));
+  if (!core_.start_at_run(start_run)) {  // checked above; kept so a failure can never drive
+    refuse_start_run(start_run, n_runs);
+    return;
+  }
   loaded_ = true;
   load_failed_ = false;
   RCLCPP_INFO(get_logger(),
-              "rpp path loaded: mission %u, %zu points -> %zu runs (%d slivers dropped)",
-              mission_id, r.artifact.points.size(), n_runs, dropped);
+              "rpp path loaded: mission %u, %zu points -> %zu runs (%d slivers dropped), "
+              "start run %u",
+              mission_id, r.artifact.points.size(), n_runs, dropped,
+              static_cast<unsigned>(start_run));
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -361,7 +410,7 @@ void RppNode::step(int64_t now_ns) {
   timer_stats_.note(now_ns);
 
   if (wants_mission_ && load_failed_ && now_ns >= retry_load_at_ns_)
-    load_mission(pending_mission_id_, pending_sha_);
+    load_mission(pending_mission_id_, pending_sha_, pending_start_run_);
 
   MotionCommand cmd = make_stop();
   // Only the command of the previous RUNNING tick of the same mission may be repeated.
@@ -382,6 +431,7 @@ void RppNode::step(int64_t now_ns) {
     return;
   }
 
+  start_run_locked_ = true;  // the first RUNNING tick of this load: the start run is final
   const TickOutput& out = core_.tick(now_ns);
   const bool segment_rate_command = params_.str(P::segment_command_mode) == "rate";
   cmd = command_from_tick(out, core_.profile_segment(), params_.num(P::max_yaw_rate_body),
@@ -430,6 +480,12 @@ void RppNode::step(int64_t now_ns) {
   }
   publish_motion(cmd);
   publish_status(state, &out, cmd);
+  const bool pivot_timed_out = out.pivot_timed_out && state == RppStatus::STATE_PIVOTING;
+  if (pivot_timed_out && !last_pivot_timed_out_) {  // the rising edge only: never per tick
+    RCLCPP_WARN(get_logger(), "rpp pivot timed out (run %zu, heading error %.1f deg)",
+                core_.run_index(), out.pivot_heading_err * (180.0 / M_PI));
+  }
+  last_pivot_timed_out_ = pivot_timed_out;
   if (state != last_state_) {  // transitions only: nothing is logged per tick
     RCLCPP_INFO(get_logger(), "rpp state %u -> %u (run %zu, tick state %d)",
                 static_cast<unsigned>(last_state_), static_cast<unsigned>(state), core_.run_index(),
@@ -500,6 +556,9 @@ void RppNode::publish_status(uint8_t state, const TickOutput* out, const MotionC
         state == RppStatus::STATE_PIVOTING || state == RppStatus::STATE_CREEPING;
     s.heading_evidence_valid =
         out->debug_valid && std::isfinite(out->debug.heading_err) && loaded_ && spray_state;
+    // 0.17.0: the pivot watchdog expired with the heading outside the release band. Only on a
+    // pivot tick; dyx3_mission pauses on it (REASON_RPP_PIVOT_TIMEOUT).
+    s.pivot_timed_out = out->pivot_timed_out && state == RppStatus::STATE_PIVOTING;
   }
   pub_status_->publish(s);
 }

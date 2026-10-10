@@ -129,6 +129,8 @@ struct CornerOutput {
   bool zero_speed_memory{false};  // Advance across a real corner: the caller zeroes last_speed_cmd
   bool set_speed_memory{false};   // Pivot: the caller sets last_speed_cmd = speed_memory
   double speed_memory{0.0};
+  // Pivot only: the pivot watchdog has expired and the heading is still outside the (widened)
+  // release band. False on every other action (brake, settle brake, advance).
   bool pivot_timed_out{false};
 };
 

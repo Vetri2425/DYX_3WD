@@ -4,8 +4,8 @@
 // state the tick leaves behind, and WHICH unported stop/pivot machine the carried code entered.
 // Values to 1e-9 relative (expected outputs are stored with 13 digits; libm differences).
 // The C++ DELIBERATELY DIFFERS from the prototype in the final-run endpoint precise stop (the
-// endpoint dead band, the brake hold and the band-edge feed-forward; "BEHAVIOUR CHANGE, not in the
-// prototype", XR-RPP-001 precedent): the recorded expectations of those ticks are the prototype's,
+// endpoint dead band and the brake hold; "BEHAVIOUR CHANGE, not in the prototype", XR-RPP-001
+// precedent): the recorded expectations of those ticks are the prototype's,
 // so they are listed as documented deviations below instead of being edited.
 #include <gtest/gtest.h>
 
@@ -48,8 +48,7 @@ struct Deviation {
   const char* why;
 };
 constexpr const char* kEndpointDeadBand =
-    "BEHAVIOUR CHANGE, not in the prototype: endpoint dead band / brake hold / band-edge "
-    "feed-forward (precise stop)";
+    "BEHAVIOUR CHANGE, not in the prototype: endpoint dead band / brake hold (precise stop)";
 constexpr Deviation kDeviations[] = {
     // Velocity fresh at the corner-stop entry (tick 44), stale from the next tick: the ancestor
     // confirms the stop 2 s after the ENTRY (tick 85), the C++ 2 s after the velocity went stale
@@ -59,22 +58,22 @@ constexpr Deviation kDeviations[] = {
     // Final-run endpoint precise stop (RppCore::precise_stop_tick): BEHAVIOUR CHANGE, not in the
     // prototype (2026-10-10, mission 0001 run 3: 14 forward/reverse reversals in 8.6 s, finished by
     // the timeout 7 mm from the point; docs/contracts/rpp_stop_pivot_fsm.md section 3.6). The
-    // carried node creeps toward residual = 0 for any residual and evaluates the feed-forward to
-    // the plane. The C++ (1) brakes instead of creeping while the finish geometry is met
-    // (|residual| <= arrival tolerance and |cross| <= cross tolerance) and the stop is not yet
-    // confirmed, holding the brake out to arrival tolerance + endpoint_capture_past_m, and (2)
-    // evaluates the feed-forward brake speed to the edge of the arrival band. Every window below
-    // is the span of the endpoint approach / hold ticks of that scenario; all other ticks of the
-    // scenario still compare, and the total number of mismatches is pinned.
-    {"seg_line_fast_tail", 43, 145, kEndpointDeadBand},
-    {"seg_line_tail", 132, 149, kEndpointDeadBand},
-    {"seg_overshoot", 5, 18, kEndpointDeadBand},
-    {"seg_precise_offline", 207, 230, kEndpointDeadBand},
-    {"seg_precise_params", 86, 103, kEndpointDeadBand},
-    {"seg_runout_precise", 97, 126, kEndpointDeadBand},
-    {"auto_mixed", 309, 329, kEndpointDeadBand},
+    // carried node creeps toward residual = 0 for any residual. The C++ brakes instead of creeping
+    // while the finish geometry is met (|residual| <= arrival tolerance and |cross| <= cross
+    // tolerance) and the stop is not yet confirmed, holding the brake out to arrival tolerance +
+    // endpoint_capture_past_m. Outside the band the feed-forward is the prototype's (evaluated to
+    // the plane), so every mismatching tick in the windows below is a C++ brake tick of the
+    // precise stop (verified tick by tick); all other ticks of the scenario still compare, and the
+    // total number of mismatches is pinned. auto_mixed no longer deviates (its endpoint window
+    // was band-edge feed-forward only).
+    {"seg_line_fast_tail", 107, 145, kEndpointDeadBand},
+    {"seg_line_tail", 134, 149, kEndpointDeadBand},
+    {"seg_overshoot", 6, 18, kEndpointDeadBand},
+    {"seg_precise_offline", 213, 229, kEndpointDeadBand},
+    {"seg_precise_params", 99, 103, kEndpointDeadBand},
+    {"seg_runout_precise", 114, 126, kEndpointDeadBand},
 };
-constexpr int kExpectedDeviations = 525;  // 10 (XR-RPP-011) + 515 (endpoint dead band, below)
+constexpr int kExpectedDeviations = 257;  // 10 (XR-RPP-011) + 247 (endpoint dead band, above)
 bool in_deviation(const std::string& scen, int tick) {
   for (const auto& d : kDeviations)
     if (scen == d.scen && tick >= d.first_tick && tick <= d.last_tick) return true;

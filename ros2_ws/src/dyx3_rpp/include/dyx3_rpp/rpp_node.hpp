@@ -49,8 +49,9 @@ private:
   void declare_and_validate_params();
   ConditionParams condition_params() const;
   void on_mission_state(const dyx3_interfaces::msg::MissionState& m);
-  void load_mission(uint32_t mission_id, const std::string& sha);
-  void load_mission_impl(uint32_t mission_id, const std::string& sha);
+  void load_mission(uint32_t mission_id, const std::string& sha, uint32_t start_run);
+  void load_mission_impl(uint32_t mission_id, const std::string& sha, uint32_t start_run);
+  void refuse_start_run(uint32_t start_run, size_t n_runs);
   void unload_mission();
   void publish_motion(const MotionCommand& c);
   void publish_status(uint8_t state, const TickOutput* out, const MotionCommand& cmd);
@@ -85,6 +86,14 @@ private:
   int64_t retry_load_at_ns_{0};
   uint32_t pending_mission_id_{0};
   std::string pending_sha_;
+  // MissionState.start_run_index (interfaces 0.17.0): the run the core begins at. Latched at the
+  // load; the message that carries the RUNNING transition may still set it until the first
+  // RUNNING tick of this load (start_run_locked_). Any later change is ignored (logged once).
+  uint32_t pending_start_run_{0};
+  uint32_t start_run_index_{0};
+  bool start_run_locked_{false};
+  bool start_run_change_logged_{false};
+  bool last_pivot_timed_out_{false};  // the rising edge is logged (a transition, not per tick)
 
   uint64_t seq_{0};
   // IF-003: VehicleState.px4_sample_stamp of the newest pose fed into the core; copied into every

@@ -307,6 +307,48 @@ TEST(CornerFsm, NeverReleasesGrosslyMisheadedEvenAfterTheWatchdog) {
   }
   EXPECT_TRUE(o.pivot_timed_out);
 }
+// RppStatus.pivot_timed_out (0.17.0): reported on a Pivot output only, once the watchdog has
+// expired; false before it, false once the heading is inside the (widened) release band.
+TEST(CornerFsm, PivotTimedOutIsReportedOnlyWhilePivotingPastTheWatchdog) {
+  StopPivotParams p;
+  CornerFsm f(p);
+  CornerOutput o;
+  int64_t t = 0;
+  // A stationary rover at a 90 deg corner whose heading never closes (1.5 rad error): the 0.3 s
+  // dwell confirms the stop at t = 300 ms, the watchdog starts on the next pivot tick (320 ms).
+  for (; t <= 300; t += 20) {
+    o = f.step(corner_in(t, 1.5, 90.0, stopped()));
+    EXPECT_FALSE(o.pivot_timed_out) << t;
+  }
+  ASSERT_EQ(o.action, CornerAction::Pivot);
+  // budget = max(spinup 1.0 + (pi/2) / 0.4, turn_timeout 5.0) = 5.0 s: expires at 5320 ms
+  for (; t < 5320; t += 20) {
+    o = f.step(corner_in(t, 1.5, 90.0, stopped()));
+    ASSERT_EQ(o.action, CornerAction::Pivot) << t;
+    EXPECT_FALSE(o.pivot_timed_out) << "inside the budget, t " << t;
+  }
+  for (; t < 8000; t += 20) {
+    o = f.step(corner_in(t, 1.5, 90.0, stopped()));
+    ASSERT_EQ(o.action, CornerAction::Pivot) << t;
+    EXPECT_TRUE(o.pivot_timed_out) << "past the budget, t " << t;
+  }
+  // 2.3 deg: outside the 2 deg band, inside the widened 3 deg one (the widening is unchanged):
+  // released, settle brake, not reported.
+  o = f.step(corner_in(t, 0.04, 90.0, stopped()));
+  EXPECT_EQ(o.action, CornerAction::SettleBrake);
+  EXPECT_FALSE(o.pivot_timed_out);
+  for (int k = 0; k < 20 && o.action != CornerAction::Advance; ++k) {
+    t += 20;
+    o = f.step(corner_in(t, 0.04, 90.0, stopped()));
+    EXPECT_FALSE(o.pivot_timed_out);
+  }
+  ASSERT_EQ(o.action, CornerAction::Advance);
+  // the next corner starts a fresh watchdog
+  t += 20;
+  o = f.step(corner_in(t, 1.5, 90.0, moving(0.3, 0.3)));
+  EXPECT_EQ(o.action, CornerAction::Brake);
+  EXPECT_FALSE(o.pivot_timed_out);
+}
 TEST(CornerFsm, StaleVelocityIsABoundedFallbackNotADeadlock) {
   StopPivotParams p;
   CornerFsm f(p);

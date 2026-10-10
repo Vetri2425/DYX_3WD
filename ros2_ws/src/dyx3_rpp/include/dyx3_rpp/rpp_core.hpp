@@ -111,7 +111,11 @@ struct TickOutput {
   double brake_speed{0.0};  // CmdKind::Brake: signed speed along the nose (+ forward, - reverse)
   double pivot_heading_err{0.0};  // CmdKind::Pivot: wrapped (target heading - yaw), rad
   double pivot_speed_memory{
-      0.0};                 // CmdKind::Pivot: the prototype's corner speed (the vector magnitude)
+      0.0};  // CmdKind::Pivot: the prototype's corner speed (the vector magnitude)
+  // CmdKind::Pivot (corner pivot or run-entry alignment pivot): the pivot watchdog has expired
+  // and the heading is still outside the release band (RppStatus.pivot_timed_out). False on
+  // every other tick. Reported only: the core keeps pivoting; the mission decides to pause.
+  bool pivot_timed_out{false};
   double creep_speed{0.0};  // CmdKind::Creep: signed speed along the nose (- reverse)
   double track_heading_ned{
       0.0};             // CmdKind::Track: heading target (frozen below 1 cm/s: no North snap)
@@ -166,6 +170,14 @@ public:
   // Mission lifecycle (mirror of _install_mission + _apply_run(0)). Allocates: call from the node
   // thread, never mid-tick. Takes ownership of the runs.
   void install_mission(std::vector<ConditionedRun> runs);
+  // Begin the installed mission at run `idx` instead of run 0 (MissionState.start_run_index: a
+  // resumed execution). The per-run reset of run `idx` with the run-boundary stop already
+  // confirmed, exactly as when run `idx` is reached after the stop at a hard run boundary
+  // (apply_run(idx, pre_stopped = true)): a pending entry alignment pivots without a second stop.
+  // idx 0 is the plain start (identical to install_mission). Call after install_mission and
+  // before the first tick; returns false and changes nothing when idx is not a run of the
+  // installed mission.
+  bool start_at_run(size_t idx);
 
   // Inputs (each stamps its own arrival time). All times are int64 ns on one monotonic clock.
   void on_pose(const NedPose& pose, int64_t now_ns);

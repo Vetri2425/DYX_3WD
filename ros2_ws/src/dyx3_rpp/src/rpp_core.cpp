@@ -150,6 +150,21 @@ void RppCore::apply_run(int idx, bool pre_stopped) {
   hint_.valid = run.closed;
 }
 
+bool RppCore::start_at_run(size_t idx) {
+  if (idx >= runs_.size()) return false;
+  // DERIVED — NOT FROM V1 SPEC: a resumed execution starts with the rover standing still (the
+  // mission arms and engages before RUNNING), so run `idx` begins in the state the run-boundary
+  // hold leaves behind (stop confirmed, pre_stopped), not in the state of a run-0 start.
+  apply_run(static_cast<int>(idx), idx > 0);
+  // DERIVED — NOT FROM V1 SPEC: the entry pose of a resumed run is unknown (the rover was paused,
+  // moved or re-placed), so the alignment watchdog budgets the worst case, exactly as run 0 does,
+  // instead of the run-boundary turn. Measured on the stand-in: a 163 deg alignment at the
+  // default pivot rate takes about 7 s, past the 5.0 s budget of a 90 deg boundary, and would be
+  // reported as a pivot timeout (and pause the mission) while it is turning correctly.
+  if (idx > 0 && run_align_pending_) run_align_turn_rad_ = kPi;
+  return true;
+}
+
 bool RppCore::advance_run(bool pre_stopped) {
   if (run_idx_ + 1 >= runs_.size()) return false;
   apply_run(static_cast<int>(run_idx_) + 1, pre_stopped);
@@ -562,6 +577,7 @@ bool RppCore::run_alignment_hold(double pos_n, double pos_e, double yaw_ned, dou
   out_.cmd = CmdKind::Pivot;
   out_.pivot_heading_err = heading_err;
   out_.pivot_speed_memory = corner_speed;
+  out_.pivot_timed_out = co.pivot_timed_out;
   publish_debug(hold_row(xt, heading_err, kNaN, corner_speed, dist_to_goal, age_ms, false));
   publish_segment_debug(SegState::CornerAlign, 0, kNaN, kNaN, kNaN, target_heading, heading_err,
                         0.0);
@@ -754,13 +770,11 @@ bool RppCore::precise_stop_tick(double pos_n, double pos_e, double yaw_ned, doub
     speed_mag = creep;
   } else {
     const double cap = std::max(speed, creep);
-    // precise_stop.feedforward_brake_speed(max(0, profile_dist - band), decel, cap)
-    // DERIVED — NOT FROM V1 SPEC: the feed-forward is evaluated to the EDGE of the arrival band
-    // (along_tol; max(along_tol, cross_tol) for the radial lateral correction), so the speed
-    // reaches zero where the finish geometry is first met instead of at the plane. The prototype
-    // evaluated it to the plane and relied on the stop happening to be confirmed there.
-    const double band = needs_lateral_correction ? std::max(along_tol, cross_tol) : along_tol;
-    const double rem = std::max(0.0, profile_dist - band);
+    // precise_stop.feedforward_brake_speed(max(0, profile_dist), decel, cap): evaluated to the
+    // plane, as the prototype does (review 2026-10-10: an evaluation to the band edge aims the stop
+    // short of the point; contract section 3.6, stop-position distribution). The brake inside the
+    // arrival band above is what removes the rocking.
+    const double rem = std::max(0.0, profile_dist);
     const double capc = std::max(0.0, cap);
     speed_mag = (rem <= 0.0 || decel <= 0.0) ? 0.0 : std::min(std::sqrt(2.0 * decel * rem), capc);
   }
@@ -1274,6 +1288,7 @@ void RppCore::control_segment(double pos_n, double pos_e, double yaw_ned, double
       out_.cmd = CmdKind::Pivot;
       out_.pivot_heading_err = heading_err;
       out_.pivot_speed_memory = corner_speed;
+      out_.pivot_timed_out = co.pivot_timed_out;
       publish_debug(hold_row(signed_xtrack, heading_err, dist_to_corner, corner_speed, dist_to_goal,
                              age_ms, spray_active));
       publish_segment_debug(segment_state_, seg_idx, dist_to_end_along, dist_to_corner,
