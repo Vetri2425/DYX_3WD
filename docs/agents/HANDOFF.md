@@ -2871,7 +2871,18 @@ S1 RTK config guard → G1 telemetry seq → P2 (owner decision) → spray items
 **DERIVED — NOT FROM V1 SPEC:** severity ratings reuse the register's scale; the Fast DDS blocking claim (P4) is from
 vendor docs for KEEP_ALL and reasoning for KEEP_LAST, flagged as needing M2.
 
-**In flight:** an architecture-completeness audit (spec §4–§14 deliverables vs code and gate records) is being added as
-review §8 in a follow-up commit on the same branch.
+**Architecture completeness (review §8, audit of spec §4–§14, 133 rows):** 48 DONE / 43 PARTIAL / 11 MISSING /
+8 SUPERSEDED / 23 GATE-OPEN; non-negotiables 12 present / 5 violated / 2 superseded. The code is complete for a
+straight-line / square mission; the programme is not accepted against any of its own numbers: GATE 1, 3 (bag corpus), 4
+and 7 are open, no §10 gate-table entry has been measured on the new stack, Stage 0.1/0.3 never done, R0 (one variable per
+stage) violated. Unported: RPP point hold/handshake/progress, `run_sequencer`, the FSM transition ring export, RPP use of
+`xy_reset_counter`, 5 spray features, the F5 battery. Missing: FCU parameter read path (`params_fcu.json` always
+"unavailable"), parameter profiles + `dyx3-param`, shipped per-node YAML, class enforcement in 4 packages, the RT executor
+split, a pinned DDS profile, BLE/mDNS, running-firmware hash in `dyx3-version`.
+**Most important:** `segment_command_mode` defaults to `heading` (`rpp_param_table.inc:119`, human decision 2026-10-08
+pending the GATE 4 A/B), so arcs still drive through PX4's P-only attitude loop; the circle/arc ladder step must be run as
+the `heading` vs `rate` A/B or it measures the old floor. Approach verdicts (keep / replace / decide) per architectural
+choice are in review §8.2; the replace list is §8.3. Docs to correct: `README.md` "Nothing here has run on a rover";
+CLAUDE.md "174 = 120 + 54" (generated 117 + 49).
 
 **Open for the human:** P2 (persisted progress + re-engage + unit split) and P5 (stop policy) are decisions, not code.
