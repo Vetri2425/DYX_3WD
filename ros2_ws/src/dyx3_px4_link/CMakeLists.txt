@@ -48,13 +48,14 @@ if(BUILD_TESTING)
   endforeach()
   ament_add_gtest(spray_ack_tokens_test test/spray_ack_tokens_test.cpp)
   target_link_libraries(spray_ack_tokens_test dyx3_px4_link_core)
-  # Real-time DDS fault injection: tens of seconds, above the 60 s ament default.
-  ament_add_gtest(px4_link_node_test test/px4_link_node_test.cpp TIMEOUT 300)
+  # DDS fault injection on an injected clock with work-driven delivery (test/dds_test_support.hpp):
+  # seconds. The timeout only bounds a hang on a loaded runner.
+  ament_add_gtest(px4_link_node_test test/px4_link_node_test.cpp TIMEOUT 120)
   target_link_libraries(px4_link_node_test dyx3_px4_link_node_lib)
   ament_target_dependencies(px4_link_node_test rclcpp px4_msgs dyx3_interfaces)
   target_compile_definitions(px4_link_node_test PRIVATE DYX3_FIXTURES="${FIXTURES}")
   # The same suite in event-driven mode (the production default): every test must pass in both.
-  ament_add_gtest(px4_link_node_event_test test/px4_link_node_test.cpp TIMEOUT 300)
+  ament_add_gtest(px4_link_node_event_test test/px4_link_node_test.cpp TIMEOUT 120)
   target_link_libraries(px4_link_node_event_test dyx3_px4_link_node_lib)
   ament_target_dependencies(px4_link_node_event_test rclcpp px4_msgs dyx3_interfaces)
   target_compile_definitions(px4_link_node_event_test PRIVATE DYX3_FIXTURES="${FIXTURES}"

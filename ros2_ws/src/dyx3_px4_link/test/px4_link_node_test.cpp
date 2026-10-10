@@ -1,5 +1,8 @@
 // Fault-injection tests: a fake FCU (publishes /fmu/out, records /fmu/in) against the real node,
 // with an injected clock. Run in a private DDS domain so it cannot talk to other test processes.
+// Delivery is work-driven, never a fixed wall-clock wait: every publish lands in the reader
+// before publish() returns (dds_test_support.hpp), so deliver() runs exactly the callbacks the
+// published samples cause and then returns; the link clock only moves through `now`.
 #include "dyx3_px4_link/px4_link_node.hpp"
 
 #include <gtest/gtest.h>
@@ -13,6 +16,8 @@
 #include <fstream>
 #include <map>
 #include <thread>
+
+#include "dds_test_support.hpp"
 
 using namespace dyx3_px4_link;
 using namespace std::chrono_literals;
@@ -48,11 +53,7 @@ const std::map<std::string, std::string> kTopicType = {
     {"/fmu/out/ulog_stream", "UlogStream"},
     {"/fmu/out/vehicle_command_ack", "VehicleCommandAck"}};
 
-void init_ctx(const std::shared_ptr<rclcpp::Context>& ctx) {
-  rclcpp::InitOptions io;
-  io.set_domain_id(100 + (getpid() % 100));
-  ctx->init(0, nullptr, io);
-}
+void init_ctx(const std::shared_ptr<rclcpp::Context>& ctx) { dyx3_test::init_isolated(ctx); }
 
 // The whole suite runs twice: px4_link_node_test in timer mode (event_driven=false, the timer-mode
 // regression) and px4_link_node_event_test in event-driven mode (the production default). Tests
@@ -256,6 +257,8 @@ struct Rig {
           link->count_subscribers("/fmu/in/vehicle_command") > 0 &&
           fcu->count_subscribers("/fmu/out/vehicle_command_ack") > 0 &&
           link->count_subscribers("/dyx3/spray/actuator_ack") > 0) {
+        // Every later deliver() relies on synchronous delivery: prove it, or fail here.
+        ASSERT_TRUE(dyx3_test::delivery_is_synchronous(ctx));
         return;
       }
     }
@@ -336,34 +339,35 @@ struct Rig {
     m.valid = valid;
     p_cmd->publish(m);
   }
-  void pump(int ms = 30) {
-    const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
-    while (std::chrono::steady_clock::now() < end) exec->spin_some(2ms);
-  }
-  // Spin until `done` holds or the wall-clock deadline passes. For positive expectations
-  // ("this message arrives"): DDS delivery latency on a loaded CI runner exceeds any fixed
-  // pump. The link clock (`now`) does not advance here, so no link timeout can fire while
-  // waiting; the deadline only bounds a genuinely missing message.
+  // Delivers everything published so far and runs every callback it causes (and the ones those
+  // cause), then returns: nothing is left in flight. A negative check after deliver() ("nothing was
+  // sent") is therefore exact, not a bet on a wait being long enough.
+  void deliver() { dyx3_test::drain(*exec); }
+  // Settle until `done` holds or the wall-clock deadline passes. For positive expectations
+  // ("this message arrives"). The link clock (`now`) does not advance here, so no link timeout can
+  // fire while waiting; the deadline only bounds a genuinely missing message.
   template <typename Done>
   bool pump_until(Done done, int timeout_ms = 3000) {
     const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     while (std::chrono::steady_clock::now() < end) {
-      exec->spin_some(2ms);
+      deliver();
       if (done()) return true;
+      exec->spin_once(1ms);  // blocks only while nothing is ready
     }
+    deliver();
     return done();
   }
   // Advance link-time by dt and run one cycle with the fake FCU alive, then deliver.
   void tick(double dt = 0.01, bool publish = true) {
     now += dt;
     if (publish) publish_fcu();
-    pump(12);
+    deliver();  // the cycle sees this tick's samples
     if (link->params().event_driven) {
       link->on_timer(now);  // the writer timer; a guard command already cycled on arrival
     } else {
       link->step(now);
     }
-    pump(12);
+    deliver();  // the recorders hold this cycle's output
   }
   void run(double seconds, double dt = 0.01, bool publish = true) {
     for (double t = 0; t < seconds; t += dt) tick(dt, publish);
@@ -467,11 +471,11 @@ TEST(Px4LinkNode, LoopOverrunWarningExpiresFromLastActualOverrun) {
   const size_t speed_before = r.speed.size();
   // An unusable clock fails to zero: one explicit STOP setpoint per bad tick, not silence.
   r.link->step(std::numeric_limits<double>::quiet_NaN());
-  r.pump(100);
+  r.deliver();
   ASSERT_EQ(r.speed.size(), speed_before + 1);
   EXPECT_EQ(r.speed.back().speed_body_x, 0.0F);
   r.link->step(r.now - 0.5);
-  r.pump(100);
+  r.deliver();
   ASSERT_EQ(r.speed.size(), speed_before + 2);
   EXPECT_EQ(r.speed.back().speed_body_x, 0.0F);
   EXPECT_EQ(r.status.loop_overrun_count, count);
@@ -498,7 +502,7 @@ TEST(Px4LinkNode, InvalidInjectedClockPublishesZeroThenNormalForwardingRecovers)
                                std::numeric_limits<double>::infinity(), r.now - 0.5}) {
     r.clear();
     r.link->step(invalid);
-    r.pump();
+    r.deliver();
     ASSERT_EQ(r.ocm.size(), 1U);
     ASSERT_EQ(r.traj.size(), 1U);
     ASSERT_EQ(r.speed.size(), 1U);
@@ -580,7 +584,7 @@ TEST(Px4LinkNode, ExplicitControlSetEveryCycleForEachMode) {
   for (const auto& c : cases) {
     r.clear();
     r.guard(c.mode, c.v, c.yaw, c.rate);
-    r.pump(40);
+    r.deliver();
     r.run(0.05);
     ASSERT_FALSE(r.speed.empty());
     ASSERT_EQ(r.ocm.size(), r.traj.size());
@@ -721,14 +725,14 @@ TEST(Px4LinkNode, DisableOffboardStreamsStopBeforeWithdrawingTheHeartbeat) {
     r.guard(2, 0.5F, NaN, 0.1F);
     r.tick();
   }
-  r.pump(50);
+  r.deliver();
   const size_t after_window = r.ocm.size();
   for (const auto& sp : r.speed) EXPECT_EQ(sp.speed_body_x, 0.0F);
   for (int i = 0; i < 20; ++i) {
     r.guard(2, 0.5F, NaN, 0.1F);
     r.tick();
   }
-  r.pump(50);
+  r.deliver();
   EXPECT_EQ(r.ocm.size(), after_window);  // heartbeat withdrawn after the window
   EXPECT_LE(after_window, 32U);
   EXPECT_FALSE(r.status.offboard_heartbeat_active);
@@ -742,7 +746,7 @@ TEST(Px4LinkNode, ShutdownStopPublishesStopOnlyWhereTheHeartbeatWasLive) {
   r.run(0.1);
   r.clear();
   EXPECT_FALSE(r.link->publish_shutdown_stop());  // offboard never enabled: no stream started
-  r.pump(50);
+  r.deliver();
   EXPECT_TRUE(r.ocm.empty());
 
   r.nav_state = 14;
@@ -763,7 +767,7 @@ TEST(Px4LinkNode, ShutdownStopPublishesStopOnlyWhereTheHeartbeatWasLive) {
     ASSERT_TRUE(r.link->publish_shutdown_stop());
     ASSERT_TRUE(r.pump_until([&] { return r.speed.size() >= i && r.ocm.size() >= i; })) << i;
   }
-  r.pump(30);
+  r.deliver();
   EXPECT_EQ(r.speed.size(), 30U);  // the writer tick did not run in between
   for (const auto& sp : r.speed) EXPECT_EQ(sp.speed_body_x, 0.0F);
   EXPECT_EQ(r.rate.back().yaw_rate_setpoint, 0.0F);
@@ -860,7 +864,7 @@ TEST(Px4LinkNode, UlogChunksAreAckedThenRepublished) {
   u.data[1] = 2;
   u.data[2] = 3;
   r.p_ulog->publish(u);
-  r.pump(100);
+  r.deliver();
   ASSERT_EQ(r.acks.size(), 1U);
   EXPECT_EQ(r.acks[0].msg_sequence, 7);
   ASSERT_EQ(r.chunks.size(), 1U);
@@ -881,7 +885,7 @@ TEST(Px4LinkNode, RtcmForwardedOnlyWhenLinkHealthyAndNeverTruncated) {
   d.flags = 1;
   d.data.assign(120, 0xD3);
   r.p_rtcm->publish(d);
-  r.pump(100);
+  r.deliver();
   EXPECT_TRUE(r.inject.empty());
   r.run(0.1);
   EXPECT_EQ(r.status.rtcm_chunks_dropped, 1U);
@@ -890,7 +894,7 @@ TEST(Px4LinkNode, RtcmForwardedOnlyWhenLinkHealthyAndNeverTruncated) {
   r.bring_up();
   r.run(0.1);
   r.p_rtcm->publish(d);
-  r.pump(100);
+  r.deliver();
   ASSERT_EQ(r.inject.size(), 1U);
   EXPECT_EQ(r.inject[0].len, 120);
   EXPECT_EQ(r.inject[0].flags, 1);
@@ -899,7 +903,7 @@ TEST(Px4LinkNode, RtcmForwardedOnlyWhenLinkHealthyAndNeverTruncated) {
   EXPECT_EQ(r.status.rtcm_chunks_accepted, 1U);
   d.data.assign(301, 0x01);
   r.p_rtcm->publish(d);
-  r.pump(100);
+  r.deliver();
   EXPECT_EQ(r.inject.size(), 1U);  // oversize rejected, not truncated
   r.run(0.1);
   EXPECT_EQ(r.status.rtcm_chunks_dropped, 2U);
@@ -919,7 +923,7 @@ TEST(Px4LinkNode, SprayActuatorCommandsBecomeVehicleCommandsAndFcuAcksAreMapped)
   m.actuator_set_index = 2;
   m.value = 0.7F;
   r.p_spray->publish(m);
-  r.pump(150);
+  r.deliver();
   int n187 = 0;
   for (const auto& c : r.cmds) {
     if (c.command != 187) continue;
@@ -941,11 +945,11 @@ TEST(Px4LinkNode, SprayActuatorCommandsBecomeVehicleCommandsAndFcuAcksAreMapped)
   a.target_component = actuator_command->source_component;
   a.result = px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_IN_PROGRESS;
   r.p_ack->publish(a);
-  r.pump(100);
+  r.deliver();
   EXPECT_TRUE(r.spray_acks.empty());  // in progress is not a result
   a.result = px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_ACCEPTED;
   r.p_ack->publish(a);
-  r.pump(150);
+  r.deliver();
   ASSERT_EQ(r.spray_acks.size(), 1U);
   EXPECT_EQ(r.spray_acks[0].seq, 41U);
   EXPECT_TRUE(r.spray_acks[0].success);
@@ -955,7 +959,7 @@ TEST(Px4LinkNode, SprayActuatorCommandsBecomeVehicleCommandsAndFcuAcksAreMapped)
   m.servo_instance = 3;
   m.pwm_us = 60000;  // out of range: clamped to 2200
   r.p_spray->publish(m);
-  r.pump(150);
+  r.deliver();
   bool saw_servo = false;
   for (const auto& c : r.cmds) {
     if (c.command == 183) {
@@ -973,7 +977,7 @@ TEST(Px4LinkNode, SprayActuatorCommandsBecomeVehicleCommandsAndFcuAcksAreMapped)
   a.target_component = servo_command->source_component;
   a.result = px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_DENIED;
   r.p_ack->publish(a);
-  r.pump(150);
+  r.deliver();
   ASSERT_EQ(r.spray_acks.size(), 2U);
   EXPECT_EQ(r.spray_acks[1].seq, 42U);
   EXPECT_FALSE(r.spray_acks[1].success);
@@ -999,7 +1003,7 @@ TEST(Px4LinkNode, TenThousandIdenticalOnReassertsReuseTheConfirmedLogicalTransac
   on.actuator_set_index = 2;
   on.value = 1.0F;
   r.p_spray->publish(on);
-  r.pump(100);
+  r.deliver();
   ASSERT_EQ(r.cmds.size(), 1U);
   const uint16_t token = r.cmds.back().source_component;
 
@@ -1009,17 +1013,16 @@ TEST(Px4LinkNode, TenThousandIdenticalOnReassertsReuseTheConfirmedLogicalTransac
   ack.target_component = token;
   ack.result = px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_ACCEPTED;
   r.p_ack->publish(ack);
-  r.pump(80);
+  r.deliver();
   ASSERT_EQ(r.spray_acks.size(), 1U);
   ASSERT_TRUE(r.spray_acks.front().success);
 
   for (int i = 0; i < 10000; ++i) {
     r.p_spray->publish(on);
-    r.pump(1);
-    if (r.cmds.size() != static_cast<size_t>(i + 2)) r.pump(20);
+    r.deliver();
     ASSERT_EQ(r.cmds.size(), static_cast<size_t>(i + 2)) << i;
   }
-  r.pump(100);
+  r.deliver();
 
   ASSERT_EQ(r.cmds.size(), 10001U);
   for (const auto& wire : r.cmds) {
@@ -1058,14 +1061,14 @@ TEST(Px4LinkNode, AcksOfReassertedSprayCommandsAreExpectedNotUnmatched) {
   r.p_ack->publish(ack);  // answers the first send: completes the transaction
   ASSERT_TRUE(r.pump_until([&] { return r.spray_acks.size() >= 1U; }));
   r.p_ack->publish(ack);  // answers the second send
-  r.pump(50);
+  r.deliver();
   for (int i = 0; i < 5; ++i) {  // reasserts of the confirmed epoch, each answered by the FCU
     r.p_spray->publish(on);
     ASSERT_TRUE(r.pump_until([&] { return r.cmds.size() >= static_cast<size_t>(3 + i); }));
     r.p_ack->publish(ack);
-    r.pump(20);
+    r.deliver();
   }
-  r.pump(50);
+  r.deliver();
   EXPECT_EQ(r.spray_acks.size(), 1U);
   EXPECT_TRUE(r.spray_acks[0].success);
   EXPECT_EQ(r.link->spray_late_ack_count(), 0U);
@@ -1090,7 +1093,7 @@ TEST(Px4LinkNode, TenThousandWatchdogOffReassertsUseOnePair) {
   off.actuator_set_index = 1;
   off.value = -1.0F;
   r.p_spray->publish(off);
-  r.pump(80);
+  r.deliver();
   ASSERT_EQ(r.cmds.size(), 1U);
   const auto system = r.cmds.back().source_system;
   const auto component = r.cmds.back().source_component;
@@ -1100,14 +1103,13 @@ TEST(Px4LinkNode, TenThousandWatchdogOffReassertsUseOnePair) {
   ack.target_component = component;
   ack.result = px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_ACCEPTED;
   r.p_ack->publish(ack);
-  r.pump(60);
+  r.deliver();
   for (int i = 0; i < 10000; ++i) {
     r.p_spray->publish(off);
-    r.pump(1);
-    if (r.cmds.size() != static_cast<size_t>(i + 2)) r.pump(20);
+    r.deliver();
     ASSERT_EQ(r.cmds.size(), static_cast<size_t>(i + 2)) << i;
   }
-  r.pump(100);
+  r.deliver();
   ASSERT_EQ(r.cmds.size(), 10001U);
   for (const auto& wire : r.cmds) {
     EXPECT_EQ(wire.source_system, system);
@@ -1135,7 +1137,7 @@ TEST(Px4LinkNode, BothAckTargetFieldsMustMatchAcrossPairBoundary) {
   on.actuator_set_index = 1;
   on.value = 1.0F;
   r.p_spray->publish(on);
-  r.pump(80);
+  r.deliver();
   ASSERT_EQ(r.cmds.size(), 1U);
   EXPECT_EQ(r.cmds.back().source_system, 2U);
   EXPECT_EQ(r.cmds.back().source_component, 2U);
@@ -1145,12 +1147,12 @@ TEST(Px4LinkNode, BothAckTargetFieldsMustMatchAcrossPairBoundary) {
   ack.target_component = 2;
   ack.result = px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_ACCEPTED;
   r.p_ack->publish(ack);  // stale system-1/comp-2 ACK
-  r.pump(50);
+  r.deliver();
   EXPECT_TRUE(r.spray_acks.empty());
   EXPECT_EQ(r.link->spray_late_ack_count(), 1U);
   ack.target_system = 2;
   r.p_ack->publish(ack);
-  r.pump(50);
+  r.deliver();
   ASSERT_EQ(r.spray_acks.size(), 1U);
   EXPECT_TRUE(r.spray_acks.back().success);
   unlink(path.c_str());
@@ -1170,11 +1172,11 @@ TEST(Px4LinkNode, AnEarlierIdenticalOffTransmissionCanProveItsEpoch) {
   off.actuator_set_index = 1;
   off.value = -1.0F;
   r.p_spray->publish(off);
-  r.pump(50);
+  r.deliver();
   ASSERT_EQ(r.cmds.size(), 1U);
   const auto first = r.cmds.back();
   r.p_spray->publish(off);
-  r.pump(50);
+  r.deliver();
   ASSERT_EQ(r.cmds.size(), 2U);
   EXPECT_EQ(r.cmds.back().source_system, first.source_system);
   EXPECT_EQ(r.cmds.back().source_component, first.source_component);
@@ -1185,22 +1187,22 @@ TEST(Px4LinkNode, AnEarlierIdenticalOffTransmissionCanProveItsEpoch) {
   ack.target_component = first.source_component;
   ack.result = px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_ACCEPTED;
   r.p_ack->publish(ack);  // ACK for the earlier identical physical transmission
-  r.pump(50);
+  r.deliver();
   ASSERT_EQ(r.spray_acks.size(), 1U);
   EXPECT_TRUE(r.spray_acks.back().success);
   off.seq = 41;
   off.value = -0.5F;
   r.p_spray->publish(off);
-  r.pump(50);
+  r.deliver();
   ASSERT_EQ(r.cmds.size(), 3U);
   const auto second = r.cmds.back();
   EXPECT_NE(second.source_component, first.source_component);
   r.p_ack->publish(ack);  // a later ACK for the old OFF epoch
-  r.pump(50);
+  r.deliver();
   EXPECT_EQ(r.spray_acks.size(), 1U);
   ack.target_component = second.source_component;
   r.p_ack->publish(ack);
-  r.pump(50);
+  r.deliver();
   ASSERT_EQ(r.spray_acks.size(), 2U);
   EXPECT_TRUE(r.spray_acks.back().success);
 }
@@ -1240,7 +1242,7 @@ TEST(Px4LinkNode, WatchdogOffRetiresTheControllerOnHeartbeatItDisplaced) {
   r.p_ack->publish(ack);
   ASSERT_TRUE(r.pump_until([&] { return r.spray_acks.size() >= 2; }));  // OFF confirmed
   r.p_spray->publish(controller);  // stale heartbeat from the displaced ON epoch
-  r.pump(100);                     // negative check: nothing may be sent
+  r.deliver();                     // negative check: nothing may be sent
   EXPECT_EQ(r.cmds.size(), 2U);
   controller.seq = 11;  // a new controller verdict after safety recovery
   r.p_spray->publish(controller);
@@ -1264,7 +1266,7 @@ TEST(Px4LinkNode, OnToOffIsANewTransactionAndOldOnAckCannotConfirmOff) {
   request.actuator_set_index = 2;
   request.value = 1.0F;
   r.p_spray->publish(request);
-  r.pump(80);
+  r.deliver();
   ASSERT_EQ(r.cmds.size(), 1U);
   const uint16_t on_token = r.cmds.back().source_component;
 
@@ -1274,27 +1276,27 @@ TEST(Px4LinkNode, OnToOffIsANewTransactionAndOldOnAckCannotConfirmOff) {
   ack.target_component = on_token;
   ack.result = px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_ACCEPTED;
   r.p_ack->publish(ack);
-  r.pump(60);
+  r.deliver();
   ASSERT_EQ(r.spray_acks.size(), 1U);
 
   request.seq = 43;
   request.on = false;
   request.value = -1.0F;
   r.p_spray->publish(request);
-  r.pump(80);
+  r.deliver();
   ASSERT_EQ(r.cmds.size(), 2U);
   const uint16_t off_token = r.cmds.back().source_component;
   EXPECT_NE(off_token, on_token);
 
   ack.target_component = on_token;
   r.p_ack->publish(ack);
-  r.pump(50);
+  r.deliver();
   ASSERT_EQ(r.spray_acks.size(), 1U);
   EXPECT_EQ(r.link->spray_late_ack_count(), 1U);
 
   ack.target_component = off_token;
   r.p_ack->publish(ack);
-  r.pump(60);
+  r.deliver();
   ASSERT_EQ(r.spray_acks.size(), 2U);
   EXPECT_EQ(r.spray_acks.back().seq, 43U);
   EXPECT_TRUE(r.spray_acks.back().success);
@@ -1320,7 +1322,7 @@ TEST(Px4LinkNode, ActuatorMappingChangeAndWatchdogOffIdentityAreHandledPrecisely
   request.actuator_set_index = 1;
   request.value = 0.8F;
   r.p_spray->publish(request);
-  r.pump(60);
+  r.deliver();
   ASSERT_EQ(r.cmds.size(), 1U);
   px4_msgs::msg::VehicleCommandAck ack;
   ack.target_system = 1;
@@ -1328,17 +1330,17 @@ TEST(Px4LinkNode, ActuatorMappingChangeAndWatchdogOffIdentityAreHandledPrecisely
   ack.target_component = r.cmds.back().source_component;
   ack.result = px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_ACCEPTED;
   r.p_ack->publish(ack);
-  r.pump(50);
+  r.deliver();
 
   request.actuator_set_index = 2;  // same seq and intent, a different physical actuator mapping
   r.p_spray->publish(request);
-  r.pump(60);
+  r.deliver();
   ASSERT_EQ(r.cmds.size(), 2U);
   const uint16_t mapping_token = r.cmds.back().source_component;
   EXPECT_NE(mapping_token, ack.target_component);
   ack.target_component = mapping_token;
   r.p_ack->publish(ack);
-  r.pump(50);
+  r.deliver();
 
   Cmd watchdog = request;
   watchdog.seq = 77;
@@ -1346,16 +1348,16 @@ TEST(Px4LinkNode, ActuatorMappingChangeAndWatchdogOffIdentityAreHandledPrecisely
   watchdog.on = false;
   watchdog.value = -1.0F;
   r.p_spray->publish(watchdog);
-  r.pump(60);
+  r.deliver();
   ASSERT_EQ(r.cmds.size(), 3U);
   const uint16_t watchdog_token = r.cmds.back().source_component;
   ack.target_component = watchdog_token;
   r.p_ack->publish(ack);
-  r.pump(50);
+  r.deliver();
 
   for (int i = 0; i < 100; ++i) {
     r.p_spray->publish(watchdog);
-    r.pump(2);
+    r.deliver();
   }
   EXPECT_EQ(r.cmds.size(), 103U);
   EXPECT_EQ(r.link->spray_identities_used(), 3U);
@@ -1381,7 +1383,7 @@ TEST(Px4LinkNode, ExhaustedIdentityCannotConfirmWatchdogOff) {
   off.actuator_set_index = 1;
   off.value = 0.0F;
   r.p_spray->publish(off);
-  r.pump(150);
+  r.deliver();
 
   EXPECT_TRUE(std::none_of(r.cmds.begin(), r.cmds.end(),
                            [](const auto& c) { return c.command == 187 || c.command == 183; }));
@@ -1414,7 +1416,7 @@ TEST(Px4LinkNode, SprayTransactionsSerializeAndWatchdogOffPreemptsQueuedAndInFli
     m.actuator_set_index = 1;
     m.value = value;
     r.p_spray->publish(m);
-    r.pump(40);
+    r.deliver();
   };
   auto last_spray_command = [&]() {
     return std::find_if(r.cmds.rbegin(), r.cmds.rend(),
@@ -1465,7 +1467,7 @@ TEST(Px4LinkNode, SprayTransactionsSerializeAndWatchdogOffPreemptsQueuedAndInFli
   ack.target_component = first_token;
   ack.result = px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_ACCEPTED;
   r.p_ack->publish(ack);
-  r.pump(40);
+  r.deliver();
   ASSERT_EQ(r.spray_acks.size(), 10U);
   ack.target_component = watchdog_off.source_component;
   r.p_ack->publish(ack);
@@ -1586,7 +1588,7 @@ TEST(Px4LinkNode, LateSprayAckAfterTimeoutCannotMatchTheNextSameCommand) {
   on.actuator_set_index = 1;
   on.value = 1.0F;
   r.p_spray->publish(on);
-  r.pump(40);
+  r.deliver();
   const auto old_command =
       std::find_if(r.cmds.rbegin(), r.cmds.rend(), [](const auto& c) { return c.command == 187; });
   ASSERT_NE(old_command, r.cmds.rend());
@@ -1603,7 +1605,7 @@ TEST(Px4LinkNode, LateSprayAckAfterTimeoutCannotMatchTheNextSameCommand) {
   off.on = false;
   off.value = -1.0F;
   r.p_spray->publish(off);
-  r.pump(40);
+  r.deliver();
   const auto current_command =
       std::find_if(r.cmds.rbegin(), r.cmds.rend(), [](const auto& c) { return c.command == 187; });
   ASSERT_NE(current_command, r.cmds.rend());
@@ -1615,13 +1617,13 @@ TEST(Px4LinkNode, LateSprayAckAfterTimeoutCannotMatchTheNextSameCommand) {
   ack.target_component = old_token;
   ack.result = px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_ACCEPTED;
   r.p_ack->publish(ack);
-  r.pump(40);
+  r.deliver();
   EXPECT_EQ(r.spray_acks.size(), 1U);  // the old token cannot acknowledge seq 11
   EXPECT_EQ(r.link->spray_late_ack_count(), 1U);
 
   ack.target_component = current_command->source_component;
   r.p_ack->publish(ack);
-  r.pump(40);
+  r.deliver();
   ASSERT_EQ(r.spray_acks.size(), 2U);
   EXPECT_EQ(r.spray_acks.back().seq, 11U);
   EXPECT_TRUE(r.spray_acks.back().success);
@@ -1643,7 +1645,7 @@ TEST(Px4LinkNode, WatchdogOffWinsQueuedControllerOffAndOldAckCannotConfirmIt) {
     m.actuator_set_index = 1;
     m.value = -1.0F;
     r.p_spray->publish(m);
-    r.pump(40);
+    r.deliver();
   };
   auto is_187 = [](const auto& c) { return c.command == 187; };
   publish_off(20, Cmd::SOURCE_CONTROLLER);
@@ -1656,7 +1658,7 @@ TEST(Px4LinkNode, WatchdogOffWinsQueuedControllerOffAndOldAckCannotConfirmIt) {
   publish_off(22, Cmd::SOURCE_WATCHDOG);
   publish_off(23, Cmd::SOURCE_WATCHDOG);  // newest watchdog OFF replaces queued watchdog OFF
   ASSERT_TRUE(r.pump_until([&] { return r.spray_acks.size() >= 2; }));
-  r.pump(50);  // negative check: no further ack while seq 20 is still in flight
+  r.deliver();  // negative check: no further ack while seq 20 is still in flight
   ASSERT_EQ(r.spray_acks.size(), 2U);
   EXPECT_EQ(r.spray_acks[0].seq, 21U);
   EXPECT_EQ(r.spray_acks[1].seq, 22U);
@@ -1679,7 +1681,7 @@ TEST(Px4LinkNode, WatchdogOffWinsQueuedControllerOffAndOldAckCannotConfirmIt) {
   ASSERT_NE(watchdog, r.cmds.rend());
   EXPECT_EQ(watchdog->source_component, 3U);
   r.p_ack->publish(ack);  // duplicate controller OFF response
-  r.pump(100);            // negative check: a stale ack confirms nothing
+  r.deliver();            // negative check: a stale ack confirms nothing
   ASSERT_EQ(r.spray_acks.size(), 3U);
   EXPECT_NE(r.spray_acks.back().source, Cmd::SOURCE_WATCHDOG);
 
@@ -1703,7 +1705,7 @@ TEST(Px4LinkNode, SprayCommandIsRefusedAtOnceWhenTheLinkIsNotProven) {
   m.actuator_set_index = 1;
   m.value = -1.0F;
   r.p_spray->publish(m);
-  r.pump(200);
+  r.deliver();
   ASSERT_EQ(r.spray_acks.size(), 1U);
   EXPECT_FALSE(r.spray_acks[0].success);
   EXPECT_EQ(r.spray_acks[0].result, dyx3_interfaces::msg::SprayActuatorAck::RESULT_LINK_REFUSED);
@@ -1717,7 +1719,7 @@ TEST(Px4LinkNode, SprayCommandIsRefusedAtOnceWhenTheLinkIsNotProven) {
   r.spray_acks.clear();
   m.actuator_set_index = 9;  // out of range
   r.p_spray->publish(m);
-  r.pump(200);
+  r.deliver();
   ASSERT_EQ(r.spray_acks.size(), 1U);
   EXPECT_FALSE(r.spray_acks[0].success);
   for (const auto& c : r.cmds) EXPECT_NE(c.command, 187U);
@@ -1849,7 +1851,7 @@ px4_msgs::msg::VehicleLocalPosition lp_sample(uint64_t t_us) {
 TEST(Px4LinkNode, EventDrivenStateIsPublishedInTheSampleCallback) {
   Rig r(nullptr, "", "", {rclcpp::Parameter("event_driven", true)});
   r.bring_up();
-  r.pump(50);
+  r.deliver();
   const uint64_t t1 = static_cast<uint64_t>(std::llround(r.now * 1e6)) + 1000;
   r.p_lp->publish(lp_sample(t1));
   ASSERT_TRUE(
@@ -1858,7 +1860,7 @@ TEST(Px4LinkNode, EventDrivenStateIsPublishedInTheSampleCallback) {
   EXPECT_FLOAT_EQ(r.state.north_m, 1.0F);
   const int after_first = r.state_count;
   r.p_lp->publish(lp_sample(t1));  // the same sample again: nothing new to fan out
-  r.pump(100);
+  r.deliver();
   EXPECT_EQ(r.state_count, after_first);
   r.p_lp->publish(lp_sample(t1 + 20000));
   ASSERT_TRUE(r.pump_until([&] { return r.state_count == after_first + 1; }));
@@ -1872,13 +1874,13 @@ TEST(Px4LinkNode, EventDrivenFallbackRepublishesOnlyWhileTheLocalPositionIsStale
   Rig r(nullptr, "", "", {rclcpp::Parameter("event_driven", true)});
   r.bring_up();
   r.run(0.1);
-  r.pump(50);
+  r.deliver();
   ASSERT_TRUE(r.state.position_valid);
   r.lp_alive = false;
-  r.pump(50);
+  r.deliver();
   const int before = r.state_count;
   r.run(0.18);  // < stale_local_position_s (0.2): silence, not a cached republish
-  r.pump(50);
+  r.deliver();
   EXPECT_EQ(r.state_count, before);
   r.run(0.1);  // now stale: fallback at the 20 ms gate with the flags cleared
   ASSERT_TRUE(r.pump_until([&] { return r.state_count >= before + 3; }));
@@ -1893,10 +1895,10 @@ TEST(Px4LinkNode, EventDrivenFallbackRepublishesOnlyWhileTheLocalPositionIsStale
 TEST(Px4LinkNode, TimerModeStateComesOnlyFromTheTwentyMillisecondGate) {
   Rig r(nullptr, "", "", {rclcpp::Parameter("event_driven", false)});
   r.bring_up();
-  r.pump(50);
+  r.deliver();
   const int before = r.state_count;
   r.p_lp->publish(lp_sample(static_cast<uint64_t>(std::llround(r.now * 1e6)) + 1000));
-  r.pump(100);
+  r.deliver();
   EXPECT_EQ(r.state_count, before);  // no writer tick, no VehicleState
   r.lp_alive = false;                // the cache alone keeps the 50 Hz stream while it is fresh
   r.run(0.1);
@@ -1917,7 +1919,7 @@ void activate(Rig& r) {
   ASSERT_TRUE(acc);
   r.guard(2, 0.2F, NaN, 0.1F);
   r.run(0.05);
-  r.pump(50);
+  r.deliver();
 }
 }  // namespace
 
@@ -1936,13 +1938,13 @@ TEST(Px4LinkNode, EventDrivenWritesEachGuardCommandInItsCallback) {
     EXPECT_EQ(r.ocm.size(), 1U);
     EXPECT_EQ(r.traj.size(), 1U);
     EXPECT_EQ(r.att_sp.size(), 1U);
-    r.pump(50);
+    r.deliver();
     EXPECT_EQ(r.speed.size(), 1U) << "one write per command";
   }
   r.clear();
   r.seq -= 1;  // the same seq again: ignored by the gate, nothing written
   r.guard(2, 0.9F, NaN, 0.1F);
-  r.pump(100);
+  r.deliver();
   EXPECT_TRUE(r.speed.empty());
 }
 
@@ -1957,7 +1959,7 @@ TEST(Px4LinkNode, EventDrivenTimerNeverRewritesACommandWithinATick) {
   ASSERT_TRUE(r.pump_until([&] { return r.speed.size() == 1; }));
   const double t = r.now;
   r.link->on_timer(t + 0.002);
-  r.pump(50);
+  r.deliver();
   EXPECT_EQ(r.speed.size(), 1U);  // within half a period: skipped
   r.link->on_timer(t + 0.010);
   ASSERT_TRUE(r.pump_until([&] { return r.speed.size() == 2; }));  // the next tick writes
@@ -1993,7 +1995,7 @@ TEST(Px4LinkNode, TimerModeWritesOnlyOnTheWriterTick) {
   activate(r);
   r.clear();
   r.guard(2, 0.4F, NaN, 0.1F);
-  r.pump(100);
+  r.deliver();
   EXPECT_TRUE(r.speed.empty());
   r.link->on_timer(r.now + 0.001);
   ASSERT_TRUE(r.pump_until([&] { return !r.speed.empty(); }));
