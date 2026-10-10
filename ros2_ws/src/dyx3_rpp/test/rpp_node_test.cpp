@@ -203,13 +203,17 @@ struct Rig {
   // of at once: a body-axis brake then decelerates through zero the way a vehicle does, instead of
   // reversing at the brake speed on the next tick. decel_limit > 0 is the rate while |speed| falls
   // (toward zero), accel_limit while it rises: rover 01 runs RO_DECEL_LIM 2.0 / RO_ACCEL_LIM 0.5
-  // (config/px4/2026-10-10.params). command_lag_ticks applies the command published that many
-  // cycles ago (PX4 speed loop + one control period = 1 tick).
+  // (config/px4/2026-10-10.params). command_lag_ticks delays the SPEED target by that many cycles
+  // (the PX4 speed loop + one control period = 1 tick); the heading and the yaw rate stay the
+  // instantaneous model above. A lagged heading would swap the nose under a command the core
+  // issued for the old nose (a reverse creep with the nose away from the point became a drive
+  // away from it): no drivetrain turns 180 degrees in 20 ms, and the core tracks a real turn
+  // tick by tick.
   bool auto_drive{false};
   double accel_limit{0.0};
   double decel_limit{0.0};  // 0: symmetric (accel_limit both ways)
   int command_lag_ticks{0};
-  std::vector<MotionSetpoint> applied_;  // one per cycle: the newest command at that cycle
+  std::vector<double> applied_;  // one per cycle: the speed target published at that cycle
   void track_speed(double target, double dt) {
     const double up = accel_limit, down = decel_limit > 0.0 ? decel_limit : accel_limit;
     if (up <= 0.0 && down <= 0.0) {
@@ -235,28 +239,27 @@ struct Rig {
   }
   void integrate(double dt) {
     if (!auto_drive || motion.empty()) return;
-    applied_.push_back(motion.back());
-    static const MotionSetpoint kStop{};  // before the first lagged command: nothing applied
-    const MotionSetpoint& m = applied_.size() > static_cast<size_t>(command_lag_ticks)
-                                  ? applied_[applied_.size() - 1 - command_lag_ticks]
-                                  : kStop;
+    const MotionSetpoint& m = motion.back();
+    const bool drives = m.mode == MotionSetpoint::MODE_TRACK_HEADING ||
+                        m.mode == MotionSetpoint::MODE_TRACK_RATE ||
+                        m.mode == MotionSetpoint::MODE_CREEP;
+    applied_.push_back(drives ? m.speed_body_x : 0.0);
+    const double target = applied_.size() > static_cast<size_t>(command_lag_ticks)
+                              ? applied_[applied_.size() - 1 - command_lag_ticks]
+                              : 0.0;  // before the first lagged command: nothing applied
     switch (m.mode) {
       case MotionSetpoint::MODE_TRACK_HEADING:
         heading = m.yaw_setpoint;
-        track_speed(m.speed_body_x, dt);
         break;
       case MotionSetpoint::MODE_TRACK_RATE:
       case MotionSetpoint::MODE_CREEP:
-        heading += m.yaw_rate_setpoint * dt;
-        track_speed(m.speed_body_x, dt);
-        break;
       case MotionSetpoint::MODE_PIVOT:
         heading += m.yaw_rate_setpoint * dt;
-        track_speed(0.0, dt);
         break;
       default:
-        track_speed(0.0, dt);
+        break;
     }
+    track_speed(target, dt);
     north += speed * std::cos(heading) * dt;
     east += speed * std::sin(heading) * dt;
   }
