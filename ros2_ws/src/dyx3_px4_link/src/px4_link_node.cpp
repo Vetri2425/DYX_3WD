@@ -81,6 +81,15 @@ const UsedTopic kUsedTopics[] = {
     {"/fmu/out/vehicle_command_ack", "VehicleCommandAck"},
     {"/fmu/out/battery_status", "BatteryStatus"},
 };
+// Optional topics (contract sections 1 and 6): requested and proven like kUsedTopics, but never
+// part of the handshake's state(), never a staleness bit, never a fault or a gate. failsafe_flags
+// is listed in the pinned firmware's dds_topics.yaml (rate limit 5 Hz) but has never been observed
+// on the rover's DDS session: if it never arrives, is not answered or does not match, only
+// VehicleState.rc_link_valid stays false.
+constexpr const char* kFailsafeFlagsRequest = "/fmu/out/failsafe_flags";
+const UsedTopic kOptionalTopics[] = {
+    {kFailsafeFlagsRequest, "FailsafeFlags"},
+};
 
 // PX4 timestamps already arrive in the system-clock domain (contract section 7): no offset to
 // apply, only the unit conversion.
@@ -93,6 +102,9 @@ builtin_interfaces::msg::Time px4_stamp(uint64_t us) {
 
 // battery_status arrives at 1 Hz: three missed samples make it unknown.
 constexpr double kBatteryFreshS = 3.0;
+// DERIVED — NOT FROM V1 SPEC: failsafe_flags (firmware rate limit 5 Hz, period not measured on the
+// rover) reuses the display-only freshness of battery_status; no separate number is invented.
+constexpr double kRcLinkFreshS = kBatteryFreshS;
 
 double steady_now_s() {
   return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -201,6 +213,18 @@ Px4LinkNode::Px4LinkNode(const rclcpp::NodeOptions& options, ClockFn clock, bool
         bat_.current_a = m->current_a;
         bat_.remaining = m->remaining;
         bat_t_ = clock_();
+      });
+  // Optional (no staleness bit, no gate): read only while its handshake entry is Ok
+  // (publish_state).
+  sub_failsafe_ = create_subscription<px4_msgs::msg::FailsafeFlags>(
+      "/fmu/out/failsafe_flags", sensor, [this](px4_msgs::msg::FailsafeFlags::ConstSharedPtr m) {
+        rc_signal_lost_ = m->manual_control_signal_lost;
+        rc_t_ = clock_();
+        if (!rc_first_sample_logged_) {
+          rc_first_sample_logged_ = true;  // once per process: shows that the topic exists
+          RCLCPP_INFO(get_logger(), "first /fmu/out/failsafe_flags sample: RC link visible (%s)",
+                      m->manual_control_signal_lost ? "signal lost" : "signal ok");
+        }
       });
   sub_att_ = create_subscription<px4_msgs::msg::VehicleAttitude>(
       "/fmu/out/vehicle_attitude", sensor,
@@ -410,10 +434,10 @@ Px4LinkNode::Px4LinkNode(const rclcpp::NodeOptions& options, ClockFn clock, bool
                                [this]() { on_timer(clock_()); });
   }
   RCLCPP_INFO(get_logger(),
-              "px4_link up: %.0f Hz setpoints, command_max_age %.3f s, %zu handshake topics, "
-              "message definitions from %s",
+              "px4_link up: %.0f Hz setpoints, command_max_age %.3f s, %zu handshake topics "
+              "(+%zu optional), message definitions from %s",
               p_.publish_rate_hz, p_.command_max_age_s, std::size(kUsedTopics),
-              p_.msg_definitions_dir.c_str());
+              std::size(kOptionalTopics), p_.msg_definitions_dir.c_str());
 }
 
 // Health at the moment of a service request: the handshake state is read live (a response may have
@@ -479,20 +503,29 @@ void Px4LinkNode::build_handshake() {
     return ss.str();
   };
   std::vector<HandshakeTopic> topics;
-  for (const auto& u : kUsedTopics) {
+  const auto add = [&](const UsedTopic& u, bool optional) {
     HandshakeTopic t;
     t.request_name = u.request_name;
+    t.optional = optional;
     std::string err;
     const auto h = message_hash(u.msg_type, res, &err);
     if (h) {
       t.expected_hash = *h;
     } else {
       t.definition_missing = true;
-      RCLCPP_ERROR(get_logger(), "px4_msgs handshake: %s (%s)", u.msg_type, err.c_str());
+      // An optional topic's missing definition is reported once by step() (topic unusable).
+      if (!optional) {
+        RCLCPP_ERROR(get_logger(), "px4_msgs handshake: %s (%s)", u.msg_type, err.c_str());
+      }
     }
     topics.push_back(std::move(t));
-  }
+  };
+  for (const auto& u : kUsedTopics) add(u, false);
+  for (const auto& u : kOptionalTopics) add(u, true);
   handshake_ = std::make_unique<Handshake>(std::move(topics), p_.handshake_retry_s);
+  for (size_t i = 0; i < handshake_->size(); ++i) {
+    if (handshake_->topic(i).request_name == kFailsafeFlagsRequest) rc_hs_index_ = i;
+  }
 }
 
 uint64_t Px4LinkNode::stamp_us() const {
@@ -953,7 +986,7 @@ void Px4LinkNode::step(double now_s) {
       px4_msgs::msg::MessageFormatRequest rq;
       rq.timestamp = stamp_us();
       rq.protocol_version = px4_msgs::msg::MessageFormatRequest::LATEST_PROTOCOL_VERSION;
-      const std::string name = kUsedTopics[i].request_name;
+      const std::string& name = handshake_->topic(i).request_name;
       std::fill(rq.topic_name.begin(), rq.topic_name.end(), '\0');
       std::memcpy(rq.topic_name.data(), name.data(),
                   std::min(name.size(), rq.topic_name.size() - 1));
@@ -964,6 +997,15 @@ void Px4LinkNode::step(double now_s) {
   if (handshake_->state() == HandshakeState::Mismatch) {
     RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 5000, "px4_msgs HANDSHAKE MISMATCH: %s",
                           handshake_->first_mismatch_reason().c_str());
+  }
+  // The optional failsafe_flags topic: a mismatch (or no local definition) makes it unusable, never
+  // the link. One WARN per handshake generation; an unanswered request is simply re-sent.
+  if (handshake_->topic_state(rc_hs_index_) == HandshakeState::Mismatch &&
+      rc_unusable_warned_gen_ != handshake_->generation()) {
+    rc_unusable_warned_gen_ = handshake_->generation();
+    RCLCPP_WARN(get_logger(),
+                "optional topic %s unusable (%s): rc_link_valid stays false, link unaffected",
+                kFailsafeFlagsRequest, handshake_->topic_mismatch_reason(rc_hs_index_).c_str());
   }
   last_link_ok_ = hs_ok && last_rep_.session_alive;
   service_spray_transactions(now_s);
@@ -1173,6 +1215,11 @@ void Px4LinkNode::publish_state(double now_s) {
   s.battery_current_a = s.battery_valid && bat_.current_a >= 0.0F ? bat_.current_a : nan;
   s.battery_remaining =
       s.battery_valid && bat_.remaining >= 0.0F && bat_.remaining <= 1.0F ? bat_.remaining : nan;
+  // Optional source: a fresh sample of a format proven in this handshake generation (Pending or
+  // Mismatch: unknown). rc_link_ok is never true without rc_link_valid.
+  s.rc_link_valid = (now_s - rc_t_) <= kRcLinkFreshS &&
+                    handshake_->topic_state(rc_hs_index_) == HandshakeState::Ok;
+  s.rc_link_ok = s.rc_link_valid && !rc_signal_lost_;
   pub_state_->publish(s);
 }
 

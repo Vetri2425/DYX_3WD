@@ -29,6 +29,7 @@
 #include "dyx3_px4_link/vehicle_state_assembler.hpp"
 #include "px4_msgs/msg/battery_status.hpp"
 #include "px4_msgs/msg/estimator_status_flags.hpp"
+#include "px4_msgs/msg/failsafe_flags.hpp"
 #include "px4_msgs/msg/gps_inject_data.hpp"
 #include "px4_msgs/msg/message_format_request.hpp"
 #include "px4_msgs/msg/message_format_response.hpp"
@@ -172,6 +173,15 @@ private:
     float voltage_v{0.0F}, current_a{-1.0F}, remaining{-1.0F};
   } bat_;
   double bat_t_{-1e18};
+  // PX4 failsafe_flags (interfaces 0.17.0, RC link): an OPTIONAL topic (contract sections 1, 6).
+  // Requested in the handshake but never part of its state(), no staleness bit, no fault, no gate:
+  // if it never arrives only VehicleState.rc_link_valid stays false. Its data is used only while
+  // its own handshake entry is Ok.
+  bool rc_signal_lost_{true};
+  double rc_t_{-1e18};
+  bool rc_first_sample_logged_{false};
+  size_t rc_hs_index_{0};                           // the failsafe_flags entry of handshake_
+  std::optional<uint32_t> rc_unusable_warned_gen_;  // one WARN per handshake generation
   // C1: timestamp_sample of the last local-position sample published on arrival.
   bool lp_published_valid_{false};
   uint64_t lp_published_sample_us_{0};
@@ -255,6 +265,7 @@ private:
   rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr sub_lp_;
   rclcpp::Subscription<px4_msgs::msg::VehicleStatus>::SharedPtr sub_status_;
   rclcpp::Subscription<px4_msgs::msg::BatteryStatus>::SharedPtr sub_battery_;
+  rclcpp::Subscription<px4_msgs::msg::FailsafeFlags>::SharedPtr sub_failsafe_;
   rclcpp::Subscription<px4_msgs::msg::VehicleAttitude>::SharedPtr sub_att_;
   rclcpp::Subscription<px4_msgs::msg::EstimatorStatusFlags>::SharedPtr sub_flags_;
   rclcpp::Subscription<px4_msgs::msg::SensorGps>::SharedPtr sub_gps_;

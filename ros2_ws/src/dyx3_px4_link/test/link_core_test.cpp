@@ -160,6 +160,76 @@ TEST(Handshake, EmptyTopicSetIsNeverOk) {
   Handshake h({}, 1.0);
   EXPECT_EQ(h.state(), HandshakeState::Pending);
 }
+// Optional topics (contract section 6, failsafe_flags): requested and proven, never aggregated.
+namespace {
+Handshake make_hs_with_optional() {
+  return Handshake({{"/fmu/in/vehicle_command", 111, false},
+                    {"/fmu/out/vehicle_status", 222, false},
+                    {"/fmu/out/failsafe_flags", 333, false, true}},
+                   1.0);
+}
+}  // namespace
+TEST(Handshake, UnansweredOptionalTopicNeverHoldsTheLinkPending) {
+  auto h = make_hs_with_optional();
+  EXPECT_EQ(h.due_requests(0.0).size(), 3U);  // the optional topic is requested too
+  EXPECT_EQ(h.pending_count(), 2U);           // but only required topics count as pending
+  h.on_response("/fmu/in/vehicle_command", true, 111);
+  h.on_response("/fmu/out/vehicle_status", true, 222);
+  EXPECT_EQ(h.state(), HandshakeState::Ok);
+  EXPECT_EQ(h.pending_count(), 0U);
+  EXPECT_EQ(h.topic_state(2), HandshakeState::Pending);  // unknown: unusable, not a fault
+  const auto d = h.due_requests(1.0);                    // still re-requested
+  ASSERT_EQ(d.size(), 1U);
+  EXPECT_EQ(d[0], 2U);
+  EXPECT_EQ(h.topic(2).request_name, "/fmu/out/failsafe_flags");
+  h.on_response("/fmu/out/failsafe_flags", true, 333);
+  EXPECT_EQ(h.topic_state(2), HandshakeState::Ok);
+  EXPECT_EQ(h.state(), HandshakeState::Ok);
+}
+TEST(Handshake, OptionalMismatchIsLatchedOnTheTopicButNeverTheLink) {
+  auto h = make_hs_with_optional();
+  h.on_response("/fmu/out/failsafe_flags", true, 999);  // wrong hash
+  EXPECT_EQ(h.topic_state(2), HandshakeState::Mismatch);
+  EXPECT_NE(h.topic_mismatch_reason(2).find("mismatch"), std::string::npos);
+  EXPECT_TRUE(h.first_mismatch_reason().empty());  // not the link's mismatch
+  EXPECT_EQ(h.state(), HandshakeState::Pending);   // required topics still pending
+  h.on_response("/fmu/in/vehicle_command", true, 111);
+  h.on_response("/fmu/out/vehicle_status", true, 222);
+  EXPECT_EQ(h.state(), HandshakeState::Ok);
+  h.on_response("/fmu/out/failsafe_flags", true, 333);  // a later match does not clear it
+  EXPECT_EQ(h.topic_state(2), HandshakeState::Mismatch);
+  EXPECT_EQ(h.due_requests(100.0).size(), 0U);  // never re-asks the mismatched one
+  h.rearm();                                    // session reset: proven again
+  EXPECT_EQ(h.topic_state(2), HandshakeState::Pending);
+  EXPECT_TRUE(h.topic_mismatch_reason(2).empty());
+  // A required mismatch still wins over everything, an optional one never counts.
+  h.on_response("/fmu/out/failsafe_flags", false, 0);  // firmware does not know it
+  EXPECT_EQ(h.topic_state(2), HandshakeState::Mismatch);
+  h.on_response("/fmu/in/vehicle_command", true, 111);
+  h.on_response("/fmu/out/vehicle_status", true, 222);
+  EXPECT_EQ(h.state(), HandshakeState::Ok);
+  h.rearm();
+  h.on_response("/fmu/in/vehicle_command", true, 999);
+  EXPECT_EQ(h.state(), HandshakeState::Mismatch);
+}
+TEST(Handshake, MissingLocalDefinitionOfAnOptionalTopicIsNotALinkMismatch) {
+  Handshake h({{"/fmu/in/vehicle_command", 111, false}, {"/fmu/out/failsafe_flags", 0, true, true}},
+              1.0);
+  EXPECT_EQ(h.topic_state(1), HandshakeState::Mismatch);
+  EXPECT_FALSE(h.topic_mismatch_reason(1).empty());
+  EXPECT_TRUE(h.first_mismatch_reason().empty());
+  EXPECT_EQ(h.due_requests(0.0).size(), 1U);  // nothing to prove for it
+  h.on_response("/fmu/in/vehicle_command", true, 111);
+  EXPECT_EQ(h.state(), HandshakeState::Ok);
+  h.rearm();  // stays unusable after a reset
+  EXPECT_EQ(h.topic_state(1), HandshakeState::Mismatch);
+}
+TEST(Handshake, OnlyOptionalTopicsIsNeverOk) {
+  Handshake h({{"/fmu/out/failsafe_flags", 333, false, true}}, 1.0);
+  h.on_response("/fmu/out/failsafe_flags", true, 333);
+  EXPECT_EQ(h.topic_state(0), HandshakeState::Ok);
+  EXPECT_EQ(h.state(), HandshakeState::Pending);
+}
 
 // --- offboard
 // -------------------------------------------------------------------------------------
