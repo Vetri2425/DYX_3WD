@@ -74,6 +74,23 @@ RppNode::RppNode(const rclcpp::NodeOptions& options, ClockFn clock, bool create_
             std::isfinite(m->velocity_east_mps) && std::isfinite(m->yaw_rate_radps)) {
           core_.on_velocity(m->velocity_north_mps, m->velocity_east_mps, m->yaw_rate_radps, now);
         }
+        // C2 (event_driven): a NEW PX4 sample ticks the core now, in this callback, with exactly
+        // the inputs a timer tick at this instant would see (the sample was fed above, on the same
+        // clock). A repeated sample (same px4_sample_stamp) or one without a stamp (px4_link had no
+        // fresh local position) is fed as before but does not tick: the watchdog covers it.
+        const auto& t = m->px4_sample_stamp;
+        const bool stamped = t.sec != 0 || t.nanosec != 0;
+        if (event_driven_ && stamped &&
+            !(have_ticked_sample_ && t.sec == ticked_sample_.sec &&
+              t.nanosec == ticked_sample_.nanosec)) {
+          have_ticked_sample_ = true;
+          ticked_sample_ = t;
+          step(now);
+          have_tick_ = true;
+          last_tick_was_sample_ = true;
+          last_tick_ns_ = now;
+          if (timer_) timer_->reset();  // the watchdog's phase restarts at this tick
+        }
       });
   sub_rtk_ = create_subscription<dyx3_interfaces::msg::RtkStatus>(
       "/dyx3/rtk_status", rel1, [this](dyx3_interfaces::msg::RtkStatus::ConstSharedPtr m) {
@@ -130,10 +147,11 @@ RppNode::RppNode(const rclcpp::NodeOptions& options, ClockFn clock, bool create_
 
   if (create_timer) {
     timer_ = create_wall_timer(std::chrono::duration<double>(1.0 / tick_hz_),
-                               [this]() { step(clock_()); });
+                               [this]() { on_watchdog(clock_()); });
   }
-  RCLCPP_INFO(get_logger(), "rpp up: %.0f Hz tick, artifacts from %s", tick_hz_,
-              artifact_dir_.c_str());
+  RCLCPP_INFO(get_logger(), "rpp up: %s, %.0f Hz %s, artifacts from %s",
+              event_driven_ ? "event-driven (tick per pose sample)" : "timer mode", tick_hz_,
+              event_driven_ ? "watchdog" : "tick", artifact_dir_.c_str());
 }
 
 void RppNode::declare_and_validate_params() {
@@ -142,6 +160,7 @@ void RppNode::declare_and_validate_params() {
   require(std::isfinite(tick_hz_) && tick_hz_ >= 20.0 && tick_hz_ <= 100.0,
           "tick_hz must be in [20, 100]");
   artifact_dir_ = declare_parameter<std::string>("artifact_dir", "/var/lib/dyx3/missions");
+  event_driven_ = declare_parameter<bool>("event_driven", true);
   std::vector<Item> items;
   for (size_t i = 0; i < kParamCount; ++i) {
     const Descriptor& d = descriptors()[i];
@@ -417,6 +436,24 @@ void RppNode::step(int64_t now_ns) {
                 static_cast<int>(out.state));
     last_state_ = state;
   }
+}
+
+void RppNode::on_watchdog(int64_t now_ns) {
+  if (event_driven_ && have_tick_) {
+    // DERIVED — NOT FROM V1 SPEC: the 1.5 / 0.5 period thresholds are structural (fractions of the
+    // configured tick period, no tuning value). After a sample tick the timer was reset, so it
+    // fires one period later; a sample later than one period (PX4 cadence jitter, a 30 ms gap) is
+    // not silence, so the watchdog waits for the second period. Once it is ticking it keeps the
+    // period. Either way silence is ticked at the tick rate, so the stale-pose STOP lands on the
+    // same pose_max_age_s deadline as in timer mode.
+    const int64_t period_ns = static_cast<int64_t>(1e9 / tick_hz_);
+    const int64_t need_ns = last_tick_was_sample_ ? period_ns + period_ns / 2 : period_ns / 2;
+    if (now_ns - last_tick_ns_ < need_ns) return;
+  }
+  step(now_ns);
+  have_tick_ = true;
+  last_tick_was_sample_ = false;
+  last_tick_ns_ = now_ns;
 }
 
 void RppNode::publish_motion(const MotionCommand& c) {
