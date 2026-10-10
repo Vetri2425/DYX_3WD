@@ -2695,3 +2695,21 @@ circumference). `RO_MAX_THR_SPEED` should be about 0.96. See the tuning proposal
 
 **Not covered in step 5:** live `pose_to_write_age` (px4_link was stopped); it is measured in step 7 through the real
 chain.
+
+## 2026-10-10 (13:05 IST) — Claude — Tuning: RO_MAX_THR_SPEED 0.96, RO_SPEED_LIM 0.85
+
+- **Basis:**
+  - the v1.16.2→v1.17 code comparison: PX4 feed-forward = setpoint / `RO_MAX_THR_SPEED`, and since v1.17 the yaw-rate
+    feed-forward is scaled by it too;
+  - the RoboClaw full command = `RBCLW_QPPS_MAX` 151200 / 148000 counts × 2π·0.1498 = **0.96 m/s**, measured twice
+    (T1 full stick 6.4 rad/s; step 5: 0.20 commanded gave 0.157 = 0.20/1.28 × 0.96).
+- **Set (disarmed, saved):**
+  - `RO_MAX_THR_SPEED` 1.28 → **0.96**;
+  - `RO_SPEED_LIM` 1.1 → **0.85**, which leaves steering headroom under the 0.96 m/s ceiling.
+- Baseline and `config/px4/2026-10-10.params` updated; baseline = FCU 105/105.
+- **Next:**
+  1. re-run the forward test: 0.20 commanded should now give about 0.20;
+  2. re-run the Mission square;
+  3. then `RO_SPEED_RED` 1 (prototype corner slowdown) as a separate change.
+- **Rule:** never set `RO_JERK_LIM` or `RO_DECEL_LIM` ≤ 0 on this firmware; the rover would not move in Mission.
+  Upstream `6cf8d80bdd` (that guard) and `df387bdec2` (pure pursuit past a waypoint) are not in `8279fa4be3`.
