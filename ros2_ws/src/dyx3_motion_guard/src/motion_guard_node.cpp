@@ -87,6 +87,14 @@ MotionGuardNode::MotionGuardNode(const rclcpp::NodeOptions& options, ClockFn clo
                                                    const double now = clock_();
                                                    core_->on_command(c, now);
                                                    w_cmd_.touch(now);
+                                                   // C3: decide and forward now, in this callback.
+                                                   if (event_driven_) {
+                                                     step(now);
+                                                     have_tick_ = true;
+                                                     last_tick_was_command_ = true;
+                                                     last_tick_s_ = now;
+                                                     if (timer_) timer_->reset();
+                                                   }
                                                  });
   sub_mission_ = create_subscription<dyx3_interfaces::msg::MissionState>(
       "/dyx3/mission/state", rel1, [this](dyx3_interfaces::msg::MissionState::ConstSharedPtr m) {
@@ -160,11 +168,13 @@ MotionGuardNode::MotionGuardNode(const rclcpp::NodeOptions& options, ClockFn clo
 
   if (create_timer) {
     timer_ = create_wall_timer(std::chrono::duration<double>(1.0 / publish_rate_hz_),
-                               [this]() { step(clock_()); });
+                               [this]() { on_watchdog(clock_()); });
   }
   RCLCPP_INFO(get_logger(),
-              "motion_guard up: %.0f Hz, command_max_age %.3f s, session_accept_count %u",
-              publish_rate_hz_, age_.command, accept_count_);
+              "motion_guard up: %s, %.0f Hz %s, command_max_age %.3f s, session_accept_count %u",
+              event_driven_ ? "event-driven (decision per RPP command)" : "timer mode",
+              publish_rate_hz_, event_driven_ ? "watchdog" : "decision loop", age_.command,
+              accept_count_);
 }
 
 rcl_interfaces::msg::SetParametersResult MotionGuardNode::on_parameters(
@@ -181,6 +191,7 @@ rcl_interfaces::msg::SetParametersResult MotionGuardNode::on_parameters(
 void MotionGuardNode::declare_and_validate_params() {
   const auto d = [this](const char* n, double v) { return declare_parameter<double>(n, v); };
   publish_rate_hz_ = d("publish_rate_hz", 50.0);
+  event_driven_ = declare_parameter<bool>("event_driven", true);
   require(std::isfinite(publish_rate_hz_) && publish_rate_hz_ >= 10.0,
           "publish_rate_hz must be >= 10");
   const int acc = static_cast<int>(declare_parameter<int>("session_accept_count", 3));
@@ -235,6 +246,21 @@ GateInputs MotionGuardNode::gather(double now_s) const {
   if (!w_est_.seen) g.est = EstimatorIn{};
   if (!w_mission_.seen) g.mission = MissionIn{};
   return g;
+}
+
+void MotionGuardNode::on_watchdog(double now_s) {
+  if (event_driven_ && have_tick_) {
+    // DERIVED — NOT FROM V1 SPEC: the 1.5 / 0.5 period thresholds are structural fractions of the
+    // configured period (as in dyx3_rpp's watchdog). A silent RPP is still decided at
+    // publish_rate_hz, so its STOP lands on the same command_max_age_s deadline as in timer mode.
+    const double period = 1.0 / publish_rate_hz_;
+    const double need = last_tick_was_command_ ? 1.5 * period : 0.5 * period;
+    if (now_s - last_tick_s_ < need - 1e-9) return;
+  }
+  step(now_s);
+  have_tick_ = true;
+  last_tick_was_command_ = false;
+  last_tick_s_ = now_s;
 }
 
 void MotionGuardNode::step(double now_s) {

@@ -41,6 +41,11 @@ if(BUILD_TESTING)
   ament_add_gtest(motion_guard_node_test test/motion_guard_node_test.cpp TIMEOUT 300)
   target_link_libraries(motion_guard_node_test dyx3_motion_guard_node_lib)
   ament_target_dependencies(motion_guard_node_test rclcpp dyx3_interfaces)
+  # The same suite in event-driven mode (the production default): every test must pass in both.
+  ament_add_gtest(motion_guard_node_event_test test/motion_guard_node_test.cpp TIMEOUT 300)
+  target_link_libraries(motion_guard_node_event_test dyx3_motion_guard_node_lib)
+  ament_target_dependencies(motion_guard_node_event_test rclcpp dyx3_interfaces)
+  target_compile_definitions(motion_guard_node_event_test PRIVATE DYX3_TEST_EVENT_DRIVEN=1)
 endif()
 
 ament_package()

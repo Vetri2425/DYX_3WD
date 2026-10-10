@@ -17,6 +17,16 @@ namespace {
 constexpr float NaN = std::numeric_limits<float>::quiet_NaN();
 using dyx3_interfaces::msg::MotionSetpoint;
 
+// The whole suite runs twice: motion_guard_node_test in timer mode (event_driven=false: tick()
+// calls step(), the timer-mode regression) and motion_guard_node_event_test in event-driven mode
+// (the production default: each RPP command is decided in its callback, tick() only calls the
+// watchdog). Tests about one mode set event_driven explicitly.
+#ifdef DYX3_TEST_EVENT_DRIVEN
+constexpr bool kSuiteEventDriven = true;
+#else
+constexpr bool kSuiteEventDriven = false;
+#endif
+
 struct Rig {
   std::shared_ptr<rclcpp::Context> ctx;
   double now{50.0};
@@ -42,6 +52,7 @@ struct Rig {
   dyx3_interfaces::msg::EmergencyStopState last_estop;
   uint64_t seq{0};
   builtin_interfaces::msg::Time rpp_stamp{}, veh_stamp{};  // IF-003 pose sample stamps
+  bool event{false};                                       // the node's mode (event_driven)
   bool veh_ok{true}, rtk_ok{true}, op_ok{true}, link_ok{true}, est_ok{true}, mission_running{true};
 
   explicit Rig(const std::vector<rclcpp::Parameter>& params = {}) {
@@ -52,9 +63,14 @@ struct Rig {
     rclcpp::NodeOptions no;
     no.context(ctx);
     no.append_parameter_override("max_reverse_speed_mps", 0.3);
-    for (const auto& p : params)
+    bool mode_given = false;
+    for (const auto& p : params) {
       no.append_parameter_override(p.get_name(), p.get_parameter_value());
+      mode_given = mode_given || p.get_name() == "event_driven";
+    }
+    if (!mode_given) no.append_parameter_override("event_driven", kSuiteEventDriven);
     guard = std::make_shared<MotionGuardNode>(no, [this]() { return now; }, false);
+    event = guard->event_driven();
     rclcpp::NodeOptions wo;
     wo.context(ctx);
     world = std::make_shared<rclcpp::Node>("world", wo);
@@ -124,6 +140,15 @@ struct Rig {
     ctx->shutdown("test done");
   }
 
+  template <typename Done>
+  bool pump_until(Done done, int timeout_ms = 3000) {
+    const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (std::chrono::steady_clock::now() < end) {
+      exec->spin_some(2ms);
+      if (done()) return true;
+    }
+    return done();
+  }
   void pump(int ms = 12) {
     const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
     while (std::chrono::steady_clock::now() < end) exec->spin_some(2ms);
@@ -197,7 +222,11 @@ struct Rig {
     publish_world();
     if (with_rpp) rpp(mode, v, yaw, rate);
     pump();
-    guard->step(now);
+    if (event) {
+      guard->on_watchdog(now);  // a no-op when the RPP command was decided on arrival
+    } else {
+      guard->step(now);
+    }
     pump();
   }
   void run(double seconds, bool with_rpp = true) {
@@ -573,4 +602,80 @@ TEST(MotionGuardNode, GateStatusIsPublishedWithoutAnyMotionCommand) {
   r.run(0.8, false);
   EXPECT_FALSE(r.last_gate.ok);
   EXPECT_EQ(r.last_gate.reason_code, dyx3_interfaces::msg::MotionSetpointStatus::REASON_RTK_GATE);
+}
+
+// --- C3: decide and forward on each RPP command
+// --------------------------------------------------- (a) The command is decided and forwarded
+// inside its own callback: neither step() nor the watchdog runs, the injected clock does not move,
+// and one output per command appears.
+TEST(MotionGuardNode, EventDrivenForwardsEachCommandInItsCallback) {
+  Rig r({rclcpp::Parameter("event_driven", true)});
+  r.run(0.2);  // session accepted, every gate fresh
+  ASSERT_EQ(r.last_out.mode, MotionSetpoint::MODE_TRACK_RATE);
+  for (int i = 1; i <= 5; ++i) {
+    const size_t before = r.outs.size();
+    const float v = 0.1F * static_cast<float>(i);
+    r.rpp(MotionSetpoint::MODE_TRACK_RATE, v, NaN, 0.1F);
+    ASSERT_TRUE(r.pump_until([&] { return r.outs.size() == before + 1; })) << i;
+    EXPECT_FLOAT_EQ(r.last_out.speed_body_x, v);
+    r.pump(10);
+    EXPECT_EQ(r.outs.size(), before + 1) << "one decision per command";
+  }
+}
+
+// No double decision: after a command decision the watchdog waits two periods, then keeps the
+// period; a command always decides.
+TEST(MotionGuardNode, EventDrivenWatchdogNeverDoubleDecidesACommand) {
+  Rig r({rclcpp::Parameter("event_driven", true)});
+  r.run(0.2);
+  const double t0 = r.now;  // the last command was decided at t0
+  const size_t n = r.outs.size();
+  const auto watchdog = [&](double at) {
+    r.now = at;
+    r.guard->on_watchdog(at);
+    r.pump(10);
+    return r.outs.size();
+  };
+  EXPECT_EQ(watchdog(t0 + 0.001), n);
+  EXPECT_EQ(watchdog(t0 + 0.020), n);      // one period: a late command is not silence
+  EXPECT_EQ(watchdog(t0 + 0.030), n + 1);  // 1.5 periods of silence: decided
+  EXPECT_EQ(watchdog(t0 + 0.035), n + 1);
+  EXPECT_EQ(watchdog(t0 + 0.040), n + 2);
+  r.now = t0 + 0.041;
+  r.rpp(MotionSetpoint::MODE_TRACK_RATE, 0.3F, NaN, 0.1F);
+  EXPECT_TRUE(r.pump_until([&] { return r.outs.size() == n + 3; }));
+}
+
+// (b) A silent RPP is stopped on the same command_max_age_s deadline in both modes.
+TEST(MotionGuardNode, ASilentRppIsStoppedOnTheSameDeadlineInBothModes) {
+  int stop_tick[2] = {-1, -1};
+  for (int mode = 0; mode < 2; ++mode) {
+    Rig r({rclcpp::Parameter("event_driven", mode == 1)});
+    r.run(0.3);
+    ASSERT_EQ(r.last_out.mode, MotionSetpoint::MODE_TRACK_RATE);
+    for (int k = 1; k <= 30 && stop_tick[mode] < 0; ++k) {
+      r.tick(0.02, /*with_rpp=*/false);
+      if (r.last_out.mode == MotionSetpoint::MODE_STOP) {
+        stop_tick[mode] = k;
+        EXPECT_EQ(r.last_status.reason_code,
+                  dyx3_interfaces::msg::MotionSetpointStatus::REASON_STALE);
+      }
+    }
+  }
+  // command_max_age_s 0.2 on a 50 Hz decision: the 10th or 11th tick (0.2 s is the boundary).
+  EXPECT_GE(stop_tick[0], 10);
+  EXPECT_LE(stop_tick[0], 11);
+  EXPECT_EQ(stop_tick[1], stop_tick[0]);
+}
+
+// (c) Timer mode: a command alone produces nothing; the timer decides.
+TEST(MotionGuardNode, TimerModeDecidesOnlyOnTheTimer) {
+  Rig r({rclcpp::Parameter("event_driven", false)});
+  r.run(0.2);
+  const size_t before = r.outs.size();
+  r.rpp(MotionSetpoint::MODE_TRACK_RATE, 0.3F, NaN, 0.1F);
+  r.pump(50);
+  EXPECT_EQ(r.outs.size(), before);
+  r.guard->on_watchdog(r.now + 0.001);
+  EXPECT_TRUE(r.pump_until([&] { return r.outs.size() == before + 1; }));
 }

@@ -15,9 +15,9 @@ events that must not drop); `R100` = point results.
 | `/dyx3/estimator_health` | EstimatorHealth | px4_link | motion_guard, gateway | R1 | 10 Hz, newest cached `estimator_status_flags` sample (about 1 Hz from the FCU) |
 | `/dyx3/rtk_status` | RtkStatus | gnss_rtk | rpp, motion_guard, spray, gateway | R1 | 5 Hz |
 | `/dyx3/mission/state` | MissionState | mission | rpp, spray, motion_guard, recorder, gateway | R1 | 10 Hz (and on change) |
-| `/dyx3/rpp/motion_setpoint` | MotionSetpoint | **rpp** | motion_guard | R1 | 50 Hz, always (STOP when not running) |
+| `/dyx3/rpp/motion_setpoint` | MotionSetpoint | **rpp** | motion_guard | R1 | once per new pose sample (about 50 Hz), 50 Hz watchdog in silence (`event_driven`); always, STOP when not running |
 | `/dyx3/rpp/status` | RppStatus | **rpp** | mission, spray, gateway | R1 | 50 Hz |
-| `/dyx3/motion_guard/command` | MotionSetpoint | motion_guard | px4_link | R1 | 50 Hz, always valid |
+| `/dyx3/motion_guard/command` | MotionSetpoint | motion_guard | px4_link | R1 | once per RPP command, 50 Hz watchdog when RPP is silent (`event_driven`); always valid |
 | `/dyx3/motion_guard/status` | MotionSetpointStatus | motion_guard | gateway | R1 | per decision |
 | `/dyx3/safety_gate` | SafetyGateStatus | motion_guard | mission, gateway | R1 | 10 Hz |
 | `/dyx3/emergency_stop_state` | EmergencyStopState | motion_guard | spray, gateway | R1 | 10 Hz (absence == asserted) |
