@@ -65,7 +65,9 @@ dbg_f="rover-debug-${sha}.tar.zst"
 tar -C "${dbg_tree}" -I 'zstd -T0 -15' -cf "${DEBUG_OUT}/${dbg_f}" .
 rm -rf "${dbg_tree}"
 # Build trees and logs are not needed at runtime (colcon install is self-contained without --symlink-install).
-tar -C / -I 'zstd -T0 -15' -cf "${OUT}/${rel_f}" \
+# zstd -19 (8 MiB window, any zstd decompresses it without flags): 10 s more in CI, about 4 MB less to download
+# at the rover's 100 KiB/s. No --long: it saves under 0.5 MB here and raises the decoder window.
+tar -C / -I 'zstd -T0 -19' -cf "${OUT}/${rel_f}" \
   --exclude="opt/dyx3/releases/${sha}/ros2_ws/build" --exclude="opt/dyx3/releases/${sha}/ros2_ws/log" \
   "opt/dyx3/releases/${sha}"
 tar -C / -I 'zstd -T0 -15' -cf "${OUT}/${msgs_f}" \
