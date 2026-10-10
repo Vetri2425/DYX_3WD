@@ -135,33 +135,50 @@ TEST(RppCore, APreciseStopPastItsTimeoutBrakesAndCompletes) {
 // are the defaults of segment_endpoint_arrival_tolerance_m / segment_endpoint_cross_tolerance_m
 // (0.02) and endpoint_capture_past_m (0.02).
 
-// One tick of the final-run precise stop with the pose `ahead` metres before the end plane on the
-// line (negative: past it), moving forward at `speed`.
-TEST(RppCore, TheEndpointDeadBandBrakesInsteadOfCreepingThroughThePlane) {
+// Damped in-band law (review 2026-10-10, rover 01 brakes at RO_DECEL_LIM 2.0 m/s^2: the
+// unconditional brake at the band edge left such a drivetrain 1.7 cm short, where the brake fired).
+// Short of the plane the command is the stop machine's unit-gain brake aimed at the deceleration
+// profile v_p = sqrt(2 * decel * residual): v_p - (v_forward - v_p), never above v_p, never a
+// reverse below -segment_brake_velocity_cap_m_s; at and past the plane v_p = 0 and it is the brake
+// itself. One tick with the pose `ahead` metres before the end plane (negative: past it), moving
+// forward at `speed`.
+TEST(RppCore, TheEndpointInBandLawTracksTheProfileShortOfThePlaneAndBrakesPastIt) {
   struct Case {
     double ahead, speed;
   };
-  // 1 cm short: the old law published a creep of sqrt(2 * 0.35 * 0.01) = 0.084 m/s forward; 3 mm
-  // past the plane: a reverse creep of 0.046 m/s. Inside the band both are a brake now.
-  for (const Case c : {Case{0.010, 0.05}, Case{-0.003, 0.05}, Case{0.0, 0.05}, Case{0.019, 0.08}}) {
+  const double decel = 0.35, cap = 0.08;
+  for (const Case c : {Case{0.010, 0.05}, Case{0.010, 0.15}, Case{0.010, 0.20}, Case{0.019, 0.08},
+                       Case{-0.003, 0.05}, Case{0.0, 0.05}}) {
     CoreRig r({north_run(6.0, Profile::Segment, 6.0)});
     r.n = 6.0 - c.ahead;
     r.vn = c.speed;  // moving: the stop is not confirmed
     const TickOutput& o = r.step();
     ASSERT_TRUE(r.core->snapshot().endpoint_stop_active) << "ahead " << c.ahead;
-    EXPECT_EQ(o.cmd, CmdKind::Brake) << "ahead " << c.ahead;
-    EXPECT_LE(o.brake_speed, 0.0) << "a brake never drives the moving rover forward";
-    EXPECT_NEAR(o.brake_speed, -c.speed, 1e-9) << "the velocity-reversal brake of the stop machine";
+    const double v_p = c.ahead > 0.0 ? std::sqrt(2.0 * decel * c.ahead) : 0.0;
+    const double expected = std::max(-cap, std::min(v_p, 2.0 * v_p - c.speed));
+    const double cmd = o.cmd == CmdKind::Brake ? o.brake_speed : o.creep_speed;
+    EXPECT_EQ(o.cmd, expected < 0.0 ? CmdKind::Brake : CmdKind::Creep)
+        << "ahead " << c.ahead << " speed " << c.speed;
+    EXPECT_NEAR(cmd, expected, 1e-9) << "ahead " << c.ahead << " speed " << c.speed;
+    EXPECT_LE(cmd, v_p + 1e-12) << "never faster than the profile";
+    EXPECT_NEAR(o.v_n, cmd, 1e-9);
     EXPECT_NEAR(o.v_e, 0.0, 1e-12);
     EXPECT_FALSE(r.core->path_done());
   }
+  // At the plane this is exactly the velocity-reversal brake of the stop machine.
+  CoreRig r({north_run(6.0, Profile::Segment, 6.0)});
+  r.n = 6.0;
+  r.vn = 0.05;
+  const TickOutput& o = r.step();
+  EXPECT_EQ(o.cmd, CmdKind::Brake);
+  EXPECT_NEAR(o.brake_speed, -0.05, 1e-9);
 }
 
 TEST(RppCore, TheEndpointBrakeIsHeldThroughAFewMillimetresOfCoastThenYieldsToACorrection) {
   CoreRig r({north_run(6.0, Profile::Segment, 6.0)});
-  r.n = 5.99;  // 1 cm short, moving: the dead band brakes and latches
+  r.n = 5.99;  // 1 cm short, moving below the profile: the in-band law (profile) latches the hold
   r.vn = 0.05;
-  ASSERT_EQ(r.step().cmd, CmdKind::Brake);
+  ASSERT_EQ(r.step().cmd, CmdKind::Creep);
   // the coast carries it 3 cm past the plane: outside the 2 cm arrival band but inside
   // along_tol + endpoint_capture_past_m = 4 cm, so the brake is NOT abandoned for a reverse creep
   r.n = 6.03;
@@ -187,9 +204,9 @@ TEST(RppCore, TheEndpointBrakeIsHeldThroughAFewMillimetresOfCoastThenYieldsToACo
 
 TEST(RppCore, AnEndpointStoppedOffTheMarkStillGetsTheCreepNudge) {
   CoreRig r({north_run(6.0, Profile::Segment, 6.0)});
-  r.n = 5.99;  // brake latched inside the band
+  r.n = 5.99;  // the hold latched inside the band
   r.vn = 0.05;
-  ASSERT_EQ(r.step().cmd, CmdKind::Brake);
+  ASSERT_EQ(r.step().cmd, CmdKind::Creep);
   r.n = 6.03;  // the coast ended 3 cm past: stopped, outside the arrival band, inside the hold band
   r.vn = 0.0;
   CmdKind last = CmdKind::Brake;
@@ -205,20 +222,32 @@ TEST(RppCore, AnEndpointStoppedOffTheMarkStillGetsTheCreepNudge) {
   EXPECT_FALSE(r.core->path_done());
 }
 
-TEST(RppCore, TheEndpointFeedForwardOutsideTheBandIsEvaluatedToThePlane) {
-  // Approaching from 3 cm short (outside the band) at 0.2 m/s: the feed-forward speed is
-  // sqrt(2 * decel * distance-to-the-plane) = 0.145 m/s (under the cap max(speed, creep)), exactly
-  // the prototype law. The band-edge variant (sqrt(2 * decel * (distance - along_tol)) = 0.084
-  // m/s) aims the stop short of the point; it was taken back (stop-position distribution below).
+TEST(RppCore, TheEndpointFeedForwardOutsideTheBandIsEvaluatedToThePlaneWithTheSameFeedback) {
+  // Approaching from 3 cm short (outside the band): the feed-forward speed is the prototype's
+  // sqrt(2 * decel * distance-to-the-plane) = 0.145 m/s (under the cap max(speed, creep)) when
+  // the rover is on or below the profile; a rover above it (0.2 m/s: a lagging drivetrain) gets
+  // the same unit-gain correction as inside the band, 2 * 0.145 - 0.2 = 0.090 m/s, never below
+  // zero. The band-edge variant (sqrt(2 * decel * (distance - along_tol)) = 0.084 m/s) aims the
+  // stop short of the point; it was taken back (stop-position distributions below).
+  const double v_p = std::sqrt(2.0 * 0.35 * 0.03);
   CoreRig r({north_run(6.0, Profile::Segment, 6.0)});
   r.n = 6.0 - 0.03;
-  r.vn = 0.2;
+  r.vn = v_p;  // on the profile (the cap max(speed, creep) limits a slower rover to its speed)
   const TickOutput& o = r.step();
   EXPECT_EQ(o.cmd, CmdKind::Creep);
-  EXPECT_NEAR(o.creep_speed, std::sqrt(2.0 * 0.35 * 0.03), 1e-9);
+  EXPECT_NEAR(o.creep_speed, v_p, 1e-9);
+  CoreRig a({north_run(6.0, Profile::Segment, 6.0)});
+  a.n = 6.0 - 0.03;
+  a.vn = 0.2;  // above it
+  EXPECT_NEAR(a.step().creep_speed, 2.0 * v_p - 0.2, 1e-9);
+  CoreRig f({north_run(6.0, Profile::Segment, 6.0)});
+  f.n = 6.0 - 0.03;
+  f.vn = 0.4;  // far above it: the approach never commands reverse (that is the in-band brake)
+  EXPECT_EQ(f.step().cmd, CmdKind::Creep);
+  EXPECT_NEAR(f.core->snapshot().endpoint_stop_active ? f.step().creep_speed : -1.0, 0.0, 1e-9);
   CoreRig e({north_run(6.0, Profile::Segment, 6.0)});
   e.n = 6.0 - 0.0201;  // just outside the band: still the plane law, not a vanishing creep
-  e.vn = 0.2;
+  e.vn = std::sqrt(2.0 * 0.35 * 0.0201);
   EXPECT_NEAR(e.step().creep_speed, std::sqrt(2.0 * 0.35 * 0.0201), 1e-9);
 }
 
@@ -236,7 +265,33 @@ struct EndpointRun {
   int sign_changes{0};     // forward/reverse reversals of the commanded speed (|v| >= 2 cm/s)
   double residual{0.0};    // signed distance to the end plane at rest (+ short, - past)
 };
-EndpointRun run_endpoint(double tau_s, int delay_ticks) {
+// Plant: tau_s > 0 is the first-order vehicle; otherwise the speed follows the command at
+// accel_limit (|v| rising) and decel_limit (|v| falling, toward zero), the rover's RO_ACCEL_LIM /
+// RO_DECEL_LIM shape (2026-10-10 params: 0.5 / 2.0 m/s^2); delay_ticks is a pure command latency.
+struct Plant {
+  double tau_s{0.0};
+  double accel_limit{0.0};
+  double decel_limit{0.0};
+  int delay_ticks{0};
+};
+double rate_limited(double speed, double target, double up, double down, double dt) {
+  double remaining = dt;
+  while (remaining > 1e-12 && speed != target) {
+    const bool toward_zero = (speed > 0.0 && target < speed) || (speed < 0.0 && target > speed);
+    const double rate = toward_zero ? down : up;
+    const double bound =
+        toward_zero ? (speed > 0.0 ? std::max(0.0, target) : std::min(0.0, target)) : target;
+    const double dv = rate * remaining;
+    const double step = std::max(-dv, std::min(dv, bound - speed));
+    speed += step;
+    remaining -= std::fabs(step) / rate;
+    if (std::fabs(step) < 1e-15) break;
+  }
+  return speed;
+}
+EndpointRun run_endpoint(const Plant& plant) {
+  const double tau_s = plant.tau_s;
+  const int delay_ticks = plant.delay_ticks;
   CoreRig r({north_run(6.0, Profile::Segment, 6.0)});
   r.n = 6.0 - 0.6;  // 0.6 m before the endpoint
   r.vn = 0.45;
@@ -266,11 +321,18 @@ EndpointRun run_endpoint(double tau_s, int delay_ticks) {
       if (last_sign != 0 && s != last_sign) ++res.sign_changes;
       last_sign = s;
     }
-    r.vn += (cmd - r.vn) * (dt / tau_s);
+    if (tau_s > 0.0) {
+      r.vn += (cmd - r.vn) * (dt / tau_s);
+    } else {
+      r.vn = rate_limited(r.vn, cmd, plant.accel_limit, plant.decel_limit, dt);
+    }
     r.n += r.vn * dt;
   }
   res.residual = 6.0 - r.n;
   return res;
+}
+EndpointRun run_endpoint(double tau_s, int delay_ticks) {
+  return run_endpoint(Plant{tau_s, 0.0, 0.0, delay_ticks});
 }
 }  // namespace
 
@@ -279,23 +341,27 @@ EndpointRun run_endpoint(double tau_s, int delay_ticks) {
 // hysteresis; they differ only in where the feed-forward outside the band reaches zero. Measured
 // with this harness (residual at rest, + short of the plane, - past it):
 //
-//   lag                      | feed-forward to the band EDGE   | feed-forward to the PLANE (ships)
-//                            | residual  reversals  complete   | residual  reversals  complete
-//   tau 0.1 s                |  +16.4 mm  1          3.66 s   |  +13.6 mm  1          3.64 s
-//   tau 0.2 s                |   +6.8 mm  1          3.44 s   |   +1.0 mm  1          3.44 s
-//   tau 0.3 s                |   -6.6 mm  1          3.42 s   |  -15.0 mm  1          3.44 s
-//   tau 0.1 s + 0.1 s delay  |   +7.6 mm  2          3.56 s   |   -0.1 mm  2          3.58 s
-//   tau 0.2 s + 0.1 s delay  |   -5.8 mm  1          3.28 s   |  -16.7 mm  1          3.32 s
-//   tau 0.3 s + 0.1 s delay  |  -10.7 mm  2          4.06 s   |   -4.7 mm  2          4.32 s
-//   mean residual            |   +1.3 mm                       |   -3.6 mm
-//   max |residual|, rms      |   16.4 mm, 9.7 mm               |   16.7 mm, 10.9 mm
+//   lag                      | band-edge FF + hard brake   | plane FF + hard brake   | profile
+//   feedback (ships)
+//                            | residual  rev.  complete    | residual  rev.  complete| residual
+//                            rev.  complete
+//   tau 0.1 s                |  +16.4 mm  1     3.66 s     |  +13.6 mm  1     3.64 s |   -2.2 mm 1
+//   3.80 s tau 0.2 s                |   +6.8 mm  1     3.44 s     |   +1.0 mm  1     3.44 s | -8.3
+//   mm  1     3.52 s tau 0.3 s                |   -6.6 mm  1     3.42 s     |  -15.0 mm  1     3.44
+//   s |  -17.5 mm  1     3.48 s tau 0.1 s + 0.1 s delay  |   +7.6 mm  2     3.56 s     |   -0.1 mm
+//   2     3.58 s |   -3.0 mm  2     3.62 s tau 0.2 s + 0.1 s delay  |   -5.8 mm  1     3.28 s     |
+//   -16.7 mm  1     3.32 s |  -10.6 mm  1     3.32 s tau 0.3 s + 0.1 s delay  |  -10.7 mm
+//   2     4.06 s     |   -4.7 mm  2     4.32 s |   -6.7 mm  2     4.20 s mean residual            |
+//   +1.3 mm                   |   -3.6 mm               |   -8.1 mm max |residual|, rms |   16.4
+//   mm, 9.7 mm           |   16.7 mm, 10.9 mm      |   17.5 mm, 9.5 mm
 //
-// In this model neither variant is biased short: the spread (about +/- 1.7 cm) comes from the
-// in-band brake and the coast behind the lag, not from where the feed-forward reaches zero. The
-// plane variant ships (review decision 2026-10-10: the prototype law, no stop short of the point
-// by construction): it completes within 5 s with at most 2 reversals and |residual| <= along_tol
-// for every lag, and its mean rest position is within 1 cm of the plane. Field re-validation of
-// the stop position on the rover is still owed.
+// In this model no variant is biased short; the spread (about +/- 1.7 cm) is the coast behind
+// the lag, including the coast below the stop speed threshold where the brake is zero by
+// invariant I1. The shipped law (plane feed-forward with the unit-gain profile feedback, the
+// generalised brake inside the band) is the one that also stops a fast-braking drivetrain on the
+// point (next test); here it completes within 5 s with at most 2 reversals and |residual| <=
+// along_tol for every lag, and its mean rest position is within 1 cm of the plane. Field
+// re-validation of the stop position on the rover is still owed.
 TEST(RppCore, TheEndpointStopPositionDistributionOnAFirstOrderVehicle) {
   struct Lag {
     double tau_s;
@@ -319,6 +385,39 @@ TEST(RppCore, TheEndpointStopPositionDistributionOnAFirstOrderVehicle) {
   const double mean = sum / n;
   std::printf("endpoint mean residual %+.1f mm\n", mean * 1000.0);
   EXPECT_LE(std::fabs(mean), 0.01) << "mean rest position " << mean << " m from the plane";
+}
+
+// The rover's own plant shape (review 2026-10-10): rover 01 runs RO_DECEL_LIM 2.0 and RO_ACCEL_LIM
+// 0.5 (config/px4/2026-10-10.params), so it brakes four times faster than it accelerates, with or
+// without one tick (20 ms) of command latency (PX4 speed loop + one control period). The hard
+// brake at the band edge (fb74658 / 4af71fe) stopped this plant where the brake fired, 1.7 cm
+// short of the point; the profile feedback stops it on the point. Table (residual at rest, +
+// short, - past; reversals; completion time), recorded with this harness:
+//
+//   decel 0.5 / accel 0.5, 0 lag   residual -0.1 mm   0 rev   3.60 s
+//   decel 1.0 / accel 0.5, 0 lag   residual -0.0 mm   0 rev   3.82 s
+//   decel 2.0 / accel 0.5, 0 lag   residual -0.0 mm   0 rev   3.94 s
+//   decel 0.5 / accel 0.5, 20 ms   residual -0.3 mm   0 rev   3.54 s
+//   decel 1.0 / accel 0.5, 20 ms   residual -0.0 mm   0 rev   3.76 s
+//   decel 2.0 / accel 0.5, 20 ms   residual -0.2 mm   0 rev   3.88 s
+//
+// (the numbers are printed by the test; the assertion is the owner's criterion: complete, at most
+// 2 reversals, no timeout finish, at rest within 1 cm of the point).
+TEST(RppCore, TheEndpointStopPositionDistributionOnARateLimitedVehicle) {
+  for (const int delay : {0, 1}) {
+    for (const double decel : {0.5, 1.0, 2.0}) {
+      const EndpointRun a = run_endpoint(Plant{0.0, 0.5, decel, delay});
+      std::printf(
+          "endpoint decel %.1f accel 0.5 lag %d tick: residual %+.1f mm, %d reversals, %s %.2f s\n",
+          decel, delay, a.residual * 1000.0, a.sign_changes,
+          a.completed ? "complete" : "NOT complete", a.t_complete);
+      EXPECT_TRUE(a.completed) << "decel " << decel << " lag " << delay;
+      EXPECT_LE(a.t_complete, 5.0)
+          << "decel " << decel << " lag " << delay;  // never the 8 s timeout
+      EXPECT_LE(a.sign_changes, 2) << "decel " << decel << " lag " << delay;
+      EXPECT_LE(std::fabs(a.residual), 0.01) << "decel " << decel << " lag " << delay;
+    }
+  }
 }
 
 // XR-RPP-005: RppStatus.cross_track_right_m is right-positive (frames.md). The precise stop's

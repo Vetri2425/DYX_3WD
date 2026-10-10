@@ -3010,3 +3010,33 @@ run must be green before this branch is merged. Timing, DDS, systemd, the unit s
    are kept; `require_rc_link` default once `rc_link_valid` is observed; stop policy (physical E-stop vs RC kill).
 4. After a services restart with the vehicle armed and idle, the guard streams STOP and nothing disarms: decide whether
    px4_link should disarm on start when it did not arm.
+
+## 2026-10-10 (after midnight, 2) — endpoint stop: the generalised brake, proven on the rover's plant shape
+
+**Why (owner review of `f8a30b3`):** the four RPP endpoint node tests had been made green with a symmetric 0.5 m/s² plant; rover 01
+runs `RO_DECEL_LIM` 2.0 / `RO_ACCEL_LIM` 0.5, so it brakes four times faster than that rig. Replayed on the real `RppCore` with the
+rig's plant model (scratchpad harness): at decel 2.0 the hard brake at the band edge did not rock (1 reversal, no timeout) but stopped
+**1.7 cm short**, exactly where the brake fired — the owner's 1 cm criterion failed, so the law was damped, not the plant.
+
+**The law (`dyx3_rpp/src/rpp_core.cpp`, `RppCore::profile_feedback`, contract §3.6 items 1 and 3):** the stop machine's brake
+(`−v_forward`, unit gain) is aimed at the deceleration profile `v_p = √(2·decel·residual)` instead of at zero:
+`command = clamp(v_p − (v − v_p), −brake_cap, v_p)`, the profile itself below the stop threshold or without a fresh velocity. At and past
+the plane `v_p = 0` and it is the brake as before; short of the plane there is never a sign flip and never a command above the profile. The
+same feedback (floored at zero) shapes the straight approach outside the band, so a lagging drivetrain is on the profile when it reaches
+the band. **No new number.** Variants tried and rejected (all measured, scratchpad): profile-follow with a switch to the brake (chatters:
+7 reversals at τ 0.1–0.2), feedback gain 2 or 3 (3 reversals under 0.1 s latency), gain scaled by the required deceleration (same),
+zero command below the stop threshold (no effect on the lagging model).
+
+**Measured (tests print the tables; contract §3.6):** rover plant shape decel 0.5/1.0/2.0 × accel 0.5 × {0, 20 ms} lag: at rest
+**−0.0 … −0.3 mm**, 0 reversals, complete 3.5–3.9 s (hard brake: −17.3 mm at decel 2.0). First-order τ 0.1–0.3 s ± 0.1 s latency:
+−2.2 … −17.5 mm, ≤ 2 reversals, mean −8.1 mm (hard brake: +13.6 … −16.7, mean −3.6). Equivalence against the carried node: 373
+documented deviations (was 257), windows widened to where the recorded speed first exceeds the profile; 0 mismatches.
+
+**Node tests (`rpp_node_test.cpp`):** the rig has an asymmetric plant (`accel_limit` while |v| rises, `decel_limit` while it falls) and
+`command_lag_ticks`; the four endpoint cases run at decel 2.0 / accel 0.5 for lag 0 and 1 with the owner's criteria (complete, ≤ 2
+reversals, never the 8 s timeout, at rest within 1 cm along the line; the lateral miss is corrected to `segment_endpoint_cross_tolerance_m`,
+2 cm, the finish geometry — a 1 cm lateral criterion would need a cross-tolerance decision). **Run here:** core and equivalence with real
+googletest (19 + 1 pass); the node tests only in CI — check the run for this commit.
+
+**Owed to the field (unchanged):** the stop position at the next endpoint on rover 01 (expect ≤ 1 reversal, no timeout finish, within
+1 cm along the line); which plant rover 01 is (rate-limited PI vs first-order lag) decides whether the first-order table applies.

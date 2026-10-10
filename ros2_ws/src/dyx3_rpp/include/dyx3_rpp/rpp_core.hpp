@@ -228,6 +228,7 @@ private:
   double next_run_turn() const;
   bool next_run_requires_alignment() const;
   void publish_brake(double yaw_ned, const StopTelemetry& tel, double* speed_out);
+  double profile_feedback(double v_profile, const StopTelemetry& tel, double floor) const;
   bool run_alignment_hold(double pos_n, double pos_e, double yaw_ned, double pose_age_s,
                           int64_t now_ns);
   void hold_before_run_advance(double pos_n, double pos_e, double yaw_ned, double pose_age_s,

@@ -201,20 +201,45 @@ struct Rig {
   // in place at the commanded rate).
   // With accel_limit > 0 the speed moves toward the commanded speed at that rate (m/s^2) instead
   // of at once: a body-axis brake then decelerates through zero the way a vehicle does, instead of
-  // reversing at the brake speed on the next tick.
+  // reversing at the brake speed on the next tick. decel_limit > 0 is the rate while |speed| falls
+  // (toward zero), accel_limit while it rises: rover 01 runs RO_DECEL_LIM 2.0 / RO_ACCEL_LIM 0.5
+  // (config/px4/2026-10-10.params). command_lag_ticks applies the command published that many
+  // cycles ago (PX4 speed loop + one control period = 1 tick).
   bool auto_drive{false};
   double accel_limit{0.0};
+  double decel_limit{0.0};  // 0: symmetric (accel_limit both ways)
+  int command_lag_ticks{0};
+  std::vector<MotionSetpoint> applied_;  // one per cycle: the newest command at that cycle
   void track_speed(double target, double dt) {
-    if (accel_limit <= 0.0) {
+    const double up = accel_limit, down = decel_limit > 0.0 ? decel_limit : accel_limit;
+    if (up <= 0.0 && down <= 0.0) {
       speed = target;
       return;
     }
-    const double dv = accel_limit * dt;
-    speed = std::max(speed - dv, std::min(speed + dv, target));
+    double remaining = dt;
+    while (remaining > 1e-12 && speed != target) {
+      const bool toward_zero = (speed > 0.0 && target < speed) || (speed < 0.0 && target > speed);
+      const double rate = toward_zero ? down : up;
+      if (rate <= 0.0) {
+        speed = target;
+        return;
+      }
+      const double bound =
+          toward_zero ? (speed > 0.0 ? std::max(0.0, target) : std::min(0.0, target)) : target;
+      const double dv = rate * remaining;
+      const double step = std::max(-dv, std::min(dv, bound - speed));
+      speed += step;
+      remaining -= std::fabs(step) / rate;
+      if (std::fabs(step) < 1e-15) break;
+    }
   }
   void integrate(double dt) {
     if (!auto_drive || motion.empty()) return;
-    const MotionSetpoint& m = motion.back();
+    applied_.push_back(motion.back());
+    static const MotionSetpoint kStop{};  // before the first lagged command: nothing applied
+    const MotionSetpoint& m = applied_.size() > static_cast<size_t>(command_lag_ticks)
+                                  ? applied_[applied_.size() - 1 - command_lag_ticks]
+                                  : kStop;
     switch (m.mode) {
       case MotionSetpoint::MODE_TRACK_HEADING:
         heading = m.yaw_setpoint;
@@ -329,46 +354,83 @@ TEST(RppNode, AMissingArtifactIsAnErrorAndStopsNeverGuesses) {
   EXPECT_EQ(r.motion.back().mode, MotionSetpoint::MODE_STOP);
 }
 
-TEST(RppNode, DrivesTheWholeMissionMarksTheLineAndCompletes) {
-  Rig r;
-  r.auto_drive = true;
-  // The endpoint brake inside the arrival band commands the measured speed reversed; a plant that
-  // takes the command at once (accel_limit 0) turns that into a limit cycle at the brake cap and
-  // never satisfies the stop confirmation, which no drivetrain does. Decelerate through zero.
+namespace {
+// Sign changes of the commanded body speed, counting only commands at or above the stop speed
+// threshold (segment_stop_speed_threshold, 0.02 m/s): below it the rover is stopped by definition.
+int speed_sign_changes(const std::vector<MotionSetpoint>& ms, size_t from) {
+  int changes = 0, last = 0;
+  for (size_t i = from; i < ms.size(); ++i) {
+    const float v = ms[i].speed_body_x;
+    if (std::fabs(v) < 0.02F) continue;
+    const int s = v > 0.0F ? 1 : -1;
+    if (last != 0 && s != last) ++changes;
+    last = s;
+  }
+  return changes;
+}
+}  // namespace
+
+// The rover's plant for the endpoint cases below (review 2026-10-10): RO_DECEL_LIM 2.0 /
+// RO_ACCEL_LIM 0.5, with and without one tick of command latency. Pass criteria: completes, at most
+// 2 forward/reverse reversals, no timeout finish (the precise stop ends within
+// segment_endpoint_precise_max_s = 8 s), at rest within 1 cm of the point along the line.
+namespace {
+void rover_plant(Rig& r, int lag) {
   r.accel_limit = 0.5;
-  r.mission_state = MissionState::STATE_RUNNING;
-  bool saw_track = false, saw_request = false, request_on_transit = false, saw_stop_at_end = false;
-  double max_speed = 0.0;
-  for (int i = 0; i < 1500 && r.status.state != RppStatus::STATE_COMPLETE; ++i) {
-    r.cycle();
-    const MotionSetpoint& m = r.motion.back();
-    if (m.mode == MotionSetpoint::MODE_TRACK_HEADING && m.speed_body_x > 0.0F) {
-      saw_track = true;
-      max_speed = std::max(max_speed, static_cast<double>(m.speed_body_x));
-      EXPECT_NEAR(m.yaw_setpoint, 0.0F, 0.2F);  // along the line
-      EXPECT_TRUE(std::isnan(m.yaw_rate_setpoint));
-    }
-    if (r.status.spray_request) {
-      saw_request = true;
-      // The request follows the CONDITIONED run, which fuses a short unpainted lead into the mark
-      // (the prototype's a54fd2d: no double stop at every mark start), so it is true from the start
-      // here; the tail stays unpainted. The valve itself is dyx3_spray's boundary projection on the
-      // artifact, not this request.
-      if (r.north > 5.3) {
-        request_on_transit = true;
-        ADD_FAILURE() << "request at north " << r.north;
+  r.decel_limit = 2.0;
+  r.command_lag_ticks = lag;
+}
+constexpr int kEndpointTimeoutTicks = 400;  // 8 s at 50 Hz
+}  // namespace
+
+TEST(RppNode, DrivesTheWholeMissionMarksTheLineAndCompletes) {
+  for (const int lag : {0, 1}) {
+    SCOPED_TRACE("command lag ticks " + std::to_string(lag));
+    Rig r;
+    r.auto_drive = true;
+    rover_plant(r, lag);
+    r.mission_state = MissionState::STATE_RUNNING;
+    bool saw_track = false, saw_request = false, request_on_transit = false,
+         saw_stop_at_end = false;
+    double max_speed = 0.0;
+    const size_t from = r.motion.size();
+    int creeping_since = -1;
+    for (int i = 0; i < 1500 && r.status.state != RppStatus::STATE_COMPLETE; ++i) {
+      r.cycle();
+      if (creeping_since < 0 && r.status.state == RppStatus::STATE_CREEPING) creeping_since = i;
+      const MotionSetpoint& m = r.motion.back();
+      if (m.mode == MotionSetpoint::MODE_TRACK_HEADING && m.speed_body_x > 0.0F) {
+        saw_track = true;
+        max_speed = std::max(max_speed, static_cast<double>(m.speed_body_x));
+        EXPECT_NEAR(m.yaw_setpoint, 0.0F, 0.2F);  // along the line
+        EXPECT_TRUE(std::isnan(m.yaw_rate_setpoint));
+      }
+      if (r.status.spray_request) {
+        saw_request = true;
+        // The request follows the CONDITIONED run, which fuses a short unpainted lead into the mark
+        // (the prototype's a54fd2d: no double stop at every mark start), so it is true from the
+        // start here; the tail stays unpainted. The valve itself is dyx3_spray's boundary
+        // projection on the artifact, not this request.
+        if (r.north > 5.3) {
+          request_on_transit = true;
+          ADD_FAILURE() << "request at north " << r.north;
+        }
       }
     }
+    EXPECT_TRUE(saw_track);
+    EXPECT_LE(max_speed, 1.0);
+    EXPECT_TRUE(saw_request) << "the planner's MARK flag must reach the request";
+    EXPECT_FALSE(request_on_transit) << "no request outside the MARK";
+    EXPECT_EQ(r.status.state, RppStatus::STATE_COMPLETE);
+    saw_stop_at_end = r.motion.back().mode == MotionSetpoint::MODE_STOP;
+    EXPECT_TRUE(saw_stop_at_end);
+    EXPECT_LE(speed_sign_changes(r.motion, from), 2);
+    ASSERT_GE(creeping_since, 0) << "the precise stop never engaged";
+    EXPECT_LT(static_cast<int>(r.applied_.size()) - creeping_since, kEndpointTimeoutTicks)
+        << "finished by the timeout";
+    EXPECT_NEAR(r.north, 6.0, 0.01) << "at rest within 1 cm of the final point";
+    EXPECT_NEAR(r.east, 0.0, 0.01);
   }
-  EXPECT_TRUE(saw_track);
-  EXPECT_LE(max_speed, 1.0);
-  EXPECT_TRUE(saw_request) << "the planner's MARK flag must reach the request";
-  EXPECT_FALSE(request_on_transit) << "no request outside the MARK";
-  EXPECT_EQ(r.status.state, RppStatus::STATE_COMPLETE);
-  saw_stop_at_end = r.motion.back().mode == MotionSetpoint::MODE_STOP;
-  EXPECT_TRUE(saw_stop_at_end);
-  EXPECT_NEAR(r.north, 6.0, 0.06) << "stopped on the final point";
-  EXPECT_NEAR(r.east, 0.0, 0.03);
 }
 
 TEST(RppNode, SegmentRateCommandModePublishesTrackRate) {
@@ -521,58 +583,44 @@ TEST(RppNode, TheCommandStreamNeverCarriesANonFiniteValueInTheWrongField) {
   }
 }
 
-namespace {
-// Sign changes of the commanded body speed, counting only commands at or above the stop speed
-// threshold (segment_stop_speed_threshold, 0.02 m/s): below it the rover is stopped by definition.
-int speed_sign_changes(const std::vector<MotionSetpoint>& ms, size_t from) {
-  int changes = 0, last = 0;
-  for (size_t i = from; i < ms.size(); ++i) {
-    const float v = ms[i].speed_body_x;
-    if (std::fabs(v) < 0.02F) continue;
-    const int s = v > 0.0F ? 1 : -1;
-    if (last != 0 && s != last) ++changes;
-    last = s;
-  }
-  return changes;
-}
-}  // namespace
-
 // XR-RPP-001: the final approach ends 3 cm to the side of the endpoint. The precise stop aims
 // diagonally; the published command must carry that direction, so the rover removes the lateral
 // miss and completes instead of rocking through the end plane along its nose.
 TEST(RppNode, AnEndpointWithALateralMissCompletesWithoutRocking) {
-  // pivot_to_intercept off: the entry alignment holds the leg heading, so the 3 cm miss is intact
-  // when the precise stop engages (it is a final approach, not a line acquisition).
-  Rig r({rclcpp::Parameter("pivot_to_intercept_enabled", false)});
-  r.auto_drive = true;
-  // The endpoint brake inside the arrival band commands the measured speed reversed; a plant that
-  // takes the command at once (accel_limit 0) turns that into a limit cycle at the brake cap and
-  // never satisfies the stop confirmation, which no drivetrain does. Decelerate through zero.
-  r.accel_limit = 0.5;
-  r.north = 5.92;
-  r.east = 0.03;
-  r.heading = 0.0;
-  r.mission_state = MissionState::STATE_RUNNING;
-  const size_t from = r.motion.size();
-  bool saw_creeping = false, saw_steer = false;
-  int ticks = 0;
-  for (; ticks < 500 && r.status.state != RppStatus::STATE_COMPLETE; ++ticks) {  // 10 s
-    r.cycle();
-    if (r.status.state == RppStatus::STATE_CREEPING) {
-      saw_creeping = true;
-      const MotionSetpoint& m = r.motion.back();
-      if (m.mode == MotionSetpoint::MODE_TRACK_HEADING && std::fabs(m.yaw_setpoint) > 0.05F)
-        saw_steer = true;  // toward the endpoint, off the line heading
+  for (const int lag : {0, 1}) {
+    SCOPED_TRACE("command lag ticks " + std::to_string(lag));
+    // pivot_to_intercept off: the entry alignment holds the leg heading, so the 3 cm miss is intact
+    // when the precise stop engages (it is a final approach, not a line acquisition).
+    Rig r({rclcpp::Parameter("pivot_to_intercept_enabled", false)});
+    r.auto_drive = true;
+    rover_plant(r, lag);
+    r.north = 5.92;
+    r.east = 0.03;
+    r.heading = 0.0;
+    r.mission_state = MissionState::STATE_RUNNING;
+    const size_t from = r.motion.size();
+    bool saw_creeping = false, saw_steer = false;
+    int ticks = 0;
+    for (; ticks < kEndpointTimeoutTicks && r.status.state != RppStatus::STATE_COMPLETE; ++ticks) {
+      r.cycle();
+      if (r.status.state == RppStatus::STATE_CREEPING) {
+        saw_creeping = true;
+        const MotionSetpoint& m = r.motion.back();
+        if (m.mode == MotionSetpoint::MODE_TRACK_HEADING && std::fabs(m.yaw_setpoint) > 0.05F)
+          saw_steer = true;  // toward the endpoint, off the line heading
+      }
     }
+    EXPECT_TRUE(saw_creeping) << "the precise stop never engaged";
+    EXPECT_TRUE(saw_steer) << "the lateral correction never reached the command";
+    EXPECT_EQ(r.status.state, RppStatus::STATE_COMPLETE)
+        << "not complete (timeout) after " << ticks * 0.02 << " s at n " << r.north << " e "
+        << r.east;
+    EXPECT_LE(speed_sign_changes(r.motion, from), 2);
+    EXPECT_NEAR(r.north, 6.0, 0.01) << "at rest within 1 cm of the plane";
+    // the lateral miss is corrected to the finish geometry (segment_endpoint_cross_tolerance_m)
+    EXPECT_NEAR(r.east, 0.0, 0.02 + 1e-3);
+    EXPECT_EQ(r.motion.back().mode, MotionSetpoint::MODE_STOP);
   }
-  EXPECT_TRUE(saw_creeping) << "the precise stop never engaged";
-  EXPECT_TRUE(saw_steer) << "the lateral correction never reached the command";
-  EXPECT_EQ(r.status.state, RppStatus::STATE_COMPLETE)
-      << "not complete after " << ticks * 0.02 << " s at n " << r.north << " e " << r.east;
-  EXPECT_LE(speed_sign_changes(r.motion, from), 2);
-  EXPECT_NEAR(r.north, 6.0, 0.02 + 1e-3);
-  EXPECT_NEAR(r.east, 0.0, 0.02 + 1e-3);
-  EXPECT_EQ(r.motion.back().mode, MotionSetpoint::MODE_STOP);
 }
 
 // ---- an L-shaped mission ----------------------------------------------------------------------
@@ -666,75 +714,94 @@ TEST(RppNode, AnLShapedMissionIsDrivenFromThePublishedCommandsAlone) {
 }
 
 TEST(RppNode, AnOffsetEndpointIsReachedFromThePublishedCommandsAlone) {
-  Rig r;  // pivot_to_intercept at its default: the entry pivot already aims at the line
-  r.auto_drive = true;
-  r.accel_limit = 0.5;  // the in-band brake needs a plant that decelerates through zero (above)
-  r.north = 5.88;
-  r.east = -0.05;  // 5 cm WEST of the final point
-  r.mission_state = MissionState::STATE_RUNNING;
-  bool saw_creeping = false;
-  for (int i = 0; i < 750 && r.status.state != RppStatus::STATE_COMPLETE; ++i) {  // 15 s
-    const double to_n = 6.0 - r.north, to_e = 0.0 - r.east;
-    r.cycle();
-    if (r.status.state != RppStatus::STATE_CREEPING) continue;
-    saw_creeping = true;
-    const MotionSetpoint& m = r.motion.back();
-    if (std::fabs(m.speed_body_x) < 0.02F) continue;
-    // the commanded motion has a component toward the endpoint
-    const double yaw = m.mode == MotionSetpoint::MODE_TRACK_HEADING ? m.yaw_setpoint : r.heading;
-    const double dir = m.speed_body_x > 0.0F ? 1.0 : -1.0;
-    EXPECT_GT(dir * (std::cos(yaw) * to_n + std::sin(yaw) * to_e), 0.0)
-        << "tick " << i << " moves away from the endpoint";
+  for (const int lag : {0, 1}) {
+    SCOPED_TRACE("command lag ticks " + std::to_string(lag));
+    Rig r;  // pivot_to_intercept at its default: the entry pivot already aims at the line
+    r.auto_drive = true;
+    rover_plant(r, lag);
+    r.north = 5.88;
+    r.east = -0.05;  // 5 cm WEST of the final point
+    r.mission_state = MissionState::STATE_RUNNING;
+    const size_t from = r.motion.size();
+    bool saw_creeping = false;
+    int creeping_since = -1;
+    for (int i = 0; i < 750 && r.status.state != RppStatus::STATE_COMPLETE; ++i) {  // 15 s
+      const double to_n = 6.0 - r.north, to_e = 0.0 - r.east;
+      r.cycle();
+      if (r.status.state != RppStatus::STATE_CREEPING) continue;
+      if (creeping_since < 0) creeping_since = i;
+      saw_creeping = true;
+      const MotionSetpoint& m = r.motion.back();
+      if (std::fabs(m.speed_body_x) < 0.02F) continue;
+      // the commanded motion has a component toward the endpoint
+      const double yaw = m.mode == MotionSetpoint::MODE_TRACK_HEADING ? m.yaw_setpoint : r.heading;
+      const double dir = m.speed_body_x > 0.0F ? 1.0 : -1.0;
+      EXPECT_GT(dir * (std::cos(yaw) * to_n + std::sin(yaw) * to_e), 0.0)
+          << "tick " << i << " moves away from the endpoint";
+    }
+    EXPECT_TRUE(saw_creeping);
+    EXPECT_EQ(r.status.state, RppStatus::STATE_COMPLETE) << "at n " << r.north << " e " << r.east;
+    EXPECT_LE(speed_sign_changes(r.motion, from), 2);
+    ASSERT_GE(creeping_since, 0);
+    EXPECT_LT(static_cast<int>(r.applied_.size()) - creeping_since, kEndpointTimeoutTicks)
+        << "finished by the timeout";
+    EXPECT_NEAR(r.north, 6.0, 0.01) << "at rest within 1 cm of the plane";
+    EXPECT_NEAR(r.east, 0.0, 0.02 + 1e-3);  // the finish geometry's cross tolerance
   }
-  EXPECT_TRUE(saw_creeping);
-  EXPECT_EQ(r.status.state, RppStatus::STATE_COMPLETE) << "at n " << r.north << " e " << r.east;
-  EXPECT_NEAR(r.north, 6.0, 0.02 + 1e-3);
-  EXPECT_NEAR(r.east, 0.0, 0.02 + 1e-3);
 }
 
 TEST(RppNode, APauseWithACoastResumesAlongTheLineFromRest) {
-  Rig r;
-  r.auto_drive = true;
-  r.accel_limit = 0.5;  // the in-band brake needs a plant that decelerates through zero (above)
-  r.mission_state = MissionState::STATE_RUNNING;
-  for (int i = 0; i < 400 && !(r.status.state == RppStatus::STATE_TRACKING && r.north > 2.0); ++i)
-    r.cycle();
-  ASSERT_EQ(r.status.state, RppStatus::STATE_TRACKING);
-  ASSERT_GT(r.speed, 0.1);
-  // pause; the rover coasts 0.2 m to rest without following any command
-  r.mission_state = MissionState::STATE_PAUSED;
-  r.auto_drive = false;
-  const size_t pause_from = r.motion.size();
-  const double coast_from = r.north;
-  r.speed = 0.25;
-  for (int i = 0; i < 40; ++i) {  // 0.8 s
-    r.north += r.speed * 0.02;
-    r.speed = std::max(0.0, r.speed - 0.0025);
-    r.cycle();
+  for (const int lag : {0, 1}) {
+    SCOPED_TRACE("command lag ticks " + std::to_string(lag));
+    Rig r;
+    r.auto_drive = true;
+    rover_plant(r, lag);
+    r.mission_state = MissionState::STATE_RUNNING;
+    for (int i = 0; i < 400 && !(r.status.state == RppStatus::STATE_TRACKING && r.north > 2.0); ++i)
+      r.cycle();
+    ASSERT_EQ(r.status.state, RppStatus::STATE_TRACKING);
+    ASSERT_GT(r.speed, 0.1);
+    // pause; the rover coasts 0.2 m to rest without following any command
+    r.mission_state = MissionState::STATE_PAUSED;
+    r.auto_drive = false;
+    const size_t pause_from = r.motion.size();
+    const double coast_from = r.north;
+    r.speed = 0.25;
+    for (int i = 0; i < 40; ++i) {  // 0.8 s
+      r.north += r.speed * 0.02;
+      r.speed = std::max(0.0, r.speed - 0.0025);
+      r.cycle();
+    }
+    r.speed = 0.0;
+    EXPECT_NEAR(r.north - coast_from, 0.2, 0.06);
+    for (size_t i = pause_from + 2; i < r.motion.size(); ++i)
+      EXPECT_EQ(r.motion[i].mode, MotionSetpoint::MODE_STOP) << "paused, tick " << i;
+    // resume
+    r.mission_state = MissionState::STATE_RUNNING;
+    r.auto_drive = true;
+    const size_t resume_from = r.motion.size();
+    float first_speed = -1.0F;
+    int creeping_since = -1;
+    for (int i = 0; i < 1500 && r.status.state != RppStatus::STATE_COMPLETE; ++i) {
+      r.cycle();
+      if (creeping_since < 0 && r.status.state == RppStatus::STATE_CREEPING) creeping_since = i;
+      const MotionSetpoint& m = r.motion.back();
+      if (first_speed < 0.0F && m.mode != MotionSetpoint::MODE_STOP) first_speed = m.speed_body_x;
+      EXPECT_NE(r.status.tick_state, 5) << "XR-RPP-008: the coast is not a position jump";
+      if (m.mode == MotionSetpoint::MODE_TRACK_HEADING && m.speed_body_x >= 0.05F)
+        EXPECT_LT(std::fabs(m.yaw_setpoint), 0.2F) << "along the line";
+    }
+    EXPECT_GT(r.motion.size(), resume_from);
+    EXPECT_GE(first_speed, 0.0F);
+    EXPECT_LT(first_speed, 0.1F) << "a resume ramps from rest";
+    EXPECT_EQ(r.status.state, RppStatus::STATE_COMPLETE);
+    EXPECT_LE(speed_sign_changes(r.motion, resume_from), 2);
+    ASSERT_GE(creeping_since, 0);
+    EXPECT_LT(static_cast<int>(r.applied_.size()) - creeping_since, kEndpointTimeoutTicks)
+        << "finished by the timeout";
+    EXPECT_NEAR(r.north, 6.0, 0.01) << "at rest within 1 cm of the plane";
+    EXPECT_NEAR(r.east, 0.0, 0.01);
   }
-  r.speed = 0.0;
-  EXPECT_NEAR(r.north - coast_from, 0.2, 0.06);
-  for (size_t i = pause_from + 2; i < r.motion.size(); ++i)
-    EXPECT_EQ(r.motion[i].mode, MotionSetpoint::MODE_STOP) << "paused, tick " << i;
-  // resume
-  r.mission_state = MissionState::STATE_RUNNING;
-  r.auto_drive = true;
-  const size_t resume_from = r.motion.size();
-  float first_speed = -1.0F;
-  for (int i = 0; i < 1500 && r.status.state != RppStatus::STATE_COMPLETE; ++i) {
-    r.cycle();
-    const MotionSetpoint& m = r.motion.back();
-    if (first_speed < 0.0F && m.mode != MotionSetpoint::MODE_STOP) first_speed = m.speed_body_x;
-    EXPECT_NE(r.status.tick_state, 5) << "XR-RPP-008: the coast is not a position jump";
-    if (m.mode == MotionSetpoint::MODE_TRACK_HEADING && m.speed_body_x >= 0.05F)
-      EXPECT_LT(std::fabs(m.yaw_setpoint), 0.2F) << "along the line";
-  }
-  EXPECT_GT(r.motion.size(), resume_from);
-  EXPECT_GE(first_speed, 0.0F);
-  EXPECT_LT(first_speed, 0.1F) << "a resume ramps from rest";
-  EXPECT_EQ(r.status.state, RppStatus::STATE_COMPLETE);
-  EXPECT_NEAR(r.north, 6.0, 0.06);
-  EXPECT_NEAR(r.east, 0.0, 0.03);
 }
 
 // XR-RPP-002: a run handover that needs no alignment (a gentle TRANSIT arc, a smooth run, into

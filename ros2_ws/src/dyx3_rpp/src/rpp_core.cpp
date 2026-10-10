@@ -463,6 +463,15 @@ StopTelemetry RppCore::telemetry(int64_t now_ns, double yaw_ned) const {
   return t;
 }
 
+// Endpoint precise stop: the feed-forward profile speed `v_profile` (> 0) corrected by unit-gain
+// error feedback on the measured forward speed, v_profile - (v_forward - v_profile), clamped to
+// [floor, v_profile]. Without a fresh velocity, or below the stop speed threshold, the profile
+// itself (brake_speed returns 0 in the same cases). Pure function of its inputs.
+double RppCore::profile_feedback(double v_profile, const StopTelemetry& tel, double floor) const {
+  if (!tel.vel_fresh || tel.speed < sp_.stop_speed_threshold) return v_profile;
+  return std::max(floor, std::min(v_profile, 2.0 * v_profile - tel.v_forward));
+}
+
 // D7: the real signed cross-track for the debug emits inside holds (debug only, never feeds
 // control).
 double RppCore::debug_xtrack(double pos_n, double pos_e) const {
@@ -750,9 +759,34 @@ bool RppCore::precise_stop_tick(double pos_n, double pos_e, double yaw_ned, doub
       std::fabs(residual) <= along_tol + capture_past_m && std::fabs(cross) <= cross_tol;
   if (!stopped && (in_finish_geometry || (endpoint_brake_hold_ && in_hold_geometry))) {
     endpoint_brake_hold_ = true;
-    double hv = 0.0;
-    publish_brake(yaw_ned, tel, &hv);
-    publish_debug(hold_row(cross, 0.0, dist_to_goal, hv, dist_to_goal, age_ms, false));
+    // Damped (review 2026-10-10: rover 01 brakes at RO_DECEL_LIM 2.0 m/s^2, four times the rig's
+    // plant, and an unconditional brake at the band edge leaves such a drivetrain 1.7 cm short,
+    // where the brake fired). The stop machine's brake, -v_forward, is unit-gain error feedback
+    // toward a zero speed target. Short of the plane the target is the deceleration profile
+    // v_p = sqrt(2 * decel * residual): command = v_p - (v_forward - v_p), never above the
+    // profile, never a reverse faster than the brake cap, and the profile itself (no feedback)
+    // without a fresh velocity or below the stop speed threshold, as brake_speed is 0 there. At
+    // and past the plane v_p = 0 and this IS the brake; there is no sign flip short of the plane,
+    // and the hold band past it brakes. The same feedback shapes the approach outside the band
+    // (below), so a drivetrain that lags the feed-forward is on the profile when it reaches the
+    // band. No new number: closed-loop stop-position tables in rpp_core_test and contract 3.6.
+    const double v_profile =
+        (residual > 0.0 && decel > 0.0) ? std::sqrt(2.0 * decel * residual) : 0.0;
+    if (v_profile > 0.0) {
+      const double cmd = profile_feedback(v_profile, tel, -sp_.brake_velocity_cap);
+      const double cn = cmd * un, ce = cmd * ue;
+      publish_velocity(cn, ce);
+      publish_yaw_rate(0.0);
+      out_.cmd = cmd < 0.0 ? CmdKind::Brake : CmdKind::Creep;
+      out_.brake_speed = cmd < 0.0 ? cmd : 0.0;
+      out_.creep_speed = cmd < 0.0 ? 0.0 : cmd;
+      publish_debug(
+          hold_row(cross, 0.0, dist_to_goal, std::fabs(cmd), dist_to_goal, age_ms, false));
+    } else {
+      double hv = 0.0;
+      publish_brake(yaw_ned, tel, &hv);
+      publish_debug(hold_row(cross, 0.0, dist_to_goal, hv, dist_to_goal, age_ms, false));
+    }
     out_.cross_track_right = -cross;  // XR-RPP-005: `cross` is left-positive
     publish_segment_debug(SegState::CornerStop, std::max(0, static_cast<int>(run_->pts.size()) - 2),
                           std::max(0.0, residual), dist_to_goal, kNaN, kNaN, kNaN, 0.0);
@@ -777,6 +811,12 @@ bool RppCore::precise_stop_tick(double pos_n, double pos_e, double yaw_ned, doub
     const double rem = std::max(0.0, profile_dist);
     const double capc = std::max(0.0, cap);
     speed_mag = (rem <= 0.0 || decel <= 0.0) ? 0.0 : std::min(std::sqrt(2.0 * decel * rem), capc);
+    // The straight approach (short of the plane, no lateral correction) is the feed-forward with
+    // the unit-gain error feedback of the in-band law above, never below zero: a drivetrain that
+    // lags the feed-forward (0.1-0.3 s on mission 0001) would otherwise enter the band 5 cm/s
+    // above the profile and overshoot (first-order model: -20.5 mm at tau 0.3 s without it).
+    if (!needs_lateral_correction && residual > 0.0 && speed_mag > 0.0)
+      speed_mag = std::max(0.0, profile_feedback(speed_mag, tel, 0.0));
   }
   double dir_n, dir_e;
   if (radial < 1e-6 || radial > std::max(correction_limit, std::max(along_tol, cross_tol))) {

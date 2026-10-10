@@ -113,46 +113,72 @@ measured speed up to 0.125 m/s, finished only by the `segment_endpoint_precise_m
 residual = 0 for **any** non-zero residual (0.084 m/s at 1 cm, 0.046 m/s at 3 mm) with a sign flip at the end plane, and `cap = max(speed, creep)` rose with the
 rocking. A vehicle with speed-loop / drivetrain latency (0.1–0.3 s) overshoots the plane, the sign flips, and "stopped" (speed < `segment_stop_speed_threshold`
 for `segment_stop_dwell_s`) is never reached. The C++ therefore differs from the prototype as follows (no new parameter):
-1. **Dead band = the arrival band.** When `|residual| ≤ along_tol ∧ |cross| ≤ cross_tol` and the stop is not yet confirmed, the command is the **brake**
-   (`CmdKind::Brake`, body-axis velocity-reversal brake, heading held — the same path as the timeout brake), not a creep. The stop confirmation can then be
-   reached and the endpoint finishes on the first tick that is `stopped`, as before.
+1. **Dead band = the arrival band, with the generalised brake (review 2026-10-10).** When `|residual| ≤ along_tol ∧ |cross| ≤ cross_tol` and the stop is
+   not yet confirmed, the command is the stop machine's brake **aimed at the deceleration profile** instead of at zero: with `v_p = √(2·decel·residual)`
+   (0 at and past the plane) and the measured forward speed `v`, `command = clamp(v_p − (v − v_p), −segment_brake_velocity_cap_m_s, v_p)`; without a fresh
+   velocity, or below `segment_stop_speed_threshold`, the profile `v_p` itself (`brake_speed` is 0 in the same cases). At and past the plane this *is* the
+   velocity-reversal brake (`CmdKind::Brake`, heading held, the timeout-brake path); short of it there is no sign flip and never a command above the
+   profile. The unconditional brake at the band edge (`fb74658`, `4af71fe`) stopped a drivetrain that brakes at rover 01's `RO_DECEL_LIM` 2.0 m/s²
+   where the brake fired, **1.7 cm short of the point**; the generalised brake stops it on the point (tables below). The stop confirmation is then
+   reached and the endpoint finishes on the first tick that is `stopped`, as before. No new number: unit gain is the gain of the existing brake.
 2. **Brake-hold hysteresis.** Once braking inside the band the brake is held while `|residual| ≤ along_tol + endpoint_capture_past_m ∧ |cross| ≤ cross_tol`
    (a few millimetres of coast must not abandon it). Beyond that band (a real overshoot) the latch is released and the creep law gives the reverse correction.
    The latch is also released when the rover is `stopped` outside the finish geometry, so the `stopped ∧ radial > band → creep` nudge is unchanged.
    *DERIVED — NOT FROM V1 SPEC:* `endpoint_capture_past_m` (the prototype's "capture past" allowance, default 0.02 m) is reused as the hold band; no new number.
    The latch is `RppCore::endpoint_brake_hold_`, reset with `segment_endpoint_stop_active_` (mission install, per-run reset, pause/resume) and on engage / finish.
-3. **Feed-forward to the plane (the prototype law, kept).** Outside the band the creep law is the prototype's
+3. **Feed-forward to the plane (the prototype law) with the same feedback.** Outside the band the creep law is the prototype's
    `feedforward_brake_speed(max(0, profile_dist), decel, cap)`, evaluated to the end plane (radial distance for the lateral correction).
-   A band-edge variant (`max(0, profile_dist − along_tol)`, briefly in `fb74658`) was taken back after review (2026-10-10): by
-   construction it aims short of the point, and the goal is 1 cm.
+   On the straight approach (short of the plane, no lateral correction) it is corrected by the same unit-gain feedback,
+   `max(0, min(v_ff, v_ff − (v − v_ff)))`, never below zero: a drivetrain that lags the feed-forward (0.1–0.3 s on mission 0001) would
+   otherwise enter the band about 5 cm/s above the profile and overshoot (−20.5 mm at τ 0.3 s without it). A band-edge variant
+   (`max(0, profile_dist − along_tol)`, briefly in `fb74658`) was taken back after review (2026-10-10): by construction it aims short
+   of the point, and the goal is 1 cm.
 
-   **Stop-position distribution** (`rpp_core_test` `TheEndpointStopPositionDistributionOnAFirstOrderVehicle`; closed loop on a
-   first-order vehicle, 50 Hz, approach from 0.6 m at 0.45 m/s, default parameters; residual at rest, + short of the plane, − past it;
-   reversals = forward/reverse sign changes of the command above 2 cm/s; complete = time to the completion latch). Both variants keep the
-   in-band brake and the brake hold; they differ only in the feed-forward outside the band.
+   **Stop-position distributions** (`rpp_core_test`; closed loop, 50 Hz, approach from 0.6 m at 0.45 m/s, default parameters; residual
+   at rest, + short of the plane, − past it; reversals = forward/reverse sign changes of the command above 2 cm/s; complete = time to
+   the completion latch).
 
-   | lag (time constant + command latency) | band edge: residual | reversals | complete | **plane (ships)**: residual | reversals | complete |
+   *The rover's plant shape* (`TheEndpointStopPositionDistributionOnARateLimitedVehicle`): the speed follows the command at
+   `RO_ACCEL_LIM` 0.5 m/s² while |v| rises and `RO_DECEL_LIM` 2.0 m/s² while it falls (rover 01, `config/px4/2026-10-10.params`), with
+   and without one tick (20 ms) of command latency. Asserted (owner criteria 2026-10-10): complete, at most 2 reversals, never the 8 s
+   timeout, at rest within **1 cm** of the point. The unconditional band-edge brake left this plant −17.3 mm (decel 2.0) / −16.6 mm
+   (whole mission) short; the generalised brake:
+
+   | decel / accel | 0 lag: residual | reversals | complete | 20 ms lag: residual | reversals | complete |
    |---|---|---|---|---|---|---|
-   | 0.1 s | +16.4 mm | 1 | 3.66 s | +13.6 mm | 1 | 3.64 s |
-   | 0.2 s | +6.8 mm | 1 | 3.44 s | +1.0 mm | 1 | 3.44 s |
-   | 0.3 s | −6.6 mm | 1 | 3.42 s | −15.0 mm | 1 | 3.44 s |
-   | 0.1 s + 0.1 s | +7.6 mm | 2 | 3.56 s | −0.1 mm | 2 | 3.58 s |
-   | 0.2 s + 0.1 s | −5.8 mm | 1 | 3.28 s | −16.7 mm | 1 | 3.32 s |
-   | 0.3 s + 0.1 s | −10.7 mm | 2 | 4.06 s | −4.7 mm | 2 | 4.32 s |
-   | mean / max abs / rms | +1.3 / 16.4 / 9.7 mm | | | −3.6 / 16.7 / 10.9 mm | | |
+   | 0.5 / 0.5 | −0.1 mm | 0 | 3.60 s | −0.3 mm | 0 | 3.54 s |
+   | 1.0 / 0.5 | −0.0 mm | 0 | 3.82 s | −0.0 mm | 0 | 3.76 s |
+   | 2.0 / 0.5 | −0.0 mm | 0 | 3.94 s | −0.2 mm | 0 | 3.88 s |
 
-   Asserted for the shipped law, every lag: complete within 5 s, at most 2 reversals, |residual| ≤ `along_tol` (0.02 m); the mean residual
-   over the sweep within 1 cm of the plane. Reading: in this model neither variant is biased short; the ±1.7 cm spread comes from the
-   in-band brake and the coast behind the lag, not from where the feed-forward reaches zero. The 1 cm goal is therefore not met by either
-   law on a 0.1–0.3 s drivetrain; what decides it is the brake/coast at the band, to be measured on the rover (Gate 4 / field ladder).
+   *First-order vehicle* (`TheEndpointStopPositionDistributionOnAFirstOrderVehicle`; time constant τ, optional 0.1 s command latency —
+   the pessimistic model of the measured 0.1–0.3 s drivetrain response). Asserted for the shipped law, every lag: complete within 5 s,
+   at most 2 reversals, |residual| ≤ `along_tol` (0.02 m); the mean residual over the sweep within 1 cm of the plane.
+
+   | lag (τ + latency) | band edge FF + hard brake | plane FF + hard brake (`4af71fe`) | **profile feedback (ships)** |
+   |---|---|---|---|
+   | 0.1 s | +16.4 mm, 1, 3.66 s | +13.6 mm, 1, 3.64 s | −2.2 mm, 1, 3.80 s |
+   | 0.2 s | +6.8 mm, 1, 3.44 s | +1.0 mm, 1, 3.44 s | −8.3 mm, 1, 3.52 s |
+   | 0.3 s | −6.6 mm, 1, 3.42 s | −15.0 mm, 1, 3.44 s | −17.5 mm, 1, 3.48 s |
+   | 0.1 s + 0.1 s | +7.6 mm, 2, 3.56 s | −0.1 mm, 2, 3.58 s | −3.0 mm, 2, 3.62 s |
+   | 0.2 s + 0.1 s | −5.8 mm, 1, 3.28 s | −16.7 mm, 1, 3.32 s | −10.6 mm, 1, 3.32 s |
+   | 0.3 s + 0.1 s | −10.7 mm, 2, 4.06 s | −4.7 mm, 2, 4.32 s | −6.7 mm, 2, 4.20 s |
+   | mean / max abs / rms | +1.3 / 16.4 / 9.7 mm | −3.6 / 16.7 / 10.9 mm | −8.1 / 17.5 / 9.5 mm |
+
+   Reading: on the rover's plant shape the generalised brake meets the 1 cm goal with margin, where the hard brake stopped 1.7 cm short;
+   on the first-order model the spread (±1.7 cm) is the coast behind the lag, including the coast below `segment_stop_speed_threshold`
+   where the brake is zero by invariant I1 — a lagging drivetrain crosses the plane at a few cm/s and rolls on. Which plant rover 01 is
+   (its speed loop is a rate-limited PI, not a first-order lag) is what the field re-validation at the next endpoint decides.
 
 Unchanged: the trigger, negative-residual engagement, the feed-forward outside the band, the `stopped ∧ radial > band → creep` nudge, the lateral-miss brake
 (`radial > segment_endpoint_max_correction_m`), the XR-RPP-001 timeout brake (kept as the backstop), `hold_at_completion`, the debug rows and `cross_track_right`.
-The orchestrator equivalence test lists the affected prototype ticks as documented deviations: every mismatching tick is a C++ in-band brake tick (247 values on
-98 ticks, in scenarios `seg_line_fast_tail` 107–145, `seg_line_tail` 134–149, `seg_overshoot` 6–18, `seg_precise_offline` 213–229, `seg_precise_params` 99–103,
-`seg_runout_precise` 114–126; `auto_mixed` no longer deviates), plus the 10 of XR-RPP-011: 257 in total (525 with the band-edge feed-forward).
-Tests: `rpp_core_test.cpp` (`TheEndpointDeadBand*`, `TheEndpointBrakeIsHeld*`, `AnEndpointStoppedOffTheMark*`, `TheEndpointFeedForwardOutsideTheBandIsEvaluatedToThePlane`,
-`TheEndpointStopPositionDistributionOnAFirstOrderVehicle`). Field re-validation of the 2 cm band at the rover's real stop behaviour is still owed (Gate 4 / field ladder).
+The orchestrator equivalence test lists the affected prototype ticks as documented deviations: every mismatching tick is a C++ precise-stop tick of the
+feedback law (the windows start where the recorded speed first exceeds the profile: `seg_line_fast_tail` 47–145, `seg_line_tail` 134–149, `seg_overshoot` 5–18,
+`seg_precise_offline` 213–229, `seg_precise_params` 99–103, `seg_runout_precise` 98–126, `auto_mixed` 313–317), plus the 10 of XR-RPP-011: 373 in total
+(257 with the hard brake, 525 with the band-edge feed-forward).
+Tests: `rpp_core_test.cpp` (`TheEndpointInBandLawTracksTheProfileShortOfThePlaneAndBrakesPastIt`, `TheEndpointBrakeIsHeld*`, `AnEndpointStoppedOffTheMark*`,
+`TheEndpointFeedForwardOutsideTheBandIsEvaluatedToThePlaneWithTheSameFeedback`, both `TheEndpointStopPositionDistribution*`); `rpp_node_test.cpp` drives the four
+endpoint cases (whole mission, lateral miss, offset endpoint, pause with a coast) on the rover's plant shape (decel 2.0 / accel 0.5, 0 and 20 ms command lag) with the
+owner's criteria. Field re-validation of the stop position at the rover's real stop behaviour is still owed (Gate 4 / field ladder).
 
 ### 3.7 Point hold (default off) and handshake (default off)
 Per must-hit point: trigger radius `point_hold_acceptance_m` (or the feed-forward `v²/2a` when `point_precise_stop_enabled`), brake → confirmed stop
