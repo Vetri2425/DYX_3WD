@@ -28,12 +28,32 @@ def test_parameter_files_are_applied_only_when_they_exist(tmp_path):
     assert all(x["params_file"] is None for x in mod.plan(str(tmp_path / "missing")))
 
 
-def test_only_control_executors_receive_real_time_scheduling():
+def test_real_time_prefixes_are_exactly_the_three_control_chain_executors():
     plans = mod.plan("/nonexistent")
-    assert {p["package"] for p in plans if p["prefix"] is not None} == {
-        "dyx3_motion_guard", "dyx3_rpp"
+    prefixes = {p["package"]: p["prefix"] for p in plans}
+    # RPP and motion_guard keep FIFO 80 on CPU 4; px4_link shares CPU 4 at FIFO 70, so both 80s preempt the writer.
+    assert prefixes == {
+        "dyx3_mission": None,
+        "dyx3_motion_guard": "taskset -c 4 chrt -f 80",
+        "dyx3_px4_link": "taskset -c 4 chrt -f 70",
+        "dyx3_rpp": "taskset -c 4 chrt -f 80",
+        "dyx3_spray": None,
+        "dyx3_system_gateway": None,
     }
-    assert all(p["prefix"] == mod.RT_CONTROL_PREFIX for p in plans if p["prefix"] is not None)
+
+
+def test_px4_link_is_on_the_control_core_below_both_control_executors():
+    prefixes = {p["package"]: p["prefix"] for p in mod.plan("/nonexistent")}
+
+    def parse(prefix):
+        words = prefix.split()
+        return int(words[words.index("-c") + 1]), int(words[words.index("-f") + 1])
+
+    link_cpu, link_prio = parse(prefixes["dyx3_px4_link"])
+    for control in ("dyx3_rpp", "dyx3_motion_guard"):
+        cpu, prio = parse(prefixes[control])
+        assert link_cpu == cpu
+        assert link_prio < prio
 
 
 def test_launch_description_builds_and_every_node_is_created():

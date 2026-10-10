@@ -309,6 +309,8 @@ libs() {
   fi
 
   # INS-007: a fresh install stops before any build with the per-rover inputs it lacks and the files to edit.
+  check "ros.env template ships loopback-only DDS as the default (matches PX4 UXRCE_DDS_PTCFG=1)" 'grep -qx "DYX3_ROS_LOCALHOST_ONLY=1" "${REPO}/deployment/network/ros.env.tmpl" && awk "\$3 == \"UXRCE_DDS_PTCFG\" { print \$4 }" "${REPO}/config/px4/3wd_6x_carry_from_proto.params" | grep -qx 1'
+  check "fastdds_profiles.xml is well-formed and carries the two derived defaults and nothing owned by the code QoS" 'python3 -c "import xml.dom.minidom,sys; xml.dom.minidom.parse(sys.argv[1])" "${REPO}/deployment/network/fastdds_profiles.xml" && grep -q "<useBuiltinTransports>false</useBuiltinTransports>" "${REPO}/deployment/network/fastdds_profiles.xml" && grep -q "<nanosec>10000000</nanosec>" "${REPO}/deployment/network/fastdds_profiles.xml" && [ "$(grep -c "is_default_profile=\"true\"" "${REPO}/deployment/network/fastdds_profiles.xml")" -eq 2 ] && ! grep -Eq "<(kind|history|durability|depth)>" "${REPO}/deployment/network/fastdds_profiles.xml"'
   check "ros.env template ships the fleet ROS domain 42" 'grep -qx "ROS_DOMAIN_ID=42" "${REPO}/deployment/network/ros.env.tmpl"'
   check "README hotspot fleet plan matches the template (192.168.2.x; the site LAN is 192.168.3.x)" 'grep -q "192.168.2.100/24" "${REPO}/deployment/network/hotspot.env.tmpl" && grep -q "192.168.2.100/24. for the first 3WD" "${REPO}/installer/README.md" && ! grep -q "192.168.3.100" "${REPO}/installer/README.md"'
   local fresh="${T}/fresh" ffb="${T}/fresh-bin"
@@ -614,6 +616,7 @@ F
   shim_inode="$(stat -c %i "${DYX3_BIN}/dyx3-upgrade")"
   install_operator_shims
   check "shims are replaced atomically (new inode, no temp file left)" '[ "$(stat -c %i "${DYX3_BIN}/dyx3-upgrade")" != "${shim_inode}" ] && [ -x "${DYX3_BIN}/dyx3-upgrade" ] && [ -z "$(find "${DYX3_BIN}" -name ".*")" ]'
+  check "the Fast DDS profile is installed with the config templates" '[ -f "${DYX3_ETC}/fastdds_profiles.xml" ] && cmp -s "${DYX3_ETC}/fastdds_profiles.xml" "${REPO}/deployment/network/fastdds_profiles.xml"'
   check "config templates for ros/backend/ntrip installed" '[ -f "${DYX3_ETC}/ros.env" ] && [ -f "${DYX3_ETC}/backend.env" ] && [ -f "${DYX3_ETC}/ntrip.env" ]'
   check "hotspot template created with no credentials and mode 0640" '[ -f "${DYX3_ETC}/hotspot.env" ] && [ "$(stat -c %a "${DYX3_ETC}/hotspot.env")" = 640 ] && ! grep -Eq "^DYX3_HOTSPOT_(SSID|PSK)=." "${DYX3_ETC}/hotspot.env"'
   local hotspot_profile="${DYX3_ROOT}/etc/NetworkManager/system-connections/dyx3-hotspot.nmconnection"
@@ -1293,6 +1296,22 @@ F
   # as_root <cmd...>: run <cmd...> with `id -u` reporting 0, as dyx3-health under sudo.
   as_root() { (id() { if [ "$*" = -u ]; then echo 0; else command id "$@"; fi; }; "$@"); }
 
+  # ---- the DDS environment the launchers export (dyx3-env.sh): RMW pinned, profile file only when it exists
+  printf '<profiles/>\n' >"${T}/hd_profiles.xml"
+  dds_env() { (
+    export DYX3_RELEASE_DIR="${rel}" DYX3_ROS_SETUP="${ROS_SETUP}" ROS_DOMAIN_ID=42 ROS_HOME="${T}/hd_rh" ROS_LOG_DIR="${T}/hd_rl"
+    unset RMW_IMPLEMENTATION FASTRTPS_DEFAULT_PROFILES_FILE RMW_FASTRTPS_USE_QOS_FROM_XML ROS_LOCALHOST_ONLY
+    # shellcheck disable=SC1091
+    . "${rel}/bin/dyx3-env.sh" && dyx3_env_load && env
+  ); }
+  DYX3_FASTDDS_PROFILES="${T}/hd_profiles.xml" dds_env >"${T}/hd_denv" 2>&1
+  check "dyx3-env: RMW pinned to rmw_fastrtps_cpp and the profile file exported when it exists" 'grep -qx "RMW_IMPLEMENTATION=rmw_fastrtps_cpp" "${T}/hd_denv" && grep -qx "FASTRTPS_DEFAULT_PROFILES_FILE=${T}/hd_profiles.xml" "${T}/hd_denv"'
+  check "dyx3-env: the per-topic QoS is never taken from XML" '! grep -q "^RMW_FASTRTPS_USE_QOS_FROM_XML=" "${T}/hd_denv"'
+  DYX3_FASTDDS_PROFILES="${T}/hd_no_such.xml" dds_env >"${T}/hd_denv" 2>&1
+  check "dyx3-env: no profile file, no FASTRTPS_DEFAULT_PROFILES_FILE (the RMW stays pinned)" '! grep -q "^FASTRTPS_DEFAULT_PROFILES_FILE=" "${T}/hd_denv" && grep -qx "RMW_IMPLEMENTATION=rmw_fastrtps_cpp" "${T}/hd_denv"'
+  DYX3_ROS_LOCALHOST_ONLY=1 dds_env >"${T}/hd_denv" 2>&1
+  check "dyx3-env: DYX3_ROS_LOCALHOST_ONLY=1 exports ROS_LOCALHOST_ONLY=1" 'grep -qx "ROS_LOCALHOST_ONLY=1" "${T}/hd_denv"'
+
   # ---- the node list (secondary)
   as_root health_graph "${rel}" >"${T}/hd_graph" 2>&1
   check "deep health as root: ros2 runs as dyx3 through sudo -n" 'grep -q "^-n -u dyx3 env -i PATH=" "${T}/hd_sudo"'
@@ -1336,9 +1355,25 @@ F
   as_root health_dds "${rel}" >"${T}/hd_dds" 2>&1
   check "PC-7a: a live session proves the PX4 DDS domain matches ROS_DOMAIN_ID 42" 'grep -q "^PASS  DDS domain: px4_link sees PX4 on ROS_DOMAIN_ID 42, so PX4 UXRCE_DDS_DOM_ID matches" "${T}/hd_dds"'
   hd_status false false 1 1
+  mkdir -p "${rel}/config/px4"
+  cp "${REPO}/config/px4/3wd_6x_carry_from_proto.params" "${rel}/config/px4/"
   rm -f "${T}/hd_agent_down"
   FAKE_NO_AGENT="${T}/hd_agent_down" as_root health_dds "${rel}" >"${T}/hd_dds" 2>&1
-  check "PC-7a: session down while the agent listens names UXRCE_DDS_DOM_ID and UXRCE_DDS_PTCFG" 'grep -q "^WARN  DDS domain: the XRCE agent listens on udp/8888 but px4_link sees no PX4 session on ROS_DOMAIN_ID 42; likely PX4 UXRCE_DDS_DOM_ID != 42 or UXRCE_DDS_PTCFG != 1" "${T}/hd_dds" && ! grep -q "^PASS  DDS domain" "${T}/hd_dds"'
+  check "PC-7a: session down while the agent listens names UXRCE_DDS_DOM_ID and UXRCE_DDS_PTCFG" 'grep -q "^FAIL  DDS domain: the XRCE agent listens on udp/8888 but px4_link sees no PX4 session on ROS_DOMAIN_ID 42; likely PX4 UXRCE_DDS_DOM_ID != 42 or UXRCE_DDS_PTCFG != 1" "${T}/hd_dds" && ! grep -q "^PASS  DDS domain" "${T}/hd_dds"'
+  # The FAIL carries the baseline values, read from the repo's parameter file at check time, next to the domain in use.
+  exp_dom="$(awk '$3 == "UXRCE_DDS_DOM_ID" { print $4 }' "${REPO}/config/px4/3wd_6x_carry_from_proto.params")"
+  exp_pt="$(awk '$3 == "UXRCE_DDS_PTCFG" { print $4 }' "${REPO}/config/px4/3wd_6x_carry_from_proto.params")"
+  check "PC-7a: the baseline parameter values are present in the repo file (42 and 1 at the time of writing)" '[ -n "${exp_dom}" ] && [ -n "${exp_pt}" ]'
+  check "PC-7a: the FAIL names the baseline UXRCE_DDS_DOM_ID/PTCFG and the ROS environment in use" 'grep -q "^FAIL  DDS domain: .*Repo baseline expects UXRCE_DDS_DOM_ID=${exp_dom} and UXRCE_DDS_PTCFG=${exp_pt}; this rover runs ROS_DOMAIN_ID=42, ROS_LOCALHOST_ONLY=1$" "${T}/hd_dds"'
+  check "PC-7a: a FAIL from the agent-listens case marks the health run failed" '_health_fail=0; FAKE_NO_AGENT="${T}/hd_agent_down_none" health_dds "${rel}" >/dev/null 2>&1; [ "${_health_fail}" -eq 1 ]'
+  # The baseline is read from the release, not hardcoded: change it there and the message follows.
+  mkdir -p "${rel}/config/px4"
+  printf '1\t1\tUXRCE_DDS_DOM_ID\t77\t6\n1\t1\tUXRCE_DDS_PTCFG\t0\t6\n' >"${rel}/config/px4/3wd_6x_carry_from_proto.params"
+  FAKE_NO_AGENT="${T}/hd_agent_down_none" as_root health_dds "${rel}" >"${T}/hd_dds_rel" 2>&1
+  check "PC-7a: the expected values come from the release's baseline file at check time" 'grep -q "Repo baseline expects UXRCE_DDS_DOM_ID=77 and UXRCE_DDS_PTCFG=0;" "${T}/hd_dds_rel"'
+  rm -rf "${rel}/config"
+  FAKE_NO_AGENT="${T}/hd_agent_down_none" as_root health_dds "${rel}" >"${T}/hd_dds_rel" 2>&1
+  check "PC-7a: a release without the baseline file says so (?) and still FAILs" 'grep -q "^FAIL  DDS domain: .*Repo baseline expects UXRCE_DDS_DOM_ID=? and UXRCE_DDS_PTCFG=?;" "${T}/hd_dds_rel"'
   : >"${T}/hd_agent_down"
   FAKE_NO_AGENT="${T}/hd_agent_down" as_root health_dds "${rel}" >"${T}/hd_dds" 2>&1
   check "PC-7a: session down with nothing on the agent port says the agent is down" 'grep -q "^WARN  DDS domain: no PX4 session and nothing listens on udp/8888: the XRCE agent is down" "${T}/hd_dds"'
@@ -1507,8 +1542,61 @@ slim_release_block() {
   check "slim: build_release does not rebuild a slimmed prebuilt release" '(build_release "${sha}" 2>&1 | grep -q "nothing to build")'
 }
 
+# ---------------------------------------------------------------- start-ros.sh: the bounded wait for the XRCE agent
+# Fake dyx3-env.sh (dyx3_env_load succeeds), fake ros2 (records that the graph was started), fake ss (a UDP listener on the port
+# in ${T}/sw_listen, one per line).
+start_ros_wait() {
+  local d="${T}/sw" out rc
+  mkdir -p "${d}/scripts" "${d}/bin"
+  cp "${REPO}/deployment/scripts/start-ros.sh" "${d}/scripts/"
+  printf 'dyx3_env_load() { return 0; }\n' >"${d}/scripts/dyx3-env.sh"
+  printf '#!/usr/bin/env bash\necho "ros2 $*" >>"%s/sw_ros2"\n' "${d}" >"${d}/bin/ros2"
+  cat >"${d}/bin/ss" <<F
+#!/usr/bin/env bash
+echo "ss \$*" >>"${d}/sw_ss"
+p="\${*: -1}"
+p="\${p##*:}"
+grep -qx "\${p}" "${d}/sw_listen" 2>/dev/null && echo "UNCONN 0 0 0.0.0.0:\${p} 0.0.0.0:*"
+exit 0
+F
+  chmod +x "${d}/bin/ros2" "${d}/bin/ss"
+  : >"${d}/sw_ros2"
+  : >"${d}/sw_listen"
+  printf '8888\n' >"${d}/sw_listen"
+  out="$(PATH="${d}/bin:${PATH}" DYX3_PLATFORM_ENV="${d}/none.env" "${d}/scripts/start-ros.sh" 2>&1)"
+  rc=$?
+  check "start-ros: an agent already listening on the default udp/8888 starts the graph at once" '[ "${rc}" -eq 0 ] && printf "%s" "${out}" | grep -q "XRCE agent listening on udp/8888 after 0.0 s" && grep -q "^ros2 launch dyx3_bringup control_graph.launch.py" "${d}/sw_ros2"'
+  # The port comes from platform.env (read, not executed).
+  printf 'DYX3_XRCE_PORT=9999\n' >"${d}/platform.env"
+  : >"${d}/sw_listen"
+  : >"${d}/sw_ros2"
+  ( sleep 1; printf '9999\n' >"${d}/sw_listen" ) &
+  out="$(PATH="${d}/bin:${PATH}" DYX3_PLATFORM_ENV="${d}/platform.env" "${d}/scripts/start-ros.sh" 2>&1)"
+  rc=$?
+  wait
+  check "start-ros: it waits for the agent on the port from platform.env, then starts the graph" '[ "${rc}" -eq 0 ] && printf "%s" "${out}" | grep -q "XRCE agent listening on udp/9999 after [1-9]" && grep -q "sport = :9999" "${d}/sw_ss" && grep -q "^ros2 launch" "${d}/sw_ros2"'
+  # No agent at all: bounded wait, one WARN line, the graph still starts.
+  : >"${d}/sw_listen"
+  : >"${d}/sw_ros2"
+  local t0 t1
+  t0="$(date +%s)"
+  out="$(PATH="${d}/bin:${PATH}" DYX3_PLATFORM_ENV="${d}/platform.env" DYX3_AGENT_WAIT_S=2 "${d}/scripts/start-ros.sh" 2>&1)"
+  rc=$?
+  t1="$(date +%s)"
+  check "start-ros: no agent: the wait is bounded, it logs one WARN line and starts the graph anyway" '[ "${rc}" -eq 0 ] && [ $((t1 - t0)) -ge 2 ] && [ $((t1 - t0)) -le 5 ] && [ "$(printf "%s\n" "${out}" | grep -c "nothing listens on udp/9999 after 2 s; starting the graph anyway")" -eq 1 ] && grep -q "^ros2 launch" "${d}/sw_ros2"'
+  # No ss on PATH (a PATH of symlinks to just what the script needs): no wait, one line, the graph starts.
+  mkdir -p "${d}/nossbin"
+  for tool in bash env dirname sed tail sleep; do ln -sf "$(command -v "${tool}")" "${d}/nossbin/${tool}"; done
+  ln -sf "${d}/bin/ros2" "${d}/nossbin/ros2"
+  : >"${d}/sw_ros2"
+  out="$(PATH="${d}/nossbin" DYX3_PLATFORM_ENV="${d}/platform.env" "${d}/scripts/start-ros.sh" 2>&1)"
+  rc=$?
+  check "start-ros: without ss it does not wait and still starts the graph" '[ "${rc}" -eq 0 ] && printf "%s" "${out}" | grep -q "ss not available" && grep -q "^ros2 launch" "${d}/sw_ros2"'
+}
+
 sup
 recorder_launcher
+(start_ros_wait)
 (libs)
 (lifecycle)
 (handoff)

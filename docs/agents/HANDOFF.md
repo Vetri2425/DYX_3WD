@@ -2885,3 +2885,46 @@ choice are in review §8.2; the replace list is §8.3. Docs to correct: `README.
 CLAUDE.md "174 = 120 + 54" (generated 117 + 49).
 
 **Open for the human:** P2 (persisted progress + re-engage + unit split) and P5 (stop policy) are decisions, not code.
+
+## 2026-10-10 (late night) — fixes from the production review applied; last two missions analysed
+
+**Branch:** `claude/funny-sagan-upnenq` (commits `df2969f`..`6dd45bb` and the deployment commit after them). Commit author
+for this branch is the owner; no agent trailers from this entry on (owner rule for this branch).
+
+**Fixes landed (review §7 items 1–6, one commit each):**
+- `df2969f` px4_link: VehicleCommandAck matched for arm/disarm 400 and OFFBOARD 176 → immediate `REASON_REJECTED_BY_FCU` /
+  `REASON_NOT_ARMED_OR_REJECTED` (session → Failed, heartbeat STOP); `ulog_streaming_enabled` default **false**; gnss_report QoS
+  declared. (P1, P4 evidence, T5)
+- `8603697` motion_guard: pre-arm gate includes `VehicleState.preflight_checks_pass` (existing `REASON_ARMING_GATE`). (P1)
+- `687764c` mission: every age/timeout/deadline on an injectable steady clock; message stamps keep ROS time. (T1)
+- `2a67023` gnss_rtk: SET_CONFIG/START/STOP refused (`conflict`) while the mission is active; worker join outside `lifecycle_m_`
+  (RtkStatus cadence never starved); DNS with a `connect_timeout_s` deadline; reconnect on no valid frame. (S1, S2)
+- `f4e8975` gateway/backend: telemetry `seq` + `t_mono_s`; backend coalesces to the newest frame and reports `dropped`;
+  `rtk_serial_ports` off the event loop. Backend ruff clean, 178 tests pass (run here). (G1)
+- deployment commit: `DYX3_ROS_LOCALHOST_ONLY=1` shipped, `RMW_IMPLEMENTATION` pinned, `/etc/dyx3/fastdds_profiles.xml`
+  (UDPv4 only, writer `max_blocking_time` 10 ms = one px4_link period), px4_link `taskset -c 4 chrt -f 70`, `health_dds`
+  FAIL with the baseline's `UXRCE_DDS_DOM_ID/PTCFG`, start-ros waits ≤ 10 s for the agent. (P3, P4)
+**Not fixed (owner decisions):** P2 (persisted progress, re-engage, unit split), P5 (stop policy), spray items.
+
+**What was run here:** backend `ruff` + `pytest` (178 pass), `dyx3_geometry` native tests (pass; bag replay skipped as before),
+clang-format **20.1.8 (the CI pin)** dry-run on every changed C++ file: 0 violations, `py_compile` of the launch files,
+shellcheck + installer staged-root tests + XML well-formedness on the deployment commit (see that commit). **Not run here:** any
+`colcon build`/`colcon test` (no ROS and no Docker daemon in this container; the Mac wrapper needs Colima). The C++ changes
+(px4_link, motion_guard, mission, gnss_rtk, gateway) and their new gtests are verified only by CI on this branch — check the run
+for `6dd45bb` and the deployment commit before deploying; fix forward on the branch if red.
+
+**Mission analysis:** `docs/analysis/2026-10-10_last_two_missions_controller_robustness.md` (from the owner's upload of
+missions 0007 and 0001: 8 recorder runs + 2 SD ULogs). Headlines:
+- **Chain latency measured (closes review M1 / X-003):** `pose_to_write_age` 3.2–3.5 ms p50, 4.2–4.5 ms p95, 14.5 ms max on
+  `7f9651d` (10–11 ms p95, 32 RPP overruns on `172b047`).
+- **Open item 6 closed:** the MANUAL release worked live (mission 0001 ULog: `DO_SET_MODE 1/1` 87.20 s → ACK → `nav_state` 0).
+- **Finding A (safety-relevant, new):** mission 0001, first 25.8 s: RoboClaw UART dead (`ACK timeout` ×1402, `Error reading
+  encoders` ×706, `Select timeout 0` ×703, ~110/s), rover stationary under a −0.45 rad/s pivot command, every gate green, PX4 no
+  failsafe, RPP in PIVOT with its timeout only widening the band; recovered by itself and then moved. Open item 8 is a blocker:
+  check F-tasks B1 #6 (`select()` fd_set reuse) in `8279fa4be3`; proposals: actuator-plausibility gate in the guard, pivot
+  timeout surfaced by RPP and acted on by the mission (interfaces bump, owner).
+- **Finding B:** pivot fine-alignment (`segment_yaw_rate_gain` 1.5 × 2–3° = 0.05–0.08 rad/s) is below what the drivetrain
+  executes; FSM hunts 1–4 cycles at the 2°/3° band; corner entry starts 1–3 cm off (converges by 0.5–1 m). GATE 4 tuning.
+- **Finding C:** final endpoint CREEP rocked ±8 cm/s for 6.5 s and finished on the 8 s timeout (7 mm). GATE 4.
+- Straight-line tracking p50 0.2–0.9 cm at 0.6 m/s; corner point capture 1.8–3.6 cm; no guard refusals, no link faults.
+- ULog over DDS: ~1 000 gaps per 40 s in every run summary → streaming off by default (`df2969f`).

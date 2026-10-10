@@ -85,6 +85,13 @@ install_config_templates() {
       install_file 0644 "root:root" "${rel}/deployment/network/${f}.tmpl" "${DYX3_ETC}/${f}"
     fi
   done
+  # The Fast DDS profile file is not a *.tmpl (it is used as shipped) but follows the same rule: created when missing, never overwritten.
+  # dyx3-env.sh exports it as FASTRTPS_DEFAULT_PROFILES_FILE when it exists.
+  if [ -e "${DYX3_ETC}/fastdds_profiles.xml" ]; then
+    log "keeping existing ${DYX3_ETC}/fastdds_profiles.xml"
+  else
+    install_file 0644 "root:root" "${rel}/deployment/network/fastdds_profiles.xml" "${DYX3_ETC}/fastdds_profiles.xml"
+  fi
 }
 
 # _env_value <file> <KEY>: the last uncommented KEY=value of an env file (empty when absent). Never executed.
