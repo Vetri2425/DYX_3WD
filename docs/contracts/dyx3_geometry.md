@@ -29,7 +29,7 @@ Build flags: `-ffp-contract=off`, no `-ffast-math` (GATE 3 needs the same IEEE o
 
 `test/gate3_equivalence_test.cpp` replays `test/fixtures/gate3_geometry_vectors.txt`, produced by `tools/gate3/gen_geometry_vectors.py`
 from the **verbatim** ancestors (never re-implemented) over the archived missions in Git (`backend/tests/data/missions`: 3 DXF + 1 waypoints file) planned by the carried path
-engine and conditioned by the verbatim `_simplify_path_for_profile` / `_smooth_corners` / `_resample_path`, plus seeded random scalar cases and 150-step tracking
+engine (no longer in the backend, removed 2026-10-10: the generator cannot be re-run from this tree and the committed fixture is the record) and conditioned by the verbatim `_simplify_path_for_profile` / `_smooth_corners` / `_resample_path`, plus seeded random scalar cases and 150-step tracking
 emulations with lateral noise and jump/hint-reset events.
 
 **Result (2026-10-07, fixture generated under Python 3.10.12 = the rover's interpreter): 119 147 values compared, 0 failed; max |diff| 1.1e-13 (`distance`,

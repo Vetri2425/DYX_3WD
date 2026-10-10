@@ -103,7 +103,7 @@ plus `must_hit_keys`. Poses re-emit the same `z` bitfield.
 | Item | Where |
 |---|---|
 | Surveyed vertices silently deleted (64→2 points) — fixed by must-hit provenance + DP-against-span (`64c12ff`; field-proven 64→4) | rule 5 |
-| `_merge_chain` dropped other segments' `vertex_indices` (A9) — **backend path engine**, not this module | `path_engine/optimizers/shape_grouping.py` |
+| `_merge_chain` dropped other segments' `vertex_indices` (A9) — was in the backend path engine (removed 2026-10-10), not this module | PX4_DXP `path_engine/optimizers/shape_grouping.py` |
 | Extension↔mark boundary full stop (2026-07-31/08-01) | rule 9 |
 | Triangle-apex-2: short connector survives as its own pivot target, leg entered un-pivoted | rule 7 |
 | Circle run flipped to `segment` by one hard corner in a chained entity | rule 8 |

@@ -1,7 +1,7 @@
 # backend — contract
 
 **Status:** draft for review, written before the implementation. **Spec:** V1 §7.10, §7.2, §4.3.1; CLAUDE.md §3 and §12. **Authority:** none over motion.
-The backend (Python, FastAPI + Socket.IO) owns REST, Socket.IO, auth, mission upload/report, telemetry delivery and path/CAD ingestion. It **never imports `rclpy`**,
+The backend (Python, FastAPI + Socket.IO) owns REST, Socket.IO, auth, admission and storage of tablet-planned missions, telemetry delivery and the status event stream. It plans no geometry: the tablet app is the single trajectory author (owner decision 2026-10-10), and the only way a trajectory enters is `POST /missions/plan` (section 1b). It **never imports `rclpy`**,
 sends no PX4 command and has no safety logic: every command goes to `dyx3_system_gateway` over its Unix socket (`docs/contracts/dyx3_system_gateway.md`), and a backend
 or tablet E-stop is a **request** to `dyx3_motion_guard`. If the gateway is not connected, a command is **not delivered and the caller is told so** (never queued, never retried later).
 
@@ -11,7 +11,6 @@ or tablet E-stop is a **request** to `dyx3_motion_guard`. If the gateway is not 
 |---|---|---|
 | `GET /ping` | none | liveness, plus `rover_id` and `rover_name` (identity, no secret; see 1a) |
 | `GET /health` | viewer | backend, gateway connection, age of the last telemetry, tablet heartbeat, `relay_running` (the relay task is alive), `operator_alive` (relay running, tablet fresh, and a relayed heartbeat acknowledged by the gateway within `tablet_heartbeat_timeout_s`; the gateway's own timer stays authoritative), and a diagnostic `mission` block (section 1c) |
-| `POST /missions` (multipart: `file` + optional `origin_n`, `origin_e`, `rotation_deg`, `unit_scale`, `close_loop`, `anchor`) | operator | upload -> path engine -> `DYX3PATH 1` artifact stored by sha256 (idempotent) -> summary |
 | `POST /missions/plan` (JSON) | operator | app-planned mission (section 1b) -> `DYX3PATH 1` artifact stored by sha256 -> **201** `{ok, mission, normalisation}` |
 | `GET /missions`, `GET /missions/{sha}`, `GET /missions/{sha}/path` | viewer | stored artifacts, summary, points; `/path` also returns `frame` and `anchor` (section 1b) |
 | `POST /missions/{sha}/start` `{request_id?}` | operator | gateway `start_mission`; **202** accepted (section 1c) |
@@ -24,36 +23,39 @@ or tablet E-stop is a **request** to `dyx3_motion_guard`. If the gateway is not 
 
 Error mapping of a gateway verdict: `ok` -> 200 (`start`: 202, section 1c); downstream `rejected` -> 409 (body carries the downstream `reason_code`, verbatim); `invalid_command` -> 400; `service_unavailable` -> 503;
 `timeout` -> 504; gateway not connected -> 503 with `"delivered": false`. Every error body: `{"ok":false,"code":...,"reason":...,"delivered":bool,"data":...}`.
-An upload is rejected (413/415/422) for: size over `upload_max_bytes`, extension not `.dxf`/`.csv`/`.waypoints`, an engine error (message returned), or an artifact the reader would refuse. The uploaded name is never used as a path.
+**Gateway reply wait.** `request_timeout_s` (`DYX3_REQUEST_TIMEOUT_S`, default **6.0 s**) is how long the backend waits for a gateway reply. It must exceed the slowest per-command timeout of the gateway
+(`offboard_timeout_s` 5.0 s, `dyx3_system_gateway.md` section 2), otherwise the tablet is told `timeout` (504) for an OFFBOARD that the gateway then confirms. Settings refuses a value below 6.0 s (or non-finite)
+at start-up, including `DYX3_REQUEST_TIMEOUT_S`. The same value is the RTK control socket's request wait.
+
+A plan is rejected (413/400/422) for: a body over `upload_max_bytes`, invalid JSON, a violated rule of section 1b, or an artifact the reader would refuse.
+
+**Removed (2026-10-10).** The backend has no DXF/CSV/waypoints file-upload planner and no DXF parser: `POST /missions` (multipart upload) and `POST /path/parse-dxf` do not exist (a POST to either is 405 / 404), and neither does the backend's path engine (`path_engine/`, `ezdxf`, `geographiclib`, the `path-engine` install extra). The tablet parses CAD files itself.
 
 **Admission (before any body byte is read).** Every HTTP request under `/api` except `GET /api/ping` first passes an ASGI layer
 (`api/admission.py`; it wraps the FastAPI app only, Socket.IO is not behind it):
 - a missing or unknown bearer token -> **401** (`{"detail": ...}`, `WWW-Authenticate: Bearer`) without reading the body, so a malformed body
   from an unauthenticated client is 401, not 422. The role check (403) stays in the route;
 - a body over the route's cap -> **413** `{"ok":false,"code":"too_large",...}`, from `Content-Length` before reading, or as soon as the
-  streamed byte count passes the cap (chunked bodies). Caps: `POST /missions/plan` = `upload_max_bytes`; the multipart uploads
-  `POST /missions` and `POST /path/parse-dxf` = `upload_max_bytes` + 64 KiB multipart envelope (the route still checks the file
-  against `upload_max_bytes` exactly); every other route = `json_body_max_bytes` (`DYX3_JSON_BODY_MAX_BYTES`, default 64 KiB, DERIVED);
+  streamed byte count passes the cap (chunked bodies). Caps: `POST /missions/plan` = `upload_max_bytes` (`DYX3_UPLOAD_MAX_BYTES`, default
+  20 MiB, DERIVED, exact); every other route = `json_body_max_bytes` (`DYX3_JSON_BODY_MAX_BYTES`, default 64 KiB, DERIVED);
 - a non-numeric `Content-Length` -> 400;
-- on the JSON routes (not the uploads), a body nested deeper than 32 levels (DERIVED) -> **400** `{"ok":false,"code":"bad_request",...}`,
+- on the JSON routes (not `POST /missions/plan`, which is checked in the planning process), a body nested deeper than 32 levels (DERIVED) -> **400** `{"ok":false,"code":"bad_request",...}`,
   checked on the stream before FastAPI parses it (deep nesting otherwise ends in a parse error or a 500, depending on the Python version).
 
 Artifact reads for `GET /missions/{sha}`, `GET /missions/{sha}/path` (including rendering its JSON) and `POST /missions/{sha}/start`
 run in a worker thread, never on the event loop (BE-005).
 
-**Planning budget (BE-004).** DXF planning (`POST /missions`), app-plan parsing and compiling (`POST /missions/plan`) and DXF parsing
-(`POST /path/parse-dxf`) run in a separate, freshly spawned process (`mission/planner.py`), never on the event loop and never in a
-thread that shares the GIL with the heartbeat relay:
-- **one job at a time**: a second planning request while one runs -> **409** `{"ok":false,"code":"busy",...}` (retry later);
+**Planning budget (BE-004).** App-plan parsing and compiling (`POST /missions/plan`) runs in a separate, freshly spawned process
+(`mission/planner.py`), never on the event loop and never in a thread that shares the GIL with the heartbeat relay:
+- **one job at a time**: a second plan request while one runs -> **409** `{"ok":false,"code":"busy",...}` (retry later);
 - wall-clock budget `plan_timeout_s` (`DYX3_PLAN_TIMEOUT_S`, default 60 s, DERIVED, process start-up included): over budget the
   process is terminated (then killed) -> **422** `plan_budget_exceeded`;
-- point budget `plan_max_points` (`DYX3_PLAN_MAX_POINTS`, default 200 000, DERIVED) for a DXF plan -> **422** `points_limit_exceeded`
-  (an app plan keeps its own 50 000-point limit);
+- point budgets (section 1b): at most 50 000 submitted points and 200 000 stored points after densify -> **422** `POINTS_LIMIT_EXCEEDED`;
 - a JSON body nested too deeply -> **400** `INVALID_PAYLOAD`; a planning process that dies without a result -> **500** `planner_crashed`.
 
 ## 1b. App-planned missions (`POST /missions/plan`, mission contract v2)
 
-The tablet owns the trajectory: it parses the file, splits it into runs and sends them. The backend **never re-plans** it; it
+The tablet is the only trajectory author: it parses the file, splits it into runs and sends them. The backend **never plans or re-plans** geometry; it
 validates, applies only the two lossless normalisations below, and stores the result. The endpoint's full rules are in
 `app_planned_mission.md` (v2); this section summarises them with the REST surface.
 
@@ -104,7 +106,8 @@ accepts only that). The canonical meta records:
 | `densified_steps` | number of submitted steps that were split |
 | `max_boundary_snap_m` | largest boundary snap in m (`0.0` when every boundary was bit-exact) |
 | `origin_ne_m` | `[0.0, 0.0]` with an anchor; as submitted for `ekf_local_ned` |
-| `total_mark_length_m`, `total_transit_length_m`, `num_waypoints`, `source` | as in v1 |
+| `total_mark_length_m`, `total_transit_length_m`, `num_waypoints` | drawn lengths in m (unchanged by densify); stored point count |
+| `source` | `{type: "app_planned", client, client_version, name, num_runs}` |
 
 The same payload always yields the same bytes and sha256; a different anchor is a different mission.
 
@@ -129,7 +132,7 @@ Errors: `{"ok": false, "code", "reason"}`; 400 `INVALID_PAYLOAD` (invalid JSON, 
 **Preview** `GET /missions/{sha}/path` returns the stored geometry, bit-exact what is driven before placement:
 `{"sha256", "frame", "anchor", "points": [[north_m, east_m, flags], ...]}`, e.g.
 `{"sha256": "45f5…", "frame": "local_ned", "anchor": {"alt": 519.5, "lat": 48.137154, "lon": 11.576124}, "points": [...]}`. `frame` and `anchor` come from the meta; an
-artifact without them (a DXF upload) reads `"frame": "local_ned", "anchor": null`.
+artifact without them (one stored before frame metadata existed) reads `"frame": "local_ned", "anchor": null`.
 
 ## 1c. Mission start and health (mission contract v2)
 
@@ -202,8 +205,54 @@ in the fail-to-STOP direction.
 
 ## 4. Socket.IO
 
-`/socket.io`, connect requires a valid token. Server -> client: `telemetry` (every gateway push, same body as `GET /telemetry`), `gateway` (`{"connected": bool}` on change).
-Client -> server: `heartbeat` (operator only, as above), `estop` `{asserted}` (same rules as REST; the ack carries the verdict). Anything else is ignored.
+`/socket.io`, connect requires a valid token (`auth={"token": ...}`; a bad one is refused with `unauthorized`). `cors_allowed_origins` is empty (same-origin / native clients only).
+Transport timing: `sio_ping_interval_s` 5.0 and `sio_ping_timeout_s` 5.0 (DERIVED; session cleanup only, the tablet heartbeat owns the safety timeout).
+
+**Server -> client: two events.**
+
+* `telemetry` `{"snapshot": {...}|null, "age_s": float|null}` on every gateway snapshot push (5 Hz, `telemetry_hz`), to every session. The periodic picture; it carries no
+  ordering and no replay. (`GET /telemetry` returns `{"connected", "age_s", "snapshot"}`.)
+* `rover_event`: **the single status event.** Every status change reaches the tablet as one `rover_event` the moment it is known, so the tablet never polls. The old `gateway`
+  event (`{"connected": bool}`) is gone: its information is the `gateway_link` kind below.
+
+```json
+{"kind": "mission_state", "seq": 118, "gateway_seq": 42, "t_mono_s": 18234.512039871, "t_wall_ms": 1791624580734,
+ "coalesced": 0, "replay": false,
+ "data": {"state": 3, "mission_id": 7, "run_index": 0, "point_index": 0, "reason_code": 0,
+          "path_artifact_sha256": "<64 hex>", "fresh": true, "stamp_s": 1791624580.733912}}
+```
+
+| field | meaning |
+|---|---|
+| `kind` | `mission_state`, `operator_link`, `fcu_link`, `estop` (the gateway's status events, `dyx3_system_gateway.md` section 1.3) or `gateway_link` (the backend's own link to the gateway) |
+| `seq` | **the backend's** sequence number: starts at 1 per backend process, +1 per `rover_event` recorded, across all kinds. It is the ordering the tablet uses. Unlike `gateway_seq` it does not restart when the gateway restarts, and a replay keeps the `seq` of the event it repeats |
+| `gateway_seq` | the gateway's `seq` for that event (restarts at 1 when the gateway restarts); `null` for `gateway_link` |
+| `t_mono_s` | gateway steady clock (seconds) when the carried value was received; `null` for `gateway_link`. Comparable only with other `t_mono_s` of the same gateway process |
+| `t_wall_ms` | Unix ms: the gateway's wall clock when the event was pushed; for `gateway_link`, the backend's wall clock when the link state changed |
+| `coalesced` | transitions the gateway folded into this event (0 = none lost); always 0 for `gateway_link` |
+| `replay` | `true` on the copy sent to a session right after it connects, and on a gateway event that is itself the gateway's connect replay; otherwise `false` |
+| `data` | the full current value of that kind, never a delta |
+
+| `kind` | `data` |
+|---|---|
+| `mission_state` | the snapshot `mission` fields (`state`, `mission_id`, `run_index`, `point_index`, `reason_code`, `path_artifact_sha256`, ...), `fresh`, `stamp_s` |
+| `operator_link` | `alive`, `age_s`, `cause`: `heartbeat` \| `timeout` \| `connection_closed` \| `never` |
+| `fcu_link` | `fresh`, `session_alive`, `handshake_ok`, `fault`, `session_resets` |
+| `estop` | `fresh`, `asserted`, `source` |
+| `gateway_link` | `{"connected": bool}`: the backend's socket to the gateway. `false` until the first connection and while the gateway is down |
+
+Rules for the tablet:
+
+* **Per kind, the event with the highest `seq` is the current state**; an event whose `seq` is not above the last one of its kind is a duplicate (a push can race the connect replay).
+* **Stale is a transition.** A gateway-sourced kind whose source went silent arrives once with `data` = `{"fresh": false}`: the state is unknown, never the last value. When `gateway_link`
+  is `connected: false`, **every other kind is unknown** (the backend does not re-emit them as stale); the gateway's replay on reconnect re-establishes each kind, with new `seq`.
+* **On connect** a session first receives, with `replay: true`, the latest `rover_event` of every kind, in `seq` order (it includes `gateway_link`, and `mission_state`/`operator_link`/`fcu_link`/`estop`
+  for each kind the backend has seen since it started), so it has the current state at once and never polls.
+* Gateway events are handed on in the order the gateway sent them, one at a time, from a bounded queue (256). A subscriber cannot block the gateway socket; if the queue overflows, the oldest
+  event is dropped and counted (`events_dropped`), because a newer event of the same kind supersedes it.
+* The backend's own `seq`, `replay` copies and `gateway_link` are the only things it adds; `data` is the gateway's, untouched.
+
+**Client -> server:** `heartbeat` (operator only, as section 3), `estop` `{asserted}` (same rules as REST; the ack carries the verdict). Anything else is ignored.
 
 ## 5. Not in this package / OPEN
 
@@ -216,6 +265,6 @@ Client -> server: `heartbeat` (operator only, as above), `estop` `{asserted}` (s
 
 Off-target: token store (hashing, roles, fail-closed), gateway client against a fake socket server (framing, reconnect, timeout, pending requests failed on disconnect, telemetry cache), the REST surface with a fake gateway
 (auth matrix, error mapping, estop role rule, delivered:false, start 202 / request id / typed start errors, the health mission block),
-app-plan admission (densify on the segment, boundary snap and its limit, frame and anchor rules, meta), upload (size, extension, engine error, idempotent store, summary), the heartbeat relay timing, the Socket.IO hub with a fake emitter.
+app-plan admission (densify on the segment, boundary snap and its limit, frame and anchor rules, meta, size, idempotent store, summary; the removed upload and parse routes answer 404/405), the heartbeat relay timing, the Socket.IO hub with a fake emitter (`rover_event` ordering, replay, `gateway_link`).
 The Python client was also run once against the REAL C++ gateway node in the Humble container (`tools/gateway_smoke.py`): framing, replies, `service_unavailable` for every service command, `invalid_command` for an unknown one, telemetry push, all as specified.
 **Not provable off-target:** the gateway socket's permissions under systemd, the real tablet, WiFi behaviour, uvicorn under systemd.

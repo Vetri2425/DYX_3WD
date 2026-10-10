@@ -699,6 +699,10 @@ Interface stability is CI-enforced: a field change needs a version bump and a mi
 
 ### 7.2 Path engine — stays Python, by decision
 
+> **Superseded 2026-10-10 (owner decision).** The backend no longer contains a path engine. The tablet app is the single trajectory
+> author; the backend only admits what it sends through `POST /api/missions/plan` (`docs/contracts/app_planned_mission.md`). The text
+> below is the original V1 rationale and is kept for the record; a second geometry builder in the backend is forbidden.
+
 ~8 000 lines: DXF parsing, CRS/geodesic conversion, arc chains, per-line extensions,
 segment-order optimisation. It runs **once per mission upload**, never in the loop.
 

@@ -3,8 +3,8 @@
 `POST /api/missions/plan` accepts the operator app's trajectory under an operator bearer token. The app owns geometry,
 order, run split, extensions, collinearity, must-hit points and the geodetic anchor. The backend validates, applies only
 the two lossless normalisations below, and writes a deterministic `DYX3PATH 1` artifact with `engine app_v1`; it never
-calls `PathEngine` and never re-plans the trajectory. Success is HTTP 201 with the same `mission` summary as
-`POST /api/missions` plus a `normalisation` report. Implementation: `backend/src/dyx3_backend/mission/app_plan.py`;
+has no path engine and never plans or re-plans the trajectory: this is the only way a trajectory enters the backend
+(owner decision 2026-10-10). Success is HTTP 201 with a `mission` summary plus a `normalisation` report. Implementation: `backend/src/dyx3_backend/mission/app_plan.py`;
 the REST surface around it: `backend.md` section 1b.
 
 ## Payload
@@ -43,7 +43,7 @@ Exactly one rule per frame:
 1. **Densify:** a within-run step longer than 5 m is split into `ceil(length / 5)` equal collinear sub-steps. The inserted
    points lie on the submitted segment, carry the run's spray bit and never the must-hit bit (they are not app vertices).
    The recorded mark and transit lengths are the drawn lengths. At most **200,000 points are stored** after densify
-   (DERIVED, the DXF plan's default budget) -> otherwise `POINTS_LIMIT_EXCEEDED`.
+   (DERIVED) -> otherwise `POINTS_LIMIT_EXCEEDED`.
 2. **Boundary snap:** a run whose first point is within **10 mm** (Euclidean) of the previous run's last point is moved
    exactly onto it. Over 10 mm -> `runs_not_contiguous`; a gap needs an explicit app-supplied travel run.
 
