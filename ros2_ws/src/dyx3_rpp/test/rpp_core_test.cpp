@@ -275,3 +275,50 @@ TEST(RppCore, TickNeverAllocates) {
   EXPECT_TRUE(r.core->path_done()) << "not done after " << i << " ticks at " << r.n << ", " << r.e;
   EXPECT_EQ(allocs, 0) << "heap allocations inside tick()";
 }
+
+// Field-test speed defaults: mission_speed starts at 0.6 m/s, max_linear_vel (the physical cap,
+// PX4 RO_SPEED_LIM) is 0.85, and the speed used is min(the two). mission_speed is LIVE, so the
+// owner steps it up with `ros2 param set` mid-drive; the cap still holds however high it is set.
+TEST(RppCore, MissionSpeedStartsAt06AndIsStillCappedByMaxLinearVel) {
+  CoreRig r({north_run(150.0, Profile::Smooth, 0.08)});
+  ASSERT_DOUBLE_EQ(r.params.num(P::mission_speed), 0.6) << "the default under test";
+  ASSERT_DOUBLE_EQ(r.params.num(P::max_linear_vel), 0.85) << "the default under test";
+  const double dt = 0.02;
+  double peak = 0.0;
+  const auto drive = [&](int ticks, int settle = 0) {  // peak is taken after `settle` ticks
+    peak = 0.0;
+    for (int i = 0; i < ticks && !r.core->path_done(); ++i) {
+      const TickOutput& o = r.step();
+      ASSERT_EQ(o.cmd, CmdKind::Track);
+      const double v = std::hypot(o.v_n, o.v_e);
+      if (i >= settle) peak = std::max(peak, v);
+      r.vn = o.v_n;  // a kinematic vehicle that follows the command exactly
+      r.ve = o.v_e;
+      r.n += r.vn * dt;
+      r.e += r.ve * dt;
+    }
+  };
+  SetContext running;
+  running.mission_running = true;
+  running.source = "test";
+
+  drive(1500);  // defaults: 0.6
+  EXPECT_LE(peak, 0.6 + 1e-9);
+  EXPECT_GE(peak, 0.55);
+
+  ASSERT_TRUE(r.params.set({"mission_speed", 0.8, ""}, running).ok);  // LIVE, mid-mission
+  drive(1500);
+  EXPECT_LE(peak, 0.8 + 1e-9);
+  EXPECT_GE(peak, 0.75);
+
+  ASSERT_TRUE(r.params.set({"mission_speed", 5.0, ""}, running).ok);  // far above the cap
+  drive(1500);
+  EXPECT_LE(peak, 0.85 + 1e-9) << "max_linear_vel must cap mission_speed";
+  EXPECT_GE(peak, 0.80);
+
+  ASSERT_TRUE(
+      r.params.set({"max_linear_vel", 0.7, ""}, running).ok);  // lowering the cap also bites
+  drive(1500, 500);  // let the 0.85 -> 0.7 deceleration finish first
+  EXPECT_LE(peak, 0.7 + 1e-9);
+  EXPECT_GE(peak, 0.65);
+}

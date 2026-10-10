@@ -138,7 +138,11 @@ TEST(OrchestratorEquivalence, TickByTickAgainstTheCarriedNode) {
     ++st.scenarios;
 
     ParamSet params;
-    std::vector<Item> items;
+    // The recorded scenarios list only the parameters they override, and the prototype that
+    // recorded them ran its own defaults for the rest: max_linear_vel = mission_speed = 1.0. The
+    // production defaults are 0.85 and 0.6 (field-test start; parameter_registry.md), so seed the
+    // prototype's two speeds explicitly; every other default is still the production table's.
+    std::vector<Item> items{{"max_linear_vel", 1.0, ""}, {"mission_speed", 1.0, ""}};
     for (int k = 0; k < n_params; ++k) {
       auto t = split(lines[i++]);
       ASSERT_EQ(t[0], "PARAM") << scen;

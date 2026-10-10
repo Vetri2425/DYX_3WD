@@ -283,6 +283,81 @@ void test_resample() {
   for (auto v : rb.flags) CHECK(v == 0);
 }
 
+// resample_fixed: fixed knots survive verbatim and each span is resampled on its own.
+void test_resample_fixed() {
+  const std::vector<Point> line = {{0, 0}, {1, 0}, {4, 0}, {10, 0}};
+  const std::vector<unsigned char> f = {1, 0, 1, 1};
+
+  // No fixed indices (or only the endpoints) is the plain resample, bit for bit.
+  const auto plain = resample(line, 0.5, &f);
+  for (const std::vector<std::size_t>& fx :
+       {std::vector<std::size_t>{}, std::vector<std::size_t>{0, 3},
+        std::vector<std::size_t>{3, 0, 0}, std::vector<std::size_t>{7, 99}}) {
+    const auto same = resample_fixed(line, 0.5, &f, fx);
+    CHECK(same.pts.size() == plain.pts.size() && same.flags == plain.flags);
+    for (std::size_t i = 0; i < plain.pts.size() && i < same.pts.size(); ++i) {
+      CHECK(same.pts[i].n == plain.pts[i].n && same.pts[i].e == plain.pts[i].e);
+    }
+  }
+
+  // A fixed knot at n = 4.0 that is NOT a multiple of the 10/34 uniform grid of the plain resample.
+  const auto r = resample_fixed(line, 0.3, &f, {2});
+  bool found = false;
+  std::size_t at = 0;
+  for (std::size_t i = 0; i < r.pts.size(); ++i) {
+    if (r.pts[i].n == 4.0 && r.pts[i].e == 0.0) {
+      found = true;
+      at = i;
+    }
+  }
+  CHECK(found);
+  CHECK(r.pts.front().n == 0.0 && r.pts.back().n == 10.0);
+  CHECK(r.flags.size() == r.pts.size());
+  if (found) {
+    CHECK(r.flags[at] == 1);  // the knot keeps its own flag
+    // span [0,4]: ceil(4/0.3)+1 = 15 samples; span [4,10]: ceil(6/0.3)+1 = 21 -> 15 + 20 total
+    CHECK(r.pts.size() == 35);
+    CHECK(at == 14);
+    for (std::size_t i = 1; i <= 14; ++i)
+      CHECK_NEAR(r.pts[i].n - r.pts[i - 1].n, 4.0 / 14.0, 1e-12);
+    for (std::size_t i = 15; i < r.pts.size(); ++i)
+      CHECK_NEAR(r.pts[i].n - r.pts[i - 1].n, 6.0 / 20.0, 1e-12);
+  }
+
+  // Unsorted / duplicated fixed indices give the same answer as a clean list.
+  const auto messy = resample_fixed(line, 0.3, &f, {2, 2, 1, 1, 2});
+  const auto clean = resample_fixed(line, 0.3, &f, {1, 2});
+  CHECK(messy.pts.size() == clean.pts.size());
+  for (std::size_t i = 0; i < messy.pts.size() && i < clean.pts.size(); ++i)
+    CHECK(messy.pts[i].n == clean.pts[i].n);
+
+  // A bend that the plain resample cuts through stays exact when it is fixed.
+  const std::vector<Point> bend = {{0, 0}, {1.03, 0}, {1.03, 1.07}};
+  const auto cut = resample(bend, 0.5);
+  const auto kept = resample_fixed(bend, 0.5, nullptr, {1});
+  bool cut_has = false, kept_has = false;
+  for (const Point& p : cut.pts) cut_has = cut_has || (p.n == 1.03 && p.e == 0.0);
+  for (const Point& p : kept.pts) kept_has = kept_has || (p.n == 1.03 && p.e == 0.0);
+  CHECK(!cut_has);  // the plain resample drops the corner: the defect this function fixes
+  CHECK(kept_has);
+
+  // Coincident knots emit once; the path end stays exact.
+  const std::vector<Point> dup = {{0, 0}, {2, 0}, {2, 0}, {2, 0}};
+  const auto rd = resample_fixed(dup, 0.5, nullptr, {1, 2});
+  CHECK(rd.pts.front().n == 0.0 && rd.pts.back().n == 2.0);
+  for (std::size_t i = 1; i < rd.pts.size(); ++i) CHECK(rd.pts[i].n > rd.pts[i - 1].n);
+
+  // Refusals apply to the whole path: the input comes back unchanged, so every knot survives.
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  const std::vector<Point> three_pts = {{0, 0}, {5, 0}, {10, 0}};
+  CHECK(resample_fixed(three_pts, nan, nullptr, {1}).pts.size() == 3);
+  CHECK(resample_fixed(three_pts, 1e-9, nullptr, {1}).pts.size() == 3);
+  CHECK(resample_fixed({{1, 1}}, 0.1, nullptr, {0}).pts.size() == 1);
+  // A path shorter than the spacing with a fixed interior knot keeps all three knots.
+  const auto tiny = resample_fixed({{0, 0}, {0.01, 0}, {0.02, 0}}, 0.5, nullptr, {1});
+  CHECK(tiny.pts.size() == 3);
+}
+
 // Deterministic jitter: SplitMix64 so the test is reproducible on every platform.
 double jitter(std::uint64_t& s, double amp) {
   s += 0x9E3779B97F4A7C15ULL;
@@ -376,6 +451,7 @@ int main() {
   test_project_onto_path_tiny();
   test_path_length_and_cumulative();
   test_resample();
+  test_resample_fixed();
   test_curvature();
   test_max_preview_curvature();
   return TEST_MAIN_RESULT();

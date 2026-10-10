@@ -22,6 +22,15 @@ the NED production control path, and must be re-validated at **GATE 4** (spec §
 prototype tuned all of them in the ENU frame, and removing the ENU↔NED conversion silently
 re-interprets them.
 
+**Production overrides (the only two defaults that are not the prototype's):** `max_linear_vel`
+1.0 → **0.85** (the physical cap, equal to PX4 `RO_SPEED_LIM`; the drive measured 0.96 m/s at full
+command) and `mission_speed` 1.0 → **0.6** (field tests start at 0.6 m/s and are stepped up on the
+field with `ros2 param set mission_speed`, LIVE). The speed used is `min(max_linear_vel,
+mission_speed)`, so `mission_speed` above 0.85 is accepted but runs at 0.85. The prototype
+equivalence vectors set these two explicitly to the prototype's 1.0 (see
+`orchestrator_equivalence_test.cpp`). The Source column keeps the prototype's `declare_parameter`
+line as the origin of the row.
+
 ## Classes (spec §9)
 
 | Class | Changeable | Rule used here |
@@ -50,7 +59,7 @@ Owner: the package in the `Owner` column is the single owner (CLAUDE.md "one dec
 
 | Name | Type | Current default | Source line | PROPOSED class | Rationale | Owner package |
 |---|---|---|---|---|---|---|
-| `max_linear_vel` | float | `1.0` | PX4_DXP/src/rpp_controller_node.py:285 | **LIVE** | speed limit; spec §9 lists speed limits as LIVE | dyx3_rpp |
+| `max_linear_vel` | float | `0.85` | PX4_DXP/src/rpp_controller_node.py:285 | **LIVE** | speed limit; spec §9 lists speed limits as LIVE. Production override of the prototype's 1.0: the physical cap, equal to PX4 `RO_SPEED_LIM` (the drive measured 0.96 m/s at full command) | dyx3_rpp |
 | `min_linear_vel` | float | `0.15` | PX4_DXP/src/rpp_controller_node.py:286 | **LIVE** | speed limit; spec §9 lists speed limits as LIVE | dyx3_rpp |
 | `min_lookahead_dist` | float | `0.52` | PX4_DXP/src/rpp_controller_node.py:299 | **LIVE** | guidance gain/lookahead; spec §9 lists lookahead and gains as LIVE | dyx3_rpp |
 | `max_lookahead_dist` | float | `1.0` | PX4_DXP/src/rpp_controller_node.py:300 | **LIVE** | guidance gain/lookahead; spec §9 lists lookahead and gains as LIVE | dyx3_rpp |
@@ -159,7 +168,7 @@ Owner: the package in the `Owner` column is the single owner (CLAUDE.md "one dec
 | `yaw_rate_feedback_gain` | float | `0.0` | PX4_DXP/src/rpp_controller_node.py:936 | **LIVE** | guidance gain/lookahead; spec §9 lists lookahead and gains as LIVE | dyx3_rpp |
 | `max_yaw_rate_body` | float | `0.45` | PX4_DXP/src/rpp_controller_node.py:943 | **LIVE** | speed limit; spec §9 lists speed limits as LIVE | dyx3_rpp |
 | `max_linear_accel` | float | `0.20` | PX4_DXP/src/rpp_controller_node.py:950 | **LIVE** | speed-profile accel/decel/curvature gate; a limit/gain, spec §9 LIVE | dyx3_rpp |
-| `mission_speed` | float | `1.0` | PX4_DXP/src/rpp_controller_node.py:976 | **LIVE** | speed limit; spec §9 lists speed limits as LIVE | dyx3_rpp |
+| `mission_speed` | float | `0.6` | PX4_DXP/src/rpp_controller_node.py:976 | **LIVE** | speed limit; spec §9 lists speed limits as LIVE. Production override of the prototype's 1.0: field tests start at 0.6 m/s and are stepped up with `ros2 param set`; `max_linear_vel` still caps it (`max_v = min(max_linear_vel, mission_speed)`) | dyx3_rpp |
 | `max_linear_decel` | float | `0.5` | PX4_DXP/src/rpp_controller_node.py:983 | **LIVE** | speed-profile accel/decel/curvature gate; a limit/gain, spec §9 LIVE | dyx3_rpp |
 | `accel_gate_heading_full_deg` | float | `2.0` | PX4_DXP/src/rpp_controller_node.py:988 | **LIVE** | speed-profile accel/decel/curvature gate; a limit/gain, spec §9 LIVE | dyx3_rpp |
 | `accel_gate_heading_none_deg` | float | `5.0` | PX4_DXP/src/rpp_controller_node.py:989 | **LIVE** | speed-profile accel/decel/curvature gate; a limit/gain, spec §9 LIVE | dyx3_rpp |
