@@ -1,8 +1,6 @@
 // recorder_node — see docs/contracts/dyx3_recorder.md
 #include "dyx3_recorder/recorder_node.hpp"
 
-#include "dyx3_recorder/run_store.hpp"
-
 #include <unistd.h>
 
 #include <algorithm>
@@ -12,6 +10,8 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+
+#include "dyx3_recorder/run_store.hpp"
 
 namespace dyx3_recorder {
 namespace {
@@ -67,7 +67,7 @@ std::vector<std::string> default_param_nodes() {
   // Every node of dyx3_bringup/launch/control_graph.launch.py (GRAPH) plus the nodes that run as
   // their own services (dyx3-rtk, dyx3-spray-watchdog, dyx3-recorder). recorder_node_test checks
   // this list against the launch file, so a node added to the graph cannot be silently left out.
-  return {"dyx3_mission", "gnss_rtk", "motion_guard",   "px4_link", "recorder",
+  return {"dyx3_mission", "gnss_rtk", "motion_guard",   "px4_link",      "recorder",
           "rpp",          "spray",    "spray_watchdog", "system_gateway"};
 }
 
@@ -117,8 +117,8 @@ std::vector<NodeParams> collect_ros_params(const std::vector<std::string>& nodes
                     std::to_string(names.size()) + " values";
         } else {
           for (const auto& p : values) {
-            np.params.push_back(
-                ParamEntry{name, p.get_name(), p.get_type_name(), param_value_text(p.get_parameter_value())});
+            np.params.push_back(ParamEntry{name, p.get_name(), p.get_type_name(),
+                                           param_value_text(p.get_parameter_value())});
           }
         }
       }
@@ -224,40 +224,27 @@ void RecorderNode::declare_params() {
   operator_ = declare_parameter<std::string>("operator", "unknown");
   // DERIVED — NOT FROM V1 SPEC: the /dyx3/** set that exists today. Raw /fmu/out/** and the
   // high-rate /dyx3/rtcm are not recorded (OPEN, see the contract).
-  topics_ = declare_parameter<std::vector<std::string>>("topics", {"/dyx3/vehicle_state",
-                                                                   "/dyx3/estimator_health",
-                                                                   "/dyx3/rtk_status",
-                                                                   "/dyx3/gnss_report",
-                                                                   "/dyx3/ntrip_status",
-                                                                   "/dyx3/px4_link/status",
-                                                                   "/dyx3/rpp/motion_setpoint",
-                                                                   "/dyx3/rpp/status",
-                                                                   "/dyx3/motion_guard/command",
-                                                                   "/dyx3/motion_guard/status",
-                                                                   "/dyx3/safety_gate",
-                                                                   "/dyx3/emergency_stop_state",
-                                                                   "/dyx3/operator_link",
-                                                                   "/dyx3/mission/state",
-                                                                   "/dyx3/mission/point_result",
-                                                                   "/dyx3/spray/state",
-                                                                   "/dyx3/spray/status",
-                                                                   "/dyx3/spray/lease",
-                                                                   "/dyx3/spray/actuator_command",
-                                                                   "/dyx3/spray/actuator_ack",
-                                                                   "/dyx3/spray/watchdog_status",
-                                                                   "/dyx3/recorder/status",
-                                                                   // REC-003: every LIVE parameter
-                                                                   // change of every node, and
-                                                                   // every node's log, mid-run
-                                                                   "/parameter_events",
-                                                                   "/rosout"});
+  topics_ = declare_parameter<std::vector<std::string>>(
+      "topics",
+      {"/dyx3/vehicle_state", "/dyx3/estimator_health", "/dyx3/rtk_status", "/dyx3/gnss_report",
+       "/dyx3/ntrip_status", "/dyx3/px4_link/status", "/dyx3/rpp/motion_setpoint",
+       "/dyx3/rpp/status", "/dyx3/motion_guard/command", "/dyx3/motion_guard/status",
+       "/dyx3/safety_gate", "/dyx3/emergency_stop_state", "/dyx3/operator_link",
+       "/dyx3/mission/state", "/dyx3/mission/point_result", "/dyx3/spray/state",
+       "/dyx3/spray/status", "/dyx3/spray/lease", "/dyx3/spray/actuator_command",
+       "/dyx3/spray/actuator_ack", "/dyx3/spray/watchdog_status", "/dyx3/recorder/status",
+       // REC-003: every LIVE parameter
+       // change of every node, and
+       // every node's log, mid-run
+       "/parameter_events", "/rosout"});
   param_nodes_ = declare_parameter<std::vector<std::string>>("param_nodes", default_param_nodes());
   bag_command_ = declare_parameter<std::vector<std::string>>(
       "bag_command", {"ros2", "bag", "record", "-o", "{dir}"});
   // Bag format (owner requirement: runs in MB, not GB; REC-021: survive a power cut). sqlite3 with
-  // the "resilient" preset (WAL + synchronous=NORMAL instead of journal in memory + synchronous=OFF),
-  // zstd FILE compression of each closed split, and a split every bag_max_duration_s so that after a
-  // power cut only the last split is uncompressed (and still a valid WAL database).
+  // the "resilient" preset (WAL + synchronous=NORMAL instead of journal in memory +
+  // synchronous=OFF), zstd FILE compression of each closed split, and a split every
+  // bag_max_duration_s so that after a power cut only the last split is uncompressed (and still a
+  // valid WAL database).
   bag_storage_ = declare_parameter<std::string>("bag_storage", "sqlite3");
   bag_storage_preset_ = declare_parameter<std::string>("bag_storage_preset", "resilient");
   bag_compression_mode_ = declare_parameter<std::string>("bag_compression_mode", "file");
@@ -272,7 +259,8 @@ void RecorderNode::declare_params() {
   // recording forever.
   mission_silence_s_ = declare_parameter<double>("mission_silence_s", 3.0);
   max_bag_restarts_ = declare_parameter<int64_t>("max_bag_restarts", 1);
-  if (max_bag_restarts_ < 0) throw std::invalid_argument("recorder parameter invalid: max_bag_restarts");
+  if (max_bag_restarts_ < 0)
+    throw std::invalid_argument("recorder parameter invalid: max_bag_restarts");
   // REC-001: the runs share /var/lib/dyx3 with the missions, the RTK state and the spray-ACK
   // ledger. Below min_free_bytes no run starts and a running bag is stopped (checked at every
   // step); retention keeps the complete runs under max_runs_bytes. 0 disables either.
@@ -332,7 +320,8 @@ std::vector<std::string> RecorderNode::bag_options() const {
 }
 
 // REC-011: every evidence file write is checked; a failure is a note and a provenance gap.
-static bool write_evidence(const std::string& path, const std::string& content, RunSummary& summary) {
+static bool write_evidence(const std::string& path, const std::string& content,
+                           RunSummary& summary) {
   if (write_file_atomic(path, content)) return true;
   summary.notes.push_back(fs::path(path).filename().string() + " could not be written");
   summary.provenance_complete = false;
@@ -346,7 +335,8 @@ std::vector<NodeParams> RecorderNode::collect_params() const {
   } catch (const std::exception& e) {
     std::vector<NodeParams> out;
     for (const auto& n : param_nodes_)
-      out.push_back(NodeParams{n, false, {}, std::string("parameter collector failed: ") + e.what()});
+      out.push_back(
+          NodeParams{n, false, {}, std::string("parameter collector failed: ") + e.what()});
     return out;
   } catch (...) {
     std::vector<NodeParams> out;
@@ -503,7 +493,8 @@ void RecorderNode::start_run(uint32_t mission_id, uint32_t run_index, const std:
     summary.notes.push_back("versions file missing: " + versions_file_);
     summary.provenance_complete = false;
     write_evidence(dir + "/versions.json",
-                   unavailable_json("versions", "versions file missing: " + versions_file_), summary);
+                   unavailable_json("versions", "versions file missing: " + versions_file_),
+                   summary);
   } else {
     write_evidence(dir + "/versions.json", versions, summary);
   }
@@ -563,7 +554,8 @@ void RecorderNode::start_run(uint32_t mission_id, uint32_t run_index, const std:
   param_thread_ = std::thread([this, dir, stamp]() {
     const auto nodes = collect_params();
     const std::string snapshot = params_ros_snapshot_json(stamp, nodes);
-    const bool written = write_file_atomic(dir + "/params_ros.json", params_ros_file_json(snapshot, ""));
+    const bool written =
+        write_file_atomic(dir + "/params_ros.json", params_ros_file_json(snapshot, ""));
     std::lock_guard<std::mutex> lk(mu_);
     if (run_dir_ != dir) return;
     params_start_ = snapshot;
@@ -649,10 +641,11 @@ void RecorderNode::stop_run(const std::string& final_state) {
       summary.provenance_complete = false;
     }
     if (!ulog_.run_header_complete())
-      summary.notes.push_back("ulog " + ulog_.header_status() + ": stream.ulg cannot be decoded alone");
+      summary.notes.push_back("ulog " + ulog_.header_status() +
+                              ": stream.ulg cannot be decoded alone");
     if (ulog_.segments() > 1)
-      summary.notes.push_back("ulog stream restarted during the run: " +
-                              std::to_string(ulog_.segments()) + " files");
+      summary.notes.push_back(
+          "ulog stream restarted during the run: " + std::to_string(ulog_.segments()) + " files");
     ulog_.close();
     if (ulog_.write_failed()) {
       summary.notes.push_back("ulog write failed");
@@ -709,11 +702,10 @@ void RecorderNode::check_bag(double) {
   if (bag_restarts_ >= max_bag_restarts_) {
     bag_died_ = true;
     error_ = true;
-    summary_.notes.push_back("bag process died during the run (exit code " + std::to_string(code) +
-                             ")" +
-                             (bag_restarts_ > 0 ? ", restart limit " +
-                                                      std::to_string(max_bag_restarts_) + " reached"
-                                                : std::string()));
+    summary_.notes.push_back(
+        "bag process died during the run (exit code " + std::to_string(code) + ")" +
+        (bag_restarts_ > 0 ? ", restart limit " + std::to_string(max_bag_restarts_) + " reached"
+                           : std::string()));
     RCLCPP_ERROR(get_logger(), "bag process died during the run (exit code %d)", code);
     return;
   }
@@ -773,10 +765,10 @@ void RecorderNode::check_disk(double) {
   ulog_.close();
   summary_.bag_healthy_throughout = false;
   summary_.provenance_complete = false;
-  summary_.notes.push_back("recording stopped: free space " + std::to_string(free_now) +
-                           " below min_free_bytes " + std::to_string(min_free_bytes_) +
-                           (esc > 0 ? " (bag needed escalation step " + std::to_string(esc) + ")"
-                                    : std::string()));
+  summary_.notes.push_back(
+      "recording stopped: free space " + std::to_string(free_now) + " below min_free_bytes " +
+      std::to_string(min_free_bytes_) +
+      (esc > 0 ? " (bag needed escalation step " + std::to_string(esc) + ")" : std::string()));
 }
 
 void RecorderNode::step(double now_s) {

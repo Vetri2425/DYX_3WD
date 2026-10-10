@@ -86,8 +86,7 @@ struct Rig {
           statuses.push_back(*m);
         }));
     keep.push_back(world->create_subscription<dyx3_interfaces::msg::SafetyGateStatus>(
-        "/dyx3/safety_gate", r1,
-        [this](dyx3_interfaces::msg::SafetyGateStatus::ConstSharedPtr m) {
+        "/dyx3/safety_gate", r1, [this](dyx3_interfaces::msg::SafetyGateStatus::ConstSharedPtr m) {
           last_gate = *m;
           gates.push_back(*m);
         }));
@@ -373,8 +372,7 @@ TEST(MotionGuardNode, EmergencyStopAssertAndClearWithinOneGatePeriodAreBothPubli
   ASSERT_FALSE(r.gates.empty()) << "assert must publish the gate state without waiting for 10 Hz";
   ASSERT_FALSE(r.estops.empty());
   EXPECT_FALSE(r.gates.back().ok);
-  EXPECT_EQ(r.gates.back().reason_code,
-            dyx3_interfaces::msg::MotionSetpointStatus::REASON_ESTOP);
+  EXPECT_EQ(r.gates.back().reason_code, dyx3_interfaces::msg::MotionSetpointStatus::REASON_ESTOP);
   EXPECT_TRUE(r.estops.back().asserted);
   EXPECT_EQ(r.estops.back().source, "tablet");
 

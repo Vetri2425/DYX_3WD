@@ -132,12 +132,12 @@ SprayNode::SprayNode(const rclcpp::NodeOptions& options, ClockFn clock, bool cre
         const ManualResult r = ctl_->set_manual(req->on, clock_());
         res->accepted = r == ManualResult::Ok;
         // MissionActive has no code of its own in SetSprayManual: it is reported as DISABLED.
-        res->reason_code = static_cast<uint8_t>(
-            r == ManualResult::Ok                 ? R::REASON_OK
-            : r == ManualResult::Disabled         ? R::REASON_DISABLED
-            : r == ManualResult::MissionActive    ? R::REASON_DISABLED
-            : r == ManualResult::Disarmed         ? R::REASON_DISARMED
-                                                  : R::REASON_WATCHDOG_NOT_READY);
+        res->reason_code =
+            static_cast<uint8_t>(r == ManualResult::Ok              ? R::REASON_OK
+                                 : r == ManualResult::Disabled      ? R::REASON_DISABLED
+                                 : r == ManualResult::MissionActive ? R::REASON_DISABLED
+                                 : r == ManualResult::Disarmed      ? R::REASON_DISARMED
+                                                                    : R::REASON_WATCHDOG_NOT_READY);
         if (r == ManualResult::MissionActive)
           RCLCPP_WARN(get_logger(), "manual spray refused: a mission owns the valve");
         step(clock_());  // act at once, do not wait for the next tick

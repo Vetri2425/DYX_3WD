@@ -23,8 +23,8 @@ bool is_stream_start(uint8_t fmo, const uint8_t* data, size_t size) {
 }
 
 bool is_known_type(uint8_t t) {
-  return is_definition(t) || t == 'A' || t == 'R' || t == 'D' || t == 'L' || t == 'C' ||
-         t == 'S' || t == 'O';
+  return is_definition(t) || t == 'A' || t == 'R' || t == 'D' || t == 'L' || t == 'C' || t == 'S' ||
+         t == 'O';
 }
 
 }  // namespace
@@ -173,7 +173,8 @@ void UlogCapture::feed(const uint8_t* data, size_t size) {
   size_t pos = 0;
   while (partial_.size() - pos >= kMsgHeaderLen) {
     const uint8_t* m = partial_.data() + pos;
-    const size_t total = kMsgHeaderLen + (static_cast<size_t>(m[0]) | (static_cast<size_t>(m[1]) << 8));
+    const size_t total =
+        kMsgHeaderLen + (static_cast<size_t>(m[0]) | (static_cast<size_t>(m[1]) << 8));
     if (!is_known_type(m[2])) {
       // Not a message boundary: drop everything until the next chunk that starts a message.
       ++parse_errors_;

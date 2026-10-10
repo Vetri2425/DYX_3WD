@@ -25,8 +25,8 @@ uint64_t dir_bytes(const std::string& dir) {
   std::error_code ec;
   uint64_t total = 0;
   if (dir.empty() || !fs::is_directory(dir, ec)) return 0;
-  for (auto it = fs::recursive_directory_iterator(dir, fs::directory_options::skip_permission_denied,
-                                                  ec);
+  for (auto it =
+           fs::recursive_directory_iterator(dir, fs::directory_options::skip_permission_denied, ec);
        !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
     std::error_code e2;
     if (it->is_regular_file(e2)) {
@@ -77,7 +77,8 @@ PruneResult prune_runs(const std::string& root, uint64_t max_bytes, const std::s
   return r;
 }
 
-std::vector<std::string> mark_interrupted_runs(const std::string& root, const std::string& now_utc) {
+std::vector<std::string> mark_interrupted_runs(const std::string& root,
+                                               const std::string& now_utc) {
   std::vector<std::string> marked;
   std::error_code ec;
   if (!fs::is_directory(root, ec)) return marked;
@@ -85,8 +86,7 @@ std::vector<std::string> mark_interrupted_runs(const std::string& root, const st
   for (auto it = fs::directory_iterator(root, ec); !ec && it != fs::directory_iterator();
        it.increment(ec)) {
     std::error_code e2;
-    if (it->is_directory(e2) && !it->is_symlink(e2) &&
-        !fs::exists(it->path() / "summary.json", e2))
+    if (it->is_directory(e2) && !it->is_symlink(e2) && !fs::exists(it->path() / "summary.json", e2))
       dirs.push_back(it->path());
   }
   std::sort(dirs.begin(), dirs.end());
@@ -109,8 +109,9 @@ std::vector<std::string> mark_interrupted_runs(const std::string& root, const st
     s.notes.push_back("run directory had no summary.json when the recorder started at " + now_utc +
                       ": the recorder or the host stopped during the run");
     if (!bag_finalised)
-      s.notes.push_back("rosbag2 metadata.yaml missing: the bag was not finalised (ros2 bag reindex "
-                        "may recover it)");
+      s.notes.push_back(
+          "rosbag2 metadata.yaml missing: the bag was not finalised (ros2 bag reindex "
+          "may recover it)");
     if (write_file_atomic((d / "summary.json").string(), summary_json(s)))
       marked.push_back(d.filename().string());
   }

@@ -1,7 +1,6 @@
 // In-process tests of the recorder node: a fake world publishes MissionState and ULog chunks, the
 // bag command is a fake child, the clock is injected, DDS runs on a private domain.
 #include "dyx3_recorder/recorder_node.hpp"
-#include "ulog_synth.hpp"
 
 #include <gtest/gtest.h>
 #include <unistd.h>
@@ -14,6 +13,8 @@
 #include <set>
 #include <sstream>
 #include <thread>
+
+#include "ulog_synth.hpp"
 
 using namespace dyx3_recorder;
 using namespace std::chrono_literals;
@@ -330,9 +331,10 @@ TEST(RecorderNode, ABagThatDiesMidRunIsReportedAndRecorded) {
 
 // REC-012: one death mid-run costs one restart, not the rest of the run.
 TEST(RecorderNode, ABagThatDiesOnceIsRestartedIntoANewDirectory) {
-  Rig r("mkdir -p \"$0\"; case \"$0\" in *rosbag2_2) trap 'exit 0' INT; "
-        "while :; do echo xxxxxxxxxx >> \"$0/data\"; sleep 0.05; done;; "
-        "*) echo x > \"$0/data\"; sleep 0.2; exit 6;; esac");
+  Rig r(
+      "mkdir -p \"$0\"; case \"$0\" in *rosbag2_2) trap 'exit 0' INT; "
+      "while :; do echo xxxxxxxxxx >> \"$0/data\"; sleep 0.05; done;; "
+      "*) echo x > \"$0/data\"; sleep 0.2; exit 6;; esac");
   r.mission(MissionState::STATE_READY);
   r.mission(MissionState::STATE_RUNNING);
   r.pump(500);
@@ -412,13 +414,14 @@ TEST(RecorderDefaults, ParamNodesCoverTheWholeLaunchGraph) {
   const std::string graph = launch.substr(g, launch.find("\n)\n", g) - g);
   const std::regex row(R"re(\(\s*"([^"]+)",\s*"([^"]+)",\s*"([^"]+)",\s*"([^"]+)"\s*\))re");
   std::set<std::string> in_graph;
-  for (auto it = std::sregex_iterator(graph.begin(), graph.end(), row); it != std::sregex_iterator();
-       ++it)
+  for (auto it = std::sregex_iterator(graph.begin(), graph.end(), row);
+       it != std::sregex_iterator(); ++it)
     in_graph.insert((*it)[3].str());
   EXPECT_GE(in_graph.size(), 6U);
   const auto defaults = default_param_nodes();
   const std::set<std::string> have(defaults.begin(), defaults.end());
-  for (const auto& n : in_graph) EXPECT_TRUE(have.count(n)) << "param_nodes misses graph node " << n;
+  for (const auto& n : in_graph)
+    EXPECT_TRUE(have.count(n)) << "param_nodes misses graph node " << n;
   for (const char* n : {"gnss_rtk", "spray_watchdog", "recorder", "rpp", "system_gateway"})
     EXPECT_TRUE(have.count(n)) << n;
 }
@@ -454,7 +457,8 @@ TEST(RecorderNode, AThrowingCollectorNeverEscapesTheNode) {
   rclcpp::InitOptions io;
   io.set_domain_id(20 + (getpid() % 100));
   ctx->init(0, nullptr, io);
-  const std::string root = (fs::temp_directory_path() / ("dyx3_recthrow_" + std::to_string(getpid()))).string();
+  const std::string root =
+      (fs::temp_directory_path() / ("dyx3_recthrow_" + std::to_string(getpid()))).string();
   rclcpp::NodeOptions o;
   o.context(ctx);
   o.append_parameter_override("runs_dir", root + "/runs");
@@ -476,7 +480,8 @@ TEST(RecorderNode, AThrowingCollectorNeverEscapesTheNode) {
     rclcpp::executors::SingleThreadedExecutor ex(eo);
     ex.add_node(rec);
     ex.add_node(world);
-    auto pub = world->create_publisher<MissionState>("/dyx3/mission/state", rclcpp::QoS(1).reliable());
+    auto pub =
+        world->create_publisher<MissionState>("/dyx3/mission/state", rclcpp::QoS(1).reliable());
     const auto until = std::chrono::steady_clock::now() + 10s;
     while (pub->get_subscription_count() == 0 && std::chrono::steady_clock::now() < until)
       ex.spin_some(5ms);
@@ -574,7 +579,8 @@ TEST(RecorderNode, LowDiskNeverStartsTheBagAndStopsARunningOne) {
   r.pump(100);
   EXPECT_EQ(r.status.state, RecorderStatus::STATE_ERROR);
   EXPECT_FALSE(r.status.bag_healthy);
-  const uint64_t stopped_at = fs::exists(d2 + "/rosbag2/data") ? fs::file_size(d2 + "/rosbag2/data") : 0;
+  const uint64_t stopped_at =
+      fs::exists(d2 + "/rosbag2/data") ? fs::file_size(d2 + "/rosbag2/data") : 0;
   r.pump(300);
   EXPECT_EQ(fs::exists(d2 + "/rosbag2/data") ? fs::file_size(d2 + "/rosbag2/data") : 0, stopped_at);
   r.mission(MissionState::STATE_COMPLETED, 2);
@@ -643,8 +649,8 @@ TEST(RecorderNode, StartupMarksALeftOpenRunInterrupted) {
 // REC-014: a bag that had to be killed, or that never wrote its metadata, is not healthy.
 TEST(RecorderNode, EscalationOrMissingMetadataClearsBagHealth) {
   {
-    Rig r("trap '' INT; mkdir -p \"$0\"; while :; do echo x >> \"$0/data\"; sleep 0.05; done",
-          true, "/bin/sh", {rclcpp::Parameter("bag_finalize_timeout_s", 0.3)});
+    Rig r("trap '' INT; mkdir -p \"$0\"; while :; do echo x >> \"$0/data\"; sleep 0.05; done", true,
+          "/bin/sh", {rclcpp::Parameter("bag_finalize_timeout_s", 0.3)});
     r.mission(MissionState::STATE_RUNNING);
     r.pump(200);
     r.mission(MissionState::STATE_COMPLETED);
@@ -653,7 +659,8 @@ TEST(RecorderNode, EscalationOrMissingMetadataClearsBagHealth) {
     EXPECT_NE(summary.find("\"bag_healthy_throughout\": false"), std::string::npos);
   }
   {
-    Rig r("trap 'exit 0' INT; mkdir -p \"$0\"; while :; do echo x >> \"$0/data\"; sleep 0.05; done");
+    Rig r(
+        "trap 'exit 0' INT; mkdir -p \"$0\"; while :; do echo x >> \"$0/data\"; sleep 0.05; done");
     r.mission(MissionState::STATE_RUNNING);
     r.pump(200);
     r.mission(MissionState::STATE_COMPLETED);
@@ -732,7 +739,7 @@ TEST(RecorderNode, AFailedRunDirectoryIsRetriedWithBackoff) {
   r.pump(100);
   EXPECT_EQ(r.status.state, RecorderStatus::STATE_ERROR);
   fs::remove(blocker);
-  fs::create_directories(blocker);  // the operator fixed it
+  fs::create_directories(blocker);          // the operator fixed it
   r.mission(MissionState::STATE_READY, 5);  // within the 1 s backoff: ignored
   EXPECT_FALSE(r.rec->recording());
   r.now += 1.5;

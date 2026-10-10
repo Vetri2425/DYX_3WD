@@ -38,8 +38,8 @@ public:
 
 private:
   int stop_locked(double sigint_wait_s, double sigterm_wait_s);  // stop_mu_ held
-  bool reap_locked();                                             // m_ held; true = still running
-  bool wait_exit(double seconds);                                 // stop owner only
+  bool reap_locked();                                            // m_ held; true = still running
+  bool wait_exit(double seconds);                                // stop owner only
 
   std::mutex stop_mu_;    // one start()/stop() at a time
   mutable std::mutex m_;  // everything below

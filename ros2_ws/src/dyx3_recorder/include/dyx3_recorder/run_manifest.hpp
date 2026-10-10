@@ -61,7 +61,9 @@ struct RunSummary {
   uint64_t ulog_bytes{0};
   uint64_t ulog_gaps{0};
   std::string ulog_header;
-  std::string conditioned_execution_sha256;  // the one RPP reported for this mission during the run  // "complete" or "incomplete: ..." (UlogCapture::header_status)
+  std::string
+      conditioned_execution_sha256;  // the one RPP reported for this mission during the run  //
+                                     // "complete" or "incomplete: ..." (UlogCapture::header_status)
   bool bag_healthy_throughout{true};
   bool provenance_complete{true};
   bool timesync_valid_end{false};

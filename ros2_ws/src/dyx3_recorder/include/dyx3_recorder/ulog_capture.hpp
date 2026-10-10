@@ -71,8 +71,8 @@ private:
   void write_cached_header();
 
   std::FILE* f_{nullptr};
-  std::string path_;           // first segment of the run
-  uint64_t file_bytes_{0};     // bytes in the current segment
+  std::string path_;        // first segment of the run
+  uint64_t file_bytes_{0};  // bytes in the current segment
 
   // stream state (persists across runs)
   bool have_last_{false};
@@ -80,9 +80,9 @@ private:
   bool synced_{false};
   std::vector<uint8_t> partial_;
   HeaderState header_state_{HeaderState::kNone};
-  std::string header_;                          // file header + definitions
-  std::map<uint16_t, std::string> subs_;        // msg_id -> 'A' message
-  std::map<std::string, std::string> params_;   // key -> latest data-section 'P' message
+  std::string header_;                         // file header + definitions
+  std::map<uint16_t, std::string> subs_;       // msg_id -> 'A' message
+  std::map<std::string, std::string> params_;  // key -> latest data-section 'P' message
 
   // per run
   std::string run_header_status_{"no file"};

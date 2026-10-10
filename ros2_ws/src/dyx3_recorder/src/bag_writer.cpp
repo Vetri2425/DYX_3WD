@@ -141,8 +141,8 @@ uint64_t BagWriter::bytes() const {
   uint64_t total = 0;
   const std::string d = dir();
   if (d.empty() || !fs::exists(d, ec)) return 0;
-  for (auto it = fs::recursive_directory_iterator(
-           d, fs::directory_options::skip_permission_denied, ec);
+  for (auto it =
+           fs::recursive_directory_iterator(d, fs::directory_options::skip_permission_denied, ec);
        it != fs::recursive_directory_iterator(); it.increment(ec)) {
     if (ec) break;
     std::error_code e2;

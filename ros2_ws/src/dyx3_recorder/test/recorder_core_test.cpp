@@ -256,7 +256,8 @@ TEST(UlogCapture, AGapInTheDefinitionsLosesTheHeaderAndAStreamRestartRollsTheFil
   const Stream st = make_stream(40);
   const auto small = chunk(st.bytes, st.starts, 0, 32);  // the definitions span several chunks
   ASSERT_GT(st.data_start, 64U);
-  u.on_chunk(small[0].seq, small[0].first_message_offset, small[0].data.data(), small[0].data.size());
+  u.on_chunk(small[0].seq, small[0].first_message_offset, small[0].data.data(),
+             small[0].data.size());
   for (size_t i = 2; i < small.size() / 2; ++i)  // chunk 1 (inside the definitions) lost
     u.on_chunk(small[i].seq, small[i].first_message_offset, small[i].data.data(),
                small[i].data.size());
@@ -361,14 +362,15 @@ TEST(RunStore, PruneDeletesOldestCompleteRunsOnly) {
   TmpDir d;
   auto make = [&](const std::string& name, size_t bytes, bool complete) {
     fs::create_directories(d.path + "/" + name + "/rosbag2");
-    std::ofstream(d.path + "/" + name + "/rosbag2/data", std::ios::binary) << std::string(bytes, 'x');
+    std::ofstream(d.path + "/" + name + "/rosbag2/data", std::ios::binary)
+        << std::string(bytes, 'x');
     if (complete) std::ofstream(d.path + "/" + name + "/summary.json") << "{}";
   };
   make("2026-01-01_000000_mission_0001", 1000, false);  // oldest but interrupted: never pruned
   make("2026-01-02_000000_mission_0002", 1000, true);
   make("2026-01-03_000000_mission_0003", 1000, true);
   make("2026-01-04_000000_mission_0004", 1000, true);
-  make("2026-01-05_000000_mission_0005", 1000, false);  // the active run
+  make("2026-01-05_000000_mission_0005", 1000, false);              // the active run
   std::ofstream(d.path + "/stray_file") << std::string(5000, 'y');  // not a run: not counted
   const uint64_t total = dir_bytes(d.path + "/2026-01-02_000000_mission_0002");
   EXPECT_EQ(total, 1002U);

@@ -102,9 +102,9 @@ inline Stream make_stream(int n_data, uint16_t first_seq = 0) {
   Stream s;
   s.starts.push_back(0);
   s.bytes = file_header();
-  for (const Bytes& m : {flag_bits(), format("pos:uint64_t timestamp;float x;uint8_t[30] pad;"),
-                         info("char[3] sys_name", "PX4"), param("NAV_ACC_RAD", 2.0F),
-                         add_logged(0, "pos")}) {
+  for (const Bytes& m :
+       {flag_bits(), format("pos:uint64_t timestamp;float x;uint8_t[30] pad;"),
+        info("char[3] sys_name", "PX4"), param("NAV_ACC_RAD", 2.0F), add_logged(0, "pos")}) {
     s.starts.push_back(s.bytes.size());
     s.bytes.insert(s.bytes.end(), m.begin(), m.end());
   }

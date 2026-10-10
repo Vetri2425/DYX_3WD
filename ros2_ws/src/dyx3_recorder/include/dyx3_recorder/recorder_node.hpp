@@ -109,12 +109,13 @@ private:
   bool finalizing_{false};
   bool bag_died_{false};
   bool disk_stopped_{false};
-  int64_t bag_restarts_{0};      // restarts of the bag child in this run (REC-012)
-  uint64_t bag_bytes_prev_{0};   // bytes of the bag directories before the current one  // the bag was stopped because free space fell below min_free_bytes
+  int64_t bag_restarts_{0};     // restarts of the bag child in this run (REC-012)
+  uint64_t bag_bytes_prev_{0};  // bytes of the bag directories before the current one  // the bag
+                                // was stopped because free space fell below min_free_bytes
   double last_status_s_{-1e18};
   double last_mission_s_{-1e18};
   double retry_after_s_{-1e18};  // no new run before this (failed directory creation, REC-017)
-  double dir_backoff_s_{1.0};  // clock_() of the newest MissionState (guarded by mu_)
+  double dir_backoff_s_{1.0};    // clock_() of the newest MissionState (guarded by mu_)
   // newest FCU timesync evidence from dyx3_px4_link (guarded by mu_); stale after link_max_age_s
   bool ts_valid_{false};
   int64_t ts_offset_us_{0};

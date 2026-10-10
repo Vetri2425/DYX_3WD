@@ -392,9 +392,9 @@ struct Rig {
   bool pivot{false};
   bool rpp_alive{true};
   bool mission_running{true};
-  std::optional<RppState> rpp_override;  // publish this state instead of tracking/pivot
+  std::optional<RppState> rpp_override;       // publish this state instead of tracking/pivot
   std::optional<MissionPhase> mission_phase;  // publish this instead of RUNNING/PAUSED
-  double period{0.02};                   // control tick period handed to the controller
+  double period{0.02};                        // control tick period handed to the controller
 
   explicit Rig(bool tracking0 = true, double period_s = 0.02,
                const std::vector<Item>& extra_params = {}) {
@@ -881,10 +881,11 @@ TEST(Controller, TrackingOfAnotherMissionIsNotEvidence) {
   EXPECT_EQ(r.c->status(r.t).safety_reason, "awaiting tracking");
 }
 
-// SP-004: min_spray_speed_mps. No paint blob while (nearly) stationary on a MARK leg, but no new gap
-// at a line start or in the terminal creep.
+// SP-004: min_spray_speed_mps. No paint blob while (nearly) stationary on a MARK leg, but no new
+// gap at a line start or in the terminal creep.
 namespace {
-// 0..5 m north: TRANSIT 0..2, MARK 2..5; the path ends on MARK (synthetic terminal boundary at 5.0).
+// 0..5 m north: TRANSIT 0..2, MARK 2..5; the path ends on MARK (synthetic terminal boundary
+// at 5.0).
 std::shared_ptr<const PathModel> ends_on_mark() {
   std::vector<double> n, e;
   std::vector<bool> f;
@@ -993,8 +994,7 @@ TEST(Controller, ManualOnIsRefusedWhileAMissionOwnsTheValve) {
     r.mission_phase = ph;
     r.step(0.5);  // TRANSIT: the geometry wants OFF
     r.step(0.5);
-    EXPECT_EQ(r.c->set_manual(true, r.t), ManualResult::MissionActive)
-        << static_cast<int>(ph);
+    EXPECT_EQ(r.c->set_manual(true, r.t), ManualResult::MissionActive) << static_cast<int>(ph);
     for (int i = 0; i < 5; ++i) r.step(0.5);
     EXPECT_FALSE(r.c->status(r.t).manual_active) << static_cast<int>(ph);
     EXPECT_FALSE(r.c->status(r.t).spraying) << static_cast<int>(ph);
@@ -1037,8 +1037,8 @@ TEST(Controller, ActiveManualOnEndsWhenAMissionStarts) {
 }
 
 TEST(Controller, ManualStillWorksWhenNoMissionIsActive) {
-  for (const MissionPhase ph : {MissionPhase::Idle, MissionPhase::Completed, MissionPhase::Aborted,
-                                MissionPhase::Error}) {
+  for (const MissionPhase ph :
+       {MissionPhase::Idle, MissionPhase::Completed, MissionPhase::Aborted, MissionPhase::Error}) {
     Rig r;
     r.mission_phase = ph;
     r.step(0.5);

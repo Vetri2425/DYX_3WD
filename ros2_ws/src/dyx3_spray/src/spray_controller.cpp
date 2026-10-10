@@ -256,12 +256,13 @@ ManualResult SprayController::set_manual(bool on, double now_s) {
   return ManualResult::Ok;
 }
 
-// SP-004: no paint while (nearly) stationary on a MARK leg. Below min_spray_speed_mps the raw desire
-// is OFF while RPP is STOPPING (corner/brake stop, settle), and while it is TRACKING once this MARK
-// stretch has been driven at or above that speed (a stall). Exempt: a TRACKING standing start (the
-// valve may open while the rover pulls away, as before, so a line start is not cut), the terminal
-// CREEP (the terminal shutoff ends it), and PIVOTING (its own gate, spray_off_during_pivot). 0 disables.
-// It shapes the desire before the debounce; safety OFF never depends on it.
+// SP-004: no paint while (nearly) stationary on a MARK leg. Below min_spray_speed_mps the raw
+// desire is OFF while RPP is STOPPING (corner/brake stop, settle), and while it is TRACKING once
+// this MARK stretch has been driven at or above that speed (a stall). Exempt: a TRACKING standing
+// start (the valve may open while the rover pulls away, as before, so a line start is not cut), the
+// terminal CREEP (the terminal shutoff ends it), and PIVOTING (its own gate,
+// spray_off_during_pivot). 0 disables. It shapes the desire before the debounce; safety OFF never
+// depends on it.
 bool SprayController::low_speed_cut(bool geometry_desired, double speed) {
   const double min_speed = std::max(0.0, p_->num(P::min_spray_speed_mps));
   const RppState st = static_cast<RppState>(rpp_state_);
