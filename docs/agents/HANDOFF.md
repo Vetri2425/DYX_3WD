@@ -3048,10 +3048,12 @@ zero command below the stop threshold (no effect on the lagging model).
 documented deviations (was 257), windows widened to where the recorded speed first exceeds the profile; 0 mismatches.
 
 **Node tests (`rpp_node_test.cpp`):** the rig has an asymmetric plant (`accel_limit` while |v| rises, `decel_limit` while it falls) and
-`command_lag_ticks`; the four endpoint cases run at decel 2.0 / accel 0.5 for lag 0 and 1 with the owner's criteria (complete, ≤ 2
-reversals, never the 8 s timeout, at rest within 1 cm along the line; the lateral miss is corrected to `segment_endpoint_cross_tolerance_m`,
+`command_lag_ticks` (the lag delays the **speed target** only — the PX4 speed loop plus one control period; heading and yaw rate stay
+the rig's instantaneous model, because a lagged heading command swapped the nose 180° in one tick under a reverse creep the core had
+issued for the old nose, CI #179/#180 — no drivetrain does that); the four endpoint cases run at decel 2.0 / accel 0.5 for lag 0 and 1
+with the owner's criteria (complete, ≤ 2 reversals, never the 8 s timeout, at rest within 1 cm along the line; the lateral miss is corrected to `segment_endpoint_cross_tolerance_m`,
 2 cm, the finish geometry — a 1 cm lateral criterion would need a cross-tolerance decision). **Run here:** core and equivalence with real
-googletest (19 + 1 pass); the node tests only in CI — check the run for this commit.
+googletest (19 + 1 pass); the node tests in CI: **green at `998d3b1` (run #181, every job)**.
 
 **Owed to the field (unchanged):** the stop position at the next endpoint on rover 01 (expect ≤ 1 reversal, no timeout finish, within
 1 cm along the line); which plant rover 01 is (rate-limited PI vs first-order lag) decides whether the first-order table applies.
