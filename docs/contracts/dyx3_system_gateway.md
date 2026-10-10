@@ -13,13 +13,50 @@ is the **operator-link heartbeat** (§4.3.1): it publishes `OperatorLinkStatus`,
 * Everything the gateway writes is valid UTF-8: client bytes are never echoed unless they passed validation, and any invalid byte in a ROS string field is written as `\ufffd`.
 * The gateway never trusts the client: every field is validated (section 3) before anything reaches ROS.
 * A client that disconnects (also with replies still queued for it) is simply removed: socket writes use `MSG_NOSIGNAL` and the node ignores `SIGPIPE`, so a backend restart can never take the gateway, and with it the control graph, down (GW-002).
+* Writes never block the node: a reply, an event or a telemetry push only appends to that client's out buffer (bounded at 1 MiB, see above) and the socket thread writes it non-blocking. A slow or stuck client therefore costs only itself: it cannot stall the ROS executor, another client, a command or an E-stop. Every queue is bounded: the command inbox (section 2), the table of service calls awaiting an answer (64), each client's out buffer, and one pending event per kind.
 
 ### Client -> gateway
 `{"v":1,"id":<int>,"cmd":"<name>","args":{...}}`  — `id` is echoed in the reply (client-chosen, not interpreted).
 
 ### Gateway -> client
-* reply: `{"v":1,"id":<id>,"ok":<bool>,"code":"<snake_case>","reason":"<text>","data":{...}}`
+* reply: `{"v":1,"id":<id>,"ok":<bool>,"code":"<snake_case>","reason":"<text>","data":{...}}`. Always this typed shape: `data` is an object (`{}` when there is nothing to report).
 * telemetry push: `{"v":1,"type":"telemetry","snapshot":{...}}` at `telemetry_hz` (5, DERIVED) to every client.
+* event push: `{"v":1,"type":"event","event":"<kind>",...}` to every client, the moment a status changes (section 1.3).
+
+A client ignores a `type` it does not know, so message types can be added without a protocol version change; `v` changes only for an incompatible change.
+
+### 1.3 Events (the status channel)
+
+The gateway pushes a status change as an event the moment it sees it; the 5 Hz telemetry snapshot stays as the complete periodic picture. One event family:
+
+```json
+{"v":1,"type":"event","event":"mission_state","seq":42,"t_mono_s":18234.512039871,"t_wall_ms":1791624580734,
+ "coalesced":0,"replay":false,
+ "data":{"state":3,"mission_id":7,"run_index":0,"point_index":0,"reason_code":0,
+         "path_artifact_sha256":"<64 hex>","fresh":true,"stamp_s":1791624580.733912}}
+```
+
+| field | meaning |
+|---|---|
+| `event` | the kind (table below) |
+| `seq` | per gateway process, starts at 1, +1 per pushed event across all kinds: the push order. It restarts at 1 when the gateway restarts (a smaller `seq` than the last one seen = a new gateway) |
+| `t_mono_s` | gateway steady clock when the carried value was received |
+| `t_wall_ms` | gateway wall clock (Unix ms) when the event was pushed |
+| `coalesced` | transitions folded into this event and not pushed on their own (0 = none lost) |
+| `replay` | `true` only on the connect replay (below) |
+| `data` | the full current value of that kind |
+
+| `event` | source | transition (pushed when it changes) | `data` |
+|---|---|---|---|
+| `mission_state` | `/dyx3/mission/state` | `state` or `reason_code` | the snapshot `mission` fields, `fresh`, `stamp_s` (the message stamp) |
+| `operator_link` | the gateway's own operator link (section 4) | `alive` | `alive`, `age_s`, `cause`: `heartbeat` \| `timeout` \| `connection_closed` \| `never` |
+| `fcu_link` | `/dyx3/px4_link/status` | `session_alive` or `handshake_ok` | `fresh`, `session_alive`, `handshake_ok`, `fault`, `session_resets` |
+| `estop` | `/dyx3/emergency_stop_state` | `asserted` or `source` | `fresh`, `asserted`, `source` |
+
+* **Stale is a transition.** All three topic sources publish periodically. When one is older than `snapshot_fresh_s` its kind is pushed once with `data` = `{"fresh":false}`: the state is unknown, never the last value. The next message is a transition again.
+* **Coalescing** (`event_coalesce_s`, 10 ms): a transition is pushed at once unless an event of the same kind went out less than 10 ms ago; then it waits until 10 ms after that push (plus at most one 10 ms node tick), and every value arriving meanwhile folds into that one event, which carries the latest value and counts the folded transitions in `coalesced`. At most 100 events per second per kind. The topic sources are subscribed with a depth-10 history, so two transitions that arrive before the node runs are both seen (with depth 1 the first would be overwritten in DDS).
+* **On connect** the gateway sends every new client the latest event of each kind, in `seq` order, with `"replay":true` and the original `seq`, before anything else it reads from that client. A client therefore has the current state at once after a (re)connect and never polls. A push can race the connect, so the same event can arrive both live and as a replay: **per kind, the event with the highest `seq` is the current one**; an event with a lower or equal `seq` than the last one of its kind is a duplicate.
+* Mission contract v2 adds MissionState fields. `request_id` is copied into the `mission_state` data and the snapshot automatically once the interface has it. **OPEN (interface release):** detail, execution id, source and execution artifact sha256 and the step being waited on; the step will also join the transition key.
 
 ## 2. Commands
 
@@ -27,7 +64,7 @@ is the **operator-link heartbeat** (§4.3.1): it publishes `OperatorLinkStatus`,
 |---|---|---|---|
 | `heartbeat` | `{}` | (internal) | the tablet heartbeat relayed by the backend; see section 4 |
 | `get_snapshot` | `{}` | (internal) | reply `data` = the telemetry snapshot |
-| `start_mission` | `{"path_artifact_sha256": "<64 lowercase hex>"}` | `StartMission` | |
+| `start_mission` | `{"path_artifact_sha256": "<64 lowercase hex>", "request_id"?: "<1..128 of [A-Za-z0-9._:-]>"}` | `StartMission` | `request_id` (optional): the client's idempotency key; passed to `StartMission.request_id` once the interface has it, and echoed as `data.request_id` in every reply to that command (accepted, rejected, `timeout`, `service_unavailable`, `busy`) |
 | `abort_mission` | `{"reason": "operator"\|"safety"\|"unspecified"}` | `AbortMission` | |
 | `pause_mission` / `resume_mission` / `skip_point` | `{}` | `PauseMission` / `ResumeMission` / `SkipPoint` | |
 | `estop` | `{"asserted": bool, "source": "tablet"\|"backend"\|"ble"\|"physical"}` | `SetEmergencyStop` (motion_guard) | **never queued behind other commands, never rate limited, never refused `busy`** |
@@ -35,25 +72,38 @@ is the **operator-link heartbeat** (§4.3.1): it publishes `OperatorLinkStatus`,
 | `offboard` | `{"enable": bool}` | `SetOffboard` (px4_link) | |
 | `spray_manual` | `{"on": bool}` | `SetSprayManual` (spray) | |
 
-Commands are queued from the socket thread and processed in batches by the node's 10 ms timer. Within a batch an `estop` is processed strictly first, then the heartbeat,
+Commands are queued from the socket thread, which also wakes the node's executor (a guard condition), so a batch is processed at once; the node's 10 ms timer remains as the periodic tick. Within a batch an `estop` is processed strictly first, then the heartbeat,
 then the rest in arrival order. Heartbeats in one batch are coalesced: only the most recent one refreshes the operator link, every one is answered `ok`. At most 256 commands
-wait between two batches; beyond that every command except `estop` (heartbeats included) is answered `busy` (GW-005).
+wait between two batches; beyond that every command except `estop` (heartbeats included) is answered `busy` (GW-005). At most 64 service calls await their answer at once; beyond that every command except `estop` is answered `busy`.
+
+Every service call is asynchronous and has its own deadline: a command that waits (an `arm` or `offboard` px4_link is still confirming) never delays another command, an `estop`, an event or the telemetry push.
 
 Unknown `cmd`, unknown `args` keys, missing or wrongly typed fields -> `invalid_command`. The gateway adds **no** policy of its own (no "arm only if ..."): the safety/mission authorities
 downstream decide and their `accepted` / `reason_code` are returned verbatim in `data` (`{"accepted":..,"reason_code":..}` plus service-specific fields). If the target service is not
-available the reply is `service_unavailable` at once; if it does not answer within `service_timeout_s` (2.0, DERIVED) the reply is `timeout` and the request is also removed from the ROS client, so a late answer is discarded and never-answered requests do not accumulate (GW-007) — **an E-stop request that could not be delivered is reported as failed, never as accepted.**
+available the reply is `service_unavailable` at once; if it does not answer within its command's timeout (below) the reply is `timeout` and the request is also removed from the ROS client, so a late answer is discarded and never-answered requests do not accumulate (GW-007) — **an E-stop request that could not be delivered is reported as failed, never as accepted.**
+
+**Per-command timeouts** (each must exceed the time the target itself may legitimately take to answer, or a success is reported as `timeout`):
+
+| commands | parameter | default | why |
+|---|---|---|---|
+| `estop` | `estop_timeout_s` | 1.0 | motion_guard answers inside its service callback, with no downstream wait. A failed E-stop must reach the operator first (so the physical stop is used): it must not exceed any other timeout (checked at start). |
+| `start_mission`, `pause_mission`, `resume_mission`, `abort_mission`, `skip_point`, `spray_manual` | `service_timeout_s` | 2.0 | fast accepts: the target decides and answers, progress comes as `mission_state` events. Kept at 2.0 while `StartMission` still reads and hashes the artifact synchronously; it can drop once start is an asynchronous accept (mission contract v2). |
+| `arm` | `arm_timeout_s` | 4.0 | px4_link answers after PX4 confirms the arming state, within its `arm_confirm_timeout_s` (2.0); `vehicle_status` arrives at 2 Hz, so 2 s of margin covers that and DDS. |
+| `offboard` | `offboard_timeout_s` | 5.0 | px4_link answers after `offboard_prestream_s` (0.5) + `offboard_confirm_timeout_s` (2.0) + its 1.0 s service margin = 3.5 s; 1.5 s of margin. |
+
+The old single 2.0 s returned `timeout` for an arm or OFFBOARD that px4_link later confirmed. All four are at most 30 s. A client's own request timeout must exceed the largest of them (the backend's `request_timeout_s` >= 6.0 s with these defaults).
 
 ## 3. Telemetry snapshot
 
 One JSON object, assembled from the latest message of each source with its receive age. `null` = never received. Every source carries `age_s` (gateway steady clock) and `fresh`
 (age <= `snapshot_fresh_s`, default 1.0, DERIVED); a consumer must treat a stale or missing source as unknown, never as the last value. Sources: `vehicle_state`, `estimator_health`,
 `rtk_status`, `gnss_report`, `ntrip_status`, `px4_link`, `safety_gate`, `emergency_stop`, `motion_guard`, `rpp`, `mission`, `last_point_result`, `spray`, `recorder`, plus `gateway`
-(`operator_alive`, `operator_age_s`, `clients`, `schema`, and `ipc`: the cumulative `dropped_slow` / `overflows` / `rejected_full` socket counters, added in place without a protocol version change). Field subsets are chosen for the tablet; the recorder, not the gateway, is the evidence path.
+(`operator_alive`, `operator_age_s`, `clients`, `schema`, and `ipc`: the cumulative `dropped_slow` / `overflows` / `rejected_full` socket counters, `event_seq` (the last event pushed) and `dispatch_last_us` / `dispatch_max_us` (command line received -> ROS service request sent), all added in place without a protocol version change). `safety_gate` gains `pre_arm_ok` (every gate except armed and OFFBOARD) once `SafetyGateStatus` has it. Field subsets are chosen for the tablet; the recorder, not the gateway, is the evidence path.
 The existing `ntrip_status` subset includes the selected security mode, verified TLS state, verification failure, plaintext credential warning, source bytes, valid frames, and RTK handoff count. The existing `px4_link` subset includes accepted/refused RTCM chunk counts. No credential or Authorization value is serialized. These are observation fields, not an RTK control API.
 
 ## 4. Operator link (R13)
 
-`OperatorLinkStatus` is published at 10 Hz regardless of connected clients. `alive == true` iff **the connection that sent the last valid `heartbeat` is still connected AND that heartbeat arrived within `operator_link_timeout_s`**.
+`OperatorLinkStatus` is published at 10 Hz regardless of connected clients; every `alive` transition is also pushed at once as an `operator_link` event (section 1.3). `alive == true` iff **the connection that sent the last valid `heartbeat` is still connected AND that heartbeat arrived within `operator_link_timeout_s`**.
 The heartbeat is bound to its connection (GW-001): when that connection closes, `alive` drops at the next publish, even if other clients stay connected; another client counts only after it sends its own `heartbeat`.
 Never heard, heartbeating client gone, or timeout -> `alive == false`, `age_s` = time since the last heartbeat (0 when never). A dead backend therefore also reads as a dead operator link (fail-safe).
 **TODO (GW-001):** the socket does not authenticate its peer. Every service runs as the same `dyx3` uid, so `SO_PEERCRED` cannot tell the backend from any other `dyx3` process; a peer-uid check needs a dedicated backend uid first (BR-005). Until then file mode 0660 / group `dyx3` is the only access control.
@@ -68,7 +118,7 @@ second, any increase of the dropped-slow, overflow and refused-at-`max_clients` 
 
 ## 5. Parameters (RESTART)
 
-`socket_path`, `max_clients` 4, `telemetry_hz` 5, `operator_link_timeout_s` 2.0, `service_timeout_s` 2.0, `snapshot_fresh_s` 1.0, `operator_link_hz` 10. Invalid values stop the node at start.
+`socket_path`, `max_clients` 4, `telemetry_hz` 5, `operator_link_timeout_s` 2.0, `service_timeout_s` 2.0, `estop_timeout_s` 1.0, `arm_timeout_s` 4.0, `offboard_timeout_s` 5.0, `snapshot_fresh_s` 1.0, `operator_link_hz` 10, `event_coalesce_s` 0.01 (in [0, 1]). Invalid values stop the node at start (timeouts finite, > 0, <= 30 s, `estop_timeout_s` not above any other).
 
 ## 6. Not in this package
 
@@ -79,4 +129,6 @@ local access control; the backend is the policy owner for who may send what.
 
 Off-target: JSON parser (strict, duplicate keys, depth, escapes), command validation table, snapshot ageing, operator-link timing, the socket server (framing, oversized line, slow consumer, max clients,
 stale socket), and a node test with fake services (reply routing; an E-stop that is accepted, rejected, delivered but never answered (exactly `timeout`) and undeliverable (exactly `service_unavailable`), never reported accepted unless the guard accepted it; heartbeat -> `OperatorLinkStatus`).
-**Not provable off-target:** socket permissions under systemd, the real tablet path, latency.
+Events: ordering, coalescing and replay (core); every kind pushed by the node, stale pushes, the connect replay; per-command deadlines (no `timeout` for an OFFBOARD still inside its 5 s); `request_id` passed and echoed (also on `timeout`); an E-stop during a pending 5 s OFFBOARD wait is dispatched and answered at once; a client that never reads is dropped while every event still reaches the other client at once.
+**Latency targets** (measured by `gateway_node_test` in a container on the development Mac, executor on its own thread; 20 repeats under full CPU load): MissionState publish -> event line on the socket, p50 < 5 ms (measured 0.4-0.5 ms idle, p95 < 3 ms loaded); command line received -> ROS service request sent, mean < 2 ms (measured 0.03 ms idle, 0.06-0.25 ms loaded).
+**Not provable off-target:** socket permissions under systemd, the real tablet path, latency on the Jetson.
