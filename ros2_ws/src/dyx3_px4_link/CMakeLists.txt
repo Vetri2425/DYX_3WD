@@ -53,6 +53,12 @@ if(BUILD_TESTING)
   target_link_libraries(px4_link_node_test dyx3_px4_link_node_lib)
   ament_target_dependencies(px4_link_node_test rclcpp px4_msgs dyx3_interfaces)
   target_compile_definitions(px4_link_node_test PRIVATE DYX3_FIXTURES="${FIXTURES}")
+  # The same suite in event-driven mode (the production default): every test must pass in both.
+  ament_add_gtest(px4_link_node_event_test test/px4_link_node_test.cpp TIMEOUT 300)
+  target_link_libraries(px4_link_node_event_test dyx3_px4_link_node_lib)
+  ament_target_dependencies(px4_link_node_event_test rclcpp px4_msgs dyx3_interfaces)
+  target_compile_definitions(px4_link_node_event_test PRIVATE DYX3_FIXTURES="${FIXTURES}"
+                             DYX3_TEST_EVENT_DRIVEN=1)
 endif()
 
 ament_package()

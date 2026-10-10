@@ -54,6 +54,10 @@ using ClockFn = std::function<double()>;
 
 struct LinkParams {
   double publish_rate_hz{100.0};
+  // Event-driven chain (RESTART). true: VehicleState is published from the vehicle_local_position
+  // callback on each new sample (new timestamp_sample) instead of the 20 ms gate; the gate stays
+  // only as a fallback while the local position is stale. false: the 20 ms gate (timer mode).
+  bool event_driven{true};
   double command_max_age_s{0.2};
   StalenessLimits stale;
   double handshake_retry_s{1.0};
@@ -112,6 +116,7 @@ private:
   void publish_vehicle_command(uint32_t command, float p1, float p2, uint64_t t_us);
   void publish_status(double now_s, const StalenessReport& rep, const GateOutput& g);
   void publish_state_and_health(double now_s);
+  void publish_state(double now_s);
   void service_pending(double now_s, bool link_healthy, const OffboardStep& ofb);
   void start_ulog_if_due(double now_s, bool link_ok);
   void on_spray_command(const dyx3_interfaces::msg::SprayActuatorCommand& m);
@@ -138,6 +143,9 @@ private:
   std::unique_ptr<YawRateEstimator> yaw_rate_;
   StatusSample st_;
   double lp_t_{-1e18}, att_t_{-1e18}, st_t_{-1e18};
+  // C1: timestamp_sample of the last local-position sample published on arrival.
+  bool lp_published_valid_{false};
+  uint64_t lp_published_sample_us_{0};
   px4_msgs::msg::EstimatorStatusFlags flags_;
   double flags_t_{-1e18};
   bool nav_offboard_{false};

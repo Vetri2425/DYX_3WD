@@ -54,6 +54,15 @@ void init_ctx(const std::shared_ptr<rclcpp::Context>& ctx) {
   ctx->init(0, nullptr, io);
 }
 
+// The whole suite runs twice: px4_link_node_test in timer mode (event_driven=false, the timer-mode
+// regression) and px4_link_node_event_test in event-driven mode (the production default). Tests
+// that are about one mode set event_driven explicitly.
+#ifdef DYX3_TEST_EVENT_DRIVEN
+constexpr bool kSuiteEventDriven = true;
+#else
+constexpr bool kSuiteEventDriven = false;
+#endif
+
 struct Rig {
   static std::string unique_token_path() {
     static std::atomic<unsigned> serial{0};
@@ -95,6 +104,7 @@ struct Rig {
   std::vector<dyx3_interfaces::msg::UlogChunk> chunks;
   dyx3_interfaces::msg::Px4LinkStatus status;
   dyx3_interfaces::msg::VehicleState state;
+  int state_count{0};
   dyx3_interfaces::msg::EstimatorHealth health;
   std::vector<rclcpp::SubscriptionBase::SharedPtr> keep;
   rclcpp::Client<dyx3_interfaces::srv::SetOffboard>::SharedPtr cli_off;
@@ -107,7 +117,8 @@ struct Rig {
   uint8_t nav_state{0}, arming_state{1};
 
   explicit Rig(const rclcpp::ParameterValue* extra = nullptr, const std::string& defs = "",
-               const std::string& token_path = "") {
+               const std::string& token_path = "",
+               const std::vector<rclcpp::Parameter>& params = {}) {
     ctx = std::make_shared<rclcpp::Context>();
     init_ctx(ctx);
     rclcpp::NodeOptions no;
@@ -122,6 +133,12 @@ struct Rig {
     no.append_parameter_override("spray_ack_token_state_path", ack_state);
     if (extra != nullptr) {
     }
+    bool mode_given = false;
+    for (const auto& p : params) {
+      no.append_parameter_override(p.get_name(), p.get_parameter_value());
+      mode_given = mode_given || p.get_name() == "event_driven";
+    }
+    if (!mode_given) no.append_parameter_override("event_driven", kSuiteEventDriven);
     link = std::make_shared<Px4LinkNode>(no, [this]() { return now; }, false);
     rclcpp::NodeOptions fo;
     fo.context(ctx);
@@ -202,8 +219,10 @@ struct Rig {
         "/dyx3/px4_link/status", r1,
         [this](dyx3_interfaces::msg::Px4LinkStatus::ConstSharedPtr m) { status = *m; }));
     keep.push_back(fcu->create_subscription<dyx3_interfaces::msg::VehicleState>(
-        "/dyx3/vehicle_state", r1,
-        [this](dyx3_interfaces::msg::VehicleState::ConstSharedPtr m) { state = *m; }));
+        "/dyx3/vehicle_state", r1, [this](dyx3_interfaces::msg::VehicleState::ConstSharedPtr m) {
+          state = *m;
+          ++state_count;
+        }));
     keep.push_back(fcu->create_subscription<dyx3_interfaces::msg::EstimatorHealth>(
         "/dyx3/estimator_health", r1,
         [this](dyx3_interfaces::msg::EstimatorHealth::ConstSharedPtr m) { health = *m; }));
@@ -300,6 +319,8 @@ struct Rig {
       lp.x = 3.0F;
       lp.y = 4.0F;
       lp.heading = 0.5F;
+      lp.timestamp_sample =
+          static_cast<uint64_t>(std::llround(now * 1e6));  // a new sample per tick
       p_lp->publish(lp);
     }
   }
@@ -1804,4 +1825,76 @@ TEST(Px4LinkNode, StatusReportsPoseToWriteAgeOfForwardedCommands) {
   r.guard(2, 0.3F, NaN, 0.1F);
   r.run(0.25);
   EXPECT_FALSE(r.status.pose_to_write_age_valid);
+}
+
+// --- C1: VehicleState on each new local-position sample ------------------------------------------
+namespace {
+px4_msgs::msg::VehicleLocalPosition lp_sample(uint64_t t_us) {
+  px4_msgs::msg::VehicleLocalPosition lp;
+  lp.xy_valid = lp.v_xy_valid = lp.heading_good_for_control = true;
+  lp.x = 1.0F;
+  lp.y = 2.0F;
+  lp.timestamp_sample = t_us;
+  return lp;
+}
+}  // namespace
+
+// (a) The sample is fanned out inside its own callback: no writer tick runs here (the link clock
+// does not move and step() is never called), yet the VehicleState carrying it arrives.
+TEST(Px4LinkNode, EventDrivenStateIsPublishedInTheSampleCallback) {
+  Rig r(nullptr, "", "", {rclcpp::Parameter("event_driven", true)});
+  r.bring_up();
+  r.pump(50);
+  const uint64_t t1 = static_cast<uint64_t>(std::llround(r.now * 1e6)) + 1000;
+  r.p_lp->publish(lp_sample(t1));
+  ASSERT_TRUE(
+      r.pump_until([&] { return r.state.px4_sample_stamp.nanosec == (t1 % 1000000) * 1000; }));
+  EXPECT_TRUE(r.state.position_valid);
+  EXPECT_FLOAT_EQ(r.state.north_m, 1.0F);
+  const int after_first = r.state_count;
+  r.p_lp->publish(lp_sample(t1));  // the same sample again: nothing new to fan out
+  r.pump(100);
+  EXPECT_EQ(r.state_count, after_first);
+  r.p_lp->publish(lp_sample(t1 + 20000));
+  ASSERT_TRUE(r.pump_until([&] { return r.state_count == after_first + 1; }));
+  EXPECT_EQ(r.state.px4_sample_stamp.nanosec, ((t1 + 20000) % 1000000) * 1000);
+}
+
+// (b) Silence: nothing is republished while the last sample is still fresh (the stale-pose path
+// downstream ages it from its own receipt), and once the local position is stale the 50 Hz fallback
+// publishes the cleared validity flags, exactly when the timer mode would show them.
+TEST(Px4LinkNode, EventDrivenFallbackRepublishesOnlyWhileTheLocalPositionIsStale) {
+  Rig r(nullptr, "", "", {rclcpp::Parameter("event_driven", true)});
+  r.bring_up();
+  r.run(0.1);
+  r.pump(50);
+  ASSERT_TRUE(r.state.position_valid);
+  r.lp_alive = false;
+  r.pump(50);
+  const int before = r.state_count;
+  r.run(0.18);  // < stale_local_position_s (0.2): silence, not a cached republish
+  r.pump(50);
+  EXPECT_EQ(r.state_count, before);
+  r.run(0.1);  // now stale: fallback at the 20 ms gate with the flags cleared
+  ASSERT_TRUE(r.pump_until([&] { return r.state_count >= before + 3; }));
+  EXPECT_FALSE(r.state.position_valid);
+  EXPECT_EQ(r.state.px4_sample_stamp.sec, 0);
+  r.lp_alive = true;  // samples return: event publication resumes at once
+  r.tick(0.01);
+  ASSERT_TRUE(r.pump_until([&] { return r.state.position_valid; }));
+}
+
+// (c) Timer mode: the sample callback publishes nothing; the 20 ms gate republishes the cache.
+TEST(Px4LinkNode, TimerModeStateComesOnlyFromTheTwentyMillisecondGate) {
+  Rig r(nullptr, "", "", {rclcpp::Parameter("event_driven", false)});
+  r.bring_up();
+  r.pump(50);
+  const int before = r.state_count;
+  r.p_lp->publish(lp_sample(static_cast<uint64_t>(std::llround(r.now * 1e6)) + 1000));
+  r.pump(100);
+  EXPECT_EQ(r.state_count, before);  // no writer tick, no VehicleState
+  r.lp_alive = false;                // the cache alone keeps the 50 Hz stream while it is fresh
+  r.run(0.1);
+  ASSERT_TRUE(r.pump_until([&] { return r.state_count >= before + 4; }));
+  EXPECT_TRUE(r.state.position_valid);
 }

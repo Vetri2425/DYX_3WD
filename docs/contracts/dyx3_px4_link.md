@@ -54,7 +54,7 @@ flashed firmware. `EstimatorHealth.test_ratios_valid` is therefore always false 
 
 | Name | Type | Rate | Content |
 |---|---|---|---|
-| `/dyx3/vehicle_state` | VehicleState | 50 Hz | one fan-out of position, velocity, attitude, resets, status. Validity flags false until each source is fresh |
+| `/dyx3/vehicle_state` | VehicleState | per new local-position sample (about 50 Hz; `event_driven`, section 8) | one fan-out of position, velocity, attitude, resets, status. Validity flags false until each source is fresh |
 | `/dyx3/estimator_health` | EstimatorHealth | 10 Hz | from `estimator_status_flags` |
 | `/dyx3/gnss_report` | GnssReport | on sample | raw `SensorGps`, no interpretation |
 | `/dyx3/px4_link/status` | Px4LinkStatus | 10 Hz | see section 6 |
@@ -199,7 +199,18 @@ their source is stale.
 
 ## 8. State fan-out
 
-`VehicleState` is assembled at 50 Hz from the newest sample of each source. Mapping (NED, rad):
+**When it is published (C1).** With `event_driven=true` (default) `VehicleState` is assembled and published inside the
+`vehicle_local_position` callback for every **new** sample (a `timestamp_sample` different from the last one published),
+so a pose reaches RPP without waiting for a writer tick; a repeated `timestamp_sample` is not republished. While the local
+position is stale (no sample for `stale_local_position_s`, or none yet) the 20 ms gate inside the writer tick republishes
+the cache, so consumers keep receiving the cleared validity flags and the `vehicle_status` fields at 50 Hz. Between the
+last sample and that staleness nothing is republished: downstream ages the last pose from its own receipt (RPP
+`pose_max_age_s`, guard `vehicle_state_max_age_s` 0.5 s), and px4_link's own TopicStale fail-to-zero still fires at
+`stale_local_position_s`. With `event_driven=false` the 20 ms gate publishes the newest cached sample at 50 Hz whatever
+arrived (the behaviour before 0.14.0). Either way the newest sample of each other source is used.
+DERIVED — NOT FROM V1 SPEC: the stale-only fallback (no constant is added; it reuses the gate and the staleness limit).
+
+`VehicleState` is assembled from the newest sample of each source. Mapping (NED, rad):
 `x,y,z` to `north/east/down`; `vx,vy,vz` to `velocity_*`; `q` (FRD to NED) copied as is;
 `heading` to `heading_rad`. Validity: `position_valid = xy_valid`, `velocity_valid = v_xy_valid`,
 `vertical_position_valid = z_valid`, `vertical_velocity_valid = v_z_valid` (IF-004, 0.14.0; each also needs a
@@ -294,6 +305,7 @@ negative injected timestamps.
 | Name | Default | Class | Source |
 |---|---|---|---|
 | `publish_rate_hz` | 100 | RESTART | F1.7 (≥ 100); validated ≥ 100 |
+| `event_driven` | true | RESTART | latency hardening (C1): VehicleState on each new local-position sample (section 8); false = the 20 ms gate |
 | `command_max_age_s` | 0.2 | IDLE_ONLY | DERIVED from prototype `input_max_age_s`, re-validate GATE 4 |
 | `stale_*_s` (6) | section 5 | IDLE_ONLY | DERIVED, re-validate GATE 4 |
 | `handshake_timeout_s`, `handshake_retry_s` | 5.0, 1.0 | IDLE_ONLY | DERIVED |

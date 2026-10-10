@@ -138,6 +138,14 @@ Px4LinkNode::Px4LinkNode(const rclcpp::NodeOptions& options, ClockFn clock, bool
         lp_.timestamp_sample_us = m->timestamp_sample;
         lp_t_ = clock_();
         mon_->on_sample(kLocalPosition, lp_t_);
+        // C1 (event_driven): a new PX4 sample is fanned out now, in this callback, not at the next
+        // 20 ms gate. A repeated timestamp_sample is not a new sample and is not republished.
+        if (p_.event_driven &&
+            !(lp_published_valid_ && lp_published_sample_us_ == m->timestamp_sample)) {
+          lp_published_valid_ = true;
+          lp_published_sample_us_ = m->timestamp_sample;
+          publish_state(lp_t_);
+        }
       });
   sub_status_ = create_subscription<px4_msgs::msg::VehicleStatus>(
       "/fmu/out/vehicle_status_v1", sensor, [this](px4_msgs::msg::VehicleStatus::ConstSharedPtr m) {
@@ -349,6 +357,7 @@ bool Px4LinkNode::link_healthy_now() const {
 
 void Px4LinkNode::declare_and_validate_params() {
   p_.publish_rate_hz = declare_checked<double>(*this, "publish_rate_hz", 100.0);
+  p_.event_driven = declare_checked<bool>(*this, "event_driven", p_.event_driven);
   // F1.7: the explicit-control set must be published at >= 100 Hz.
   require(std::isfinite(p_.publish_rate_hz) && p_.publish_rate_hz >= 100.0,
           "publish_rate_hz must be >= 100");
@@ -895,47 +904,12 @@ void Px4LinkNode::service_pending(double now_s, bool link_healthy, const Offboar
 }
 
 void Px4LinkNode::publish_state_and_health(double now_s) {
-  if (now_s - last_state_pub_s_ >= 0.02 - 1e-9) {
-    last_state_pub_s_ = now_s;
-    const double fresh_lp = p_.stale.max_age_s[kLocalPosition];
-    const double fresh_att = p_.stale.max_age_s[kAttitude];
-    const double fresh_st = p_.stale.max_age_s[kVehicleStatus];
-    Freshness f;
-    f.local_position = (now_s - lp_t_) <= fresh_lp;
-    f.attitude = (now_s - att_t_) <= fresh_att;
-    f.status = (now_s - st_t_) <= fresh_st;
-    const auto o = assemble(lp_, att_, st_, f);
-    dyx3_interfaces::msg::VehicleState s;
-    s.stamp = ros_now();
-    s.px4_sample_stamp = px4_stamp(o.px4_sample_us);
-    s.position_valid = o.position_valid;
-    s.velocity_valid = o.velocity_valid;
-    s.attitude_valid = o.attitude_valid;
-    s.north_m = o.north;
-    s.east_m = o.east;
-    s.down_m = o.down;
-    s.velocity_north_mps = o.vn;
-    s.velocity_east_mps = o.ve;
-    s.velocity_down_mps = o.vd;
-    for (size_t i = 0; i < 4; ++i) s.q_frd_to_ned[i] = o.q[i];
-    s.heading_rad = o.heading;
-    // 0 also means "unknown": the rate is published only with a valid, fresh attitude.
-    s.yaw_rate_radps = o.attitude_valid && yaw_rate_->valid() ? yaw_rate_->rate() : 0.0F;
-    s.xy_reset_counter = o.xy_reset_counter;
-    s.delta_north_m = o.delta_north;
-    s.delta_east_m = o.delta_east;
-    s.global_reference_valid = o.global_reference_valid;
-    s.reference_latitude_deg = o.ref_lat;
-    s.reference_longitude_deg = o.ref_lon;
-    s.reference_altitude_m_amsl = o.ref_alt;
-    s.arming_state = o.arming_state;
-    s.nav_state = o.nav_state;
-    s.failsafe = o.failsafe;
-    s.preflight_checks_pass = o.preflight_checks_pass;
-    s.vertical_position_valid = o.vertical_position_valid;
-    s.vertical_velocity_valid = o.vertical_velocity_valid;
-    pub_state_->publish(s);
-  }
+  // Timer mode: the 20 ms gate. Event-driven: each new sample was published on arrival, so the
+  // gate runs only while the local position is stale (or never seen), so consumers keep seeing the
+  // cleared validity flags and the vehicle_status fields at 50 Hz.
+  const bool lp_fresh = (now_s - lp_t_) <= p_.stale.max_age_s[kLocalPosition];
+  if ((!p_.event_driven || !lp_fresh) && now_s - last_state_pub_s_ >= 0.02 - 1e-9)
+    publish_state(now_s);
   if (now_s - last_health_pub_s_ >= 0.1 - 1e-9) {
     last_health_pub_s_ = now_s;
     dyx3_interfaces::msg::EstimatorHealth h;  // flags_valid=false default: unhealthy
@@ -955,6 +929,48 @@ void Px4LinkNode::publish_state_and_health(double now_s) {
     // test_ratios_valid stays false: estimator_status is not on DDS at the flashed firmware.
     pub_health_->publish(h);
   }
+}
+
+void Px4LinkNode::publish_state(double now_s) {
+  last_state_pub_s_ = now_s;
+  const double fresh_lp = p_.stale.max_age_s[kLocalPosition];
+  const double fresh_att = p_.stale.max_age_s[kAttitude];
+  const double fresh_st = p_.stale.max_age_s[kVehicleStatus];
+  Freshness f;
+  f.local_position = (now_s - lp_t_) <= fresh_lp;
+  f.attitude = (now_s - att_t_) <= fresh_att;
+  f.status = (now_s - st_t_) <= fresh_st;
+  const auto o = assemble(lp_, att_, st_, f);
+  dyx3_interfaces::msg::VehicleState s;
+  s.stamp = ros_now();
+  s.px4_sample_stamp = px4_stamp(o.px4_sample_us);
+  s.position_valid = o.position_valid;
+  s.velocity_valid = o.velocity_valid;
+  s.attitude_valid = o.attitude_valid;
+  s.north_m = o.north;
+  s.east_m = o.east;
+  s.down_m = o.down;
+  s.velocity_north_mps = o.vn;
+  s.velocity_east_mps = o.ve;
+  s.velocity_down_mps = o.vd;
+  for (size_t i = 0; i < 4; ++i) s.q_frd_to_ned[i] = o.q[i];
+  s.heading_rad = o.heading;
+  // 0 also means "unknown": the rate is published only with a valid, fresh attitude.
+  s.yaw_rate_radps = o.attitude_valid && yaw_rate_->valid() ? yaw_rate_->rate() : 0.0F;
+  s.xy_reset_counter = o.xy_reset_counter;
+  s.delta_north_m = o.delta_north;
+  s.delta_east_m = o.delta_east;
+  s.global_reference_valid = o.global_reference_valid;
+  s.reference_latitude_deg = o.ref_lat;
+  s.reference_longitude_deg = o.ref_lon;
+  s.reference_altitude_m_amsl = o.ref_alt;
+  s.arming_state = o.arming_state;
+  s.nav_state = o.nav_state;
+  s.failsafe = o.failsafe;
+  s.preflight_checks_pass = o.preflight_checks_pass;
+  s.vertical_position_valid = o.vertical_position_valid;
+  s.vertical_velocity_valid = o.vertical_velocity_valid;
+  pub_state_->publish(s);
 }
 
 void Px4LinkNode::publish_status(double now_s, const StalenessReport& rep, const GateOutput& g) {
