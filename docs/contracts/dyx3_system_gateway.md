@@ -3,7 +3,7 @@
 **Status:** draft for review, written before the implementation. **Spec:** V1 §7.10, §4.3.1 (operator-link loss), R13. **Authority:** none over motion or safety.
 It is the **single ROS <-> backend boundary**: the backend (Python, no `rclpy`) talks to it over a Unix domain socket; it turns validated requests into ROS service calls and
 publishes a canonical telemetry snapshot. A backend or tablet E-stop is a **request** to `dyx3_motion_guard`; the gateway never stops anything itself. The one thing it owns
-is the **operator-link heartbeat** (§4.3.1): it publishes `OperatorLinkStatus`, and `dyx3_motion_guard` stops on `alive == false`.
+is the **operator-link heartbeat** (§4.3.1): it publishes `OperatorLinkStatus`; `dyx3_motion_guard` requires `alive == true` to START a mission (pre-arm gate) and does not stop a running one on its loss (owner decision 2026-10-10).
 
 ## 1. Transport
 

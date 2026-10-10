@@ -324,6 +324,21 @@ TEST(MotionGuardNode, ForwardsAfterSessionAcceptanceWhenAllGatesPass) {
   EXPECT_FLOAT_EQ(r.last_out.speed_body_x, -0.08F);
 }
 
+// Owner decision 2026-10-10: the tablet heartbeat is a START condition only. While RUNNING, a lost
+// operator link keeps the rover tracking; the pre-arm gate reports it so a new start is refused.
+TEST(MotionGuardNode, OperatorLinkLossKeepsARunningMissionAndBlocksStart) {
+  Rig r;
+  r.run(0.3);
+  ASSERT_EQ(r.last_out.mode, MotionSetpoint::MODE_TRACK_RATE);
+  r.op_ok = false;  // the tablet goes silent
+  r.run(1.0);
+  EXPECT_EQ(r.last_out.mode, MotionSetpoint::MODE_TRACK_RATE);
+  EXPECT_FLOAT_EQ(r.last_out.speed_body_x, 0.3F);
+  EXPECT_TRUE(r.last_gate.ok);
+  EXPECT_FALSE(r.last_gate.pre_arm_ok);
+  EXPECT_EQ(r.last_gate.pre_arm_reason_code, dyx3_interfaces::msg::MotionSetpointStatus::REASON_OPERATOR_LINK_LOST);
+}
+
 TEST(MotionGuardNode, EachInputLossZeroesWithItsReasonAndRecovers) {
   struct Case {
     const char* name;
@@ -334,7 +349,6 @@ TEST(MotionGuardNode, EachInputLossZeroesWithItsReasonAndRecovers) {
   const Case cases[] = {{"mission", &Rig::mission_running, S::REASON_MISSION_GATE},
                         {"vehicle", &Rig::veh_ok, S::REASON_ARMING_GATE},
                         {"rtk", &Rig::rtk_ok, S::REASON_RTK_GATE},
-                        {"operator", &Rig::op_ok, S::REASON_OPERATOR_LINK_LOST},
                         {"px4 link", &Rig::link_ok, S::REASON_PX4_LINK_UNHEALTHY},
                         {"estimator", &Rig::est_ok, S::REASON_HEADING_UNHEALTHY}};
   for (const auto& c : cases) {
@@ -472,7 +486,7 @@ TEST(MotionGuardNode, ForwardedCommandsKeepThePoseStampOwnStopsUseTheNewestVehic
     r.tick(0.02, true, MotionSetpoint::MODE_STOP, 0.0F, NaN, 0.0F);  // a clean STOP is forwarded
     EXPECT_TRUE(r.last_status.accepted);
     EXPECT_EQ(r.last_out.source_pose_sample_stamp, r.rpp_stamp);
-    r.op_ok = false;  // operator link lost: the guard refuses and publishes its own STOP
+    r.rtk_ok = false;  // RTK gate lost: the guard refuses and publishes its own STOP
     r.now += 0.6;
     r.tick();
     EXPECT_EQ(r.last_out.mode, MotionSetpoint::MODE_STOP);
@@ -549,7 +563,6 @@ TEST(MotionGuardNode, StatusInputFreshnessBoundaryIsHalfASecond) {
   const Case cases[] = {{"mission", &Rig::mission_running, S::REASON_MISSION_GATE},
                         {"vehicle", &Rig::veh_ok, S::REASON_ARMING_GATE},
                         {"rtk", &Rig::rtk_ok, S::REASON_RTK_GATE},
-                        {"operator", &Rig::op_ok, S::REASON_OPERATOR_LINK_LOST},
                         {"px4 link", &Rig::link_ok, S::REASON_PX4_LINK_UNHEALTHY},
                         {"estimator", &Rig::est_ok, S::REASON_HEADING_UNHEALTHY}};
   for (const auto& c : cases) {

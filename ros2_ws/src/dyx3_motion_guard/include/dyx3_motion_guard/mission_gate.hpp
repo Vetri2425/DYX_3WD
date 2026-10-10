@@ -60,13 +60,15 @@ struct GateConfig {
 };
 
 // First failing safety gate in the documented priority order, or Reason::Ok. Excludes the mission
-// gate.
+// gate and the operator link (owner decision 2026-10-10: the tablet is required to start a mission,
+// not to keep it running).
 Reason first_failing_safety_gate(const GateInputs& in, const GateConfig& cfg);
 
 // First failing PRE-ARM gate, or Reason::Ok: the same gates and order as
 // first_failing_safety_gate except that "armed" and "nav_state == OFFBOARD" are not required (the
-// arming check keeps "vehicle state fresh, no PX4 failsafe"), plus the EKF global reference
-// (GlobalReferenceInvalid, checked last). dyx3_mission arms only while this is Ok.
+// arming check keeps "vehicle state fresh, no PX4 failsafe"), plus the operator link (live tablet
+// heartbeat) and the EKF global reference (GlobalReferenceInvalid, checked last). dyx3_mission arms
+// only while this is Ok.
 Reason first_failing_pre_arm_gate(const GateInputs& in, const GateConfig& cfg);
 
 // The mission gate on its own: MissionState fresh and RUNNING.

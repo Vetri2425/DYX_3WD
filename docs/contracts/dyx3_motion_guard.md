@@ -57,7 +57,7 @@ For the freshest RPP command, the first failing check wins and yields STOP with 
 | — | a clean STOP command is forwarded as STOP here, whatever the gates say, `accepted=true`, reason `OK` | |
 | 4 | E-stop latched | `ESTOP` (5) |
 | 5 | PX4 link: session alive, handshake ok, no stale topic, status fresh | `PX4_LINK_UNHEALTHY` (8) |
-| 6 | operator link alive and fresh | `OPERATOR_LINK_LOST` (10) |
+| 6 | operator link: **not checked for commands** (owner decision 2026-10-10: the tablet is required to START a mission, not to keep it running). It is part of the pre-arm gate only (`pre_arm_reason_code` 10) | — |
 | 7 | arming: `arming_state == ARMED`, `nav_state == OFFBOARD`, no PX4 failsafe, vehicle state fresh | `ARMING_GATE` (11) |
 | 8 | RTK: fix RTK_FLOAT/RTK_FIXED at or above `rtk_min_fix_type`, corrections fresh, horizontal accuracy known and within `rtk_max_hrms_m`, status fresh | `RTK_GATE` (6) |
 | 9 | heading: estimator health fresh and `flags_valid`, GNSS yaw fusion intended and not faulted, yaw not rejected, `VehicleState.attitude_valid` | `HEADING_UNHEALTHY` (9) |
@@ -65,7 +65,7 @@ For the freshest RPP command, the first failing check wins and yields STOP with 
 | 11 | mission: `MissionState` fresh and `RUNNING` | `MISSION_GATE` (4) |
 | 12 | hard envelopes (section 5): clamp, never refuse | `LIMIT_CLAMPED` (7) with `accepted=true`, `clamped=true` |
 
-`SafetyGateStatus` is the aggregate of checks 4–10 (everything except the mission gate and the
+`SafetyGateStatus` is the aggregate of checks 4–10 (everything except check 6, the mission gate and the
 command's own validity) at a fixed 10 Hz with the same priority order; `ok=false` is
 authoritative and default. A gate input that was never received or is older than its limit is
 **failing**, never "assumed fine". A gate failing on a non-STOP command always zeroes the output at
