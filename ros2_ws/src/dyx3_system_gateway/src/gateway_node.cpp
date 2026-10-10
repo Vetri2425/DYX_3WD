@@ -181,6 +181,10 @@ GatewayNode::GatewayNode(const rclcpp::NodeOptions& options, ClockFn clock, bool
             .integer("nav_state", m.nav_state)
             .boolean("failsafe", m.failsafe)
             .boolean("global_reference_valid", m.global_reference_valid)
+            // The EKF origin, so a client can turn north_m/east_m into lat/lon with PX4's own
+            // projection (azimuthal equidistant, R 6371000 m) instead of assuming a plan origin.
+            .raw("reference_latitude_deg", json_dbl(m.reference_latitude_deg))
+            .raw("reference_longitude_deg", json_dbl(m.reference_longitude_deg))
             .integer("xy_reset_counter", m.xy_reset_counter)
             .boolean("battery_valid", m.battery_valid)
             .num("battery_voltage_v", m.battery_voltage_v)
