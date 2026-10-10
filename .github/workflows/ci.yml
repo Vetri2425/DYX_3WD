@@ -110,7 +110,10 @@ jobs:
           source /opt/ros/humble/setup.bash
           source "$(ls -d /opt/dyx3/px4_msgs/*/install | head -1)/setup.bash"
           cd ros2_ws
-          colcon test
+          # ctest -j2: a package's test binaries (the timer/event-driven twins) run side by side.
+          # Each node-test process takes its own ROS domain under an exclusive lock
+          # (test/dds_test_support.hpp), so parallel processes never share one.
+          colcon test --ctest-args -j2
           colcon test-result --verbose
 
   native_geometry_tests:
