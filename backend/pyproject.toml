@@ -9,10 +9,17 @@ description = "DYX 3WD production backend: REST + Socket.IO, auth, tablet-planne
 requires-python = ">=3.10"
 license = { text = "Proprietary" }
 authors = [{ name = "Vetri", email = "vetri96anitha@gmail.com" }]
+# Pinned to the versions validated on rover 01 (Python 3.10, 2026-10-10). The web/WebSocket stack is
+# pinned exactly, as the prototype was: an unpinned upgrade must never reach a rover untested.
 dependencies = [
-    "fastapi>=0.110",
-    "uvicorn[standard]>=0.29",
-    "python-socketio>=5.10",
+    "fastapi==0.143.0",
+    "starlette==1.7.0",
+    "pydantic==2.14.0",
+    "uvicorn[standard]==0.54.0",
+    "websockets==16.1.1",
+    "python-socketio==5.17.0",
+    "python-engineio==4.14.0",
+    "anyio==4.15.1",
 ]
 
 [project.optional-dependencies]

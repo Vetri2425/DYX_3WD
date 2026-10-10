@@ -13,7 +13,7 @@ from dyx3_backend.main import create_api
 
 def test_socketio_ping_settings_parse_and_reject_invalid_values():
     defaults = Settings.from_env({})
-    assert (defaults.sio_ping_interval_s, defaults.sio_ping_timeout_s) == (5.0, 5.0)
+    assert (defaults.sio_ping_interval_s, defaults.sio_ping_timeout_s) == (5.0, 20.0)
     configured = Settings.from_env({"DYX3_SIO_PING_INTERVAL_S": "2.5", "DYX3_SIO_PING_TIMEOUT_S": "3.25"})
     assert (configured.sio_ping_interval_s, configured.sio_ping_timeout_s) == (2.5, 3.25)
     for key in ("DYX3_SIO_PING_INTERVAL_S", "DYX3_SIO_PING_TIMEOUT_S"):

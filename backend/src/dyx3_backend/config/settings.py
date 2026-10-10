@@ -46,8 +46,10 @@ class Settings:
     telemetry_stale_s: float = 2.0
     # DERIVED — re-validate in field Wi-Fi. Session cleanup, not motion safety.
     sio_ping_interval_s: float = 5.0
-    # DERIVED — re-validate in field Wi-Fi. Tablet heartbeat owns the safety timeout.
-    sio_ping_timeout_s: float = 5.0
+    # A tablet whose UI thread stalls (file import, first map render) answers the ping late; 5 s dropped
+    # the socket on every such stall. 20 s matches the prototype (python-socketio default). The socket is
+    # not a safety channel: E-stop has its own path and the rover runs on its own once started.
+    sio_ping_timeout_s: float = 20.0
     # Rover identity and LAN discovery beacon (contract section 1a). Empty id/name = derived from the
     # machine id and hostname. The beacon is off by default here (tests); from_env turns it on.
     rover_id: str = ""
@@ -101,7 +103,7 @@ class Settings:
             tablet_heartbeat_timeout_s=_f(e, "DYX3_TABLET_HEARTBEAT_TIMEOUT_S", 1.5),
             telemetry_stale_s=_f(e, "DYX3_TELEMETRY_STALE_S", 2.0),
             sio_ping_interval_s=_f(e, "DYX3_SIO_PING_INTERVAL_S", 5.0),
-            sio_ping_timeout_s=_f(e, "DYX3_SIO_PING_TIMEOUT_S", 5.0),
+            sio_ping_timeout_s=_f(e, "DYX3_SIO_PING_TIMEOUT_S", 20.0),
             rover_id=e.get("DYX3_ROVER_ID", ""),
             rover_name=e.get("DYX3_ROVER_NAME", ""),
             api_port=int(_f(e, "DYX3_BACKEND_PORT", 8000)),

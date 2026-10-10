@@ -226,7 +226,7 @@ in the fail-to-STOP direction.
 ## 4. Socket.IO
 
 `/socket.io`, connect requires a valid token (`auth={"token": ...}`; a bad one is refused with `unauthorized`). `cors_allowed_origins` is empty (same-origin / native clients only).
-Transport timing: `sio_ping_interval_s` 5.0 and `sio_ping_timeout_s` 5.0 (DERIVED; session cleanup only, the tablet heartbeat owns the safety timeout).
+Transport timing: `sio_ping_interval_s` 5.0 and `sio_ping_timeout_s` 20.0 (DERIVED; session cleanup only). 20 s, the prototype's value, keeps a tablet whose UI thread stalls for a few seconds (file import, first map render) connected; 5 s dropped the socket on every such stall.
 
 **Server -> client: two events.**
 
