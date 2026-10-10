@@ -17,10 +17,11 @@ namespace {
 void set_nonblock(int fd) { fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK); }
 }  // namespace
 
-bool IpcServer::start(const Config& cfg, OnLine on_line, std::string* err) {
+bool IpcServer::start(const Config& cfg, OnLine on_line, std::string* err, OnConnect on_connect) {
   stop();
   cfg_ = cfg;
   on_line_ = std::move(on_line);
+  on_connect_ = std::move(on_connect);
   if (cfg.path.size() >= sizeof(sockaddr_un::sun_path)) {
     if (err) *err = "socket path too long";
     return false;
@@ -189,6 +190,7 @@ void IpcServer::loop() {
       while (read(wake_[0], buf, sizeof buf) > 0) {
       }
     }
+    std::vector<int> accepted;
     if (fds[0].revents & POLLIN) {
       for (;;) {
         const int cfd = accept(listen_fd_, nullptr, nullptr);
@@ -200,9 +202,14 @@ void IpcServer::loop() {
           continue;
         }
         set_nonblock(cfd);
+        accepted.push_back(next_id_);
         clients_map_[next_id_++] = Client{cfd, {}, {}, false};
         clients_ = static_cast<int>(clients_map_.size());
       }
+    }
+    // Without the lock, so the handler can send() (e.g. replay the latest event to the newcomer).
+    if (on_connect_) {
+      for (const int id : accepted) on_connect_(id);
     }
     std::vector<int> to_close;
     std::vector<std::pair<int, std::string>> lines;

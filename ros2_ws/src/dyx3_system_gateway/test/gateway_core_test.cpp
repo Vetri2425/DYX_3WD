@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "dyx3_system_gateway/command_validator.hpp"
+#include "dyx3_system_gateway/event_stream.hpp"
 #include "dyx3_system_gateway/ipc_server.hpp"
 #include "dyx3_system_gateway/json.hpp"
 #include "dyx3_system_gateway/operator_link.hpp"
@@ -288,6 +289,107 @@ TEST(Snapshot, MissingSourcesAreNullAndOldSourcesAreNotFresh) {
   size_t n;
   TelemetrySnapshot::all_sources(&n);
   EXPECT_EQ(v.o.size(), n + 1);
+  EXPECT_TRUE(s.fresh("rtk_status", 11.0));
+  EXPECT_FALSE(s.fresh("rtk_status", 11.1));
+  EXPECT_FALSE(s.fresh("vehicle_state", 10.0));  // never received is never fresh
+}
+
+// ---- pushed events
+// -------------------------------------------------------------------------------------------------
+namespace {
+struct Events {
+  std::vector<JsonValue> out;
+  EventStream es;
+  explicit Events(double coalesce_s = 0.01)
+      : es(
+            coalesce_s,
+            [this](const std::string& l) {
+              JsonValue v;
+              std::string e;
+              EXPECT_TRUE(parse_json(l, &v, &e)) << e << ": " << l;
+              out.push_back(v);
+            },
+            [] { return int64_t{1760000000123}; }) {}
+};
+}  // namespace
+
+TEST(EventStream, ATransitionIsPushedAtOnceWithItsSequenceAndStamps) {
+  Events ev;
+  ev.es.offer("mission_state", "2/0", R"({"state":2})", 10.0);
+  ASSERT_EQ(ev.out.size(), 1U);
+  const JsonValue& e = ev.out[0];
+  EXPECT_EQ(e.get("v")->i, kProtocolVersion);
+  EXPECT_EQ(e.get("type")->s, "event");
+  EXPECT_EQ(e.get("event")->s, "mission_state");
+  EXPECT_EQ(e.get("seq")->i, 1);
+  EXPECT_DOUBLE_EQ(e.get("t_mono_s")->n, 10.0);
+  EXPECT_EQ(e.get("t_wall_ms")->i, 1760000000123);
+  EXPECT_EQ(e.get("coalesced")->i, 0);
+  EXPECT_FALSE(e.get("replay")->b);
+  EXPECT_EQ(e.get("data")->get("state")->i, 2);
+  // the same key again is not a transition: nothing is pushed (the snapshot carries it)
+  ev.es.offer("mission_state", "2/0", R"({"state":2,"point_index":7})", 10.5);
+  EXPECT_EQ(ev.out.size(), 1U);
+  EXPECT_FALSE(ev.es.pending("mission_state"));
+  // another kind has its own window and shares the sequence
+  ev.es.offer("estop", "1:tablet", R"({"asserted":true})", 10.501);
+  ASSERT_EQ(ev.out.size(), 2U);
+  EXPECT_EQ(ev.out[1].get("seq")->i, 2);
+  EXPECT_EQ(ev.es.seq(), 2U);
+  EXPECT_EQ(ev.es.last_key("estop"), "1:tablet");
+  EXPECT_EQ(ev.es.last_key("fcu_link"), "");
+}
+
+TEST(EventStream, TransitionsWithinTheWindowAreFoldedIntoOneEventWithTheLatestData) {
+  Events ev;
+  ev.es.offer("mission_state", "1/0", R"({"state":1})", 20.000);  // leading edge: pushed
+  ev.es.offer("mission_state", "2/0", R"({"state":2})", 20.002);  // inside the window: waits
+  ev.es.offer("mission_state", "3/0", R"({"state":3})", 20.004);  // folded
+  ev.es.offer("mission_state", "3/0", R"({"state":3,"point_index":1})", 20.006);  // latest data
+  ASSERT_EQ(ev.out.size(), 1U);
+  EXPECT_TRUE(ev.es.pending("mission_state"));
+  ev.es.flush(20.009);  // the window (10 ms from the last push) has not passed
+  ASSERT_EQ(ev.out.size(), 1U);
+  ev.es.flush(20.010);
+  ASSERT_EQ(ev.out.size(), 2U);
+  const JsonValue& e = ev.out[1];
+  EXPECT_EQ(e.get("seq")->i, 2);
+  EXPECT_EQ(e.get("coalesced")->i, 1);  // two transitions in one event: one folded away
+  EXPECT_EQ(e.get("data")->get("state")->i, 3);
+  EXPECT_EQ(e.get("data")->get("point_index")->i, 1);
+  EXPECT_DOUBLE_EQ(e.get("t_mono_s")->n, 20.006);  // when the carried value was observed
+  // after a quiet window the next transition is pushed at once again
+  ev.es.offer("mission_state", "4/0", R"({"state":4})", 20.030);
+  ASSERT_EQ(ev.out.size(), 3U);
+  EXPECT_EQ(ev.out[2].get("coalesced")->i, 0);
+  // a window of 0 pushes every transition
+  Events all(0.0);
+  for (int i = 0; i < 5; ++i)
+    all.es.offer("estop", std::to_string(i % 2), "{}", 1.0);  // same instant, five transitions
+  EXPECT_EQ(all.out.size(), 5U);
+}
+
+TEST(EventStream, ReplayGivesTheLatestEventOfEachKindInSequenceOrder) {
+  Events ev;
+  std::vector<std::string> sent;
+  ev.es.replay([&](const std::string& l) { sent.push_back(l); });
+  EXPECT_TRUE(sent.empty());  // nothing pushed yet, nothing to replay
+  ev.es.offer("estop", "0:", R"({"asserted":false})", 1.0);
+  ev.es.offer("mission_state", "2/0", R"({"state":2})", 1.0);
+  ev.es.offer("estop", "1:ble", R"({"asserted":true})", 1.5);
+  ev.es.replay([&](const std::string& l) { sent.push_back(l); });
+  ASSERT_EQ(sent.size(), 2U);
+  JsonValue a, b;
+  std::string e;
+  ASSERT_TRUE(parse_json(sent[0], &a, &e)) << e;
+  ASSERT_TRUE(parse_json(sent[1], &b, &e)) << e;
+  EXPECT_EQ(a.get("event")->s, "mission_state");
+  EXPECT_EQ(a.get("seq")->i, 2);
+  EXPECT_EQ(b.get("event")->s, "estop");
+  EXPECT_EQ(b.get("seq")->i, 3);  // the original sequence number: a client can drop a duplicate
+  EXPECT_TRUE(a.get("replay")->b && b.get("replay")->b);
+  EXPECT_TRUE(b.get("data")->get("asserted")->b);
+  EXPECT_EQ(ev.es.seq(), 3U);  // a replay is not a new event
 }
 
 TEST(OperatorLink, AliveOnlyWithAClientAndAFreshHeartbeat) {
@@ -511,6 +613,39 @@ TEST(IpcServer, ASecondServerOnTheSamePathIsRefusedAndTheFirstKeepsServing) {
   EXPECT_TRUE(d.start(c, [](int, const std::string&) {}, &err)) << err;
   d.stop();
   std::filesystem::remove(path + ".lock");
+}
+
+TEST(IpcServer, TheConnectHookSeesEachNewClientAndCanWriteToIt) {
+  const std::string path = tmp_sock();
+  IpcServer s;
+  IpcServer::Config c;
+  c.path = path;
+  std::string err;
+  std::mutex mu;
+  std::vector<int> seen;
+  ASSERT_TRUE(s.start(
+      c, [](int, const std::string&) {}, &err,
+      [&](int cl) {
+        {
+          std::lock_guard<std::mutex> lk(mu);
+          seen.push_back(cl);
+        }
+        s.send(cl, "hello " + std::to_string(cl));
+      }))
+      << err;
+  Sock a(path);
+  ASSERT_TRUE(a.ok());
+  auto r = a.read_lines(1);
+  ASSERT_EQ(r.size(), 1U);
+  EXPECT_EQ(r[0].rfind("hello ", 0), 0U);
+  Sock b(path);
+  ASSERT_TRUE(b.ok());
+  r = b.read_lines(1);
+  ASSERT_EQ(r.size(), 1U);
+  std::lock_guard<std::mutex> lk(mu);
+  ASSERT_EQ(seen.size(), 2U);
+  EXPECT_NE(seen[0], seen[1]);
+  EXPECT_EQ(r[0], "hello " + std::to_string(seen[1]));
 }
 
 TEST(IpcServer, StopLeavesASocketFileItDidNotCreate) {

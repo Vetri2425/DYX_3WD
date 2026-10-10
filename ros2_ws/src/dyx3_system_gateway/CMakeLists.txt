@@ -15,6 +15,7 @@ add_library(dyx3_gateway_core STATIC
   src/json.cpp
   src/command_validator.cpp
   src/telemetry_snapshot.cpp
+  src/event_stream.cpp
   src/ipc_server.cpp)
 target_include_directories(dyx3_gateway_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

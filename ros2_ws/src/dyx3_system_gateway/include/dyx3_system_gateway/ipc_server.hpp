@@ -1,6 +1,8 @@
 // ipc_server — Unix-domain-socket NDJSON server on its own thread. Contract:
 // docs/contracts/dyx3_system_gateway.md section 1. POSIX/std only. Complete lines are handed to the
-// callback ON THE IPC THREAD; send()/broadcast() are thread safe.
+// callback ON THE IPC THREAD; send()/broadcast() are thread safe and never block on a peer: they
+// only append to that peer's bounded out buffer (a peer past max_out_bytes is dropped), so a slow
+// or stuck client can never stall the caller (the ROS executor) or another client.
 // Path ownership: start() takes an exclusive flock on "<path>.lock" and refuses to start while
 // another instance holds it; stop() unlinks the socket only if it is still the one this instance
 // bound (same device and inode).
@@ -29,9 +31,12 @@ public:
   using OnLine = std::function<void(int client, const std::string& line)>;
   using OnOverflow =
       std::function<void(int client)>;  // line too long: the client is closed after this
+  // A new client was accepted (called ON THE IPC THREAD, without the server lock, before any line
+  // of that client is read); the handler may send() to it.
+  using OnConnect = std::function<void(int client)>;
 
   ~IpcServer() { stop(); }
-  bool start(const Config& cfg, OnLine on_line, std::string* err);
+  bool start(const Config& cfg, OnLine on_line, std::string* err, OnConnect on_connect = nullptr);
   void stop();
   void send(int client, const std::string& line);  // appends '\n'
   void broadcast(const std::string& line);
@@ -53,6 +58,7 @@ private:
   void release_path();
   Config cfg_;
   OnLine on_line_;
+  OnConnect on_connect_;
   int listen_fd_{-1};
   int lock_fd_{-1};
   bool own_sock_{false};

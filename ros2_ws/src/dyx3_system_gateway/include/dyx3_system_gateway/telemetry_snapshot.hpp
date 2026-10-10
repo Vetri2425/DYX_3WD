@@ -17,6 +17,8 @@ public:
   // cannot mistake absence for a value.
   std::string to_json(double now_s, const std::string& gateway_json) const;
   static const char* const* all_sources(size_t* n);
+  // True when `source` has been received and its latest message is at most fresh_s old.
+  bool fresh(const std::string& source, double now_s) const;
 
 private:
   struct Entry {
