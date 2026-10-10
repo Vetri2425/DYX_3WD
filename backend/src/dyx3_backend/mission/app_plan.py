@@ -8,7 +8,8 @@ cannot alter the drawn path, and reports every one of them:
   (meta ``max_boundary_snap_m``).
 
 The frame is explicit: points relative to a geodetic ``anchor`` (``frame: "local_ned"``), or points already in the
-rover's EKF local frame (``frame: "ekf_local_ned"``, no anchor). A ``local_ned`` payload without an anchor is refused,
+rover's EKF local frame (``frame: "ekf_local_ned"``, no anchor). With an anchor, the anchor is the origin: point
+``(n, e)`` is metres north/east of it and ``origin_ne_m`` must be absent or ``[0, 0]``. A ``local_ned`` payload without an anchor is refused,
 so points relative to an app GPS origin can never be driven as if they were EKF-local.
 """
 
@@ -128,6 +129,11 @@ def compile_plan(body: object) -> bytes:
     if not isinstance(origin, list) or len(origin) != 2:
         raise MissionError(400, "INVALID_PAYLOAD", "origin_ne_m must have two coordinates")
     origin = [_coordinate(value, f"origin_ne_m[{i}]") for i, value in enumerate(origin)]
+    if anchor is not None:
+        # The anchor IS the origin: point (n, e) is metres north/east of it. A second offset would be ambiguous.
+        if origin != [0.0, 0.0]:
+            _fail("ORIGIN_WITH_ANCHOR", "with an anchor, origin_ne_m must be absent or [0, 0]: points are metres from the anchor")
+        origin = [0.0, 0.0]  # canonical (-0.0 spells differently)
     runs = body["runs"]
     if not isinstance(runs, list):
         raise MissionError(400, "INVALID_PAYLOAD", "runs must be an array")

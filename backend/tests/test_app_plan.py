@@ -343,3 +343,37 @@ def test_header_frame_line_is_unchanged_and_meta_canonical():
     meta = json.loads(lines[3][5:])
     assert lines[3][5:] == json.dumps(meta, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
     assert pa.decode(data).meta["densified_steps"] == 1
+
+
+@pytest.mark.parametrize("origin,code", [
+    ([0.5, 0.0], "ORIGIN_WITH_ANCHOR"),
+    ([0.0, -2.0], "ORIGIN_WITH_ANCHOR"),
+    ([1e-9, 0.0], "ORIGIN_WITH_ANCHOR"),
+])
+def test_an_anchor_is_the_origin(rig, origin, code):
+    client, settings = rig
+    body = plan("mark")
+    body["origin_ne_m"] = origin
+    response = client.post("/api/missions/plan", headers=H("oper-tok"), json=body)
+    assert response.status_code == 422 and response.json()["code"] == code, response.text
+    assert not Path(settings.missions_dir).exists()
+
+
+def test_anchor_with_a_zero_or_absent_origin_is_accepted():
+    shas = set()
+    for origin in ("absent", [0, 0], [0.0, -0.0]):
+        body = plan("mark")
+        if origin != "absent":
+            body["origin_ne_m"] = origin
+        data = compile_plan(body)
+        assert pa.decode(data).meta["origin_ne_m"] == [0.0, 0.0]
+        shas.add(pa.sha256_hex(data))
+    assert len(shas) == 1  # one canonical spelling, one mission
+
+
+def test_ekf_frame_keeps_its_origin_offset():
+    body = plan("mark")
+    body["frame"] = "ekf_local_ned"
+    del body["anchor"]
+    body["origin_ne_m"] = [1.5, -2.25]
+    assert pa.decode(compile_plan(body)).meta["origin_ne_m"] == [1.5, -2.25]
