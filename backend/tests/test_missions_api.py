@@ -97,7 +97,7 @@ def test_start_goes_to_the_gateway_only_for_a_readable_artifact(rig):
     data = Path(os.path.join(DATA, "square_2x2.dxf")).read_bytes()
     sha = up(c, "s.dxf", data).json()["mission"]["sha256"]
     r = c.post(f"/api/missions/{sha}/start", headers=H("oper-tok"))
-    assert r.status_code == 200
+    assert r.status_code == 202
     assert gw.calls[-1] == ("start_mission", {"path_artifact_sha256": sha})
     n = len(gw.calls)
     assert c.post(f"/api/missions/{'0' * 64}/start", headers=H("oper-tok")).status_code == 404
@@ -114,3 +114,90 @@ def test_a_corrupt_artifact_is_skipped_by_the_listing(rig):
         fh.write(b"junk")
     shas = [m["sha256"] for m in c.get("/api/missions", headers=H("view-tok")).json()["missions"]]
     assert shas == [sha]
+
+
+# ------------------------------------------------------------------------------------------------ start v2 (202 accept)
+def plan_mission(c) -> str:
+    body = {"client": "t", "client_version": "1", "frame": "ekf_local_ned",
+            "runs": [{"type": "mark", "points": [[0, 0, 3], [1, 0, 1], [2, 0, 3]]}]}
+    r = c.post("/api/missions/plan", headers=H("oper-tok"), json=body)
+    assert r.status_code == 201, r.text
+    return r.json()["mission"]["sha256"]
+
+
+def accepted(mission_id: int) -> dict:
+    return {"v": 1, "ok": True, "code": "ok", "reason": "", "data": {"accepted": True, "reason_code": 0, "mission_id": mission_id}}
+
+
+def test_start_answers_202_accepted_with_the_execution(rig):
+    c, gw, _ = rig
+    sha = plan_mission(c)
+    gw.replies["start_mission"] = accepted(7)
+    r = c.post(f"/api/missions/{sha}/start", headers=H("oper-tok"))
+    assert r.status_code == 202, r.text
+    assert r.json() == {"ok": True, "accepted": True, "execution": {"mission_id": 7, "request_id": None},
+                        "data": {"accepted": True, "reason_code": 0, "mission_id": 7}}
+    assert gw.calls[-1] == ("start_mission", {"path_artifact_sha256": sha})  # no id: none is invented
+
+
+def test_start_passes_the_request_id_through_also_on_a_duplicate(rig):
+    c, gw, _ = rig
+    sha = plan_mission(c)
+    gw.replies["start_mission"] = accepted(7)
+    first = c.post(f"/api/missions/{sha}/start", headers=H("oper-tok"), json={"request_id": "tab-1:9f2c"})
+    again = c.post(f"/api/missions/{sha}/start", headers={**H("oper-tok"), "Idempotency-Key": "tab-1:9f2c"})
+    both = c.post(f"/api/missions/{sha}/start", headers={**H("oper-tok"), "Idempotency-Key": "tab-1:9f2c"},
+                  json={"request_id": "tab-1:9f2c"})
+    for r in (first, again, both):
+        assert r.status_code == 202, r.text
+        assert r.json()["execution"] == {"mission_id": 7, "request_id": "tab-1:9f2c"}
+    assert gw.calls[-3:] == [("start_mission", {"path_artifact_sha256": sha, "request_id": "tab-1:9f2c"})] * 3
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"json": {"request_id": ""}},
+    {"json": {"request_id": "x" * 65}},
+    {"json": {"request_id": "has space"}},
+    {"json": {"request_id": 12}},
+    {"json": {"request_id": "a", "force": True}},
+    {"headers": {"Idempotency-Key": "a/b"}},
+    {"headers": {"Idempotency-Key": "a"}, "json": {"request_id": "b"}},
+])
+def test_a_bad_request_id_never_reaches_the_gateway(rig, kwargs):
+    c, gw, _ = rig
+    sha = plan_mission(c)
+    headers = {**H("oper-tok"), **kwargs.pop("headers", {})}
+    r = c.post(f"/api/missions/{sha}/start", headers=headers, **kwargs)
+    assert r.status_code == 422, r.text
+    assert gw.calls == []
+
+
+@pytest.mark.parametrize("reply,status", [
+    ({"ok": False, "code": "rejected", "reason": "refused by the target (see data.reason_code)",
+      "data": {"accepted": False, "reason_code": 3, "mission_id": 0}}, 409),
+    ({"ok": False, "code": "rejected", "reason": "busy", "data": {"accepted": False, "reason_code": 2, "detail": "x"}}, 409),
+    ({"ok": False, "code": "service_unavailable", "reason": "mission start service is not available", "data": {}}, 503),
+    ({"ok": False, "code": "timeout", "reason": "no answer", "data": {}}, 504),
+    ({"ok": False, "code": "invalid_command", "reason": "bad args", "data": {}}, 400),
+])
+def test_start_errors_pass_through_typed_and_untouched(rig, reply, status):
+    c, gw, _ = rig
+    sha = plan_mission(c)
+    gw.replies["start_mission"] = {"v": 1, **reply}
+    r = c.post(f"/api/missions/{sha}/start", headers=H("oper-tok"), json={"request_id": "r1"})
+    assert r.status_code == status, r.text
+    assert r.json() == {"ok": False, "code": reply["code"], "reason": reply["reason"], "delivered": True, "data": reply["data"]}
+
+
+def test_start_not_delivered_is_503_and_unknown_is_504(rig):
+    from dyx3_backend.gateway.client import GatewayTimeout
+
+    c, gw, _ = rig
+    sha = plan_mission(c)
+    gw.connected = False
+    r = c.post(f"/api/missions/{sha}/start", headers=H("oper-tok"))
+    assert r.status_code == 503 and r.json()["delivered"] is False and r.json()["ok"] is False
+    gw.connected = True
+    gw.raises = GatewayTimeout("no reply to start_mission within 2.0s")
+    r = c.post(f"/api/missions/{sha}/start", headers=H("oper-tok"))
+    assert r.status_code == 504 and r.json()["delivered"] is None  # unknown: re-read the state

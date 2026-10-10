@@ -21,6 +21,12 @@ end <N>
 ```
 `flags`: bit0 = spray ON, bit1 = **must-hit** (source CAD/survey vertex, never simplified away). Bit-test, never `> 0.5` (spray-OFF must-hit = `2`).
 `north_m`, `east_m`: local NED metres relative to the mission origin recorded in `meta.origin_ne_m`. `DYX3PATH` holds the planned polyline.
+For an app-planned mission (`engine app_v1`, `backend.md` section 1b) the header line stays `frame local_ned` and the meta says what
+the coordinates are relative to: `meta.frame` = `"local_ned"` (north/east metres from the WGS84 `meta.anchor`
+`{"alt": float|null, "lat": float, "lon": float}`) or `"ekf_local_ned"` (already the rover's EKF local frame, `meta.anchor` = `null`).
+It also records the admission normalisation: `meta.densified_steps` (steps over 5 m split into collinear sub-steps) and
+`meta.max_boundary_snap_m` (largest run-boundary snap, at most 0.010 m). An artifact without `meta.frame` (a DXF upload)
+carries no anchor.
 At mission install, RPP is the sole owner of `dyx3_rpp::path_conditioner` and writes the resulting immutable `DYX3COND 1` artifact.
 
 ## Conditioned execution artifact (`DYX3COND 1`)

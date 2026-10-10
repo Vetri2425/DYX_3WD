@@ -65,6 +65,15 @@ def summarize(art: pa.PathArtifact) -> dict:
     }
 
 
+def normalisation(art: pa.PathArtifact) -> dict:
+    """What app-plan admission changed (docs/contracts/backend.md section 1b); zero for an artifact that predates it."""
+    meta = art.meta or {}
+    return {
+        "densified_steps": int(meta.get("densified_steps", 0)),
+        "max_boundary_snap_m": float(meta.get("max_boundary_snap_m", 0.0)),
+    }
+
+
 class MissionService:
     def __init__(self, settings: Settings, engine_id: str | None = None) -> None:
         # Imported here because the planner imports this module (MissionError).
@@ -95,19 +104,21 @@ class MissionService:
             raise MissionError(422, "artifact_failed", f"{type(exc).__name__}: {exc}") from exc
         return summarize(art)
 
-    def ingest_app_plan(self, raw: bytes) -> dict:
+    def ingest_app_plan(self, raw: bytes) -> tuple[dict, dict]:
         """Parse, validate and store an app plan (raw JSON body). Blocking: call it in a worker thread.
 
-        Parsing and compiling run in the planning process; this path never imports the path engine.
+        Returns ``(summary, normalisation)``; both are read back from the stored artifact. Parsing and compiling run in
+        the planning process; this path never imports the path engine.
         """
         from dyx3_backend.mission import planner
 
         blob = self.planner.run(planner.app_plan_job, bytes(raw))
         try:
             digest, _ = pa.store(self._s.missions_dir, blob)
-            return summarize(pa.load(self._s.missions_dir, digest))
+            art = pa.load(self._s.missions_dir, digest)
         except (pa.ArtifactError, OSError) as exc:
             raise MissionError(422, "ARTIFACT_FAILED", f"{type(exc).__name__}: {exc}") from exc
+        return summarize(art), normalisation(art)
 
     def parse_dxf(self, filename: str, data: bytes) -> dict:
         """Parse-only DXF import (no artifact). Blocking: call it in a worker thread; ezdxf runs in the planning process."""
