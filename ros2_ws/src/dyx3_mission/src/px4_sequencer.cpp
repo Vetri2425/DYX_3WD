@@ -36,6 +36,7 @@ void Px4Sequencer::begin_execution() {
   queue_.clear();
   flights_.clear();
   arm_ = Arm::kNone;
+  armed_earlier_ = false;
   offboard_requested_ = false;
   releasing_ = false;
 }
@@ -98,8 +99,11 @@ void Px4Sequencer::note_arm_result(Px4Result r, std::uint8_t reason) {
   } else if (r == Px4Result::kTimeout || reason == kArmReasonTimeout) {
     arm_ = Arm::kDoubt;  // PX4 may still arm: the release disarms
   } else {
-    arm_ = Arm::kRefused;  // px4_link refused before commanding: nothing to disarm
+    // px4_link refused before commanding: this request armed nothing (an earlier cycle of this
+    // execution may have: armed_earlier_ keeps that).
+    arm_ = Arm::kRefused;
   }
+  if (arm_ == Arm::kConfirmed || arm_ == Arm::kDoubt) armed_earlier_ = true;
 }
 
 std::optional<Px4Outcome> Px4Sequencer::on_response(std::uint64_t id, bool accepted,

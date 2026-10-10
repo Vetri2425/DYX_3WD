@@ -69,6 +69,14 @@ const char* to_string(Event e) {
       return "rpp_stale";
     case Event::kRppAckTimeout:
       return "rpp_ack_timeout";
+    case Event::kReengage:
+      return "reengage";
+    case Event::kReengaged:
+      return "reengaged";
+    case Event::kReengageTimeout:
+      return "reengage_timeout";
+    case Event::kRppPivotTimeout:
+      return "rpp_pivot_timeout";
   }
   return "?";
 }
@@ -118,6 +126,11 @@ Result MissionFsm::go(State to, Event ev, std::uint8_t reason, const std::string
   t.detail = detail;
   t.stamp_ns = now_ns;
   state_ = to;
+  // The re-engage marks live exactly as long as its ARMING / ENGAGING (reengage() sets them first).
+  if (to != State::kArming && to != State::kEngaging) {
+    reengaging_ = false;
+    reengage_confirmed_ = false;
+  }
   reason_ = reason;
   gate_reason_ = gate_reason;
   detail_ = detail;
@@ -205,6 +218,12 @@ Result MissionFsm::armed(bool ok, std::uint8_t reason, const std::string& detail
 
 Result MissionFsm::engaged(bool ok, std::uint8_t reason, const std::string& detail,
                            std::int64_t now_ns) {
+  if (state_ == State::kEngaging && reengaging_ && ok) {
+    if (reengage_confirmed_) return ok_no_change(Event::kEngaged, "duplicate", now_ns);
+    reengage_confirmed_ = true;  // RUNNING only with the full gate: reengage_gate()
+    return ok_no_change(Event::kEngaged, "re-engage: OFFBOARD confirmed, waiting for the full gate",
+                        now_ns);
+  }
   return step(State::kEngaging, State::kReady, Event::kEngaged, ok, reason, detail, now_ns);
 }
 
@@ -232,6 +251,9 @@ Result MissionFsm::pause(std::int64_t now_ns) {
 }
 
 Result MissionFsm::resume(bool gate_ok, std::int64_t now_ns) {
+  if (reengaging_) {
+    return ok_no_change(Event::kResume, "re-engage already in progress", now_ns);
+  }
   if (state_ != State::kPaused) {
     return refuse(Event::kResume, Reject::kNotPaused, false, "not paused", now_ns);
   }
@@ -239,6 +261,39 @@ Result MissionFsm::resume(bool gate_ok, std::int64_t now_ns) {
     return refuse(Event::kResume, Reject::kSafetyGate, false, "resume conditions not met", now_ns);
   }
   return go(State::kRunning, Event::kResume, kReasonNone, "operator resume", now_ns);
+}
+
+Result MissionFsm::reengage(std::int64_t now_ns) {
+  if (state_ != State::kPaused) {
+    if (reengaging_) {
+      return ok_no_change(Event::kReengage, "re-engage already in progress", now_ns);
+    }
+    return refuse(Event::kReengage, Reject::kNotPaused, false, "not paused", now_ns);
+  }
+  reengaging_ = true;  // before the transition: the observer already sees a re-engage
+  reengage_confirmed_ = false;
+  return go(State::kArming, Event::kReengage, kReasonNone,
+            "operator resume: re-engaging (arm, then OFFBOARD)", now_ns);
+}
+
+Result MissionFsm::reengage_gate(bool gate_ok, std::int64_t now_ns) {
+  if (!awaiting_reengage_gate() || state_ != State::kEngaging) {
+    return refuse(Event::kReengaged, Reject::kIllegal, true, "no re-engage awaiting the gate",
+                  now_ns);
+  }
+  if (!gate_ok) {
+    return ok_no_change(Event::kReengaged, "re-engage held: full safety gate not ok yet", now_ns);
+  }
+  return go(State::kRunning, Event::kReengaged, kReasonNone, "re-engaged: armed and OFFBOARD",
+            now_ns);
+}
+
+Result MissionFsm::reengage_timeout(std::uint8_t guard_reason, std::int64_t now_ns) {
+  if (!awaiting_reengage_gate() || state_ != State::kEngaging) {
+    return ok_no_change(Event::kReengageTimeout, "no re-engage awaiting the gate", now_ns);
+  }
+  return go(State::kError, Event::kReengageTimeout, map_guard_reason(guard_reason),
+            "full safety gate never passed after the re-engage", now_ns, guard_reason);
 }
 
 Result MissionFsm::abort(std::uint8_t reason, std::int64_t now_ns) {
@@ -254,14 +309,16 @@ Result MissionFsm::rpp_complete(std::int64_t now_ns) {
   if (state_ == State::kRunning) {
     return go(State::kCompleted, Event::kRppComplete, kReasonNone, "rpp reports complete", now_ns);
   }
-  if (state_ == State::kPaused) {
+  if (state_ == State::kPaused || reengaging_) {
     return ok_no_change(Event::kRppComplete, "complete while paused ignored", now_ns);
   }
   return refuse(Event::kRppComplete, Reject::kIllegal, true, "not running", now_ns);
 }
 
 Result MissionFsm::rpp_error(std::int64_t now_ns) {
-  if (state_ == State::kReady || state_ == State::kRunning || state_ == State::kPaused) {
+  // A re-engage's RPP still holds the execution (loaded and paused).
+  if (state_ == State::kReady || state_ == State::kRunning || state_ == State::kPaused ||
+      reengaging_) {
     return go(State::kError, Event::kRppError, kReasonRppError, "rpp reports error", now_ns);
   }
   if (active()) {
@@ -311,6 +368,14 @@ Result MissionFsm::rpp_stale(std::int64_t now_ns) {
   return ok_no_change(Event::kRppStale, "no running mission", now_ns);
 }
 
+Result MissionFsm::rpp_pivot_timeout(std::int64_t now_ns) {
+  if (state_ == State::kRunning) {
+    return go(State::kPaused, Event::kRppPivotTimeout, kReasonRppPivotTimeout,
+              "rpp pivot watchdog expired (heading not reached)", now_ns);
+  }
+  return ok_no_change(Event::kRppPivotTimeout, "no running mission", now_ns);
+}
+
 Result MissionFsm::rpp_ack_timeout(bool gate_ok, std::uint8_t guard_reason, std::int64_t now_ns) {
   if (state_ != State::kReady) {
     return ok_no_change(Event::kRppAckTimeout, "not waiting for an ack", now_ns);
@@ -324,7 +389,8 @@ Result MissionFsm::rpp_ack_timeout(bool gate_ok, std::uint8_t guard_reason, std:
 }
 
 Result MissionFsm::skip_point(bool has_active_point, std::int64_t now_ns) {
-  if (state_ != State::kRunning && state_ != State::kPaused) {
+  // A re-engage is still a paused execution to the operator (MissionState says PAUSED).
+  if (state_ != State::kRunning && state_ != State::kPaused && !reengaging_) {
     return refuse(Event::kSkipPoint, Reject::kNotRunning, false, "not running", now_ns);
   }
   if (!has_active_point) {

@@ -11,6 +11,7 @@ struct RunState {
   std::uint32_t mission_id = 0;
   std::uint32_t run_index = 0;         ///< mirrored from RppStatus (RPP owns run sequencing)
   std::uint32_t point_index = 0;       ///< active must-hit point (journal)
+  std::uint32_t start_run_index = 0;   ///< the run RPP starts this execution from (resume, 0.17.0)
   std::string path_artifact_sha256;    ///< the EXECUTION artifact (what RPP loads); set from ARMING
   std::string source_artifact_sha256;  ///< the artifact the operator started
   std::string request_id;              ///< StartMission.request_id of this execution
@@ -18,6 +19,7 @@ struct RunState {
   void clear_progress() {
     run_index = 0;
     point_index = 0;
+    start_run_index = 0;
   }
   void clear() {
     mission_id = 0;

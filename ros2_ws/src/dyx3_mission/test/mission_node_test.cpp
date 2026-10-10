@@ -17,6 +17,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <string>
@@ -39,6 +40,7 @@
 #include "dyx3_interfaces/srv/skip_point.hpp"
 #include "dyx3_interfaces/srv/start_mission.hpp"
 #include "dyx3_mission/frame_placement.hpp"
+#include "dyx3_mission/mission_progress.hpp"
 #include "dyx3_mission/sha256.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_action/rclcpp_action.hpp"
@@ -149,7 +151,7 @@ protected:
             r.reason_code = di::srv::SetOffboard::Response::REASON_NOT_ARMED_OR_REJECTED;
           } else {
             r.accepted = true;
-            offboard_ = req->enable && armed_;
+            offboard_ = req->enable && armed_ && offboard_effective_;
           }
           off_srv_->send_response(*hdr, r);
         });
@@ -217,6 +219,8 @@ protected:
     const bool engaged = armed_ && offboard_;
     g.ok = pre_arm_ok_ && engaged;
     g.reason_code = !pre_arm_ok_ ? pre_arm_reason_ : engaged ? 0 : GuardReason::REASON_ARMING_GATE;
+    // The guard's priority order puts the arming gate (check 7) before RTK / heading / estimator.
+    if (arming_gate_first_ && !engaged) g.reason_code = GuardReason::REASON_ARMING_GATE;
     gate_pub_->publish(g);
     if (vehicle_on_) {
       di::msg::VehicleState v;
@@ -238,7 +242,7 @@ protected:
         if (dyx3_mission::load_artifact(dir_.string(), last_state_.path_artifact_sha256).ok) {
           rpp(s == MS::STATE_RUNNING ? di::msg::RppStatus::STATE_TRACKING
                                      : di::msg::RppStatus::STATE_LOADED,
-              last_state_.mission_id);
+              last_state_.mission_id, rpp_run_);
         }
       }
     }
@@ -288,6 +292,7 @@ protected:
     r.state = state;
     r.mission_id = mission_id;
     r.run_index = run;
+    r.pivot_timed_out = rpp_pivot_;
     rpp_pub_->publish(r);
   }
   template <typename Client, typename Req>
@@ -297,10 +302,12 @@ protected:
     return fut.get();
   }
   di::srv::StartMission::Response::SharedPtr start(const std::string& sha,
-                                                   const std::string& request_id = "") {
+                                                   const std::string& request_id = "",
+                                                   bool resume = false) {
     auto req = std::make_shared<di::srv::StartMission::Request>();
     req->path_artifact_sha256 = sha;
     req->request_id = request_id;
+    req->resume = resume;
     return call(start_, req);
   }
   bool wait_state(std::uint8_t s, std::chrono::milliseconds limit = 6000ms) {
@@ -333,6 +340,76 @@ protected:
   }
   void finish_release() {
     ASSERT_TRUE(spin_until([&] { return last_state_.waiting_on == MS::WAIT_NONE; }));
+  }
+  bool resume_call() {
+    return call(resume_, std::make_shared<di::srv::ResumeMission::Request>())->accepted;
+  }
+  // ---- persisted progress (contract section 9a)
+  fs::path progress_path(const std::string& sha) const {
+    return dir_ / "progress" / (sha + ".json");
+  }
+  bool read_progress(const std::string& sha, dyx3_mission::MissionProgress* p) const {
+    std::ifstream in(progress_path(sha), std::ios::binary);
+    if (!in) return false;
+    const std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    std::string err;
+    return dyx3_mission::parse_progress(bytes, p, &err);
+  }
+  // Waits until the persisted record of `sha` satisfies `pred` (the writes are asynchronous).
+  bool wait_progress(const std::string& sha,
+                     const std::function<bool(const dyx3_mission::MissionProgress&)>& pred) {
+    return spin_until([&] {
+      dyx3_mission::MissionProgress p;
+      return read_progress(sha, &p) && pred(p);
+    });
+  }
+  std::vector<di::msg::PointResult> points_of(std::uint32_t mission_id) const {
+    std::vector<di::msg::PointResult> out;
+    for (const auto& p : points_) {
+      if (p.mission_id == mission_id) out.push_back(p);
+    }
+    return out;
+  }
+  // Drives the vehicle along the execution artifact (2 cm to the side, as RPP would) until the
+  // first `resolved` must-hit points of `mission_id` are reported, stopping 0.3 m before the next.
+  void drive_over_points(std::size_t resolved, std::uint32_t mission_id) {
+    const auto art = dyx3_mission::load_artifact(dir_.string(), last_state_.path_artifact_sha256);
+    ASSERT_TRUE(art.ok) << art.error;
+    const auto& pts = art.artifact.points;
+    std::vector<std::size_t> must_hit;
+    for (std::size_t i = 0; i < pts.size(); ++i) {
+      if (pts[i].must_hit()) must_hit.push_back(i);
+    }
+    ASSERT_GT(must_hit.size(), resolved);
+    const auto& stop = pts[must_hit[resolved]];
+    for (std::size_t i = 0; i < must_hit[resolved]; ++i) {
+      if (std::hypot(pts[i].north_m - stop.north_m, pts[i].east_m - stop.east_m) < 0.3) break;
+      veh_n_ = pts[i].north_m;
+      veh_e_ = pts[i].east_m + 0.02;
+      pump(25ms);
+    }
+    ASSERT_TRUE(spin_until([&] { return points_of(mission_id).size() >= resolved; }));
+  }
+  void drive_whole_path() {
+    const auto art = dyx3_mission::load_artifact(dir_.string(), last_state_.path_artifact_sha256);
+    ASSERT_TRUE(art.ok) << art.error;
+    for (const auto& p : art.artifact.points) {
+      veh_n_ = p.north_m;
+      veh_e_ = p.east_m + 0.02;
+      pump(25ms);
+    }
+  }
+  // A new mission process on the same missions_dir (what a services-unit restart or a reboot is).
+  void restart_node() {
+    make_node();
+    pump(300ms);  // the old node's endpoints leave the graph
+    ASSERT_TRUE(start_->wait_for_service(5s));
+    ASSERT_TRUE(spin_until([this] {
+      return node_->count_subscribers("/dyx3/mission/state") > 0 &&
+             node_->count_publishers("/dyx3/rpp/status") > 0 &&
+             node_->count_publishers("/dyx3/safety_gate") > 0;
+    }));
+    pump(150ms);
   }
 
   static inline int seq_ = 0;
@@ -372,6 +449,10 @@ protected:
   std::uint8_t xy_counter_ = 0;
   double veh_n_ = 0.0, veh_e_ = 0.0;
   bool rpp_auto_ = true;
+  std::uint32_t rpp_run_ = 0;  ///< the run the fake RPP reports
+  bool rpp_pivot_ = false;     ///< RppStatus.pivot_timed_out of the fake RPP
+  bool arming_gate_first_ = false;
+  bool offboard_effective_ = true;  ///< false: set_offboard(true) confirms, PX4 never gets there
   bool armed_ = false, offboard_ = false;
   Reply arm_reply_ = Reply::kOk, disarm_reply_ = Reply::kOk, offboard_reply_ = Reply::kOk;
   std::uint8_t arm_refuse_reason_ = di::srv::ArmDisarm::Response::REASON_LINK_UNHEALTHY;
@@ -863,7 +944,11 @@ TEST_F(MissionNodeTest, EmergencyStopWhileArmingAbortsAndDisarms) {
   EXPECT_FALSE(called("offboard_on"));
 }
 
-TEST_F(MissionNodeTest, PauseKeepsTheVehicleArmedAndResumeNeedsOffboard) {
+// Changed in 0.17.0 (P2 re-engage): this test asserted that a resume after an OFFBOARD loss is
+// refused with REASON_NOT_ARMED_OR_OFFBOARD and nothing re-engages. Now that resume re-engages
+// (arm, then OFFBOARD) while MissionState stays PAUSED, and RUNNING follows only with the full
+// gate.
+TEST_F(MissionNodeTest, PauseKeepsTheVehicleArmedAndAResumeAfterAnOffboardLossReEngages) {
   start_running();
   ASSERT_TRUE(call(pause_, std::make_shared<di::srv::PauseMission::Request>())->accepted);
   ASSERT_TRUE(wait_state(MS::STATE_PAUSED));
@@ -871,18 +956,76 @@ TEST_F(MissionNodeTest, PauseKeepsTheVehicleArmedAndResumeNeedsOffboard) {
   pump(400ms);
   EXPECT_EQ(ops(), (std::vector<std::string>{"arm", "offboard_on"}));  // no release on pause
   EXPECT_TRUE(armed_);
-  EXPECT_TRUE(call(resume_, std::make_shared<di::srv::ResumeMission::Request>())->accepted);
+  EXPECT_TRUE(resume_call());
   ASSERT_TRUE(wait_state(MS::STATE_RUNNING));
-  // OFFBOARD lost: the guard pauses the mission; resume is refused and nothing re-engages.
+  EXPECT_EQ(ops(), (std::vector<std::string>{"arm", "offboard_on"}));  // armed + OFFBOARD: no call
+  // OFFBOARD lost: the guard pauses the mission; nothing re-engages until the operator resumes.
   offboard_ = false;
   ASSERT_TRUE(wait_state(MS::STATE_PAUSED));
   EXPECT_EQ(last_state_.gate_reason_code, GuardReason::REASON_ARMING_GATE);
-  const auto rr = call(resume_, std::make_shared<di::srv::ResumeMission::Request>());
+  pump(300ms);
+  EXPECT_EQ(state(), MS::STATE_PAUSED);
+  EXPECT_EQ(ops(), (std::vector<std::string>{"arm", "offboard_on"}));
+  const std::size_t from = states_.size();
+  EXPECT_TRUE(resume_call());
+  ASSERT_TRUE(wait_state(MS::STATE_RUNNING));
+  EXPECT_EQ(ops(), (std::vector<std::string>{"arm", "offboard_on", "arm", "offboard_on"}));
+  // RPP's view: PAUSED (it streams STOP and keeps the execution) until RUNNING; never READY,
+  // ARMING or ENGAGING, and the same execution and artifact throughout.
+  bool saw_arm_wait = false, saw_offboard_wait = false;
+  for (std::size_t i = from; i < states_.size(); ++i) {
+    const auto& m = states_[i];
+    EXPECT_TRUE(m.state == MS::STATE_PAUSED || m.state == MS::STATE_RUNNING) << int(m.state);
+    EXPECT_EQ(m.mission_id, 1U);
+    EXPECT_FALSE(m.path_artifact_sha256.empty());
+    saw_arm_wait |= m.state == MS::STATE_PAUSED && m.waiting_on == MS::WAIT_ARM;
+    saw_offboard_wait |= m.state == MS::STATE_PAUSED && m.waiting_on == MS::WAIT_OFFBOARD;
+  }
+  EXPECT_TRUE(saw_arm_wait);
+  EXPECT_TRUE(saw_offboard_wait);
+  const auto& log = node_->fsm().log();
+  bool saw_reengaged = false;
+  for (const auto& t : log) saw_reengaged |= t.event == dyx3_mission::Event::kReengaged;
+  EXPECT_TRUE(saw_reengaged);
+  pump(300ms);
+  EXPECT_EQ(state(), MS::STATE_RUNNING);
+}
+
+// Unchanged behaviour, made explicit: a resume is refused (and nothing re-engages) when more than
+// the arming gate fails, even when the guard names the arming gate first (its priority order).
+TEST_F(MissionNodeTest, AResumeIsStillRefusedWhenMoreThanTheArmingGateFails) {
+  start_running();
+  offboard_ = false;
+  ASSERT_TRUE(wait_state(MS::STATE_PAUSED));
+  arming_gate_first_ = true;
+  pre_arm_ok_ = false;
+  pre_arm_reason_ = GuardReason::REASON_HEADING_UNHEALTHY;
+  pump(200ms);
+  auto rr = call(resume_, std::make_shared<di::srv::ResumeMission::Request>());
   EXPECT_FALSE(rr->accepted);
   EXPECT_EQ(rr->reason_code, di::srv::ResumeMission::Response::REASON_NOT_ARMED_OR_OFFBOARD);
   pump(300ms);
   EXPECT_EQ(state(), MS::STATE_PAUSED);
   EXPECT_EQ(ops(), (std::vector<std::string>{"arm", "offboard_on"}));
+  pre_arm_ok_ = true;  // only the arming gate fails now: the resume re-engages
+  pump(200ms);
+  EXPECT_TRUE(resume_call());
+  EXPECT_TRUE(wait_state(MS::STATE_RUNNING));
+}
+
+TEST_F(MissionNodeTest, AReEngageWhoseArmIsRefusedStillDisarmsWhatTheFirstCycleArmed) {
+  start_running();
+  offboard_ = false;  // PX4 left OFFBOARD; px4_link now refuses to arm
+  ASSERT_TRUE(wait_state(MS::STATE_PAUSED));
+  arm_reply_ = Reply::kRefuse;
+  EXPECT_TRUE(resume_call());
+  ASSERT_TRUE(wait_state(MS::STATE_ERROR));
+  EXPECT_EQ(last_state_.reason_code, MS::REASON_ARM_REFUSED);
+  finish_release();
+  // The refused re-arm armed nothing, but the start did: OFFBOARD released, then disarmed.
+  EXPECT_EQ(ops(),
+            (std::vector<std::string>{"arm", "offboard_on", "arm", "offboard_off", "disarm"}));
+  EXPECT_TRUE(last_state_.path_artifact_sha256.empty());
 }
 
 TEST_F(MissionNodeTest, DuplicateRequestIdReturnsTheSameExecution) {
@@ -1082,6 +1225,249 @@ TEST_F(MissionNodeTest, ActionCancelAbortsAsCanceled) {
   EXPECT_EQ(wr.code, rclcpp_action::ResultCode::CANCELED);
   ASSERT_TRUE(wr.result != nullptr);
   EXPECT_EQ(wr.result->result_code, Exec::Result::RESULT_ABORTED);
+}
+
+// ------------------------------------------------------------------------------------------------
+// recovery (P2): re-engage deadlines, pivot timeout, persisted progress and resume
+// ------------------------------------------------------------------------------------------------
+TEST_F(MissionNodeClockTest, AReEngageArmTimeoutIsAnArmTimeoutErrorOnTheSteadyClock) {
+  start_running();
+  armed_ = false;  // PX4 disarmed itself (and left OFFBOARD)
+  offboard_ = false;
+  ASSERT_TRUE(wait_state(MS::STATE_PAUSED));
+  arm_reply_ = Reply::kSilent;
+  steady_follows_world_ = false;  // the test moves it
+  const std::size_t from = states_.size();
+  EXPECT_TRUE(resume_call());
+  ASSERT_TRUE(spin_until([&] { return ops().size() == 3U; }));
+  pump(300ms);
+  EXPECT_EQ(state(), MS::STATE_PAUSED);
+  EXPECT_EQ(last_state_.waiting_on, MS::WAIT_ARM);
+  const std::int64_t moved =
+      step_steady_until([&] { return state() == MS::STATE_ERROR; }, 4'000'000'000LL);
+  ASSERT_EQ(state(), MS::STATE_ERROR);
+  EXPECT_EQ(last_state_.reason_code, MS::REASON_ARM_TIMEOUT);
+  EXPECT_GE(moved, 2'100'000'000LL);  // arm_timeout_s 2.1
+  EXPECT_LE(moved, 3'100'000'000LL);
+  for (std::size_t i = from; i < states_.size(); ++i) {
+    EXPECT_TRUE(states_[i].state == MS::STATE_PAUSED || states_[i].state == MS::STATE_ERROR);
+  }
+  steady_follows_world_ = true;
+  EXPECT_TRUE(spin_until([&] { return called("disarm"); }));  // an arm in doubt is disarmed
+}
+
+TEST_F(MissionNodeClockTest, AReEngageOffboardTimeoutIsAnOffboardTimeoutErrorOnTheSteadyClock) {
+  start_running();
+  offboard_ = false;
+  ASSERT_TRUE(wait_state(MS::STATE_PAUSED));
+  offboard_reply_ = Reply::kSilent;
+  steady_follows_world_ = false;
+  EXPECT_TRUE(resume_call());
+  ASSERT_TRUE(
+      spin_until([&] { return ops().size() == 4U; }));  // arm, offboard_on, arm, offboard_on
+  pump(300ms);
+  EXPECT_EQ(state(), MS::STATE_PAUSED);
+  EXPECT_EQ(last_state_.waiting_on, MS::WAIT_OFFBOARD);
+  const std::int64_t moved =
+      step_steady_until([&] { return state() == MS::STATE_ERROR; }, 6'000'000'000LL);
+  ASSERT_EQ(state(), MS::STATE_ERROR);
+  EXPECT_EQ(last_state_.reason_code, MS::REASON_OFFBOARD_TIMEOUT);
+  EXPECT_GE(moved, 3'600'000'000LL);  // offboard_timeout_s 3.6
+  EXPECT_LE(moved, 4'600'000'000LL);
+  steady_follows_world_ = true;
+  finish_release();
+  EXPECT_EQ(ops(), (std::vector<std::string>{"arm", "offboard_on", "arm", "offboard_on",
+                                             "offboard_off", "disarm"}));
+}
+
+TEST_F(MissionNodeClockTest, AReEngageWhoseFullGateNeverPassesIsASafetyError) {
+  start_running();
+  offboard_ = false;
+  ASSERT_TRUE(wait_state(MS::STATE_PAUSED));
+  offboard_effective_ = false;  // px4_link confirms, the guard never sees OFFBOARD
+  steady_follows_world_ = false;
+  const std::size_t from = states_.size();
+  EXPECT_TRUE(resume_call());
+  ASSERT_TRUE(spin_until([&] { return ops().size() == 4U; }));
+  pump(300ms);
+  EXPECT_EQ(state(), MS::STATE_PAUSED);  // held: never RUNNING without the full gate
+  const std::int64_t moved =
+      step_steady_until([&] { return state() == MS::STATE_ERROR; }, 6'000'000'000LL);
+  ASSERT_EQ(state(), MS::STATE_ERROR);
+  EXPECT_EQ(last_state_.reason_code, MS::REASON_SAFETY);
+  EXPECT_EQ(last_state_.gate_reason_code, GuardReason::REASON_ARMING_GATE);
+  EXPECT_GE(moved, 3'500'000'000LL);  // offboard_timeout_s 3.6 after the confirmation
+  EXPECT_LE(moved, 4'600'000'000LL);
+  for (std::size_t i = from; i < states_.size(); ++i) {
+    EXPECT_NE(states_[i].state, MS::STATE_RUNNING);  // no motion was ever allowed again
+  }
+  steady_follows_world_ = true;
+  finish_release();
+  EXPECT_TRUE(called("disarm"));
+}
+
+TEST_F(MissionNodeTest, PivotTimeoutPausesWithItsOwnReasonOncePerExpiry) {
+  start_running();
+  rpp_pivot_ = true;  // RPP: commanded to pivot, heading not reached within the watchdog
+  ASSERT_TRUE(wait_state(MS::STATE_PAUSED));
+  EXPECT_EQ(last_state_.reason_code, MS::REASON_RPP_PIVOT_TIMEOUT);
+  EXPECT_EQ(last_state_.reason_detail, "rpp pivot watchdog expired (heading not reached)");
+  EXPECT_FALSE(called("disarm"));  // a pause: armed, OFFBOARD, STOP
+  pump(300ms);
+  EXPECT_EQ(state(), MS::STATE_PAUSED);  // never an automatic resume
+  // The operator resumes while RPP still reports the same expiry: it does not pause again.
+  EXPECT_TRUE(resume_call());
+  ASSERT_TRUE(wait_state(MS::STATE_RUNNING));
+  pump(400ms);
+  EXPECT_EQ(state(), MS::STATE_RUNNING);
+  // The watchdog clears, then expires again: a new pause.
+  rpp_pivot_ = false;
+  pump(200ms);
+  EXPECT_EQ(state(), MS::STATE_RUNNING);
+  rpp_pivot_ = true;
+  ASSERT_TRUE(wait_state(MS::STATE_PAUSED));
+  EXPECT_EQ(last_state_.reason_code, MS::REASON_RPP_PIVOT_TIMEOUT);
+}
+
+TEST_F(MissionNodeTest, ProgressIsPersistedOnEveryPointAndStateChange) {
+  start_running();
+  using dyx3_mission::MissionProgress;
+  ASSERT_TRUE(
+      wait_progress(ekf_sha_, [](const MissionProgress& p) { return p.state == "RUNNING"; }));
+  rpp_run_ = 1;  // RPP moved on to its second run: the first is complete
+  drive_over_points(2, 1);
+  ASSERT_TRUE(wait_progress(ekf_sha_, [](const MissionProgress& p) {
+    return p.completed_points.size() == 2U && p.run_index == 1U;
+  }));
+  MissionProgress p;
+  ASSERT_TRUE(read_progress(ekf_sha_, &p));
+  EXPECT_EQ(p.path_artifact_sha256, ekf_sha_);  // keyed by the SOURCE artifact
+  EXPECT_EQ(p.mission_id, 1U);
+  EXPECT_EQ(p.point_index, 2U);
+  EXPECT_EQ(p.completed_points, (std::vector<std::uint32_t>{0, 1}));
+  EXPECT_EQ(p.state, "RUNNING");
+  EXPECT_EQ(p.updated_utc.size(), 20U);
+  ASSERT_TRUE(call(pause_, std::make_shared<di::srv::PauseMission::Request>())->accepted);
+  ASSERT_TRUE(
+      wait_progress(ekf_sha_, [](const MissionProgress& q) { return q.state == "PAUSED"; }));
+  auto ab = std::make_shared<di::srv::AbortMission::Request>();
+  ASSERT_TRUE(call(abort_, ab)->accepted);
+  ASSERT_TRUE(
+      wait_progress(ekf_sha_, [](const MissionProgress& q) { return q.state == "ABORTED"; }));
+  // The abort's sweep reports the unreached points FAILED, but they are not progress.
+  EXPECT_TRUE(spin_until([&] { return points_of(1).size() == 5U; }));
+  ASSERT_TRUE(read_progress(ekf_sha_, &p));
+  EXPECT_EQ(p.completed_points, (std::vector<std::uint32_t>{0, 1}));
+  // Atomic: only the record itself is in the directory, never a temporary file.
+  std::size_t entries = 0;
+  for (const auto& e : fs::directory_iterator(dir_ / "progress")) {
+    EXPECT_EQ(e.path().extension(), ".json") << e.path();
+    ++entries;
+  }
+  EXPECT_EQ(entries, 1U);
+}
+
+TEST_F(MissionNodeTest, ResumeStartsAtTheFirstRunNotCompletedAndReissuesNoPoint) {
+  using dyx3_mission::MissionProgress;
+  start_running();
+  rpp_run_ = 1;
+  drive_over_points(2, 1);
+  ASSERT_TRUE(call(abort_, std::make_shared<di::srv::AbortMission::Request>())->accepted);
+  finish_release();
+  ASSERT_TRUE(wait_progress(ekf_sha_, [](const MissionProgress& p) {
+    return p.state == "ABORTED" && p.completed_points.size() == 2U;
+  }));
+  veh_n_ = veh_e_ = 0.0;  // the rover is put back at the start of the path
+  const std::size_t from = states_.size();
+  const auto res = start(ekf_sha_, "resume-1", true);
+  ASSERT_TRUE(res->accepted);
+  EXPECT_EQ(res->mission_id, 2U);
+  EXPECT_EQ(res->resumed_run_index, 1U);
+  const auto dup = start(ekf_sha_, "resume-1", true);  // a retry of the same request
+  EXPECT_TRUE(dup->duplicate);
+  EXPECT_EQ(dup->resumed_run_index, 1U);
+  ASSERT_TRUE(wait_state(MS::STATE_RUNNING));
+  // MissionState carries the start run from LOADING on (RPP installs the artifact at that run).
+  bool saw_loading = false;
+  for (std::size_t i = from; i < states_.size(); ++i) {
+    if (states_[i].mission_id != 2U) continue;
+    saw_loading |= states_[i].state == MS::STATE_LOADING;
+    EXPECT_EQ(states_[i].start_run_index, 1U) << int(states_[i].state);
+  }
+  EXPECT_TRUE(saw_loading);
+  // The resumed run drives the whole path again: the restored points are never re-issued.
+  drive_whole_path();
+  rpp_auto_ = false;
+  rpp(di::msg::RppStatus::STATE_COMPLETE, 2, 1);
+  ASSERT_TRUE(wait_state(MS::STATE_COMPLETED));
+  ASSERT_TRUE(spin_until([&] { return points_of(2).size() >= 3U; }));
+  const auto second = points_of(2);
+  ASSERT_EQ(second.size(), 3U);
+  for (std::size_t k = 0; k < second.size(); ++k) {
+    EXPECT_EQ(second[k].point_index, k + 2);
+    EXPECT_EQ(second[k].result_code, di::msg::PointResult::RESULT_COMPLETED);
+  }
+  ASSERT_TRUE(
+      wait_progress(ekf_sha_, [](const MissionProgress& p) { return p.state == "COMPLETED"; }));
+  finish_release();
+  // A completed path leaves nothing to resume: resume=true is a fresh start.
+  rpp_auto_ = true;
+  const auto again = start(ekf_sha_, "", true);
+  ASSERT_TRUE(again->accepted);
+  EXPECT_EQ(again->resumed_run_index, 0U);
+  ASSERT_TRUE(wait_state(MS::STATE_RUNNING));
+  EXPECT_EQ(last_state_.start_run_index, 0U);
+}
+
+TEST_F(MissionNodeTest, ProgressSurvivesANodeRestart) {
+  using dyx3_mission::MissionProgress;
+  start_running();
+  rpp_run_ = 1;
+  drive_over_points(2, 1);
+  ASSERT_TRUE(call(pause_, std::make_shared<di::srv::PauseMission::Request>())->accepted);
+  ASSERT_TRUE(wait_progress(ekf_sha_, [](const MissionProgress& p) {
+    return p.state == "PAUSED" && p.completed_points.size() == 2U;
+  }));
+  // The mission process ends (its unit restarts): the new one has only the file.
+  restart_node();
+  points_.clear();
+  veh_n_ = veh_e_ = 0.0;
+  const auto res = start(ekf_sha_, "", true);
+  ASSERT_TRUE(res->accepted);
+  EXPECT_EQ(res->mission_id, 1U);  // a new process counts executions from 1 again
+  EXPECT_EQ(res->resumed_run_index, 1U);
+  ASSERT_TRUE(wait_state(MS::STATE_RUNNING));
+  EXPECT_EQ(last_state_.start_run_index, 1U);
+  drive_whole_path();
+  rpp_auto_ = false;
+  rpp(di::msg::RppStatus::STATE_COMPLETE, 1, 1);
+  ASSERT_TRUE(wait_state(MS::STATE_COMPLETED));
+  ASSERT_TRUE(spin_until([&] { return points_.size() >= 3U; }));
+  for (const auto& p : points_) EXPECT_GE(p.point_index, 2U);
+}
+
+TEST_F(MissionNodeTest, ResumeFalseStartsAtRunZeroAndOverwritesTheProgress) {
+  using dyx3_mission::MissionProgress;
+  start_running();
+  rpp_run_ = 1;
+  drive_over_points(2, 1);
+  ASSERT_TRUE(call(abort_, std::make_shared<di::srv::AbortMission::Request>())->accepted);
+  finish_release();
+  ASSERT_TRUE(wait_progress(ekf_sha_, [](const MissionProgress& p) {
+    return p.state == "ABORTED" && p.completed_points.size() == 2U;
+  }));
+  rpp_run_ = 0;
+  veh_n_ = veh_e_ = 0.0;
+  const auto res = start(ekf_sha_);  // resume = false
+  ASSERT_TRUE(res->accepted);
+  EXPECT_EQ(res->resumed_run_index, 0U);
+  ASSERT_TRUE(wait_state(MS::STATE_RUNNING));
+  EXPECT_EQ(last_state_.start_run_index, 0U);
+  ASSERT_TRUE(wait_progress(ekf_sha_, [](const MissionProgress& p) {
+    return p.mission_id == 2U && p.run_index == 0U && p.completed_points.empty();
+  }));
+  drive_over_points(1, 2);  // point 0 is reported again for the new execution
+  EXPECT_EQ(points_of(2).front().point_index, 0U);
 }
 
 // ------------------------------------------------------------------------------------------------

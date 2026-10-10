@@ -9,6 +9,9 @@
 //    disarm": an arm that timed out or is still in flight counts as armed);
 //  * the release order: set_offboard(false) first, then arm(false), one at a time; a release is
 //    sent at once even while an engage request is still in flight (that request is abandoned).
+//  * an execution may run more than one engage cycle (the re-engage from PAUSED: arm, then OFFBOARD
+//    again, docs/contracts/dyx3_mission.md section 3a). Ownership only grows within an execution:
+//    once this execution armed (or may have), a later refused arm does not clear it.
 #pragma once
 
 #include <cstdint>
@@ -54,7 +57,8 @@ public:
 
   /// Forget the previous execution's bookkeeping. Only legal while !busy().
   void begin_execution();
-  /// Queue an engage step (kArm or kOffboardOn). Ignored while releasing.
+  /// Queue an engage step (kArm or kOffboardOn). Ignored while releasing. May be called again after
+  /// the previous cycle finished (re-engage); the ownership of the earlier cycle is kept.
   void engage(Px4Op op);
   /// Stop engaging and queue the release: set_offboard(false) if this execution requested OFFBOARD,
   /// then arm(false) if it armed (or may have armed), or always when `force_disarm` (E-stop).
@@ -75,7 +79,8 @@ public:
   std::optional<Px4Op> release_pending() const;
   /// This execution armed the vehicle or may have (in flight, confirmed or timed out).
   bool arm_owned() const {
-    return arm_ == Arm::kInFlight || arm_ == Arm::kConfirmed || arm_ == Arm::kDoubt;
+    return armed_earlier_ || arm_ == Arm::kInFlight || arm_ == Arm::kConfirmed ||
+           arm_ == Arm::kDoubt;
   }
   bool offboard_requested() const { return offboard_requested_; }
 
@@ -94,6 +99,8 @@ private:
   std::deque<Px4Op> queue_;
   std::vector<Flight> flights_;
   Arm arm_ = Arm::kNone;
+  /// An earlier engage cycle of this execution armed the vehicle (confirmed or doubt).
+  bool armed_earlier_ = false;
   bool offboard_requested_ = false;
   bool releasing_ = false;
   std::uint64_t next_id_ = 1;

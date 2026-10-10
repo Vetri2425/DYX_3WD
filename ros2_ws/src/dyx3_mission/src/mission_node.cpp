@@ -25,6 +25,7 @@ static_assert(static_cast<std::uint8_t>(State::kEngaging) == MissionState::STATE
 static_assert(kReasonRppStale == MissionState::REASON_RPP_STALE);
 static_assert(kReasonNoPlacementFrame == MissionState::REASON_NO_PLACEMENT_FRAME);
 static_assert(kReasonEstop == MissionState::REASON_ESTOP);
+static_assert(kReasonRppPivotTimeout == MissionState::REASON_RPP_PIVOT_TIMEOUT);
 
 // px4_link's own confirmation windows (docs/contracts/dyx3_px4_link.md): arm_confirm_timeout_s
 // 2.0 s; set_offboard answers by prestream 0.5 s + confirm 2.0 s + 1.0 s at the latest. The
@@ -117,6 +118,17 @@ MissionNode::MissionNode(const rclcpp::NodeOptions& options, ClockFn clock)
     }
   }
   px4_.set_timeouts({arm_timeout_s_, offboard_timeout_s_});
+  // Persisted progress (contract section 9a). DERIVED — NOT FROM V1 SPEC: read once here, before
+  // the executor runs, so StartMission(resume) decides from memory (no file I/O in the callback).
+  {
+    std::vector<std::string> warnings;
+    progress_ = load_progress_dir(missions_dir_, &warnings);
+    for (const auto& w : warnings)
+      RCLCPP_WARN(get_logger(), "progress record ignored: %s", w.c_str());
+    if (!progress_.empty()) {
+      RCLCPP_INFO(get_logger(), "%zu persisted mission progress record(s)", progress_.size());
+    }
+  }
   param_cb_ = add_on_set_parameters_callback(
       std::bind(&MissionNode::on_parameters, this, std::placeholders::_1));
 
@@ -160,12 +172,13 @@ MissionNode::MissionNode(const rclcpp::NodeOptions& options, ClockFn clock)
   start_srv_ = create_service<StartSrv>(
       "/dyx3/mission/start", [this](const std::shared_ptr<StartSrv::Request> req,
                                     std::shared_ptr<StartSrv::Response> res) {
-        const auto o = begin_mission(req->path_artifact_sha256, req->request_id);
+        const auto o = begin_mission(req->path_artifact_sha256, req->request_id, req->resume);
         res->accepted = o.accepted;
         res->reason_code = o.reason;
         res->mission_id = o.mission_id;
         res->duplicate = o.duplicate;
         res->gate_reason_code = o.gate_reason;
+        res->resumed_run_index = o.resumed_run_index;
       });
   pause_srv_ = create_service<dyx3_interfaces::srv::PauseMission>(
       "/dyx3/mission/pause",
@@ -180,21 +193,29 @@ MissionNode::MissionNode(const rclcpp::NodeOptions& options, ClockFn clock)
   resume_srv_ = create_service<ResumeSrv>(
       "/dyx3/mission/resume",
       [this](const std::shared_ptr<ResumeSrv::Request>, std::shared_ptr<ResumeSrv::Response> res) {
-        // Resume needs the FULL gate (armed + OFFBOARD included: never re-engaged automatically),
-        // a fresh RppStatus (otherwise it would pause again on the next tick) and the EKF reference
-        // the path was placed with.
+        // Resume needs the FULL gate (armed + OFFBOARD included), a fresh RppStatus (otherwise it
+        // would pause again on the next tick) and the EKF reference the path was placed with.
+        // When ONLY the arming gate fails (the vehicle lost arm / OFFBOARD while paused) and the
+        // pre-arm gate is ok, the resume re-engages: ARMING -> ENGAGING -> RUNNING, exactly the
+        // steps of a start (contract section 3a). Never automatic: only this operator call.
         std::uint8_t why = 0;
         const bool paused = fsm_.state() == State::kPaused;
         const bool reference_ok = !paused || reference_matches_placement();
         const bool full = gate_ok(&why);
+        const bool pre = pre_arm_ok();
         const bool rpp_ok = rpp_status_fresh();
-        const Result r = fsm_.resume(reference_ok && full && rpp_ok, steady_ns());
+        const bool reengage = paused && reference_ok && rpp_ok && !full && pre &&
+                              why == MotionSetpointStatus::REASON_ARMING_GATE;
+        const Result r = reengage ? fsm_.reengage(steady_ns())
+                                  : fsm_.resume(reference_ok && full && rpp_ok, steady_ns());
         res->accepted = r.accepted;
         if (r.accepted) {
           res->reason_code = ResumeSrv::Response::REASON_OK;
-          // The operator saw the EKF reset and resumes on the same reference: re-baseline.
-          if (placement_ && vehicle_) placement_->xy_reset_counter = vehicle_->xy_reset_counter;
-          ekf_reset_reported_ = false;
+          if (r.transitioned) {
+            // The operator saw the EKF reset and resumes on the same reference: re-baseline.
+            if (placement_ && vehicle_) placement_->xy_reset_counter = vehicle_->xy_reset_counter;
+            ekf_reset_reported_ = false;
+          }
         } else if (r.reject == Reject::kNotPaused) {
           res->reason_code = ResumeSrv::Response::REASON_NOT_PAUSED;
         } else if (!reference_ok) {
@@ -226,7 +247,13 @@ MissionNode::MissionNode(const rclcpp::NodeOptions& options, ClockFn clock)
           const auto ev = journal_->skip();
           res->reason_code = res->REASON_OK;
           res->skipped_point_index = ev ? ev->point_index : 0U;
-          if (ev) publish_point(*ev);
+          if (ev) {
+            publish_point(*ev);
+            const auto active = journal_->active_point();
+            run_.point_index =
+                active ? *active : static_cast<std::uint32_t>(journal_->point_count());
+            record_resolved({*ev});
+          }
         } else {
           res->reason_code = r.reject == Reject::kNotRunning ? res->REASON_NOT_RUNNING
                                                              : res->REASON_NO_ACTIVE_POINT;
@@ -239,7 +266,7 @@ MissionNode::MissionNode(const rclcpp::NodeOptions& options, ClockFn clock)
       [this](const rclcpp_action::GoalUUID&, std::shared_ptr<const ExecuteMission::Goal> goal) {
         // One mission at a time; begin_mission() is the single start path (no request id: an
         // action goal has its own UUID).
-        const auto o = begin_mission(goal->path_artifact_sha256, "");
+        const auto o = begin_mission(goal->path_artifact_sha256, "", false);
         return o.accepted ? rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE
                           : rclcpp_action::GoalResponse::REJECT;
       },
@@ -270,6 +297,19 @@ MissionNode::~MissionNode() {
   // std::future from std::async joins in its destructor: a running file job finishes first.
   if (load_job_.valid()) load_job_.wait();
   if (place_job_.valid()) place_job_.wait();
+  // The newest progress of every artifact reaches the disk on a clean shutdown (a destructor, not a
+  // callback: writing here cannot stall the executor).
+  if (progress_job_.valid()) {
+    for (const auto& e : progress_job_.get()) {
+      RCLCPP_ERROR(get_logger(), "progress not persisted: %s", e.c_str());
+    }
+  }
+  for (const auto& kv : progress_queue_) {
+    std::string e;
+    if (!write_progress(missions_dir_, kv.second, &e)) {
+      RCLCPP_ERROR(get_logger(), "progress not persisted: %s", e.c_str());
+    }
+  }
 }
 
 rcl_interfaces::msg::SetParametersResult MissionNode::on_parameters(
@@ -400,7 +440,11 @@ void MissionNode::evaluate_gate() {
   }
   if (fsm_.before_running()) {
     // Before motion the vehicle may be disarmed: the pre-arm gate is the one that must hold.
-    if (!pre) fsm_.gate_lost(pre_why, steady_ns());
+    if (!pre) {
+      fsm_.gate_lost(pre_why, steady_ns());
+    } else if (full && fsm_.awaiting_reengage_gate()) {
+      fsm_.reengage_gate(true, steady_ns());  // re-engaged and the guard sees armed + OFFBOARD
+    }
   } else if (fsm_.state() == State::kRunning) {
     if (!full) fsm_.gate_lost(full_why, steady_ns());
   }
@@ -417,14 +461,31 @@ void MissionNode::on_rpp(const RppStatus& m) {
       m.state == RppStatus::STATE_LOADED || m.state == RppStatus::STATE_TRACKING ||
       m.state == RppStatus::STATE_STOPPING || m.state == RppStatus::STATE_PIVOTING ||
       m.state == RppStatus::STATE_CREEPING;
+  // The run RPP reports is the one in progress (runs are driven in order): every earlier run is
+  // complete, which is what a resume restarts from (contract section 9a).
+  const bool driven =
+      fsm_.state() == State::kRunning || fsm_.state() == State::kPaused || fsm_.reengaging();
+  if (driven && rpp_holds_path && m.run_index > progress_run_) {
+    progress_run_ = m.run_index;
+    note_progress();
+  }
   if (m.state == RppStatus::STATE_ERROR) {
     fsm_.rpp_error(steady_ns());
   } else if (fsm_.state() == State::kReady && rpp_holds_path) {
     // Nothing reaches RUNNING without the full gate (armed + OFFBOARD included).
     fsm_.rpp_ack(gate_ok(), steady_ns());
+  } else if (fsm_.state() == State::kRunning && m.pivot_timed_out && !pivot_timeout_latched_) {
+    // DERIVED — NOT FROM V1 SPEC: one pause per watchdog expiry. RPP keeps the flag up while the
+    // heading is still outside the release band; once the operator resumed after this pause, the
+    // same expiry does not pause again (only a new one, after RPP reported false, does).
+    pivot_timeout_latched_ = true;
+    RCLCPP_WARN(get_logger(), "rpp pivot watchdog expired while RUNNING (run %u): pausing",
+                m.run_index);
+    fsm_.rpp_pivot_timeout(steady_ns());
   } else if (m.state == RppStatus::STATE_COMPLETE && fsm_.state() != State::kReady) {
     fsm_.rpp_complete(steady_ns());
   }
+  if (!m.pivot_timed_out) pivot_timeout_latched_ = false;
   advance();
 }
 
@@ -433,9 +494,11 @@ void MissionNode::on_vehicle(const dyx3_interfaces::msg::VehicleState& m) {
   vehicle_stamp_ns_ = steady_ns();
   check_ekf_reset();
   if (fsm_.state() == State::kRunning && journal_ && m.position_valid) {
-    publish_points(journal_->update(m.north_m, m.east_m));
+    const auto evs = journal_->update(m.north_m, m.east_m);
+    publish_points(evs);
     const auto active = journal_->active_point();
     run_.point_index = active ? *active : static_cast<std::uint32_t>(journal_->point_count());
+    record_resolved(evs);
   }
   advance();
 }
@@ -478,6 +541,18 @@ void MissionNode::on_timer() {
                  rpp_ack_timeout_s_, rpp_stamp_ns_ ? "yes" : "no", full ? "yes" : "no");
     fsm_.rpp_ack_timeout(full, why, steady_ns());
   }
+  if (fsm_.awaiting_reengage_gate() && reengage_confirmed_ns_ &&
+      static_cast<double>(steady_ns() - *reengage_confirmed_ns_) * 1e-9 >= offboard_timeout_s_) {
+    // DERIVED — NOT FROM V1 SPEC: the hold after the re-engage's OFFBOARD confirmation is bounded
+    // by the engage step's own timeout (offboard_timeout_s); the outcome mirrors READY's
+    // rpp_ack_timeout with a full gate that never passed.
+    std::uint8_t why = 0;
+    gate_ok(&why);
+    RCLCPP_ERROR(get_logger(),
+                 "re-engaged but the full gate did not pass within %.1f s (reason %u)",
+                 offboard_timeout_s_, static_cast<unsigned>(why));
+    fsm_.reengage_timeout(why, steady_ns());
+  }
   if (goal_ && goal_->is_active() && goal_->is_canceling()) finish_goal_if_terminal();
   advance();
   publish_state();
@@ -485,14 +560,14 @@ void MissionNode::on_timer() {
 
 void MissionNode::on_work_timer() {
   advance();
-  if (!jobs_pending()) work_timer_->cancel();
+  if (!jobs_pending() && !progress_job_.valid()) work_timer_->cancel();
 }
 
 // ------------------------------------------------------------------------------------------------
 // admission
 // ------------------------------------------------------------------------------------------------
 MissionNode::StartOutcome MissionNode::begin_mission(const std::string& sha,
-                                                     const std::string& request_id) {
+                                                     const std::string& request_id, bool resume) {
   StartOutcome out;
   out.mission_id = fsm_.mission_id();
   if (!valid_request_id(request_id)) {
@@ -505,6 +580,7 @@ MissionNode::StartOutcome MissionNode::begin_mission(const std::string& sha,
     out.accepted = true;
     out.duplicate = true;
     out.reason = StartSrv::Response::REASON_OK;
+    out.resumed_run_index = run_.start_run_index;
     RCLCPP_INFO(get_logger(), "start request %s is a duplicate of mission %u", request_id.c_str(),
                 out.mission_id);
     return out;
@@ -522,12 +598,25 @@ MissionNode::StartOutcome MissionNode::begin_mission(const std::string& sha,
   }
   std::uint8_t why = 0;
   const bool pre = pre_arm_ok(&why);
+  // Resume: the persisted progress of this artifact, unless it is complete (from memory, no I/O).
+  std::uint32_t start_run = 0;
+  std::vector<std::uint32_t> restored;
+  if (resume) {
+    const auto it = progress_.find(sha);
+    if (it != progress_.end() && !it->second.complete()) {
+      start_run = it->second.run_index;
+      restored = it->second.completed_points;
+    }
+  }
   // The new execution's identity must be in place before the transition publishes it.
   const RunState previous = run_;
   run_.clear();
   run_.mission_id = fsm_.mission_id() + 1;
   run_.source_artifact_sha256 = sha;
   run_.request_id = request_id;
+  run_.start_run_index = start_run;  // MissionState.start_run_index from LOADING on
+  run_.run_index = start_run;
+  run_.point_index = static_cast<std::uint32_t>(restored.size());  // the first unresolved point
   const Result r = fsm_.start(pre, steady_ns());
   if (!r.accepted) {
     run_ = previous;
@@ -544,9 +633,21 @@ MissionNode::StartOutcome MissionNode::begin_mission(const std::string& sha,
   release_note_.clear();
   rpp_stamp_ns_.reset();
   ready_since_ns_.reset();
+  reengage_confirmed_ns_.reset();
+  pivot_timeout_latched_ = false;
   px4_.begin_execution();
+  // Progress is written from PLACING on (the artifact verified); resume=false overwrites it then.
+  progress_tracking_ = false;
+  progress_run_ = start_run;
+  resume_points_ = restored;
+  completed_ = std::move(restored);
   out.accepted = true;
   out.reason = StartSrv::Response::REASON_OK;
+  out.resumed_run_index = start_run;
+  if (resume) {
+    RCLCPP_INFO(get_logger(), "mission %u: resume of %s from run %u (%zu points already resolved)",
+                out.mission_id, sha.c_str(), start_run, resume_points_.size());
+  }
   advance();  // LOADING's entry action only launches the read: no file I/O here
   return out;
 }
@@ -569,10 +670,13 @@ void MissionNode::advance() {
     handle_px4(o);
   }
   // Entry actions, once per state change, including changes they cause themselves.
+  bool changed = false;
   while (entered_changes_ != fsm_.changes()) {
     entered_changes_ = fsm_.changes();
     enter(fsm_.state(), steady_ns());
+    changed = true;
   }
+  if (changed) note_progress();  // every state change of a tracked execution is persisted
   while (const auto req = px4_.next(steady_ns())) send_px4(*req);
   if (dirty_) publish_state();
 }
@@ -670,6 +774,12 @@ void MissionNode::on_terminal_entry() {
 
 void MissionNode::poll_jobs() {
   using namespace std::chrono_literals;
+  if (progress_job_.valid() && progress_job_.wait_for(0s) == std::future_status::ready) {
+    for (const auto& e : progress_job_.get()) {
+      RCLCPP_ERROR(get_logger(), "progress not persisted: %s", e.c_str());
+    }
+    launch_progress_job();  // the records queued meanwhile (newest per artifact)
+  }
   if (load_job_.valid() && load_job_.wait_for(0s) == std::future_status::ready) {
     ArtifactResult r = load_job_.get();
     if (job_mission_id_ == fsm_.mission_id() && fsm_.state() == State::kLoading) {
@@ -678,6 +788,7 @@ void MissionNode::poll_jobs() {
         fsm_.artifact_loaded(false, r.error, steady_ns());
       } else {
         artifact_ = std::move(r.artifact);
+        progress_tracking_ = true;  // a verified artifact: its progress is persisted from now on
         fsm_.artifact_loaded(true, "artifact verified", steady_ns());
       }
     }
@@ -701,6 +812,17 @@ void MissionNode::poll_jobs() {
     } catch (const std::exception& e) {
       RCLCPP_ERROR(get_logger(), "point journal refused: %s", e.what());
       fsm_.placed(false, kReasonPathError, e.what(), steady_ns());
+      return;
+    }
+    // Resume: the restored points were resolved by the earlier execution (placement keeps the
+    // point order and flags, so a must-hit rank names the same vertex in source and execution).
+    if (!resume_points_.empty() && !journal_->restore_resolved(resume_points_.size())) {
+      const std::string why = "persisted progress (" + std::to_string(resume_points_.size()) +
+                              " points) does not fit the execution artifact (" +
+                              std::to_string(journal_->point_count()) + " must-hit points)";
+      RCLCPP_ERROR(get_logger(), "%s", why.c_str());
+      journal_.reset();
+      fsm_.placed(false, kReasonInternalError, why, steady_ns());
       return;
     }
     placement_->anchored = p.transformed;
@@ -778,6 +900,12 @@ void MissionNode::handle_px4(const Px4Outcome& o) {
       if (fsm_.state() == State::kEngaging) {
         fsm_.engaged(ok, timeout ? kReasonOffboardTimeout : kReasonOffboardRefused, what,
                      steady_ns());
+        if (fsm_.awaiting_reengage_gate()) {
+          // Re-engage: RUNNING once the guard also sees armed + OFFBOARD (evaluate_gate), bounded
+          // by offboard_timeout_s (on_timer).
+          reengage_confirmed_ns_ = steady_ns();
+          if (gate_ok()) fsm_.reengage_gate(true, steady_ns());
+        }
       }
       break;
     case Px4Op::kOffboardOff:
@@ -810,6 +938,53 @@ std::uint8_t MissionNode::waiting_on() const {
   }
 }
 
+std::uint8_t MissionNode::published_state() const {
+  if (fsm_.reengaging()) return MissionState::STATE_PAUSED;
+  return static_cast<std::uint8_t>(fsm_.state());
+}
+
+// ------------------------------------------------------------------------------------------------
+// persisted progress (contract section 9a)
+// ------------------------------------------------------------------------------------------------
+void MissionNode::record_resolved(const std::vector<PointEvent>& evs) {
+  if (evs.empty()) return;
+  // The journal resolves points in path order, so this list stays 0..k-1.
+  for (const auto& e : evs) completed_.push_back(e.point_index);
+  note_progress();
+}
+
+void MissionNode::note_progress() {
+  if (!progress_tracking_) return;
+  MissionProgress p;
+  p.path_artifact_sha256 = run_.source_artifact_sha256;
+  p.mission_id = fsm_.mission_id();
+  p.run_index = progress_run_;
+  p.point_index = run_.point_index;
+  p.completed_points = completed_;
+  p.state = to_string(fsm_.state());
+  p.updated_utc = utc_now_iso8601();
+  if (fsm_.terminal()) progress_tracking_ = false;  // the last record of this execution
+  progress_[p.path_artifact_sha256] = p;  // what a resume decides from, before the disk has it
+  progress_queue_[p.path_artifact_sha256] = std::move(p);  // at most one pending, newest wins
+  launch_progress_job();
+}
+
+void MissionNode::launch_progress_job() {
+  if (progress_job_.valid() || progress_queue_.empty()) return;
+  std::vector<MissionProgress> batch;
+  for (auto& kv : progress_queue_) batch.push_back(std::move(kv.second));
+  progress_queue_.clear();
+  progress_job_ = std::async(std::launch::async, [dir = missions_dir_, batch = std::move(batch)]() {
+    std::vector<std::string> errors;
+    for (const auto& rec : batch) {
+      std::string e;
+      if (!write_progress(dir, rec, &e)) errors.push_back(e);
+    }
+    return errors;
+  });
+  work_timer_->reset();
+}
+
 // ------------------------------------------------------------------------------------------------
 // outputs
 // ------------------------------------------------------------------------------------------------
@@ -817,7 +992,7 @@ void MissionNode::publish_state() {
   dirty_ = false;
   MissionState m;
   m.stamp = get_clock()->now();  // message stamp: ROS time (never used for an age)
-  m.state = static_cast<std::uint8_t>(fsm_.state());
+  m.state = published_state();
   m.mission_id = fsm_.mission_id();
   m.run_index = run_.run_index;
   m.point_index = run_.point_index;
@@ -830,6 +1005,7 @@ void MissionNode::publish_state() {
   m.gate_reason_code = fsm_.gate_reason();
   m.waiting_on = waiting_on();
   m.state_entered = to_msg_time(state_entered_ros_ns_);  // ROS time, see MissionState.msg
+  m.start_run_index = run_.start_run_index;
   state_pub_->publish(m);
   if (goal_ && goal_->is_active()) {
     auto fb = std::make_shared<ExecuteMission::Feedback>();

@@ -12,7 +12,7 @@ find_package(dyx3_interfaces REQUIRED)
 find_package(Threads REQUIRED)
 
 # Pure C++ core: FSM, PX4 call sequencer, frame placement, path-artifact reader/writer, SHA-256,
-# point journal. No ROS includes.
+# point journal, persisted progress. No ROS includes.
 add_library(dyx3_mission_core STATIC
   src/mission_fsm.cpp
   src/px4_sequencer.cpp
@@ -20,6 +20,7 @@ add_library(dyx3_mission_core STATIC
   src/sha256.cpp
   src/path_artifact.cpp
   src/point_journal.cpp
+  src/mission_progress.cpp
   src/run_state.cpp)
 target_include_directories(dyx3_mission_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -48,14 +49,15 @@ if(BUILD_TESTING)
   find_package(rosgraph_msgs REQUIRED)  # the node test steps ROS time through /clock
   set(FIXTURES ${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures)
   foreach(t mission_fsm_test px4_sequencer_test frame_placement_test sha256_test path_artifact_test
-          point_journal_test)
+          point_journal_test mission_progress_test)
     ament_add_gtest(${t} test/${t}.cpp)
     target_link_libraries(${t} dyx3_mission_core)
     target_compile_definitions(${t} PRIVATE DYX3_FIXTURES="${FIXTURES}")
   endforeach()
   # Fake px4_link / guard / RPP / vehicle in-process; condition waits, private locked DDS domain.
-  # The arm and OFFBOARD timeout cases wait for the minimum valid timeouts (> 2.0 s, > 3.5 s).
-  ament_add_gtest(mission_node_test test/mission_node_test.cpp TIMEOUT 180)
+  # The arm and OFFBOARD timeout cases wait for the minimum valid timeouts (> 2.0 s, > 3.5 s); the
+  # recovery cases (persisted progress, resume, re-engage) drive whole paths in real time.
+  ament_add_gtest(mission_node_test test/mission_node_test.cpp TIMEOUT 300)
   target_link_libraries(mission_node_test dyx3_mission_node_lib)
   ament_target_dependencies(mission_node_test rclcpp rclcpp_action dyx3_interfaces rosgraph_msgs)
   target_compile_definitions(mission_node_test PRIVATE DYX3_FIXTURES="${FIXTURES}")

@@ -100,6 +100,12 @@ std::optional<PointEvent> PointJournal::skip() {
   return ev;
 }
 
+bool PointJournal::restore_resolved(std::size_t resolved) {
+  if (next_ != 0 || capturing_ || resolved > vertices_.size()) return false;
+  next_ = resolved;
+  return true;
+}
+
 std::vector<PointEvent> PointJournal::finish() {
   std::vector<PointEvent> out;
   if (capturing_ && next_ < vertices_.size()) {

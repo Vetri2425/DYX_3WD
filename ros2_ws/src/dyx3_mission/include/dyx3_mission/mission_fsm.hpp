@@ -49,6 +49,7 @@ enum Reason : std::uint8_t {
   kReasonEstop = 15,
   kReasonRppError = 16,
   kReasonRppStale = 17,
+  kReasonRppPivotTimeout = 18,  ///< interfaces 0.17.0
 };
 
 enum class Event : std::uint8_t {
@@ -69,6 +70,10 @@ enum class Event : std::uint8_t {
   kSkipPoint,
   kRppStale,
   kRppAckTimeout,
+  kReengage,         ///< PAUSED -> ARMING (resume of a vehicle that lost arm / OFFBOARD)
+  kReengaged,        ///< ENGAGING (re-engage, OFFBOARD confirmed) -> RUNNING with the full gate
+  kReengageTimeout,  ///< the full gate never passed after the re-engage's OFFBOARD confirmation
+  kRppPivotTimeout,  ///< RPP's pivot watchdog expired while RUNNING
 };
 
 /// Why a request was refused. Mapped to the service REASON_* codes by the node.
@@ -132,14 +137,28 @@ public:
   Result placed(bool ok, std::uint8_t reason, const std::string& detail, std::int64_t now_ns);
   /// ARMING: px4_link confirmed the arm (ok) or refused / timed out (`reason`).
   Result armed(bool ok, std::uint8_t reason, const std::string& detail, std::int64_t now_ns);
-  /// ENGAGING: px4_link confirmed OFFBOARD (ok) or refused / timed out (`reason`).
+  /// ENGAGING: px4_link confirmed OFFBOARD (ok) or refused / timed out (`reason`). A start goes to
+  /// READY; a re-engage stays in ENGAGING until reengage_gate() (the guard's verdict may lag the
+  /// confirmation, and nothing reaches RUNNING without the full gate).
   Result engaged(bool ok, std::uint8_t reason, const std::string& detail, std::int64_t now_ns);
   /// RPP holds this execution's path. READY -> RUNNING only with the FULL gate ok; otherwise the
   /// acknowledgement is held (the guard's verdict may lag the OFFBOARD confirmation) until the
   /// gate passes or rpp_ack_timeout fires.
   Result rpp_ack(bool gate_ok, std::int64_t now_ns);
   Result pause(std::int64_t now_ns);
+  /// PAUSED -> RUNNING with every resume condition met. During a re-engage: accepted, no change
+  /// (a retry of the resume that started it).
   Result resume(bool gate_ok, std::int64_t now_ns);
+  /// Resume of a PAUSED execution whose vehicle is no longer armed / in OFFBOARD (the node checks
+  /// that only the arming gate fails and the pre-arm gate is ok): PAUSED -> ARMING -> ENGAGING ->
+  /// RUNNING, with the same steps, timeouts and failure reasons as a start. RPP keeps the execution
+  /// loaded and paused, so there is no READY handshake; the node publishes PAUSED until RUNNING.
+  Result reengage(std::int64_t now_ns);
+  /// Re-engage, OFFBOARD confirmed: -> RUNNING when the full gate is ok, else held (no change).
+  Result reengage_gate(bool gate_ok, std::int64_t now_ns);
+  /// Re-engage, OFFBOARD confirmed, and the full gate never passed in time: ERROR with the guard
+  /// reason (SAFETY / RTK), as rpp_ack_timeout does for READY.
+  Result reengage_timeout(std::uint8_t guard_reason, std::int64_t now_ns);
   Result abort(std::uint8_t reason, std::int64_t now_ns);
   Result rpp_complete(std::int64_t now_ns);
   Result rpp_error(std::int64_t now_ns);
@@ -156,6 +175,9 @@ public:
   /// RPP stopped reporting for the running mission: automatic pause (REASON_RPP_STALE), never an
   /// automatic resume.
   Result rpp_stale(std::int64_t now_ns);
+  /// RPP reports its pivot watchdog expired (heading not reached) while RUNNING: automatic pause
+  /// (REASON_RPP_PIVOT_TIMEOUT), never an automatic resume.
+  Result rpp_pivot_timeout(std::int64_t now_ns);
   Result skip_point(bool has_active_point, std::int64_t now_ns);
 
   State state() const { return state_; }
@@ -171,6 +193,10 @@ public:
   /// Incremented on every ACCEPTED start (0 until the first mission): the execution id.
   std::uint32_t mission_id() const { return mission_id_; }
   const std::deque<Transition>& log() const { return log_; }
+  /// ARMING / ENGAGING of a re-engage from PAUSED (not of a start).
+  bool reengaging() const { return reengaging_; }
+  /// A re-engage whose OFFBOARD is confirmed, waiting for the full gate (reengage_gate()).
+  bool awaiting_reengage_gate() const { return reengaging_ && reengage_confirmed_; }
   std::uint64_t transitions_total() const { return seq_; }
   /// Number of state changes (refusals and no-change events excluded). A self-transition (PAUSED
   /// -> PAUSED on an EKF reset) counts.
@@ -204,6 +230,8 @@ private:
   std::uint32_t mission_id_ = 0;
   std::uint64_t seq_ = 0;
   std::uint64_t changes_ = 0;
+  bool reengaging_ = false;
+  bool reengage_confirmed_ = false;
   std::deque<Transition> log_;
   Observer observer_;
 };
