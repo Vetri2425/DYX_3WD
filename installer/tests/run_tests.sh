@@ -283,7 +283,7 @@ libs() {
   check "os_check rejects debian" '! (DYX3_OS_RELEASE="${T}/osdeb" DYX3_ARCH=aarch64 os_check) 2>/dev/null'
 
   check "pins: XRCE agent v2.4.3 pinned to a commit" '(load_pin microxrce_agent; [ "${XRCE_TAG}" = v2.4.3 ] && [ ${#XRCE_COMMIT} -eq 40 ])'
-  check "pins: firmware SHA is the flashed 27a7ac92" '(load_pin firmware; [ "${FIRMWARE_SHA}" = 27a7ac92845317b0276776242c504215809b2a0f ])'
+  check "pins: firmware SHA is the rover firmware 8279fa4b" '(load_pin firmware; [ "${FIRMWARE_SHA}" = 8279fa4be33d5fc26c3b895c7e4a0a8660fcfff1 ])'
 
   # dry-run of the whole install flow must complete and mention every required step.
   # PC-7c: the user step asks the HOST whether the service user exists, so a host with a dyx3 user skipped useradd and
@@ -821,7 +821,7 @@ F
 
   # ---- dyx3-version / dyx3-rollback
   (print_version) >"${T}/ver" 2>&1
-  check "dyx3-version prints the stack SHA, the firmware pin and the message-set hash" 'grep -q "^stack_sha=${D}$" "${T}/ver" && grep -q "^firmware_expected_sha=27a7ac92" "${T}/ver" && grep -q "^px4_msgs_msg_set_sha256=abc123def456$" "${T}/ver"'
+  check "dyx3-version prints the stack SHA, the firmware pin and the message-set hash" 'grep -q "^stack_sha=${D}$" "${T}/ver" && grep -q "^firmware_expected_sha=8279fa4b" "${T}/ver" && grep -q "^px4_msgs_msg_set_sha256=abc123def456$" "${T}/ver"'
   check "dyx3-version admits the running firmware identity is unreadable" 'grep -q "^firmware_running=unavailable" "${T}/ver"'
 
   (rollback_release) >"${T}/rb1" 2>&1
