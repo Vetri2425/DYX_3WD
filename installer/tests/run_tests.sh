@@ -1165,7 +1165,12 @@ with tarfile.open(sys.argv[1], "w") as tf:
         info.size = 0
         tf.addfile(info, io.BytesIO(b""))
 PY
-  tar --zstd -cf "${T}/art_dd/release-${sha}.tar.zst" "@${T}/dd.tar"
+  # GNU tar has no bsdtar "@archive" member copy; compress the crafted tar as-is
+  if command -v zstd >/dev/null 2>&1; then
+    zstd -q -c "${T}/dd.tar" >"${T}/art_dd/release-${sha}.tar.zst"
+  else
+    tar --zstd -cf "${T}/art_dd/release-${sha}.tar.zst" "@${T}/dd.tar"
+  fi
   (cd "${T}/art_dd" && sha256sum artifacts.env "release-${sha}.tar.zst" "px4_msgs-${FIRMWARE_SHA}.tar.zst" >SHA256SUMS)
   (DYX3_ARTIFACT_DIR="${T}/art_dd" install_prebuilt "${sha}") >"${T}/pb_dd" 2>&1
   rc=$?
