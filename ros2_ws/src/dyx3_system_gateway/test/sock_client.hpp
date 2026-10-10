@@ -18,6 +18,9 @@ namespace {
 struct Sock {
   int fd{-1};
   mutable std::string partial;  // bytes after the last newline seen by read_lines
+  // Complete lines a reader took off the socket but did not consume (e.g. events read while waiting
+  // for a reply), for the next reader of this connection.
+  mutable std::vector<std::string> stash;
   explicit Sock(const std::string& path) {
     fd = socket(AF_UNIX, SOCK_STREAM, 0);
     sockaddr_un a{};

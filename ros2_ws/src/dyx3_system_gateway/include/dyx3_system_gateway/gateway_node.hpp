@@ -1,6 +1,9 @@
 // gateway_node — ROS wiring of the system gateway. Contract: docs/contracts/dyx3_system_gateway.md.
 // Single-threaded executor assumed: IPC lines arrive on the IPC thread and are handed over through
 // a mutex-guarded inbox that step() drains, so no rclcpp call is ever made from the IPC thread.
+// The IPC thread also wakes the executor (a guard condition) so a queued command is dispatched at
+// once rather than on the next 10 ms tick. Every service call is asynchronous with its own
+// deadline: no command, event or E-stop ever waits for another command's answer.
 #pragma once
 
 #include <atomic>
@@ -37,6 +40,7 @@
 #include "dyx3_interfaces/srv/skip_point.hpp"
 #include "dyx3_interfaces/srv/start_mission.hpp"
 #include "dyx3_system_gateway/command_validator.hpp"
+#include "dyx3_system_gateway/event_stream.hpp"
 #include "dyx3_system_gateway/ipc_server.hpp"
 #include "dyx3_system_gateway/operator_link.hpp"
 #include "dyx3_system_gateway/telemetry_snapshot.hpp"
@@ -45,11 +49,23 @@
 namespace dyx3_gateway {
 
 using ClockFn = std::function<double()>;
+class WakeWaitable;
 
 class GatewayNode : public rclcpp::Node {
 public:
   // Commands queued between two steps; beyond it every command except an E-stop is refused "busy".
   static constexpr size_t kInboxCap = 256;
+  // Service calls awaiting their answer; beyond it every command except an E-stop is refused
+  // "busy", so a client that floods slow commands cannot grow the pending table without bound.
+  static constexpr size_t kPendingCap = 64;
+  // Line received on the IPC thread -> ROS service request sent (steady clock, microseconds).
+  struct DispatchStats {
+    uint64_t count{0};
+    double last_us{0.0};
+    double max_us{0.0};
+    double sum_us{0.0};
+    double estop_last_us{0.0};
+  };
 
   explicit GatewayNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions(),
                        ClockFn clock = nullptr, bool create_timer = true);
@@ -66,11 +82,20 @@ public:
   size_t inbox_depth() const;
   // Test hook (read-only): the downstream services this node's clients cannot reach right now.
   std::vector<std::string> unavailable_services() const;
+  // Test hooks (read on the executor thread): dispatch latency, and the sequence number of the
+  // last event pushed (0 = none yet).
+  const DispatchStats& dispatch_stats() const { return dispatch_; }
+  uint64_t event_seq() const { return events_->seq(); }
+  // The answer deadline of a command (contract section 2, per-command timeouts).
+  double timeout_for(CmdKind k) const;
+  // Adapter probe (mission contract v2): true once StartMission.Request has `request_id`.
+  static bool start_mission_carries_request_id();
 
 private:
   struct Inbound {
     int client;
     ParseResult pr;
+    double rx_steady_s{0.0};  // when the IPC thread queued it (real steady clock)
   };
   struct Pending {
     int client;
@@ -78,12 +103,18 @@ private:
     int64_t id;
     CmdKind kind;
     double deadline_s;
+    double timeout_s;
+    std::string request_id;        // echoed in every reply to a start_mission, "" when absent
     std::string what;              // audit label, e.g. "E-stop assert (source=tablet)"
     std::function<void()> forget;  // drops the request from the rclcpp client (GW-007)
   };
   void declare_params();
   void on_line(int client, const std::string& line);
   void process(const Inbound& in, double now_s);
+  void on_connect(int client);
+  void track_operator_link(double now_s);
+  void track_stale_sources(double now_s);
+  void note_dispatch(const Inbound& in);
   void reply(int client, bool has_id, int64_t id, bool ok, const std::string& code,
              const std::string& reason, const std::string& data_json = "{}");
   template <typename Srv, typename Fill, typename Render>
@@ -99,6 +130,9 @@ private:
   int max_clients_{4};
   double telemetry_hz_{5.0}, operator_link_timeout_s_{2.0}, service_timeout_s_{2.0},
       snapshot_fresh_s_{1.0}, operator_link_hz_{10.0};
+  // Per-command answer deadlines (contract section 2); service_timeout_s_ covers the fast accepts.
+  double estop_timeout_s_{1.0}, arm_timeout_s_{4.0}, offboard_timeout_s_{5.0};
+  double event_coalesce_s_{0.01};  // events of one kind closer than this are folded into one
 
   IpcServer ipc_;
   OperatorLink link_{2.0};
@@ -109,6 +143,9 @@ private:
   std::map<uint64_t, Pending> pending_;
   uint64_t next_token_{1};
   std::vector<CmdKind> last_batch_;
+  DispatchStats dispatch_;
+  // Pushed status events (contract section 1.3). Built after ipc_ (it broadcasts through it).
+  std::unique_ptr<EventStream> events_;
   double last_link_pub_s_{-1e18}, last_tel_s_{-1e18};
   // Audit log state (XR-GW-001): last logged operator-link state and IPC counters.
   bool link_alive_{false};
@@ -128,6 +165,8 @@ private:
   rclcpp::Client<dyx3_interfaces::srv::SetSprayManual>::SharedPtr cli_spray_;
   std::vector<rclcpp::SubscriptionBase::SharedPtr> subs_;
   rclcpp::TimerBase::SharedPtr timer_;
+  std::shared_ptr<WakeWaitable>
+      wake_;  // set before the IPC thread starts, null in step()-driven tests
 };
 
 }  // namespace dyx3_gateway

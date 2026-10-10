@@ -20,6 +20,11 @@ void TelemetrySnapshot::update(const std::string& source, const std::string& fie
   latest_[source] = Entry{fields_json, now_s};
 }
 
+bool TelemetrySnapshot::fresh(const std::string& source, double now_s) const {
+  const auto it = latest_.find(source);
+  return it != latest_.end() && now_s - it->second.stamp <= fresh_s_;
+}
+
 std::string TelemetrySnapshot::to_json(double now_s, const std::string& gateway_json) const {
   JsonLine o;
   size_t n;

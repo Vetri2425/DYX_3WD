@@ -29,6 +29,16 @@ const JsonValue* need(const JsonValue& args, const char* key, JsonValue::Type t)
   return (v != nullptr && v->type == t) ? v : nullptr;
 }
 
+bool is_request_id(const std::string& s) {
+  if (s.empty() || s.size() > kMaxRequestIdLen) return false;
+  for (const char c : s) {
+    const bool ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                    c == '.' || c == '_' || c == ':' || c == '-';
+    if (!ok) return false;
+  }
+  return true;
+}
+
 bool is_hex64(const std::string& s) {
   if (s.size() != 64) return false;
   for (const char c : s)
@@ -134,11 +144,19 @@ ParseResult parse_command(const std::string& line) {
   if (c == "spray_manual") return bool_arg(CmdKind::SprayManual, "on");
 
   if (c == "start_mission") {
-    if (!only_keys(*args, {"path_artifact_sha256"}, &bad))
+    if (!only_keys(*args, {"path_artifact_sha256", "request_id"}, &bad))
       return fail(r, "invalid_command", "unknown argument '" + bad + "'");
     const JsonValue* s = need(*args, "path_artifact_sha256", JsonValue::Type::String);
     if (s == nullptr || !is_hex64(s->s)) {
       return fail(r, "invalid_command", "path_artifact_sha256 must be 64 lowercase hex characters");
+    }
+    if (const JsonValue* rid = args->get("request_id")) {
+      if (rid->type != JsonValue::Type::String || !is_request_id(rid->s)) {
+        return fail(r, "invalid_command",
+                    "request_id must be 1.." + std::to_string(kMaxRequestIdLen) +
+                        " characters of [A-Za-z0-9._:-]");
+      }
+      out.request_id = rid->s;
     }
     out.kind = CmdKind::StartMission;
     out.sha256 = s->s;

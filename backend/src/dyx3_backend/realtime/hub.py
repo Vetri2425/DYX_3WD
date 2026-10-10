@@ -2,11 +2,19 @@
 
 Contract: docs/contracts/backend.md section 4. The hub holds no safety logic: ``estop`` is forwarded to the gateway as a request
 and the verdict is returned in the ack.
+
+Status reaches the tablet as ONE Socket.IO event, ``rover_event``, pushed the moment it changes: every gateway status event
+(gateway contract section 1.3: ``mission_state``, ``operator_link``, ``fcu_link``, ``estop``) and the backend's own link to the
+gateway (``gateway_link``). Each carries a hub ``seq`` (monotonic per backend process). A session gets the latest event of every
+kind as soon as it connects (``replay`` true, original ``seq``), so the tablet never polls; per kind, the highest ``seq`` is the
+current state.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -15,7 +23,15 @@ from dyx3_backend.gateway.client import GatewayClient, GatewayError
 from dyx3_backend.realtime.relay import OperatorLinkRelay
 
 log = logging.getLogger("dyx3.hub")
-Emit = Callable[[str, Any], Awaitable[None]]
+# emit(event, data, to=None): socketio.AsyncServer.emit; ``to`` None = every connected session.
+Emit = Callable[..., Awaitable[None]]
+
+STATUS_EVENT = "rover_event"
+GATEWAY_LINK = "gateway_link"
+
+
+def _wall_ms() -> int:
+    return time.time_ns() // 1_000_000
 
 
 class RealtimeHub:
@@ -25,6 +41,12 @@ class RealtimeHub:
         self._relay = relay
         self._emit = emit
         self._sessions: dict[str, Identity] = {}
+        self._seq = 0
+        self._latest: dict[str, dict] = {}  # kind -> the last rover_event payload of that kind
+        self._tasks: set[asyncio.Task] = set()
+        # Until the gateway client reports a connection, the gateway link is down.
+        self._record(GATEWAY_LINK, {"connected": False}, wall_ms=_wall_ms())
+        gateway.on_event(self.broadcast_event)
 
     # ---- connection lifecycle
     def on_connect(self, sid: str, auth: Any) -> bool:
@@ -33,6 +55,10 @@ class RealtimeHub:
         if ident is None:
             return False  # refused: unknown or missing token
         self._sessions[sid] = ident
+        # The current state, right after the connection is accepted (the handler returns first).
+        task = asyncio.get_running_loop().create_task(self.send_current_state(sid))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
         return True
 
     def on_disconnect(self, sid: str) -> None:
@@ -72,5 +98,38 @@ class RealtimeHub:
     async def broadcast_telemetry(self, snapshot: dict | None) -> None:
         await self._emit("telemetry", {"snapshot": snapshot, "age_s": self._gw.snapshot_age()})
 
+    def _record(self, kind: str, data: dict, *, gateway_event: dict | None = None, wall_ms: int | None = None) -> dict:
+        self._seq += 1
+        ev = gateway_event or {}
+        payload = {
+            "kind": kind,
+            "seq": self._seq,
+            "gateway_seq": ev.get("seq"),
+            "t_mono_s": ev.get("t_mono_s"),
+            "t_wall_ms": ev.get("t_wall_ms", wall_ms),
+            "coalesced": ev.get("coalesced", 0),
+            "replay": bool(ev.get("replay", False)),
+            "data": data,
+        }
+        self._latest[kind] = payload
+        return payload
+
+    async def broadcast_event(self, event: dict) -> None:
+        """A gateway status event (already ordered and de-duplicated by the gateway client): relay it at once."""
+        payload = self._record(event["event"], event["data"], gateway_event=event)
+        await self._emit(STATUS_EVENT, payload)
+
     async def broadcast_gateway_state(self, connected: bool) -> None:
-        await self._emit("gateway", {"connected": connected})
+        """The backend's own link to the gateway. While it is down every gateway-sourced kind is unknown."""
+        await self._emit(STATUS_EVENT, self._record(GATEWAY_LINK, {"connected": connected}, wall_ms=_wall_ms()))
+
+    async def send_current_state(self, sid: str) -> None:
+        """The latest event of every kind, in seq order, marked replay, to one session."""
+        for payload in sorted(self._latest.values(), key=lambda p: p["seq"]):
+            if sid not in self._sessions:
+                return  # gone meanwhile
+            try:
+                await self._emit(STATUS_EVENT, {**payload, "replay": True}, to=sid)
+            except Exception:  # one session's transport must never break the hub
+                log.exception("sending the current state to %s failed", sid)
+                return

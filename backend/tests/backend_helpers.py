@@ -26,9 +26,13 @@ class FakeGateway:
         self.raises: Exception | None = None
         self.snapshot: dict | None = None
         self._age: float | None = None
+        self.event_cbs: list = []
 
     def snapshot_age(self):
         return self._age
+
+    def on_event(self, cb) -> None:
+        self.event_cbs.append(cb)
 
     async def request(self, cmd: str, args: dict | None = None) -> dict:
         if not self.connected:
