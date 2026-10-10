@@ -2447,3 +2447,45 @@ it passes on a quiet machine. Watch it in CI.
 
 **Agent note:** while debugging, the installer agent deleted the `tmp.*` directories in the Mac user `$TMPDIR`.
 No data loss is known.
+
+## 2026-10-10 (02:10 UTC) — CI fix on `hardening/2026-10-10` (pushed; CI green at `6e92e28`)
+
+**Result:** run 38014548283 (`92ad85e`) red → run 38015295583 (`6e92e28`) **green**, one fix push. `master`
+(`962c4ee`) untouched.
+
+**Failure 1 — clang-format check.** 16 files in `dyx3_recorder`, `dyx3_spray` and `dyx3_motion_guard` had been
+formatted with a local clang-format **23**; CI pins **20.1.8** and rejected them (trailing-comment alignment,
+comment re-wrap at the column limit, one include grouping in `run_manifest.cpp`). Fix `6e92e28`: re-formatted only
+the files 20.1.8 flagged. Checked: whitespace, comment re-wraps and one std include reorder only, no code change.
+The `ci.yml` comment "20.1.8 and 23.1.0 both report 0 violations" is no longer true for this tree.
+
+**Failure 2 — installer tests, 256 passed / 3 failed.** The INS-020 test built its `..` archive with
+`tar --zstd -cf out.tar.zst "@dd.tar"`. `@archive` is **bsdtar (macOS) syntax only**; GNU tar on the Ubuntu runner
+reads it as a missing file (`Cannot stat`), so the archive never existed and three prebuilt tests failed (the `..`
+test, then the escaping-symlink and missing-artifacts tests as a knock-on). It passed on the Mac and was never run
+on Linux, because without `zstd` the whole prebuilt block skips (`ok prebuilt artifact tests skipped`). Fix
+`c35974b`: compress the crafted tar with `zstd -c` directly; the old line stays as the fallback where `zstd` is
+absent. Test-only; no installer code or assertion changed. Linux re-run: 258 passed / 0 failed.
+
+**Rules so a CI failure does not reach the next agent — run the CI-pinned tools before every push:**
+```bash
+pip install clang-format==20.1.8 shellcheck-py==0.10.0.1     # the CI pins, never the local default
+find ros2_ws/src -type f \( -name '*.cpp' -o -name '*.hpp' -o -name '*.h' \) -print0 \
+  | xargs -0 -r clang-format --dry-run --Werror
+shellcheck -x installer/*.sh installer/lib/*.sh installer/ci/*.sh installer/tests/*.sh deployment/scripts/*.sh
+bash installer/tests/run_tests.sh      # needs zstd installed (apt/brew), else the prebuilt tests silently skip
+```
+- Format only with clang-format 20.1.8. Re-formatting with another version is a CI failure, not a style choice.
+- If `run_tests.sh` prints `prebuilt artifact tests skipped`, the run is incomplete: install `zstd` and re-run.
+- Installer tests and scripts must work with **GNU tar** (CI and the Jetson), not only macOS bsdtar: no
+  `@archive`, no bsdtar-only flags. Run them on Linux (`./tools/dev/ros2_humble.sh` environment or a container)
+  before pushing installer changes.
+- `mission_node_test` (load flake) did not fail in either run.
+
+**Rover artifacts are not built for this branch.** `rover_artifacts`/`rover_publish` run only on pushes to `master`
+or `claude/cloud-phases` (`ci.yml:313`), so no `rover-6e92e28…` release exists. Owner decision 2026-10-10: leave it
+as is. To upgrade the rover to this branch: `sudo /opt/dyx3/bin/dyx3-upgrade <full-sha>` (`DYX3_ARTIFACTS=auto`
+builds on the Jetson, ~40 min), or fast-forward `master` after review (`master` is an ancestor of this branch) and
+upgrade from the published artifact with `DYX3_ARTIFACTS=prebuilt` (~20 s).
+
+**Not run:** colcon locally (CI ran it green twice), anything on the Jetson.
