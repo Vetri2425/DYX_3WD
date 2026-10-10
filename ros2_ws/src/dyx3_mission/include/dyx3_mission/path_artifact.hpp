@@ -40,6 +40,10 @@ struct ArtifactResult {
   PathArtifact artifact;
 };
 
+/// Python repr(float) spelling of a finite double, the only coordinate spelling the reader accepts.
+/// For C++ writers of DYX3PATH artifacts (tests, tools); empty for a non-finite value.
+std::string python_repr(double v);
+
 /// Parse artifact bytes. When `expected_sha256` is non-empty the bytes must hash to it.
 ArtifactResult parse_artifact(const std::string& bytes, const std::string& expected_sha256 = "");
 

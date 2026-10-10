@@ -68,7 +68,7 @@ bool parse_uint(const std::string& tok, unsigned long& out) {
 // Python repr(float) of a finite double: the shortest digits that round-trip, positional notation
 // for 1e-4 <= |v| < 1e16, otherwise d[.ddd]e+XX with at least two exponent digits. This is the
 // spelling the Python writer emits and its decoder requires (`repr(x) == token`).
-std::string python_repr(double v) {
+std::string python_repr_impl(double v) {
   char buf[64];
   const auto r = std::to_chars(buf, buf + sizeof(buf), v, std::chars_format::scientific);
   if (r.ec != std::errc()) return {};
@@ -110,7 +110,7 @@ std::string python_repr(double v) {
 // A coordinate token is accepted only in the spelling Python's repr() produces ("1", "1e0",
 // "1.50", "+1.0", hex floats and the like parse with strtod but are refused by the decoder).
 bool parse_canonical_double(const std::string& tok, double& out) {
-  return parse_double(tok, out) && python_repr(out) == tok;
+  return parse_double(tok, out) && python_repr_impl(out) == tok;
 }
 
 // Strict check of the `meta` line against what Python's decode() enforces: valid JSON, an object,
@@ -294,6 +294,8 @@ private:
 };
 
 }  // namespace
+
+std::string python_repr(double v) { return python_repr_impl(v); }
 
 ArtifactResult parse_artifact(const std::string& bytes, const std::string& expected_sha256) {
   const std::string digest = sha256_hex(bytes);

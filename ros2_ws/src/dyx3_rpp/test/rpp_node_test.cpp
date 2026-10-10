@@ -10,7 +10,6 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
-#include <iomanip>
 #include <locale>
 #include <sstream>
 #include <vector>
@@ -45,8 +44,10 @@ std::string write_artifact(const std::string& dir, const std::vector<ArtPoint>& 
   body.imbue(std::locale::classic());
   body << "DYX3PATH 1\nframe local_ned\nengine 0123456789abcdef\nmeta {}\npoints " << pts.size()
        << "\n";
-  body << std::setprecision(17);
-  for (const auto& p : pts) body << p.n << " " << p.e << " " << p.flag << "\n";
+  // Coordinates in Python repr() spelling, as the backend writes them (the reader refuses others).
+  for (const auto& p : pts)
+    body << dyx3_mission::python_repr(p.n) << " " << dyx3_mission::python_repr(p.e) << " " << p.flag
+         << "\n";
   body << "end " << pts.size() << "\n";
   const std::string text = body.str();
   const std::string sha = dyx3_mission::sha256_hex(text);
