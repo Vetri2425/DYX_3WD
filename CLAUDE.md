@@ -67,7 +67,7 @@ fixes and open items: `docs/agents/HANDOFF.md`, entry "2026-10-10 (evening)".
 | Operator app | `yasarbaiiiii-blip/Three_Wheel_v2` branch **`Trajectory` = `0d8225c`** (pushed): v2 mission flow, `rover_event`, live 10 Hz, map via the EKF origin. Release APK in `3WD_PROD/builds/` |
 | Rover hardware | Pixhawk 6X + Jetson Orin Nano 8 GB, UM982 (TELEM1 + USB COM3 for RTCM), RoboClaw on GPS2, spray on FMU PWM OUT 1, 8S LiFePO4 |
 | Live params | baseline `config/px4/3wd_6x_carry_from_proto.params` = FCU; full dump `config/px4/2026-10-10.params` |
-| Field data | `3WD_PROD/Bags/<date>/` (recorder runs), `3WD_PROD/ulogs/<date>/` (PX4 SD logs via `bench_tools/ulog_pull.py`) |
+| Field data | `3WD_PROD/Recorder/<DD-MM-YYYY>/<NN_session>/` with `Bags/` (recorder runs) and `Logs/` (PX4 SD logs via `bench_tools/ulog_pull.py`); a `README.md` per date lists the sessions |
 
 **Proven on the rover:** steps 0–5 (link, params, RTK fixed + dual-antenna heading, Mission mode, Offboard signs);
 the v2 mission chain from the tablet (3 completed runs); 10 Hz telemetry; E-stop assert/clear from the tablet.

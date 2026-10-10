@@ -2516,7 +2516,7 @@ handshake OK, timesync 0.55 ms round trip; battery 26.46 V (86 %). Two notes:
   - `config/px4/3wd_6x_carry_from_proto.params`;
   - `config/px4/3wd_rover01_rc_calibration.params`;
   - `config/vehicle/roboclaw/README.md`.
-  - Logs copied to `~/Vetri/3WD_PROD/bench_tools/logs_2026-10-10/`.
+  - Logs copied to `~/Vetri/3WD_PROD/Recorder/10-10-2026/01_morning_T1-motor-mapping/Logs/`.
 - **Accel / decel observed (owner: leave them as they are):** full stick about 5 s to full speed; release from
   about 0.96 m/s about 3.5 s to stop (about 0.27 m/s², `RO_DECEL_LIM 0.3`): about 1.7 m stopping distance at
   1 m/s.
@@ -2556,7 +2556,7 @@ about 30 s. The download took about 7 min: the site router uplink is about 100 K
 After the upgrade: `health: OK`, `event_driven=True` in px4_link/rpp/motion_guard, `spray_unmatched_ack_count` 0
 (XR-GPX-005 confirmed).
 
-**Step 1 results** (evidence: `bench_tools/logs_2026-10-10/link_soak_20261010_1045.csv`, `recovery.json`):
+**Step 1 results** (evidence: `Recorder/10-10-2026/02_morning_step1-link-soak/Logs/link_soak_20261010_1045.csv`, `recovery.json`):
 
 | Gate | Result |
 |---|---|
@@ -2650,7 +2650,7 @@ to the baseline and `config/px4/2026-10-10.params`; no other parameter changed.
 ## 2026-10-10 (13:45) — Claude — Step 4 (PX4 Mission mode, controlled) passed
 
 - **Run:** `1_Aug.plan` (4 waypoints, 2.0–2.5 m legs, no speed item, so `RO_SPEED_LIM` 1.1). Log `log_57_2026-10-10-12-26-28.ulg`;
-  copies of it and `log_54` are in `bench_tools/logs_2026-10-10/`.
+  copies of it and `log_54` are in `Recorder/10-10-2026/03_midday_step4-px4-mission_before-after-jerk-fix/Logs/`.
 - **Results:**
 
   | Check | Result |
@@ -2716,7 +2716,7 @@ chain.
 - **Verified (13:10 IST, log `forward_5s_tuned.ulg`):** Offboard 0.20 m/s now gives 0.199 m/s measured, 0.201 m/s from
   the wheels and 0.199 m/s along the heading (steady state; it was 0.157 before). The first second is the
   `RO_ACCEL_LIM` ramp. Next: the Mission square at the new limits.
-- **Mission re-run with the tuning (13:15 IST, log `bench_tools/logs_2026-10-10/mission_tuned_07_28_03.ulg`), same
+- **Mission re-run with the tuning (13:15 IST, log `Recorder/10-10-2026/05_midday_speed-tuning_after-fix/Logs/mission_tuned_07_28_03.ulg`), same
   plan:**
 
   | Metric | Before (log_57) | After |
@@ -2745,8 +2745,9 @@ the p95).
 
 **Deployed:** rover 01 on release **`rover-7f9651d48f`** (health OK; px4_link handshake OK incl. battery_status;
 telemetry 10.0 Hz; battery 26.2 V / 80 %). App `yasarbaiiiii-blip/Three_Wheel_v2` `Trajectory` = **`0d8225c`**
-(pushed), release APK on the tablet. Data: `3WD_PROD/Bags/2026-10-10/` (12 recorder segments of the 3 completed
-missions) and `3WD_PROD/ulogs/2026-10-10/` (the 3 PX4 SD logs, byte-exact, via `bench_tools/ulog_pull.py`).
+(pushed), release APK on the tablet. Data: `3WD_PROD/Recorder/10-10-2026/` sessions 06 (`172b047`: missions 0003 aborted, 0006,
+0007) and 07 (`7f9651d`: mission 0001), each with `Bags/` (recorder segments) and `Logs/` (PX4 SD logs, byte-exact,
+via `bench_tools/ulog_pull.py`); the date folder's `README.md` lists every session of the day.
 
 ### What was fixed today (after the morning steps 0–5)
 
