@@ -13,6 +13,7 @@ find_package(dyx3_interfaces REQUIRED)
 # Pure C++ core: FSM, path-artifact reader, SHA-256, point journal. No ROS includes.
 add_library(dyx3_mission_core STATIC
   src/mission_fsm.cpp
+  src/px4_sequencer.cpp
   src/frame_placement.cpp
   src/sha256.cpp
   src/path_artifact.cpp
@@ -43,7 +44,7 @@ ament_export_targets(export_dyx3_mission_core HAS_LIBRARY_TARGET)
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   set(FIXTURES ${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures)
-  foreach(t mission_fsm_test frame_placement_test sha256_test path_artifact_test point_journal_test)
+  foreach(t mission_fsm_test px4_sequencer_test frame_placement_test sha256_test path_artifact_test point_journal_test)
     ament_add_gtest(${t} test/${t}.cpp)
     target_link_libraries(${t} dyx3_mission_core)
     target_compile_definitions(${t} PRIVATE DYX3_FIXTURES="${FIXTURES}")
