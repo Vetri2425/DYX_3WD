@@ -68,7 +68,7 @@ def test_round_trip_run_boundaries(rig, kinds):
         assert (prior.north_m, prior.east_m) == (current.north_m, current.east_m)
         assert prior.must_hit and current.must_hit
     assert client.get(f"/api/missions/{sha}/path", headers=H("view-tok")).status_code == 200
-    assert client.post(f"/api/missions/{sha}/start", headers=H("oper-tok")).status_code == 200
+    assert client.post(f"/api/missions/{sha}/start", headers=H("oper-tok")).status_code == 202
     assert client.post("/api/missions/plan", headers=H("oper-tok"), json=body).json()["mission"]["sha256"] == sha
 
 

@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Annotated, Literal
 
 import anyio
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel, ConfigDict, StrictBool
+from pydantic import BaseModel, ConfigDict, StrictBool, StrictStr
 
 from dyx3_backend.api.admission import bearer_identity
 from dyx3_backend.auth.tokens import Identity, Role
@@ -43,6 +44,10 @@ class OffboardBody(_Body):
 
 class SprayBody(_Body):
     on: StrictBool
+
+
+class StartBody(_Body):
+    request_id: StrictStr | None = None
 
 
 class RtkSourceBody(_Body):
@@ -90,19 +95,27 @@ AnyRole = Depends(any_authenticated)
 _STATUS = {"rejected": 409, "invalid_command": 400, "bad_message": 400, "service_unavailable": 503, "timeout": 504, "busy": 503}
 
 
-async def send(request: Request, cmd: str, args: dict | None = None) -> JSONResponse:
-    """Forward one request; report exactly what happened, including 'not delivered'."""
+async def forward(request: Request, cmd: str, args: dict | None = None) -> tuple[int, dict]:
+    """Forward one request; return (HTTP status, typed body) for exactly what happened, including 'not delivered'.
+
+    Every body is ``{ok, code, reason, delivered, data}``; ``data`` (with the downstream ``reason_code``) is the gateway's,
+    untouched. A delivered ``ok`` verdict is 200 here; a route may answer it differently (start: 202).
+    """
     gw = request.app.state.gateway
     try:
         reply = await gw.request(cmd, args)
     except GatewayError as exc:
         status = 503 if exc.delivered is False else 504
-        body = {"ok": False, "code": type(exc).__name__, "reason": str(exc), "delivered": exc.delivered, "data": {}}
-        return JSONResponse(body, status_code=status)
+        return status, {"ok": False, "code": type(exc).__name__, "reason": str(exc), "delivered": exc.delivered, "data": {}}
     ok = bool(reply.get("ok"))
     code = str(reply.get("code", "?"))
     body = {"ok": ok, "code": code, "reason": reply.get("reason", ""), "delivered": True, "data": reply.get("data", {})}
-    return JSONResponse(body, status_code=200 if ok else _STATUS.get(code, 502))
+    return (200 if ok else _STATUS.get(code, 502)), body
+
+
+async def send(request: Request, cmd: str, args: dict | None = None) -> JSONResponse:
+    status, body = await forward(request, cmd, args)
+    return JSONResponse(body, status_code=status)
 
 
 # ------------------------------------------------------------------------------------------------ routes
@@ -269,16 +282,46 @@ async def get_mission_path(sha: str, request: Request, _: Identity = Viewer):
     return Response(content=content, media_type="application/json")
 
 
+# A client request id (idempotency key): printable token, so it is safe in the gateway's JSON, ROS strings and logs.
+REQUEST_ID = re.compile(r"[A-Za-z0-9._:-]{1,64}")
+
+
+def _request_id(body: StartBody | None, header: str | None) -> str | None:
+    ids = {v for v in ((body.request_id if body else None), header) if v is not None}
+    if len(ids) > 1:
+        raise MissionError(422, "invalid_request_id", "request_id and the Idempotency-Key header differ")
+    rid = ids.pop() if ids else None
+    if rid is not None and not REQUEST_ID.fullmatch(rid):
+        raise MissionError(422, "invalid_request_id", "request_id must be 1-64 characters of A-Z a-z 0-9 . _ : -")
+    return rid
+
+
 @router.post("/missions/{sha}/start")
-async def start_mission(sha: str, request: Request, _: Identity = Operator) -> JSONResponse:
+async def start_mission(
+    sha: str,
+    request: Request,
+    body: StartBody | None = None,
+    idempotency_key: Annotated[str | None, Header()] = None,
+    _: Identity = Operator,
+) -> JSONResponse:
+    """Ask the rover to start; 202 once the mission node has ACCEPTED the start (progress follows as events)."""
     if len(sha) != 64 or any(c not in "0123456789abcdef" for c in sha):
         return JSONResponse({"ok": False, "code": "bad_id", "reason": "sha256 must be 64 lowercase hex characters"}, status_code=400)
     try:
+        rid = _request_id(body, idempotency_key)
         # never start a mission whose artifact this side cannot read; read + verify off the event loop (BE-005)
         await anyio.to_thread.run_sync(request.app.state.missions.get, sha)
     except MissionError as exc:
         return _mission_error(exc)
-    return await send(request, "start_mission", {"path_artifact_sha256": sha})
+    args = {"path_artifact_sha256": sha}
+    if rid is not None:
+        args["request_id"] = rid
+    status, reply = await forward(request, "start_mission", args)
+    if not reply["ok"]:
+        return JSONResponse(reply, status_code=status)
+    data = reply["data"]
+    execution = {"mission_id": data.get("mission_id"), "request_id": rid}
+    return JSONResponse({"ok": True, "accepted": True, "execution": execution, "data": data}, status_code=202)
 
 
 # ------------------------------------------------------------------------------------------------ runs

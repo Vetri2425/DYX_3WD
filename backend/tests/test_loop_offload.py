@@ -45,7 +45,7 @@ def test_artifact_reads_run_in_a_worker_thread(rig, monkeypatch):
     sha = mission["sha256"]
     assert c.get(f"/api/missions/{sha}", headers=H("view-tok")).json()["mission"] == mission
     path = c.get(f"/api/missions/{sha}/path", headers=H("view-tok"))
-    assert c.post(f"/api/missions/{sha}/start", headers=H("oper-tok")).status_code == 200
+    assert c.post(f"/api/missions/{sha}/start", headers=H("oper-tok")).status_code == 202
     assert gw.calls[-1] == ("start_mission", {"path_artifact_sha256": sha})
     assert where == [False, False, False]  # never on the event loop
     # The pre-rendered /path body is the same JSON as before.
