@@ -935,8 +935,301 @@ TEST(Px4LinkNode, ArmIsRefusedWhenPx4NeverLeavesAStaleOffboard) {
   EXPECT_GE(manual_mode_cmds(r.cmds), 2);
 }
 
-TEST(Px4LinkNode, UlogChunksAreAckedThenRepublished) {
+// --- VehicleCommandAck for arm/disarm and the OFFBOARD mode request (contract section 9) ---
+namespace {
+void publish_command_ack(Rig& r, uint32_t command, uint8_t result, uint8_t target_system = 1,
+                         uint16_t target_component = 1) {
+  px4_msgs::msg::VehicleCommandAck a;
+  a.command = command;
+  a.result = result;
+  a.target_system = target_system;
+  a.target_component = target_component;
+  r.p_ack->publish(a);
+}
+bool offboard_mode_requested(const std::vector<px4_msgs::msg::VehicleCommand>& cmds) {
+  return std::any_of(cmds.begin(), cmds.end(), [](const auto& c) {
+    return c.command == 176 && c.param1 == 1.0F && c.param2 == 6.0F;
+  });
+}
+using Ack = px4_msgs::msg::VehicleCommandAck;
+}  // namespace
+
+TEST(Px4LinkNode, ArmDeniedByPx4AnswersAtOnceAsRejectedByFcu) {
   Rig r;
+  r.bring_up();
+  r.run(0.2);
+  r.clear();
+  auto req = std::make_shared<dyx3_interfaces::srv::ArmDisarm::Request>();
+  req->arm = true;
+  auto fut = r.cli_arm->async_send_request(req);
+  ASSERT_TRUE(r.pump_until([&] { return arm_cmds(r.cmds) == 1; }));
+  const double t_request = r.now;
+  const auto wall_start = std::chrono::steady_clock::now();
+  publish_command_ack(r, 400, Ack::VEHICLE_CMD_RESULT_DENIED);
+  ASSERT_TRUE(r.pump_until([&] { return fut.wait_for(0ms) == std::future_status::ready; }));
+  const double wall_s =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - wall_start).count();
+  // Answered by the ack itself: no link-clock tick ran, far inside arm_confirm_timeout_s.
+  EXPECT_LT(r.now - t_request, r.link->params().arm_confirm_timeout_s);
+  EXPECT_DOUBLE_EQ(r.now, t_request);
+  EXPECT_LT(wall_s, r.link->params().arm_confirm_timeout_s);
+  const auto resp = fut.get();
+  EXPECT_FALSE(resp->accepted);
+  EXPECT_EQ(resp->reason_code, dyx3_interfaces::srv::ArmDisarm::Response::REASON_REJECTED_BY_FCU);
+  // Every terminal refusal is a rejection, not only DENIED.
+  for (const uint8_t result :
+       {Ack::VEHICLE_CMD_RESULT_TEMPORARILY_REJECTED, Ack::VEHICLE_CMD_RESULT_UNSUPPORTED,
+        Ack::VEHICLE_CMD_RESULT_FAILED, Ack::VEHICLE_CMD_RESULT_CANCELLED}) {
+    r.cmds.clear();
+    auto f = r.cli_arm->async_send_request(req);
+    ASSERT_TRUE(r.pump_until([&] { return arm_cmds(r.cmds) == 1; }));
+    publish_command_ack(r, 400, result);
+    ASSERT_TRUE(r.pump_until([&] { return f.wait_for(0ms) == std::future_status::ready; }))
+        << static_cast<int>(result);
+    const auto rr = f.get();
+    EXPECT_FALSE(rr->accepted);
+    EXPECT_EQ(rr->reason_code, dyx3_interfaces::srv::ArmDisarm::Response::REASON_REJECTED_BY_FCU);
+  }
+}
+
+TEST(Px4LinkNode, ArmAcceptedAckStillWaitsForVehicleStatus) {
+  Rig r;
+  r.bring_up();
+  r.run(0.2);
+  r.clear();
+  auto req = std::make_shared<dyx3_interfaces::srv::ArmDisarm::Request>();
+  req->arm = true;
+  auto fut = r.cli_arm->async_send_request(req);
+  ASSERT_TRUE(r.pump_until([&] { return arm_cmds(r.cmds) == 1; }));
+  publish_command_ack(r, 400, Ack::VEHICLE_CMD_RESULT_IN_PROGRESS);
+  r.deliver();
+  EXPECT_NE(fut.wait_for(0ms), std::future_status::ready);
+  publish_command_ack(r, 400, Ack::VEHICLE_CMD_RESULT_ACCEPTED);
+  r.deliver();
+  EXPECT_NE(fut.wait_for(0ms), std::future_status::ready);  // accepted is not armed
+  r.arming_state = 2;
+  for (int i = 0; i < 300 && fut.wait_for(0ms) != std::future_status::ready; ++i) r.tick();
+  ASSERT_EQ(fut.wait_for(0ms), std::future_status::ready);
+  const auto resp = fut.get();
+  EXPECT_TRUE(resp->accepted);
+  EXPECT_EQ(resp->reason_code, dyx3_interfaces::srv::ArmDisarm::Response::REASON_OK);
+}
+
+TEST(Px4LinkNode, ArmDenialPublishedBeforeTheRequestIsIgnored) {
+  Rig r;
+  r.bring_up();
+  r.run(0.2);
+  r.clear();
+  publish_command_ack(r, 400, Ack::VEHICLE_CMD_RESULT_DENIED);  // nothing pending: stale
+  r.deliver();
+  r.tick();
+  auto req = std::make_shared<dyx3_interfaces::srv::ArmDisarm::Request>();
+  req->arm = true;
+  auto fut = r.cli_arm->async_send_request(req);
+  ASSERT_TRUE(r.pump_until([&] { return arm_cmds(r.cmds) == 1; }));
+  r.deliver();
+  EXPECT_NE(fut.wait_for(0ms), std::future_status::ready);  // the old denial did not answer it
+  r.arming_state = 2;
+  for (int i = 0; i < 300 && fut.wait_for(0ms) != std::future_status::ready; ++i) r.tick();
+  ASSERT_EQ(fut.wait_for(0ms), std::future_status::ready);
+  const auto resp = fut.get();
+  EXPECT_TRUE(resp->accepted);
+  EXPECT_EQ(resp->reason_code, dyx3_interfaces::srv::ArmDisarm::Response::REASON_OK);
+}
+
+TEST(Px4LinkNode, AckOtherThanTheLinkIdentityNeverAnswersAnArm) {
+  using Cmd = dyx3_interfaces::msg::SprayActuatorCommand;
+  Rig r;
+  r.bring_up();
+  r.run(0.2);
+  r.clear();
+  // A real spray identity (component >= 2) from a command in flight.
+  Cmd on;
+  on.seq = 1;
+  on.source = Cmd::SOURCE_CONTROLLER;
+  on.backend = Cmd::BACKEND_ACTUATOR;
+  on.on = true;
+  on.actuator_set_index = 1;
+  on.value = 1.0F;
+  r.p_spray->publish(on);
+  ASSERT_TRUE(r.pump_until([&] {
+    return std::any_of(r.cmds.begin(), r.cmds.end(),
+                       [](const auto& c) { return c.command == 187; });
+  }));
+  const auto spray_cmd =
+      *std::find_if(r.cmds.begin(), r.cmds.end(), [](const auto& c) { return c.command == 187; });
+  ASSERT_GE(spray_cmd.source_component, 2U);
+
+  auto req = std::make_shared<dyx3_interfaces::srv::ArmDisarm::Request>();
+  req->arm = true;
+  auto fut = r.cli_arm->async_send_request(req);
+  ASSERT_TRUE(r.pump_until([&] { return arm_cmds(r.cmds) == 1; }));
+  const uint64_t late_before = r.link->spray_late_ack_count();
+  // The spray identity naming command 400, another component, another system: none is ours.
+  publish_command_ack(r, 400, Ack::VEHICLE_CMD_RESULT_DENIED, spray_cmd.source_system,
+                      spray_cmd.source_component);
+  publish_command_ack(r, 400, Ack::VEHICLE_CMD_RESULT_DENIED, 1, 2);
+  publish_command_ack(r, 400, Ack::VEHICLE_CMD_RESULT_DENIED, 1, 999);
+  publish_command_ack(r, 400, Ack::VEHICLE_CMD_RESULT_DENIED, 2, 1);
+  r.deliver();
+  EXPECT_NE(fut.wait_for(0ms), std::future_status::ready);
+  EXPECT_EQ(r.link->spray_late_ack_count(), late_before);  // not counted as spray traffic either
+  // A spray ack (187) with the spray identity completes the spray transaction, not the arm.
+  publish_command_ack(r, 187, Ack::VEHICLE_CMD_RESULT_ACCEPTED, spray_cmd.source_system,
+                      spray_cmd.source_component);
+  r.deliver();
+  ASSERT_EQ(r.spray_acks.size(), 1U);
+  EXPECT_TRUE(r.spray_acks[0].success);
+  EXPECT_NE(fut.wait_for(0ms), std::future_status::ready);
+  r.arming_state = 2;
+  for (int i = 0; i < 300 && fut.wait_for(0ms) != std::future_status::ready; ++i) r.tick();
+  ASSERT_EQ(fut.wait_for(0ms), std::future_status::ready);
+  EXPECT_TRUE(fut.get()->accepted);
+}
+
+TEST(Px4LinkNode, ArmHeldForAStaleOffboardIgnoresAcksUntilItsOwnCommandIsSent) {
+  Rig r;
+  r.bring_up();
+  r.nav_state = 14;  // left over: PX4 in OFFBOARD, our heartbeat never started
+  r.run(0.1);
+  r.clear();
+  auto req = std::make_shared<dyx3_interfaces::srv::ArmDisarm::Request>();
+  req->arm = true;
+  auto fut = r.cli_arm->async_send_request(req);
+  r.run(0.2);
+  r.deliver();
+  ASSERT_EQ(manual_mode_cmds(r.cmds), 1);
+  ASSERT_EQ(arm_cmds(r.cmds), 0);  // held
+  // A denial of the MANUAL release (176) or a stray 400 ack while held answers nothing.
+  publish_command_ack(r, 176, Ack::VEHICLE_CMD_RESULT_DENIED);
+  publish_command_ack(r, 400, Ack::VEHICLE_CMD_RESULT_DENIED);
+  r.deliver();
+  EXPECT_NE(fut.wait_for(0ms), std::future_status::ready);
+  r.nav_state = 1;
+  for (int i = 0; i < 100 && arm_cmds(r.cmds) == 0; ++i) r.tick();
+  ASSERT_EQ(arm_cmds(r.cmds), 1);  // the arm went out after PX4 left OFFBOARD
+  EXPECT_NE(fut.wait_for(0ms), std::future_status::ready);
+  // Now its own command is out: a denial answers it at once.
+  publish_command_ack(r, 400, Ack::VEHICLE_CMD_RESULT_DENIED);
+  ASSERT_TRUE(r.pump_until([&] { return fut.wait_for(0ms) == std::future_status::ready; }));
+  const auto resp = fut.get();
+  EXPECT_FALSE(resp->accepted);
+  EXPECT_EQ(resp->reason_code, dyx3_interfaces::srv::ArmDisarm::Response::REASON_REJECTED_BY_FCU);
+}
+
+TEST(Px4LinkNode, OffboardDeniedByPx4FailsTheSessionAtOnceAndKeepsStop) {
+  Rig r;
+  r.bring_up();
+  r.nav_state = 0;
+  r.run(0.2);
+  r.clear();
+  auto req = std::make_shared<dyx3_interfaces::srv::SetOffboard::Request>();
+  req->enable = true;
+  auto fut = r.cli_off->async_send_request(req);
+  for (int i = 0; i < 200 && !offboard_mode_requested(r.cmds); ++i) {
+    r.guard(2, 0.5F, NaN, 0.1F);
+    r.tick();
+  }
+  ASSERT_TRUE(offboard_mode_requested(r.cmds));
+  ASSERT_NE(fut.wait_for(0ms), std::future_status::ready);
+  const double t_request = r.now;
+  publish_command_ack(r, 176, Ack::VEHICLE_CMD_RESULT_DENIED);
+  ASSERT_TRUE(r.pump_until([&] { return fut.wait_for(0ms) == std::future_status::ready; }));
+  EXPECT_DOUBLE_EQ(r.now, t_request);  // before offboard_confirm_timeout_s could have fired
+  const auto resp = fut.get();
+  EXPECT_FALSE(resp->accepted);
+  EXPECT_EQ(resp->reason_code,
+            dyx3_interfaces::srv::SetOffboard::Response::REASON_NOT_ARMED_OR_REJECTED);
+  // Failed: the next heartbeat carries STOP whatever the guard publishes, even if PX4 later
+  // reports OFFBOARD; no automatic retry of the mode request.
+  r.clear();
+  r.nav_state = 14;
+  for (int i = 0; i < 30; ++i) {
+    r.guard(2, 0.5F, NaN, 0.1F);
+    r.tick();
+  }
+  ASSERT_FALSE(r.speed.empty());
+  for (const auto& sp : r.speed) EXPECT_EQ(sp.speed_body_x, 0.0F);
+  EXPECT_FALSE(offboard_mode_requested(r.cmds));
+  EXPECT_TRUE(r.status.offboard_heartbeat_active);
+}
+
+TEST(Px4LinkNode, StaleModeAckBeforeAnOffboardRequestIsIgnoredAndAcceptedWaitsForNavState) {
+  Rig r;
+  r.bring_up();
+  r.nav_state = 0;
+  r.run(0.2);
+  r.clear();
+  // E.g. the denial of an earlier MANUAL release: no request pending, ignored.
+  publish_command_ack(r, 176, Ack::VEHICLE_CMD_RESULT_DENIED);
+  r.deliver();
+  auto req = std::make_shared<dyx3_interfaces::srv::SetOffboard::Request>();
+  req->enable = true;
+  auto fut = r.cli_off->async_send_request(req);
+  // The same ack while the request is still in the prestream, before its command was published.
+  publish_command_ack(r, 176, Ack::VEHICLE_CMD_RESULT_DENIED);
+  r.deliver();
+  for (int i = 0; i < 200 && !offboard_mode_requested(r.cmds); ++i) r.tick();
+  ASSERT_TRUE(offboard_mode_requested(r.cmds));
+  EXPECT_NE(fut.wait_for(0ms), std::future_status::ready);
+  publish_command_ack(r, 176, Ack::VEHICLE_CMD_RESULT_ACCEPTED);
+  r.deliver();
+  EXPECT_NE(fut.wait_for(0ms), std::future_status::ready);  // accepted is not OFFBOARD
+  r.nav_state = 14;
+  for (int i = 0; i < 300 && fut.wait_for(0ms) != std::future_status::ready; ++i) r.tick();
+  ASSERT_EQ(fut.wait_for(0ms), std::future_status::ready);
+  const auto resp = fut.get();
+  EXPECT_TRUE(resp->accepted);
+  EXPECT_EQ(resp->reason_code, dyx3_interfaces::srv::SetOffboard::Response::REASON_OK);
+}
+
+TEST(Px4LinkNode, ManualReleaseAckIsNeverTakenForTheOffboardRequest) {
+  Rig r;
+  r.bring_up();
+  r.nav_state = 14;
+  bool acc = false;
+  uint8_t rs = 0;
+  ASSERT_TRUE(r.call_offboard(true, &acc, &rs));
+  ASSERT_TRUE(acc);
+  r.run(0.1);
+  auto off = std::make_shared<dyx3_interfaces::srv::SetOffboard::Request>();
+  off->enable = false;
+  auto released = r.cli_off->async_send_request(off);
+  ASSERT_TRUE(r.pump_until([&] { return released.wait_for(0ms) == std::future_status::ready; }));
+  r.clear();
+  r.run(0.6);  // STOP window over: MANUAL requested while PX4 still reports OFFBOARD
+  r.deliver();
+  ASSERT_GE(manual_mode_cmds(r.cmds), 1);
+  // New request in its prestream: the MANUAL's denial arrives now and must not fail it.
+  r.nav_state = 0;
+  auto on = std::make_shared<dyx3_interfaces::srv::SetOffboard::Request>();
+  on->enable = true;
+  auto fut = r.cli_off->async_send_request(on);
+  r.tick();
+  publish_command_ack(r, 176, Ack::VEHICLE_CMD_RESULT_DENIED);
+  r.deliver();
+  EXPECT_NE(fut.wait_for(0ms), std::future_status::ready);
+  r.nav_state = 14;
+  for (int i = 0; i < 300 && fut.wait_for(0ms) != std::future_status::ready; ++i) r.tick();
+  ASSERT_EQ(fut.wait_for(0ms), std::future_status::ready);
+  EXPECT_TRUE(fut.get()->accepted);
+}
+
+TEST(Px4LinkNode, UlogStreamingIsOffByDefault) {
+  // Evidence 2026-10-10: the best-effort DDS stream lost ~30 chunks/s (ulog_gaps 1195 in a 39 s
+  // run, no decodable header). Nothing asks the FCU to stream unless the parameter is set.
+  Rig r;
+  EXPECT_FALSE(r.link->params().ulog_streaming_enabled);
+  r.bring_up();
+  r.run(0.5);
+  int starts = 0;
+  for (const auto& c : r.cmds) starts += (c.command == 2510) ? 1 : 0;
+  EXPECT_EQ(starts, 0);
+}
+
+TEST(Px4LinkNode, UlogChunksAreAckedThenRepublished) {
+  Rig r(nullptr, "", "", {rclcpp::Parameter("ulog_streaming_enabled", true)});
+  EXPECT_TRUE(r.link->params().ulog_streaming_enabled);
   r.bring_up();
   r.run(0.1);
   ASSERT_TRUE(r.pump_until([&] { return r.fcu->count_subscribers("/fmu/out/ulog_stream") > 0; }));

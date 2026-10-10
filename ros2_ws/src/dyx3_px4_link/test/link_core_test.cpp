@@ -188,6 +188,31 @@ TEST(Offboard, ConfirmTimeoutFailsWithoutRetry) {
   EXPECT_FALSE(o.send_mode_command);
   EXPECT_TRUE(o.publish_heartbeat);
 }
+TEST(Offboard, RefusalFailsOnlyARequestedSessionAndKeepsStop) {
+  OffboardSession s{OffboardTiming{}};
+  EXPECT_FALSE(s.fail_requested());  // disabled
+  s.enable(true, 0.0);
+  EXPECT_FALSE(s.fail_requested());  // prestream: no mode command was sent yet
+  EXPECT_EQ(s.state(), OffboardState::Prestream);
+  s.step(0.5, true, false);  // mode command sent
+  ASSERT_EQ(s.state(), OffboardState::Requested);
+  EXPECT_TRUE(s.fail_requested());
+  auto o = s.step(0.51, true, false);
+  EXPECT_EQ(o.state, OffboardState::Failed);
+  EXPECT_TRUE(o.publish_heartbeat);
+  EXPECT_TRUE(o.stop_only);
+  EXPECT_FALSE(o.send_mode_command);
+  EXPECT_FALSE(s.fail_requested());  // already failed
+  // PX4 reporting OFFBOARD later does not revive a failed session.
+  EXPECT_EQ(s.step(0.6, true, true).state, OffboardState::Failed);
+  OffboardSession a{OffboardTiming{}};
+  a.enable(true, 0.0);
+  a.step(0.5, true, false);
+  a.step(0.6, true, true);
+  ASSERT_EQ(a.state(), OffboardState::Active);
+  EXPECT_FALSE(a.fail_requested());  // a late refusal cannot stop an established session
+  EXPECT_EQ(a.state(), OffboardState::Active);
+}
 TEST(Offboard, LeavingOffboardIsLostAndNeverReRequested) {
   OffboardSession s{OffboardTiming{}};
   s.enable(true, 0.0);

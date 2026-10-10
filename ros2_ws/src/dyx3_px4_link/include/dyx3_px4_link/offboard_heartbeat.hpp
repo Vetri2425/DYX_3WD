@@ -46,6 +46,11 @@ public:
   // nav_state_offboard = latest vehicle_status.nav_state == 14.
   OffboardStep step(double now_s, bool link_ok, bool nav_state_offboard);
 
+  // PX4 answered the mode request with a terminal refusal (VehicleCommandAck): Requested ->
+  // Failed at once instead of after confirm_timeout_s (heartbeat STOP, no automatic retry).
+  // Returns false and changes nothing in any other state.
+  bool fail_requested();
+
   OffboardState state() const { return state_; }
 
 private:

@@ -29,6 +29,34 @@ constexpr uint32_t kCmdLoggingStart = 2510;  // VEHICLE_CMD_LOGGING_START
 constexpr uint32_t kCmdDoSetServo = 183;     // VEHICLE_CMD_DO_SET_SERVO
 constexpr uint32_t kCmdDoSetActuator = 187;  // VEHICLE_CMD_DO_SET_ACTUATOR
 constexpr size_t kMaxSprayTransactions = 16;
+// The ordinary command identity of this link (publish_vehicle_command). PX4 echoes a command's
+// source_system/source_component into the ack's target_system/target_component. Spray commands
+// carry their own identities (component >= SprayAckTokens::kFirst = 2), so none of their acks can
+// carry this one.
+constexpr uint8_t kLinkSystemId = 1;
+constexpr uint16_t kLinkComponentId = 1;
+
+const char* ack_result_name(uint8_t result) {
+  using Ack = px4_msgs::msg::VehicleCommandAck;
+  switch (result) {
+    case Ack::VEHICLE_CMD_RESULT_ACCEPTED:
+      return "ACCEPTED";
+    case Ack::VEHICLE_CMD_RESULT_TEMPORARILY_REJECTED:
+      return "TEMPORARILY_REJECTED";
+    case Ack::VEHICLE_CMD_RESULT_DENIED:
+      return "DENIED";
+    case Ack::VEHICLE_CMD_RESULT_UNSUPPORTED:
+      return "UNSUPPORTED";
+    case Ack::VEHICLE_CMD_RESULT_FAILED:
+      return "FAILED";
+    case Ack::VEHICLE_CMD_RESULT_IN_PROGRESS:
+      return "IN_PROGRESS";
+    case Ack::VEHICLE_CMD_RESULT_CANCELLED:
+      return "CANCELLED";
+    default:
+      return "UNKNOWN";
+  }
+}
 
 struct UsedTopic {
   const char* request_name;  // BASE topic name: the firmware matches the uORB name, no _vN suffix
@@ -248,8 +276,8 @@ Px4LinkNode::Px4LinkNode(const rclcpp::NodeOptions& options, ClockFn clock, bool
                                                                     rclcpp::QoS(1).reliable());
   pub_health_ = create_publisher<dyx3_interfaces::msg::EstimatorHealth>("/dyx3/estimator_health",
                                                                         rclcpp::QoS(1).reliable());
-  pub_gnss_ =
-      create_publisher<dyx3_interfaces::msg::GnssReport>("/dyx3/gnss_report", rclcpp::QoS(5));
+  pub_gnss_ = create_publisher<dyx3_interfaces::msg::GnssReport>("/dyx3/gnss_report",
+                                                                 rclcpp::QoS(5).reliable());
   pub_status_ = create_publisher<dyx3_interfaces::msg::Px4LinkStatus>("/dyx3/px4_link/status",
                                                                       rclcpp::QoS(1).reliable());
   pub_chunk_ = create_publisher<dyx3_interfaces::msg::UlogChunk>("/dyx3/ulog_chunk",
@@ -341,6 +369,8 @@ Px4LinkNode::Px4LinkNode(const rclcpp::NodeOptions& options, ClockFn clock, bool
                       "switching to MANUAL first");
         } else {
           publish_vehicle_command(kCmdArmDisarm, req->arm ? 1.0F : 0.0F, 0.0F, stamp_us());
+          p.cmd_sent = true;
+          p.cmd_sent_s = now;
           p.deadline_s = now + p_.arm_confirm_timeout_s;
         }
         pending_.push_back(p);
@@ -421,7 +451,8 @@ void Px4LinkNode::declare_and_validate_params() {
           "offboard timings");
   p_.arm_confirm_timeout_s = declare_checked<double>(*this, "arm_confirm_timeout_s", 2.0);
   require(p_.arm_confirm_timeout_s > 0.0, "arm_confirm_timeout_s must be > 0");
-  p_.ulog_streaming_enabled = declare_checked<bool>(*this, "ulog_streaming_enabled", true);
+  p_.ulog_streaming_enabled =
+      declare_checked<bool>(*this, "ulog_streaming_enabled", p_.ulog_streaming_enabled);
   p_.yaw_rate_lpf_tau_s =
       declare_checked<double>(*this, "yaw_rate_lpf_tau_s", p_.yaw_rate_lpf_tau_s);
   require(std::isfinite(p_.yaw_rate_lpf_tau_s) && p_.yaw_rate_lpf_tau_s >= 0.0,
@@ -521,10 +552,10 @@ void Px4LinkNode::publish_vehicle_command(uint32_t command, float p1, float p2, 
   c.param1 = p1;
   c.param2 = p2;
   // DERIVED — NOT FROM V1 SPEC: stock companion addressing (system 1, component 1, external).
-  c.target_system = 1;
-  c.target_component = 1;
-  c.source_system = 1;
-  c.source_component = 1;
+  c.target_system = kLinkSystemId;
+  c.target_component = kLinkComponentId;
+  c.source_system = kLinkSystemId;
+  c.source_component = kLinkComponentId;
   c.from_external = true;
   pub_cmd_->publish(c);
 }
@@ -711,6 +742,11 @@ void Px4LinkNode::on_spray_command(const dyx3_interfaces::msg::SprayActuatorComm
 
 void Px4LinkNode::on_vehicle_command_ack(const px4_msgs::msg::VehicleCommandAck& a) {
   if (a.result == px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_IN_PROGRESS) return;
+  // Spray commands are 183/187 only: arm/disarm and mode acks never reach the spray matching below.
+  if (a.command == kCmdArmDisarm || a.command == kCmdDoSetMode) {
+    on_arm_mode_command_ack(a);
+    return;
+  }
   if (!spray_inflight_ || spray_inflight_->command != a.command ||
       spray_inflight_->ack_system != a.target_system ||
       spray_inflight_->ack_token != a.target_component) {
@@ -741,6 +777,81 @@ void Px4LinkNode::on_vehicle_command_ack(const px4_msgs::msg::VehicleCommandAck&
   if (accepted) spray_confirmed_[completed.source] = completed;
   publish_spray_ack(completed.seq, completed.source, accepted, a.result);
   dispatch_next_spray_transaction();
+}
+
+void Px4LinkNode::note_mode_command_published(bool offboard, double now_s) {
+  for (auto& p : pending_) {
+    if (p.is_arm) continue;
+    // After a MANUAL release the OFFBOARD request can no longer be told apart from it by command
+    // id alone: its ack is not matched, the nav_state confirmation / timeout decides.
+    p.cmd_sent = offboard;
+    if (offboard) p.cmd_sent_s = now_s;
+    p.fcu_accepted = false;
+  }
+}
+
+// A non-IN_PROGRESS VehicleCommandAck for arm/disarm (400) or DO_SET_MODE (176). Answers only the
+// request it can belong to: the command matches, the target is this link's ordinary identity
+// (never a spray identity), the request's own command has been published, and the ack arrived
+// after that (link clock). With no such request pending the ack is ignored, so a stale ack can
+// never answer a later request. MANUAL-release acks are never matched
+// (note_mode_command_published).
+void Px4LinkNode::on_arm_mode_command_ack(const px4_msgs::msg::VehicleCommandAck& a) {
+  using Ack = px4_msgs::msg::VehicleCommandAck;
+  if (a.target_system != kLinkSystemId || a.target_component != kLinkComponentId) return;
+  const bool is_arm_ack = a.command == kCmdArmDisarm;
+  const double ack_s = clock_();
+  const bool accepted = a.result == Ack::VEHICLE_CMD_RESULT_ACCEPTED;
+
+  const auto eligible = [&](const Pending& p) {
+    return p.is_arm == is_arm_ack && p.cmd_sent && !p.fcu_accepted && ack_s >= p.cmd_sent_s;
+  };
+  if (is_arm_ack) {
+    // PX4 acknowledges in order: the oldest request still waiting for its ack is the one.
+    const auto it = std::find_if(pending_.begin(), pending_.end(), eligible);
+    if (it == pending_.end()) return;
+    if (accepted) {
+      it->fcu_accepted = true;  // vehicle_status still decides (unchanged)
+      return;
+    }
+    RCLCPP_WARN(get_logger(), "PX4 refused %s (command %u): VehicleCommandAck result %u (%s)",
+                it->arm_target ? "arm" : "disarm", static_cast<unsigned>(a.command),
+                static_cast<unsigned>(a.result), ack_result_name(a.result));
+    ArmSrv::Response r;
+    r.accepted = false;
+    r.reason_code = ArmSrv::Response::REASON_REJECTED_BY_FCU;
+    srv_arm_->send_response(*it->header, r);
+    pending_.erase(it);
+    return;
+  }
+
+  // DO_SET_MODE: the OFFBOARD request. Only a session that is waiting for PX4's answer can be
+  // failed by a refusal; in any other state (restarted by a link loss, already decided) the ack
+  // is stale for it.
+  if (!std::any_of(pending_.begin(), pending_.end(), eligible)) return;
+  if (accepted) {
+    for (auto& p : pending_) {
+      if (eligible(p)) p.fcu_accepted = true;  // nav_state 14 still decides (unchanged)
+    }
+    return;
+  }
+  if (!offboard_->fail_requested()) return;
+  RCLCPP_WARN(
+      get_logger(),
+      "PX4 refused OFFBOARD (command %u): VehicleCommandAck result %u (%s); session failed, "
+      "heartbeat carries STOP",
+      static_cast<unsigned>(a.command), static_cast<unsigned>(a.result), ack_result_name(a.result));
+  for (auto it = pending_.begin(); it != pending_.end();) {
+    if (!eligible(*it)) {
+      ++it;
+      continue;
+    }
+    OffSrv::Response r;
+    r.accepted = false;
+    r.reason_code = OffSrv::Response::REASON_NOT_ARMED_OR_REJECTED;
+    srv_off_->send_response(*it->header, r);
+    it = pending_.erase(it);
+  }
 }
 
 void Px4LinkNode::publish_spray_ack(uint32_t seq, uint8_t source, bool success, uint8_t result) {
@@ -886,13 +997,17 @@ void Px4LinkNode::step(double now_s) {
     age_last_s_ = age;
     age_valid_ = true;
   }
-  if (ofb.send_mode_command) publish_vehicle_command(kCmdDoSetMode, 1.0F, kMainModeOffboard, t_us);
+  if (ofb.send_mode_command) {
+    publish_vehicle_command(kCmdDoSetMode, 1.0F, kMainModeOffboard, t_us);
+    note_mode_command_published(true, now_s);
+  }
   if (now_s <= leave_offboard_until_s_) {
     if (!nav_offboard_) {
       leave_offboard_until_s_ = -1e18;  // PX4 has left OFFBOARD
     } else if (!ofb.publish_heartbeat && last_link_ok_ &&
                now_s - leave_offboard_sent_s_ >= kLeaveOffboardRetryS - 1e-9) {
       publish_vehicle_command(kCmdDoSetMode, 1.0F, kMainModeManual, t_us);
+      note_mode_command_published(false, now_s);
       leave_offboard_sent_s_ = now_s;
       RCLCPP_INFO(get_logger(), "leaving OFFBOARD: MANUAL requested");
     }
@@ -937,6 +1052,8 @@ void Px4LinkNode::service_pending(double now_s, bool link_healthy, const Offboar
       if (!nav_offboard_) {
         publish_vehicle_command(kCmdArmDisarm, 1.0F, 0.0F, stamp_us());
         it->arm_after_leave_offboard = false;
+        it->cmd_sent = true;
+        it->cmd_sent_s = now_s;
         it->deadline_s = now_s + p_.arm_confirm_timeout_s;
       } else if (now_s > it->deadline_s) {
         ArmSrv::Response r;

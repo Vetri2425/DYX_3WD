@@ -14,6 +14,12 @@ void OffboardSession::enable(bool on, double now_s) {
   enabled_ = on;
 }
 
+bool OffboardSession::fail_requested() {
+  if (!enabled_ || state_ != OffboardState::Requested) return false;
+  state_ = OffboardState::Failed;
+  return true;
+}
+
 OffboardStep OffboardSession::step(double now_s, bool link_ok, bool nav_state_offboard) {
   OffboardStep out;
   if (!enabled_) {

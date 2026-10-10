@@ -64,7 +64,9 @@ struct LinkParams {
   double handshake_retry_s{1.0};
   OffboardTiming offboard;
   double arm_confirm_timeout_s{2.0};
-  bool ulog_streaming_enabled{true};
+  // Off by default: the best-effort DDS stream loses chunks (about 30/s in the 2026-10-10 run) and
+  // the file cannot be decoded; the SD log is the evidence source (contract section 10).
+  bool ulog_streaming_enabled{false};
   // An unanswered spray VehicleCommand is failed after this long (its reasserts keep republishing
   // it until then). Short, because an OFF queued behind it waits that long.
   double spray_transaction_timeout_s{0.3};
@@ -113,6 +115,14 @@ private:
     bool arm_after_leave_offboard{false};
     std::shared_ptr<rmw_request_id_t> header;
     double deadline_s{0.0};
+    // VehicleCommandAck matching (contract section 9). cmd_sent_s is the link-clock time at which
+    // the request's own command (arm/disarm 400, or OFFBOARD DO_SET_MODE 176) was published; an
+    // ack that arrived earlier cannot answer it. Not sent yet (held arm, offboard prestream) means
+    // no ack can match. fcu_accepted: PX4 acknowledged it ACCEPTED, so the next ack belongs to a
+    // later request; confirmation still comes from vehicle_status.
+    bool cmd_sent{false};
+    double cmd_sent_s{0.0};
+    bool fcu_accepted{false};
   };
 
   void declare_and_validate_params();
@@ -130,6 +140,10 @@ private:
   void start_ulog_if_due(double now_s, bool link_ok);
   void on_spray_command(const dyx3_interfaces::msg::SprayActuatorCommand& m);
   void on_vehicle_command_ack(const px4_msgs::msg::VehicleCommandAck& a);
+  void on_arm_mode_command_ack(const px4_msgs::msg::VehicleCommandAck& a);
+  // The DO_SET_MODE just published is the OFFBOARD request (true) or a MANUAL release (false): the
+  // pending set_offboard requests can match an ack only for the former.
+  void note_mode_command_published(bool offboard, double now_s);
   void service_spray_transactions(double now_s);
   void dispatch_next_spray_transaction();
   void publish_spray_ack(uint32_t seq, uint8_t source, bool success, uint8_t result);
