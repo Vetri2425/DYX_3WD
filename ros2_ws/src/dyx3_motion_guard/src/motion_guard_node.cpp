@@ -111,6 +111,7 @@ MotionGuardNode::MotionGuardNode(const rclcpp::NodeOptions& options, ClockFn clo
         veh_.velocity_valid = m->velocity_valid;
         veh_.attitude_valid = m->attitude_valid;
         veh_.global_reference_valid = m->global_reference_valid;
+        veh_.preflight_checks_pass = m->preflight_checks_pass;
         veh_pose_stamp_ = m->px4_sample_stamp;
         w_veh_.touch(clock_());
       });

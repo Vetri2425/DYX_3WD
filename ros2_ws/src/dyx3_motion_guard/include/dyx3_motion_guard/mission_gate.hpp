@@ -28,6 +28,7 @@ struct VehicleIn {
   bool velocity_valid{false};
   bool attitude_valid{false};
   bool global_reference_valid{false};  // pre-arm gate only
+  bool preflight_checks_pass{false};   // pre-arm gate only: PX4 would deny the arm if false
 };
 struct EstimatorIn {
   bool fresh{false};
@@ -60,7 +61,8 @@ Reason first_failing_safety_gate(const GateInputs& in, const GateConfig& cfg);
 
 // First failing PRE-ARM gate, or Reason::Ok: the same gates and order as
 // first_failing_safety_gate except that "armed" and "nav_state == OFFBOARD" are not required (the
-// arming check keeps "vehicle state fresh, no PX4 failsafe"), plus the EKF global reference
+// arming check keeps "vehicle state fresh, no PX4 failsafe" and adds PX4's own pre-flight checks
+// verdict, so a Start is refused before an arm PX4 would deny), plus the EKF global reference
 // (GlobalReferenceInvalid, checked last). dyx3_mission arms only while this is Ok.
 Reason first_failing_pre_arm_gate(const GateInputs& in, const GateConfig& cfg);
 
