@@ -5,7 +5,7 @@
 # Jetson's userland; L4T/CUDA are not in the link path of these packages). Uses the installer's own
 # build_px4_msgs / build_release, so the release is the layout the rover would build, at the same
 # absolute paths (/opt/dyx3/...): nothing needs relocating on the rover. Before packaging, slim_release.sh
-# removes test sources and fixtures (nothing the rover reads).
+# removes test sources and the venv's packaging tools (nothing the rover reads).
 # Consumed by installer/lib/artifacts.sh (install_prebuilt). Proposal 2026-10-08_prebuilt-release-artifacts.md.
 set -euo pipefail
 
@@ -47,6 +47,7 @@ _sizes() {
 log "before slimming (KiB): $(_sizes)"
 removed="$(slim_release_tests "${rel}")"
 log "removed test sources: $(printf '%s' "${removed}" | tr '\n' ' ')"
+slim_release_venv "${rel}"
 log "after slimming (KiB): $(_sizes)"
 health_release_only "${rel}" 0 || die "slimmed release ${sha:0:10} failed static verification"
 

@@ -1218,7 +1218,7 @@ PY
 }
 
 # ================================================================ release size (installer/ci/slim_release.sh)
-# What CI removes from a built release before packaging it: test sources and fixtures.
+# What CI removes from a built release before packaging it: test sources, the venv's packaging tools.
 # The slimmed tree must still pass the static verification and install through the prebuilt path.
 slim_release_block() {
   export INSTALLER_DIR="${REPO}/installer" DYX3_ROOT="${T}/slim" DYX3_ALLOW_ANY_OS=1 ROS_DISTRO_NAME=humble
@@ -1260,6 +1260,39 @@ slim_release_block() {
     'for f in ros2_ws/src/pkg_a/package.xml ros2_ws/src/pkg_a/CMakeLists.txt ros2_ws/src/pkg_a/launch/a.launch.py ros2_ws/src/pkg_a/config/a.yaml ros2_ws/src/pkg_a/src/a.cpp ros2_ws/src/pkg_b/package.xml ros2_ws/src/pkg_c/package.xml backend/pyproject.toml backend/src/dyx3_backend/__init__.py installer/tests/run_tests.sh deployment/scripts/start-ros.sh docs/a.md; do [ -f "${srel}/${f}" ] || exit 1; done'
   check "slim: a tree that is not a built release is refused" '! (slim_release_tests "${T}/slim_none" >/dev/null 2>&1)'
 
+  # ---- venv: pip/setuptools/wheel go; whatever imported before still imports
+  if python3 -m venv "${T}/slim_venv_probe" >/dev/null 2>&1 && [ -x "${T}/slim_venv_probe/bin/pip" ]; then
+    rm -rf "${T}/slim_venv_probe"
+    python3 -m venv "${srel}/venv" >/dev/null 2>&1
+    local sp
+    sp="$("${srel}/venv/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+    mkdir -p "${sp}/dyx3_backend/api"
+    : >"${sp}/dyx3_backend/__init__.py"
+    : >"${sp}/dyx3_backend/api/__init__.py"
+    printf 'import json\n' >"${sp}/dyx3_backend/api/routes.py"
+    printf 'import dyx3_backend.api.routes\nprint("noise on stdout")\n' >"${sp}/runtime_dep.py"
+    (slim_release_venv "${srel}") >"${T}/slim_venv" 2>&1
+    rc=$?
+    check "slim: the venv loses pip (module, scripts) and keeps its interpreter" \
+      '[ "${rc}" -eq 0 ] && ! "${srel}/venv/bin/python" -c "import pip" 2>/dev/null && [ -z "$(ls "${srel}/venv/bin" | grep -E "^(pip|easy_install|wheel)")" ] && [ -L "${srel}/venv/bin/python3" ] && grep -q "modules import as before" "${T}/slim_venv"'
+    check "slim: the backend and its dependencies still import after the venv is slimmed" \
+      '"${srel}/venv/bin/python" -I -c "import runtime_dep, dyx3_backend.api.routes" >/dev/null && [ -z "$(find "${srel}/venv" -name "distutils-precedence.pth" -o -name "pip-*.dist-info" -o -name "setuptools-*.dist-info")" ]'
+    check "slim: slimming a venv twice is harmless" '(slim_release_venv "${srel}") >/dev/null 2>&1'
+    # A runtime module that needs pip: removing pip would break it, so the slimming must refuse.
+    python3 -m venv "${T}/slim_bad/venv" >/dev/null 2>&1
+    sp="$("${T}/slim_bad/venv/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+    printf 'import pip\n' >"${sp}/needs_pip.py"
+    (slim_release_venv "${T}/slim_bad") >"${T}/slim_bad.log" 2>&1
+    rc=$?
+    check "slim: removing a packaging tool that a runtime module imports is refused" '[ "${rc}" -ne 0 ] && grep -q "no longer importable.*needs_pip" "${T}/slim_bad.log"'
+  else
+    rm -rf "${T}/slim_venv_probe"
+    ok "slim: venv tests skipped (python3 -m venv with pip unavailable here)"
+  fi
+  (slim_release_venv "${T}/slim_none") >"${T}/slim_novenv" 2>&1
+  rc=$?
+  check "slim: a release without a backend venv is left alone" '[ "${rc}" -eq 0 ] && grep -q "no backend venv" "${T}/slim_novenv"'
+
   # ---- the slimmed release passes static verification and installs through the prebuilt path
   if ! tar --zstd -cf /dev/null --files-from /dev/null 2>/dev/null; then
     ok "slim: prebuilt install of a slimmed release skipped (tar has no zstd here)"
@@ -1268,6 +1301,9 @@ slim_release_block() {
   local pmst="${stage}/opt/dyx3/px4_msgs/${FIRMWARE_SHA}"
   mkdir -p "${pmst}/install" "${art}"
   : >"${pmst}/install/setup.bash" && : >"${pmst}/.complete" && echo abc >"${pmst}/px4_msgs.sha256"
+  # The test venv above links to this host's python; a CI venv links to /usr/bin/python3 (the only absolute link
+  # install_prebuilt accepts).
+  rm -rf "${srel}/venv" && mkdir -p "${srel}/venv/bin" && ln -s /usr/bin/python3 "${srel}/venv/bin/python3"
   tar -C "${stage}" --zstd -cf "${art}/release-${sha}.tar.zst" "opt/dyx3/releases/${sha}"
   tar -C "${stage}" --zstd -cf "${art}/px4_msgs-${FIRMWARE_SHA}.tar.zst" "opt/dyx3/px4_msgs/${FIRMWARE_SHA}"
   printf 'ARTIFACT_STACK_SHA=%s\nARTIFACT_FIRMWARE_SHA=%s\nARTIFACT_ROS_DISTRO=humble\nARTIFACT_CI_RUN=https://ci/run/2\n' \
