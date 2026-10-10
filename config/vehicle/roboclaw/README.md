@@ -12,17 +12,21 @@ saved 2026-10-09 16:53. Restore it with Motion Studio → *Device* → *Load set
 | Velocity P / I (M2) | 0.83852 / 0.10062 | Autotuned |
 | Current limit | ±60 A | |
 
-**Wiring — UNDER CORRECTION (2026-10-09 19:10).**
-- The owner confirmed in Motion Studio: **M1 = RIGHT motor, M2 = LEFT motor.**
-- The FCU still has `RBCLW_FUNC1 102` / `RBCLW_FUNC2 101` (left command → M1). That is **mirrored** for this
-  wiring.
-  - Manual only looks correct because `RC1_REV −1` inverts the stick a second time.
-  - Mission, Offboard and RPP would steer the wrong way. **Do not run them until fixed.**
-- Expected correct values: `RBCLW_FUNC1 101` (right → M1), `RBCLW_FUNC2 102` (left → M2), and the stick sign
-  re-derived (likely `RC1_REV +1`). Verify with `actuator_test` and a live stick read (HANDOFF 2026-10-09 19:10).
-- Rule: fix a left/right swap in the RBCLW_FUNC output mapping, proven by driving one output directly. Never fix
-  it with `RC1_REV`, which only changes manual driving.
-- EKF2 uses only the mean of `wheel_encoders.wheel_speed[0..1]`.
+**Wiring and output mapping — verified 2026-10-10 on the bench (wheels up, logs below).**
+- **M1 = RIGHT motor, M2 = LEFT motor** (Motion Studio, owner).
+- PX4: **`RBCLW_FUNC1 101`** (right command → M1), **`RBCLW_FUNC2 102`** (left command → M2), **`RBCLW_REV 0`**.
+- Stick: **`RC1_REV +1`** (stick right ⇒ `manual_control_setpoint.roll` +1), `RC3_REV −1` (stick forward ⇒
+  throttle +1).
+- Proof (FCU logs `2026-10-10/03_50_14.ulg` and `03_54_46.ulg`, copies in `bench_tools/logs_2026-10-10/`):
+  stick right → left wheel forward, right wheel back (right turn); stick forward → both `wheel_speed` positive;
+  reverse → both negative. Command sign = encoder sign on both motors.
+- **Do not use `RBCLW_REV` to "fix" direction.** A test with `RBCLW_REV 3` made stick forward drive backwards:
+  the RoboClaw already follows the commanded sign and its encoders read the physical direction. EKF2 fuses
+  `(wheel_speed[0] + wheel_speed[1]) / 2` (`EKF2_WENC_CTRL 1`), so the encoder sign must stay physical.
+- `actuator_test set -f <fn> -v <v>` gave a direction that disagreed with the stick path on this setup; prove
+  direction with a logged stick drive (or Offboard), not with `actuator_test` alone.
+- Rule: fix a left/right swap in the RBCLW_FUNC output mapping, never with `RC1_REV` (that only changes manual
+  driving). Still to do: wheels-down check that gyro yaw is positive on a right turn.
 
 **PX4 link:** `RBCLW_QPPS_MAX` = 90 % of the tuned QPPS = **151200**
 (`config/px4/3wd_6x_carry_from_proto.params`). Full stick then stays inside the RoboClaw's tuned speed, so the

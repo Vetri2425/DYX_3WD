@@ -2489,3 +2489,35 @@ builds on the Jetson, ~40 min), or fast-forward `master` after review (`master` 
 upgrade from the published artifact with `DYX3_ARTIFACTS=prebuilt` (~20 s).
 
 **Not run:** colcon locally (CI ran it green twice), anything on the Jetson.
+
+## 2026-10-10 (09:30) — Claude — T0 passed, T1 motor/stick mapping proven (wheels up)
+
+**T0 (bench pre-flight):** `dyx3-health --deep` OK (release `bd49374`); FCU `8279fa4be3`; DDS session alive,
+handshake OK, timesync 0.55 ms round trip; battery 26.46 V (86 %). Two notes:
+- `dyx3-health` reports "no /fmu topics" and missing nodes although the graph and the FCU session are healthy: its
+  `ros2` query does not use the services' DDS environment. New finding, to fix with INS-005's gateway query.
+- `px4_link` logs "discarded unmatched spray ACK" twice a second: XR-GPX-005, fixed on `hardening/2026-10-10`.
+
+**T1 (wheels up, disarmed for every parameter change):**
+- **Final mapping:** `RBCLW_FUNC1 101`, `RBCLW_FUNC2 102`, `RBCLW_REV 0`, `RC1_REV +1`, `RC3_REV −1`.
+- **Proof:** log `03_54_46.ulg`:
+  - stick right (roll +1) → R −1 / L +1 (right turn);
+  - left → R +1 / L −1;
+  - forward (throttle +1) → both +, encoders +6.4 rad/s;
+  - reverse → both −.
+  - Command sign = encoder sign on both motors.
+- **Wrong turn taken and reverted:** `RBCLW_REV 3`, inferred from an `actuator_test` direction, made stick forward
+  drive backwards (log `03_45_37.ulg`). The RoboClaw already follows the commanded sign. Prove direction with a
+  logged stick drive, not with `actuator_test` alone.
+- **Incident:** `RC1_REV` was set while the FCU was ARMED (wheels up, stick held). The steering command flipped
+  from full left to full right with no harm. Rule from now on: every `param set` is gated on a disarmed read that
+  aborts.
+- **Persisted:**
+  - `config/px4/3wd_6x_carry_from_proto.params`;
+  - `config/px4/3wd_rover01_rc_calibration.params`;
+  - `config/vehicle/roboclaw/README.md`.
+  - Logs copied to `~/Vetri/3WD_PROD/bench_tools/logs_2026-10-10/`.
+- **Accel / decel observed (owner: leave them as they are):** full stick about 5 s to full speed; release from
+  about 0.96 m/s about 3.5 s to stop (about 0.27 m/s², `RO_DECEL_LIM 0.3`): about 1.7 m stopping distance at
+  1 m/s.
+- **Remaining T1c:** wheels down, slow manual drive; the log must show gyro yaw > 0 on a right turn.
