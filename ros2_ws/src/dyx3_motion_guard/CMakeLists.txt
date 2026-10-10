@@ -37,12 +37,13 @@ if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(guard_core_test test/guard_core_test.cpp)
   target_link_libraries(guard_core_test dyx3_motion_guard_core)
-  # Real-time DDS fault injection: tens of seconds, above the 60 s ament default.
-  ament_add_gtest(motion_guard_node_test test/motion_guard_node_test.cpp TIMEOUT 300)
+  # DDS fault injection on an injected clock with work-driven delivery (test/dds_test_support.hpp):
+  # seconds. The timeout only bounds a hang on a loaded runner.
+  ament_add_gtest(motion_guard_node_test test/motion_guard_node_test.cpp TIMEOUT 120)
   target_link_libraries(motion_guard_node_test dyx3_motion_guard_node_lib)
   ament_target_dependencies(motion_guard_node_test rclcpp dyx3_interfaces)
   # The same suite in event-driven mode (the production default): every test must pass in both.
-  ament_add_gtest(motion_guard_node_event_test test/motion_guard_node_test.cpp TIMEOUT 300)
+  ament_add_gtest(motion_guard_node_event_test test/motion_guard_node_test.cpp TIMEOUT 120)
   target_link_libraries(motion_guard_node_event_test dyx3_motion_guard_node_lib)
   ament_target_dependencies(motion_guard_node_event_test rclcpp dyx3_interfaces)
   target_compile_definitions(motion_guard_node_event_test PRIVATE DYX3_TEST_EVENT_DRIVEN=1)
