@@ -1,5 +1,7 @@
 # DYX 3WD Pixhawk 6X: prototype (Cube Orange+ v1.16.2) vehicle config carried to prod v1.17
 # Source: proto_ref_01.params; only values differing from prod firmware defaults; no calibration
+# Load order on a fresh FCU: SYS_AUTOSTART 50000 (generic differential rover) first and reboot, so the airframe
+# and board defaults this file relies on (CA_R_REV 3, UXRCE_DDS_CFG 1000) are in place; then load the rest.
 # Vehicle-Id Component-Id Name Value Type
 1	1	BAT1_A_PER_V	12	9
 1	1	BAT1_N_CELLS	8	6
@@ -100,6 +102,7 @@
 1	1	SENS_IMU_MODE	0	6
 1	1	SER_GPS2_BAUD	115200	6
 1	1	SER_TEL1_BAUD	230400	6
+1	1	SYS_AUTOSTART	50000	6
 1	1	SYS_HAS_MAG	0	6
 1	1	UXRCE_DDS_DOM_ID	42	6
 1	1	UXRCE_DDS_PTCFG	1	6
