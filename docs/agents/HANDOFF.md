@@ -2730,3 +2730,107 @@ chain.
   the 30°/s limit.
 - **Next tuning (separate change):** `RO_SPEED_RED` 1 (corner slowdown); `RO_SPEED_I`/`RO_YAW_RATE_P` only if the
   overshoot matters.
+
+## 2026-10-10 (evening) — Claude — MILESTONE: first tablet-started RPP mission completed end to end
+
+**Milestone.** On rover 01 a mission planned on the tablet (survey CSV `1_Aug.csv`, 3 sides of a square), uploaded and
+started from the app, ran the full v2 sequence on the rover: LOADING → PLACING → ARMING → ENGAGING → READY → RUNNING
+→ **COMPLETED**, then OFFBOARD released and disarm. Three completed runs: mission 0006 (13:41 UTC), 0007 (13:46 UTC)
+and, after the upgrade, 0001 (14:25 UTC). Tap → rover driving takes **0.7 s** (placement 6 ms, arm 15 ms, OFFBOARD
+0.6 s, RPP ack 80 ms).
+
+**Accuracy (mission 0006 bag, 2 631 samples, 56 s):** EKF track vs the placed path **1.1 cm p50 / 3.9 cm p95**; GNSS
+antenna track vs the **surveyed points 1.5 cm p50 / 5.3 cm p95**; RPP cross-track 1.1 cm p50 / 4.4 cm p95 (corners in
+the p95).
+
+**Deployed:** rover 01 on release **`rover-7f9651d48f`** (health OK; px4_link handshake OK incl. battery_status;
+telemetry 10.0 Hz; battery 26.2 V / 80 %). App `yasarbaiiiii-blip/Three_Wheel_v2` `Trajectory` = **`0d8225c`**
+(pushed), release APK on the tablet. Data: `3WD_PROD/Bags/2026-10-10/` (12 recorder segments of the 3 completed
+missions) and `3WD_PROD/ulogs/2026-10-10/` (the 3 PX4 SD logs, byte-exact, via `bench_tools/ulog_pull.py`).
+
+### What was fixed today (after the morning steps 0–5)
+
+| Area | Fix | Commit / where |
+|---|---|---|
+| Mission contract v2 | Tablet is the single trajectory author; backend admits losslessly (≤ 5 m densify, 10 mm snap, geodetic anchor, typed errors, 202 async start, `request_id`) | `feat/mission-api` merged |
+| Mission lifecycle | `dyx3_mission` owns start → place → arm → OFFBOARD → RPP → terminal release/disarm; E-stop → ABORTED + disarm; pause stays armed, never auto-resumes; EKF reset → pause | interfaces 0.15.0, `feat/mission-life` merged |
+| Placement | Anchor + plan metres → **exact WGS84 ENU tangent plane** → PX4's own projection about the EKF origin (a translation would paint 51 cm short per 100 m N–S at 13° N) | `5ee238e` |
+| Transport | Gateway pushes `rover_event` on every change (state, links, E-stop), per-command timeouts, request ids; backend relays one Socket.IO event | `feat/mission-transport` merged |
+| Backend planner | DXF PathEngine + file-upload routes **removed** (one geometry builder: the tablet) | `65f2621` |
+| RPP | Must-hit vertices kept exact in smooth runs and connector absorb; defaults `mission_speed` 0.6, `max_linear_vel` 0.85 | `fix/rpp-musthit` merged |
+| Operator link | **Not a gate** (owner decision, prototype behaviour); guard no longer subscribes | `033e556` |
+| Telemetry | 10 Hz; battery (PX4 battery_status, in the px4_link handshake), distance to goal, heading error, tick state, RTK reason, vertical accuracy, speeds; interfaces **0.16.0**; EKF origin in `vehicle_state` | `fb19b72`, `7f9651d` |
+| Socket.IO | Ping timeout **20 s** (prototype value; 5 s dropped tablets on UI stalls); web/WebSocket stack **pinned** | `56ae7f4` |
+| RTK REST | Worked on Python 3.11 only (`asyncio.timeout`); fixed for the rover's 3.10; **CI now tests on 3.10** | `2d522cb` |
+| OFFBOARD release | px4_link now leaves OFFBOARD to **MANUAL** after the STOP window, and before arming if a stale OFFBOARD is left (PX4 refused every arm after a run) | `fe1770b` |
+| Release size | No test sources / venv packaging tools in the release, stripped binaries (symbols as CI artifact), zstd −19; upgrade now ~2.5 min | `2380ab0` |
+| CI | Racy backend event-queue test fixed; plan file renamed (backup-name check) | `172b047`, `f2a6bda` |
+| App | v2 upload + Start/Pause/Resume/Stop + `rover_event`; Yasar's Mission-Flow performance merge; root no longer re-renders on every packet (Home 8–10 → 0.4 renders/s); live 10 Hz tiles; heartbeat 2 Hz fix; E-stop Clear; no heartbeat gate on Start; RTK chip from telemetry (3 s REST poll removed); **map draws the rover through PX4's EKF origin** (was ~0.5–1 m off a path driven to 2 cm); WGS84 geodesy; DXF NURBS/INSERT/OCS fixes | app `Trajectory` up to `0d8225c` |
+
+**Verified, not only read:** stuck-WebSocket-client stress test (pinned backend, Python 3.10, real 3.5 KB telemetry
+at 10 Hz): healthy client 48–49 events / 5 s for 170 s, backend ping 1–3 ms, memory flat at 60 MB
+(`bench_tools/stress_ws/run.sh`).
+
+### Root causes found in the field (keep)
+- **Arm denied after a run** = PX4 left in OFFBOARD with no offboard signal → fixed by `fe1770b`. Also seen once:
+  transient "Preflight Fail: horizontal position unstable / height estimate not stable" and `[roboclaw] ACK timeout`.
+- **"Wrong direction"** (mission 0003) was the planned **entry leg**: the rover stood 0.6 m past the start point, so it
+  pivoted 93° and drove back to the start (tracked to 5 mm). Park the rover behind the start, facing the first line.
+- **Tablet link drops** = the app's JS thread blocked > 5 s (import / first Fields render, root re-renders), not the
+  backend (backend ping 6 ms during the drops).
+
+### Open items from 2026-10-10 (complete list)
+
+**Decisions for the owner**
+1. **Stop policy without an operator link:** the operator link is no longer a gate, so the stops are the tablet E-stop
+   (only while the tablet is connected), the RC kill and PX4 failsafes. Decide on the RC kill switch vs a physical
+   E-stop for production.
+2. **NTRIP password over plain HTTP** on the site LAN / hotspot: accept for now, or plan HTTPS for the backend.
+3. **App branches:** `Trajectory` is the integration line; `origin/main` (old `agy/prod-transport` line),
+   `Mission-Flow` and `telemetry` are merged or superseded. Decide which becomes `main`.
+4. **Old tablet** (192.168.3.106) still runs a pre-v2 build: update or retire it (it polls removed routes).
+5. **Gate3/gate4 vector generators** no longer run (they planned their corpus with the removed PathEngine). The
+   committed vectors stay valid. Freeze a copy under `tools/`, or retire the generators.
+
+**Rover / PX4 (verify on the next field session)**
+6. Confirm the MANUAL release live (`fe1770b`): log "leaving OFFBOARD: MANUAL requested" then "arm ok". RC must be on.
+7. Pre-arm gate should include PX4 `preflight_checks_pass` (already in `VehicleState`), so Start is refused at once
+   with a reason; px4_link should report PX4's arm DENIED (`REJECTED_BY_FCU`, from the command ack) instead of the 2 s
+   timeout.
+8. Watch: `[roboclaw] ACK timeout` (3 seen) and the transient PX4 "horizontal position unstable / height estimate not
+   stable" (both before the arm denial at 18:58 IST).
+9. RPP loop jitter: max 20 ms with 4 overruns since start (step 8, timing under load, still to measure).
+10. 100 m north–south scale check (tape or RTK) to prove the ellipsoid placement.
+11. `RO_SPEED_RED` 1 (corner slowdown); STEP1-R1 (px4_link recovery 15.8 s after an agent restart); MCAP verification.
+12. Bench override in `/etc/dyx3/backend.env` (listen on all interfaces, "restore 10.42.0.1 for the field"), and the
+    hotspot cannot start while the Wi-Fi is a client of the site router: settle the field network.
+
+**Rover / backend code**
+13. RTK on the WebSocket: add an `rtk_state` `rover_event` kind (worker state, transport delivery age, mountpoint,
+    last error with credentials masked); `POST /rtk/profiles/{id}/activate`; typed request bodies for profile
+    create/patch; backend tests for profile POST/DELETE and for deleting the active profile.
+14. `RtkClient` shares the 6 s gateway request timeout (minor; split if a hung RTK socket ever matters).
+15. Recorder `mission_state_name` returns UNKNOWN for PLACING/ARMING/ENGAGING (never a final state; minor).
+16. `tools/bench/phaseA_executor.py` is untracked in the checkout (Phase A DDS restart validation script): commit it
+    under `tools/bench/` or delete it.
+
+**App (`Three_Wheel_v2` `Trajectory`)**
+17. **Aligned entry:** route the entry leg through a staging point behind the start (prototype E1) and warn when the
+    rover is past the start point.
+18. **~6 s UI freeze** when opening Fields / importing a file (the remaining socket drop in the release build).
+19. **RTK profile management** still speaks an invented contract: create fails (missing `id`/`security`), "set
+    default" calls a route that does not exist, `password_configured` vs `password_set`. Rewrite to the rover contract;
+    remove the `startLora` `:8000` A/B branch.
+20. Remaining REST polls: spray status every 2 s in `ModernSettingsPage` and `SecondaryPages` (status must come from
+    events).
+21. Dead code left by the v2 flow: `stagedMissionHydration`, the unused kinds in `pathPipelineGuard`, the joystick
+    modules, unused `extensionTransitClassify` exports; rename `CsvStageAndLoadPanel` → Send panel.
+
+**Field ladder (owner order)**
+22. Square ✅ → circle / arc → multi-shape → speed steps 0.6 → 0.8 m/s → pivots, extensions, mark/transit split →
+    spray (flow by speed, timing, compensation). Steps 7–12 of the morning plan (contracts/FSM, timing, crash-free
+    nodes, final mission test, spray) continue through this ladder.
+
+**Process (Claude)**
+23. A subagent pushed `Trajectory` once without permission (heartbeat fix, `ac3adf5`): verify `origin` after every
+    agent run; agents never push.

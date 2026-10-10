@@ -53,29 +53,36 @@ human decision.
 
 ---
 
-## 3b. Current status — 2026-10-09 (night before the bench day; field demo planned 2026-10-10)
+## 3b. Current status — 2026-10-10 (evening): first tablet-started mission completed
 
-**The stack runs on the 3WD rover** (deployed 2026-10-08 from `claude/cloud-phases` `84518cd`, power-cycle tested).
-**`master` is now the single authoritative companion branch.** It holds the old deploy branch, production RTK
-(NTRIP or LoRa → USB or PX4 DDS, no automatic failover) and the px4_link flaky-test fix. Agent work merges into
-`master` only after Claude's review. No branch is deleted unless the human asks. **Nothing has driven yet**: no
-calibration, no motion, no field RTK. Bench runbook: `~/Vetri/3WD_PROD/BENCH_2026-10-09.md`.
+**MILESTONE (2026-10-10):** a mission planned on the tablet, uploaded and started from the app, ran the full v2
+sequence on rover 01 (LOADING → PLACING → ARMING → ENGAGING → READY → RUNNING → COMPLETED → OFFBOARD released →
+disarm). Tracking: EKF vs placed path **1.1 cm p50 / 3.9 cm p95**; GNSS vs surveyed points **1.5 cm p50**. Details,
+fixes and open items: `docs/agents/HANDOFF.md`, entry "2026-10-10 (evening)".
 
 | | |
 |---|---|
-| This repo | `Vetri2425/DYX_3WD`, **`master` = `75f3930`; rover runs `0eafcd5`** (same code apart from the BRLTTY installer step, applied by hand). Earlier deploy target `8af2595` (release `rover-8af2595…`): production RTK, app-planned missions `/api/missions/plan`, parse-only DXF, optional hotspot, Socket.IO ping 5/5 s. Later commits are docs only |
-| Firmware | `Vetri2425/PX4-Autopilot-3WD-Prod` `dyx-3wd-production` = **`8279fa4be3`, the V1 final candidate** (stall fix, XRCE fd, RTCM writes, WENC timers). **Flashed on rover 01 (2026-10-09).** NuttX from the fork `Vetri2425/NuttX` `dyx-3wd-production` @ `e462af8eb3`. Installer pin `8279fa4be3` (PC-9, 2026-10-10; same `msg/` set as the old pin `27a7ac9284`) |
-| Operator app | `yasarbaiiiii-blip/Three_Wheel_v2` (push rights for Vetri2425); **`main` = `dbb2ba1`**, reviewed. Signed APK: `3WD_PROD/App-Releases/dbb2ba1-agy-prod-transport/` (DYX release key) |
-| Rover hardware | Holybro Pixhawk Jetson Baseboard: Pixhawk 6X + Jetson Orin Nano 8 GB, UM982 on TELEM1, RoboClaw on GPS2, spray on FMU PWM OUT 1, 8S LiFePO4 24 Ah |
-| Rover release | `/opt/dyx3/current` → `84518cd`, `build_origin` = CI prebuilt; all six services **enabled at boot**, health OK |
-| Artifact archive | firmware: `3WD_PROD/PX4-Firmware/3WD/<short-sha>-<slug>/`; stack: GitHub Releases `rover-<sha>` (last 20) |
+| This repo | `Vetri2425/DYX_3WD` **`master` = `7f9651d`**; rover 01 runs release **`rover-7f9651d48f`** (CI prebuilt, health OK) |
+| Firmware | `Vetri2425/PX4-Autopilot-3WD-Prod` `dyx-3wd-production` = **`8279fa4be3`**, flashed on rover 01. Installer pin `8279fa4be3` |
+| Operator app | `yasarbaiiiii-blip/Three_Wheel_v2` branch **`Trajectory` = `0d8225c`** (pushed): v2 mission flow, `rover_event`, live 10 Hz, map via the EKF origin. Release APK in `3WD_PROD/builds/` |
+| Rover hardware | Pixhawk 6X + Jetson Orin Nano 8 GB, UM982 (TELEM1 + USB COM3 for RTCM), RoboClaw on GPS2, spray on FMU PWM OUT 1, 8S LiFePO4 |
+| Live params | baseline `config/px4/3wd_6x_carry_from_proto.params` = FCU; full dump `config/px4/2026-10-10.params` |
+| Field data | `3WD_PROD/Bags/<date>/` (recorder runs), `3WD_PROD/ulogs/<date>/` (PX4 SD logs via `bench_tools/ulog_pull.py`) |
 
-**Proven on the rover 2026-10-08:** power cycle → all six services up with 0 restarts; uXRCE-DDS session on
-domain 42, 68 `/fmu` topics, odometry 100 Hz; `px4_link` stable (no session flaps); QGC over the network
-(TCP 5760: heartbeat, 915/915 params in 1.1 s); NTRIP → `/dyx3/rtcm` 6.4 msg/s → `/fmu/in/gps_inject_data` →
-PX4 "rate RTCM injection 5.77 Hz", CRC OK (indoors: no fix, expected); upgrade from CI artifacts in **20 s**
-(was 40 min compiling on the Jetson).
-**Not proven:** calibration, any motion, RTK fix outdoors, spray valve, accuracy, Jetson timing under load.
+**Proven on the rover:** steps 0–5 (link, params, RTK fixed + dual-antenna heading, Mission mode, Offboard signs);
+the v2 mission chain from the tablet (3 completed runs); 10 Hz telemetry; E-stop assert/clear from the tablet.
+**Not proven yet:** curves/arcs, multi-shape, speeds above 0.6 m/s, spray, the 100 m scale check, the MANUAL release
+on a live run (`fe1770b`, deployed in `7f9651d`).
+
+**Mission and control contract (decided 2026-10-10, owner):**
+- The tablet is the **only** trajectory builder; the backend only admits (no DXF planner); the rover places the anchor
+  (WGS84 ENU tangent plane → PX4 projection) and RPP owns corner policy.
+- The rover arms and switches OFFBOARD itself; the operator only uploads, previews, starts, pauses, stops. On release
+  px4_link sends PX4 to **MANUAL** (needs the RC transmitter on).
+- The tablet heartbeat (operator link) is **not** a motion gate. E-stop and the RC kill are the stops.
+- Status to the tablet is pushed (`rover_event`, `telemetry` at 10 Hz); REST is for commands only. Socket.IO ping
+  5 s / timeout 20 s. The backend web stack is pinned.
+- Field speed starts at 0.6 m/s (RPP `mission_speed`), cap 0.85 (= PX4 `RO_SPEED_LIM`).
 
 ### What exists
 
@@ -96,30 +103,19 @@ PX4 "rate RTCM injection 5.77 Hz", CRC OK (indoors: no fix, expected); upgrade f
   integrity = SHA-256 over GitHub TLS for now; signing + branch protection before customer deliveries.
 - Transport and command interface migrate together; gates are acceptance gates, not start gates.
 
-### Immediate next steps (updated 2026-10-09 11:55)
+### Immediate next steps (updated 2026-10-10 evening)
 
-**Owner order: one task at a time.**
-1. **DONE: RTK over USB.**
-   - UM982 USB = COM3, proven with `UNILOGLIST`; COM1 goes to PX4 TELEM1.
-   - The CH340 is driven by `ch341` (built directly, no DKMS; BRLTTY masked).
-   - NTRIP → USB_DIRECT is live: 0 failures, `/dyx3/rtcm` silent, receiver DGPS. Procedure: installer/README.
-   - Reboot persistence proven (3 full power cycles, 2026-10-09). Fresh rovers record the receiver
-     automatically (installer passive NMEA check → `/etc/dyx3/usb-receiver.env`; proven at the `cacc1ba` upgrade).
-   - Pending: an outdoor RTK FIXED test; LoRa (parked: needs the radio hardware).
-2. **DONE (2026-10-09): PX4↔Jetson Ethernet with no stall, plus reliable QGC.**
-   - Only RPP and motion_guard are FIFO 80 on CPU 4; the spray/recorder busy-polls are gone; `dyx3-ros` stop is
-     bounded (15 s). Jetson load ~1.8.
-   - Firmware `8279fa4be3`: 30/30 agent restarts at `MAV_2_CONFIG 1000` and 30/30 at 0 with zero stalls, plus 3
-     full power cycles. MAVLink + DDS share the Ethernet (`MAV_2_CONFIG 1000`).
-   - mavlink-router: a UDP server on 0.0.0.0:14550 (template fixed); QGC TCP 5760 recovers in 1–2 s.
-   - TELEM2 for QGC is not usable: the Jetson `ttyTHS1` RX is corrupt on L4T 36.5 (NVIDIA DMA UART bug).
-   - Later: the RTK PX4_DDS transport recovery fix (not in today's USB path).
-3. **NOW:** Calibration (gyro, level-only accel, level horizon), RoboClaw motion, Acro/manual/mission/offboard basics on PX4.
-4. Backend → frontend (app `main` @ `dbb2ba1`), then RPP.
+The complete open list (23 items: owner decisions, rover/PX4, backend, app, field ladder) is in
+`docs/agents/HANDOFF.md`, entry "2026-10-10 (evening)", section "Open items from 2026-10-10". First:
+1. Next run: confirm the MANUAL release live ("leaving OFFBOARD: MANUAL requested" → "arm ok") with the RC on.
+2. Field ladder: square ✅ → circle/arc → multi-shape → speed steps 0.6 → 0.8 m/s → pivots/extensions/mark-transit → spray.
+3. Pre-arm gate + PX4 `preflight_checks_pass`; px4_link reports PX4's arm DENIED immediately.
+4. App: aligned entry behind the start point; the Fields/import UI freeze; RTK profile management to the rover contract.
+5. Owner decisions: stop policy (RC kill vs physical E-stop), NTRIP password over HTTP, which app branch becomes `main`.
 
 ### Known risks carried into this repo
 
-- **PX4 Ethernet TX stall** (above) — the rover fails to zero (px4_link, 0.2 s) but does not recover by itself.
+- **PX4 Ethernet TX stall**: resolved in firmware `8279fa4be3` (60/60 restarts + power cycles, 2026-10-09). The fail-to-zero (px4_link, 0.2 s) stays.
 - **Upstream #27514** (`risk:safety-critical`): PX4 applies a stale setpoint for ~900 ms after an external
   process dies. Our fail-to-zero is not optional.
 - **Upstream #27497**: rover differential does not turn in Mission Mode on v1.17 stable.
