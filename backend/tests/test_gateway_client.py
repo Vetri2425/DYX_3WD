@@ -310,7 +310,10 @@ async def test_a_slow_event_subscriber_never_blocks_replies_and_its_queue_is_bou
     assert gw._events.qsize() <= EVENT_QUEUE_MAX
     release.set()
     assert await wait_until(lambda: seen and seen[-1] == n)  # the newest always gets through
-    assert seen[0] == 1 and len(seen) == n - gw.events_dropped
+    # Only the oldest are dropped, so what arrives is in order and nothing is lost but the dropped ones. Which
+    # event the subscriber takes first depends on when the dispatcher wakes (seq 1 on a fast machine, a later
+    # one on a loaded CI runner), so it is not asserted.
+    assert seen == sorted(set(seen)) and len(seen) == n - gw.events_dropped
     await gw.stop()
     await srv.stop()
 
