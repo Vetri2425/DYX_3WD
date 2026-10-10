@@ -2929,3 +2929,13 @@ missions 0007 and 0001: 8 recorder runs + 2 SD ULogs). Headlines:
 - **Finding C:** final endpoint CREEP rocked ±8 cm/s for 6.5 s and finished on the 8 s timeout (7 mm). GATE 4.
 - Straight-line tracking p50 0.2–0.9 cm at 0.6 m/s; corner point capture 1.8–3.6 cm; no guard refusals, no link faults.
 - ULog over DDS: ~1 000 gaps per 40 s in every run summary → streaming off by default (`df2969f`).
+
+**Endpoint precise stop (control-law change, `dyx3_rpp`, this branch):** inside the arrival band
+(`segment_endpoint_arrival_tolerance_m`) the command is now a brake, held while
+`|residual| <= along_tol + endpoint_capture_past_m` (hysteresis), and the feed-forward creep outside the band is evaluated to the
+band edge instead of the plane; the 8 s timeout stays the backstop. Evidence: mission 0001 run 3 rocked 14 times and finished by
+timeout (analysis §4). Tests: tick-level reproduction (old law gave 0.084 m/s at 1 cm, new gives a brake), hysteresis, nudge
+preserved, closed-loop first-order model completes in 3.4 s with 1 sign change (old law: 3 sign changes, > 4 s); equivalence
+vectors deviate only inside the endpoint windows of 7 scenarios (pinned count 525). Verified here with the real core compiled
+against a gtest stand-in; CI is the authority for `rpp_node_test`. **Field re-validation required at the next endpoint:**
+expect ≤ 2 reversals, no timeout finish.

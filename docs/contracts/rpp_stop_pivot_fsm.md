@@ -88,6 +88,32 @@ Final run only. Residual along the final segment tangent (+ ahead, − overshot)
 else `feedforward_brake_speed(profile_dist, decel, max(speed, creep))`. Direction: along the segment (±), or at the endpoint when a small lateral correction is needed.
 Pure helpers (`precise_stop.py`): trigger `max(floor, v²/2a)`, `v = min(√(2ad), cap)`, `along_track_residual`, bang-bang `servo_speed`, `reached`.
 
+**BEHAVIOUR CHANGE, not in the prototype — dead band, brake hold, band-edge feed-forward (2026-10-10).** Evidence: mission 0001 run 3 (recorder bag),
+final-run endpoint: 14 forward→reverse command reversals in 8.6 s, commanded speed alternating +0.07 / −0.085 m/s while `dist_to_goal` was 0.000–0.010 m,
+measured speed up to 0.125 m/s, finished only by the `segment_endpoint_precise_max_s` (8 s) timeout brake, 7 mm from the point. Mechanism: finishing needs
+`|residual| ≤ along_tol ∧ |cross| ≤ cross_tol ∧ stopped`, but while not yet `stopped` the prototype law commanded `min(√(2·decel·|residual|), cap)` toward
+residual = 0 for **any** non-zero residual (0.084 m/s at 1 cm, 0.046 m/s at 3 mm) with a sign flip at the end plane, and `cap = max(speed, creep)` rose with the
+rocking. A vehicle with speed-loop / drivetrain latency (0.1–0.3 s) overshoots the plane, the sign flips, and "stopped" (speed < `segment_stop_speed_threshold`
+for `segment_stop_dwell_s`) is never reached. The C++ therefore differs from the prototype as follows (no new parameter):
+1. **Dead band = the arrival band.** When `|residual| ≤ along_tol ∧ |cross| ≤ cross_tol` and the stop is not yet confirmed, the command is the **brake**
+   (`CmdKind::Brake`, body-axis velocity-reversal brake, heading held — the same path as the timeout brake), not a creep. The stop confirmation can then be
+   reached and the endpoint finishes on the first tick that is `stopped`, as before.
+2. **Brake-hold hysteresis.** Once braking inside the band the brake is held while `|residual| ≤ along_tol + endpoint_capture_past_m ∧ |cross| ≤ cross_tol`
+   (a few millimetres of coast must not abandon it). Beyond that band (a real overshoot) the latch is released and the creep law gives the reverse correction.
+   The latch is also released when the rover is `stopped` outside the finish geometry, so the `stopped ∧ radial > band → creep` nudge is unchanged.
+   *DERIVED — NOT FROM V1 SPEC:* `endpoint_capture_past_m` (the prototype's "capture past" allowance, default 0.02 m) is reused as the hold band; no new number.
+   The latch is `RppCore::endpoint_brake_hold_`, reset with `segment_endpoint_stop_active_` (mission install, per-run reset, pause/resume) and on engage / finish.
+3. **Band-edge feed-forward.** Outside the band the creep law evaluates `feedforward_brake_speed(max(0, profile_dist − band), decel, cap)` with
+   `band = along_tol` (along-track case) or `max(along_tol, cross_tol)` (radial lateral correction, `profile_dist = radial`), so the commanded speed reaches
+   zero at the **edge** of the arrival band, where the brake takes over, instead of at the plane. *DERIVED — NOT FROM V1 SPEC:* the prototype evaluated it to the
+   plane and relied on the stop happening to be confirmed there.
+Unchanged: the trigger, negative-residual engagement, the `stopped ∧ radial > band → creep` nudge, the lateral-miss brake (`radial > segment_endpoint_max_correction_m`),
+the XR-RPP-001 timeout brake (kept as the backstop), `hold_at_completion`, the debug rows and `cross_track_right`. The orchestrator equivalence test lists the
+affected prototype ticks as documented deviations (scenarios `seg_line_fast_tail`, `seg_line_tail`, `seg_overshoot`, `seg_precise_offline`, `seg_precise_params`,
+`seg_runout_precise`, `auto_mixed`). Tests: `rpp_core_test.cpp` (`TheEndpointDeadBand*`, `TheEndpointBrakeIsHeld*`, `AnEndpointStoppedOffTheMark*`,
+`TheEndpointFeedForward*`, `TheEndpointSettlesWithoutRocking*` — closed loop on a first-order 0.2 s vehicle). Field re-validation of the 2 cm band at the
+rover's real stop behaviour is still owed (Gate 4 / field ladder).
+
 ### 3.7 Point hold (default off) and handshake (default off)
 Per must-hit point: trigger radius `point_hold_acceptance_m` (or the feed-forward `v²/2a` when `point_precise_stop_enabled`), brake → confirmed stop
 (precise mode also needs `|along residual| ≤ point_arrival_tolerance_m`; servo mode creeps, timeout `precise_stop_max_s` accepts best position) → dwell

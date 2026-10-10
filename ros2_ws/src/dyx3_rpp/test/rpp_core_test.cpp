@@ -74,9 +74,11 @@ struct CoreRig {
 
 // XR-RPP-001 safety net (BEHAVIOUR CHANGE): a precise stop that reaches its timeout while the
 // rover is still moving brakes to a confirmed stop and completes; it never creeps on forever.
+// The pose is 3 cm short of the end, outside the 2 cm arrival band (inside it the dead band brakes
+// at once, see TheEndpointDeadBand* below), and the velocity never settles below the threshold.
 TEST(RppCore, APreciseStopPastItsTimeoutBrakesAndCompletes) {
   CoreRig r({north_run(6.0, Profile::Segment, 6.0)});
-  r.n = 5.99;  // inside the arrival tolerance, but the velocity never settles below the threshold
+  r.n = 5.97;
   r.vn = 0.05;
   bool engaged = false;
   for (int i = 0; i < 300; ++i) {  // 6 s: the default timeout is 8 s
@@ -92,6 +94,167 @@ TEST(RppCore, APreciseStopPastItsTimeoutBrakesAndCompletes) {
   r.vn = 0.0;  // the brake took effect
   for (int i = 0; i < 30 && !r.core->path_done(); ++i) r.step();
   EXPECT_TRUE(r.core->path_done());
+}
+
+// ---- Endpoint precise stop: dead band, brake-hold hysteresis, band-edge feed-forward ----------
+// BEHAVIOUR CHANGE, not in the prototype (2026-10-10, mission 0001 run 3, recorder bag): the final
+// endpoint rocked through the end plane, 14 forward/reverse command reversals in 8.6 s (+0.07 /
+// -0.085 m/s at dist_to_goal 0.000-0.010 m, measured speed up to 0.125 m/s) until the 8 s timeout
+// braked it 7 mm from the point. The creep law commanded sqrt(2*decel*|residual|) toward residual
+// = 0 for ANY residual (0.084 m/s at 1 cm), so a vehicle with speed-loop latency overshot the
+// plane, the sign flipped, and "stopped" was never satisfied. Inside the arrival band the finish
+// geometry is met and only the stop confirmation is missing: the command is a brake. The tolerances
+// are the defaults of segment_endpoint_arrival_tolerance_m / segment_endpoint_cross_tolerance_m
+// (0.02) and endpoint_capture_past_m (0.02).
+
+// One tick of the final-run precise stop with the pose `ahead` metres before the end plane on the
+// line (negative: past it), moving forward at `speed`.
+TEST(RppCore, TheEndpointDeadBandBrakesInsteadOfCreepingThroughThePlane) {
+  struct Case {
+    double ahead, speed;
+  };
+  // 1 cm short: the old law published a creep of sqrt(2 * 0.35 * 0.01) = 0.084 m/s forward; 3 mm
+  // past the plane: a reverse creep of 0.046 m/s. Inside the band both are a brake now.
+  for (const Case c : {Case{0.010, 0.05}, Case{-0.003, 0.05}, Case{0.0, 0.05}, Case{0.019, 0.08}}) {
+    CoreRig r({north_run(6.0, Profile::Segment, 6.0)});
+    r.n = 6.0 - c.ahead;
+    r.vn = c.speed;  // moving: the stop is not confirmed
+    const TickOutput& o = r.step();
+    ASSERT_TRUE(r.core->snapshot().endpoint_stop_active) << "ahead " << c.ahead;
+    EXPECT_EQ(o.cmd, CmdKind::Brake) << "ahead " << c.ahead;
+    EXPECT_LE(o.brake_speed, 0.0) << "a brake never drives the moving rover forward";
+    EXPECT_NEAR(o.brake_speed, -c.speed, 1e-9) << "the velocity-reversal brake of the stop machine";
+    EXPECT_NEAR(o.v_e, 0.0, 1e-12);
+    EXPECT_FALSE(r.core->path_done());
+  }
+}
+
+TEST(RppCore, TheEndpointBrakeIsHeldThroughAFewMillimetresOfCoastThenYieldsToACorrection) {
+  CoreRig r({north_run(6.0, Profile::Segment, 6.0)});
+  r.n = 5.99;  // 1 cm short, moving: the dead band brakes and latches
+  r.vn = 0.05;
+  ASSERT_EQ(r.step().cmd, CmdKind::Brake);
+  // the coast carries it 3 cm past the plane: outside the 2 cm arrival band but inside
+  // along_tol + endpoint_capture_past_m = 4 cm, so the brake is NOT abandoned for a reverse creep
+  r.n = 6.03;
+  r.vn = 0.03;
+  EXPECT_EQ(r.step().cmd, CmdKind::Brake);
+  // the same pose without the latch (a fresh approach at that pose) is a correction
+  CoreRig f({north_run(6.0, Profile::Segment, 6.0)});
+  f.n = 6.03;
+  f.vn = 0.03;
+  const TickOutput& fo = f.step();
+  EXPECT_EQ(fo.cmd, CmdKind::Creep);
+  EXPECT_LT(fo.creep_speed, 0.0) << "past the plane: reverse";
+  // a real overshoot (5 cm, beyond the hold band) releases the brake: reverse creep as before
+  r.n = 6.05;
+  r.vn = 0.03;
+  const TickOutput& o = r.step();
+  EXPECT_EQ(o.cmd, CmdKind::Creep);
+  EXPECT_LT(o.creep_speed, 0.0);
+  // and the latch is released: back inside the hold band but outside the arrival band, a creep
+  r.n = 6.03;
+  EXPECT_EQ(r.step().cmd, CmdKind::Creep);
+}
+
+TEST(RppCore, AnEndpointStoppedOffTheMarkStillGetsTheCreepNudge) {
+  CoreRig r({north_run(6.0, Profile::Segment, 6.0)});
+  r.n = 5.99;  // brake latched inside the band
+  r.vn = 0.05;
+  ASSERT_EQ(r.step().cmd, CmdKind::Brake);
+  r.n = 6.03;  // the coast ended 3 cm past: stopped, outside the arrival band, inside the hold band
+  r.vn = 0.0;
+  CmdKind last = CmdKind::Brake;
+  double creep = 0.0;
+  for (int i = 0; i < 40; ++i) {  // 0.8 s: the 0.3 s dwell confirms the stop
+    const TickOutput& o = r.step();
+    last = o.cmd;
+    creep = o.creep_speed;
+    if (last == CmdKind::Creep) break;
+  }
+  EXPECT_EQ(last, CmdKind::Creep) << "a stopped rover off the mark must be nudged back";
+  EXPECT_NEAR(creep, -0.1, 1e-9) << "segment_endpoint_creep_speed, toward the plane";
+  EXPECT_FALSE(r.core->path_done());
+}
+
+TEST(RppCore, TheEndpointFeedForwardReachesZeroAtTheEdgeOfTheArrivalBand) {
+  // Approaching from 3 cm short (outside the band): the feed-forward speed is
+  // sqrt(2 * decel * (distance - along_tol)) = 0.084 m/s, zero at 2 cm short instead of at the
+  // plane (the old law: sqrt(2 * 0.35 * 0.03) = 0.145 m/s, held to the 0.1 m/s creep cap).
+  CoreRig r({north_run(6.0, Profile::Segment, 6.0)});
+  r.n = 6.0 - 0.03;
+  r.vn = 0.05;
+  const TickOutput& o = r.step();
+  EXPECT_EQ(o.cmd, CmdKind::Creep);
+  EXPECT_NEAR(o.creep_speed, std::sqrt(2.0 * 0.35 * (0.03 - 0.02)), 1e-9);
+  CoreRig e({north_run(6.0, Profile::Segment, 6.0)});
+  e.n = 6.0 - 0.0201;  // just outside the band: a vanishing creep, not 0.084 m/s
+  e.vn = 0.05;
+  EXPECT_LT(e.step().creep_speed, 0.02);
+}
+
+// Closed loop on a first-order vehicle: the speed follows the commanded body speed with a 0.2 s
+// time constant, the position integrates, 50 Hz ticks. DERIVED — NOT FROM V1 SPEC: test-only lag
+// taken from the rover's measured speed-loop/drivetrain response in the same bag (0.1-0.3 s; the
+// heading lags the command by 0-0.4 s, irrelevant on a straight leg). The old law
+// (min(sqrt(2*decel*|residual|), cap) toward residual = 0 with a sign flip at the plane) rocks
+// this model through the end plane and only the 8 s timeout ends it; the new law settles inside
+// the arrival band.
+namespace {
+struct EndpointRun {
+  bool completed{false};
+  double t_complete{0.0};
+  int sign_changes{0};
+  double residual{0.0};
+};
+EndpointRun run_endpoint(double tau_s, int delay_ticks) {
+  CoreRig r({north_run(6.0, Profile::Segment, 6.0)});
+  r.n = 6.0 - 0.6;  // 0.6 m before the endpoint
+  r.vn = 0.45;
+  const double dt = 0.02;
+  EndpointRun res;
+  int last_sign = 0;
+  std::vector<double> queue(static_cast<size_t>(delay_ticks), 0.45);
+  size_t qi = 0;
+  for (int i = 0; i < 400 && !res.completed; ++i) {  // 8 s
+    const TickOutput& o = r.step();
+    if (r.core->snapshot().completion_stop_pending || r.core->path_done()) {
+      res.completed = true;
+      res.t_complete = (i + 1) * dt;
+      break;
+    }
+    double cmd = o.v_n;  // heading 0: the commanded NED vector is the body speed
+    if (delay_ticks > 0) {
+      const double delayed = queue[qi];
+      queue[qi] = cmd;
+      qi = (qi + 1) % queue.size();
+      cmd = delayed;
+    }
+    if (r.core->snapshot().endpoint_stop_active && std::fabs(o.v_n) >= 0.02) {
+      const int s = o.v_n > 0.0 ? 1 : -1;
+      if (last_sign != 0 && s != last_sign) ++res.sign_changes;
+      last_sign = s;
+    }
+    r.vn += (cmd - r.vn) * (dt / tau_s);
+    r.n += r.vn * dt;
+  }
+  res.residual = 6.0 - r.n;
+  return res;
+}
+}  // namespace
+
+TEST(RppCore, TheEndpointSettlesWithoutRockingOnAFirstOrderVehicle) {
+  const EndpointRun a = run_endpoint(0.2, 0);
+  EXPECT_TRUE(a.completed) << "not complete in 8 s, residual " << a.residual;
+  EXPECT_LE(a.t_complete, 4.0) << "tc " << a.t_complete;
+  EXPECT_LE(a.sign_changes, 2) << "sc " << a.sign_changes;
+  EXPECT_LE(std::fabs(a.residual), 0.02);
+  // a harsher drivetrain: 0.3 s time constant plus 0.1 s of command latency (looser time bound)
+  const EndpointRun b = run_endpoint(0.3, 5);
+  EXPECT_TRUE(b.completed) << "not complete in 8 s, residual " << b.residual;
+  EXPECT_LE(b.t_complete, 5.0) << "tc " << b.t_complete;
+  EXPECT_LE(b.sign_changes, 2) << "sc " << b.sign_changes;
+  EXPECT_LE(std::fabs(b.residual), 0.02);
 }
 
 // XR-RPP-005: RppStatus.cross_track_right_m is right-positive (frames.md). The precise stop's
@@ -154,7 +317,7 @@ TEST(RppCore, AResumeAfterACoastIsAFreshStartNotAJump) {
 // XR-RPP-008: the precise-stop timeout does not count through a pause.
 TEST(RppCore, APauseRestartsThePreciseStopTimer) {
   CoreRig r({north_run(6.0, Profile::Segment, 6.0)});
-  r.n = 5.99;
+  r.n = 5.97;  // 3 cm short: outside the 2 cm arrival band, where the dead band would brake at once
   r.vn = 0.05;  // never settles: only the timeout can end the precise stop
   for (int i = 0; i < 300; ++i) r.step();  // 6 s of the 8 s budget
   ASSERT_TRUE(r.core->snapshot().endpoint_stop_active);
