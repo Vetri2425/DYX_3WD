@@ -438,6 +438,32 @@ TEST(MissionFsmGuards, GuardReasonMapping) {
   }
 }
 
+// The FSM keeps no clock of its own: every time it records is the caller's. The node passes its
+// steady clock (arbitrary, large values counted from boot) and keeps ROS time for the message, and
+// it detects a state change by changes() moving, so that is pinned here too.
+TEST(MissionFsmLifecycle, TimesAreTheCallersClockAndOnlyAStateChangeMovesChanges) {
+  constexpr std::int64_t kBoot = 987'654'000'000'000LL;
+  MissionFsm f;
+  f.start(true, kBoot);
+  EXPECT_EQ(f.state_entered_ns(), kBoot);
+  f.artifact_loaded(true, kD, kBoot + 5);
+  EXPECT_EQ(f.state_entered_ns(), kBoot + 5);
+  const std::uint64_t before = f.changes();
+  f.gate_lost(6, kBoot + 6);  // PLACING: pre-arm lost -> ERROR, a change
+  EXPECT_EQ(f.changes(), before + 1);
+  EXPECT_EQ(f.state_entered_ns(), kBoot + 6);
+  const std::uint64_t at_error = f.changes();
+  f.ekf_reset("no placed execution", kBoot + 7);  // ERROR: ok_no_change, no change
+  EXPECT_EQ(f.changes(), at_error);
+  EXPECT_EQ(f.state_entered_ns(), kBoot + 6);
+
+  MissionFsm p = in_state(S::kPaused);
+  const std::uint64_t paused = p.changes();
+  p.ekf_reset("reset", kBoot);  // PAUSED -> PAUSED: a counted self-transition that re-stamps
+  EXPECT_EQ(p.changes(), paused + 1);
+  EXPECT_EQ(p.state_entered_ns(), kBoot);
+}
+
 TEST(MissionFsmLog, TransitionsCarryReasonSequenceAndAreBounded) {
   MissionFsm f = in_state(S::kRunning);
   std::vector<Transition> seen;

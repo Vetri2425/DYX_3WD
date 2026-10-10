@@ -105,7 +105,7 @@ struct Transition {
   bool refused = false;  ///< true: the event did NOT change state (from == to)
   Reject reject = Reject::kNone;
   std::string detail;
-  std::int64_t stamp_ns = 0;
+  std::int64_t stamp_ns = 0;  ///< the `now_ns` the caller passed (the node's steady clock)
 };
 
 struct Result {
@@ -164,7 +164,9 @@ public:
   std::uint8_t gate_reason() const { return gate_reason_; }
   /// Detail of the transition into the current state.
   const std::string& detail() const { return detail_; }
-  /// Time of the transition into the current state (0 before the first one).
+  /// Time of the transition into the current state on the clock the caller passes (the node's
+  /// steady clock; NOT ROS time: the node keeps the ROS time for MissionState.state_entered).
+  /// 0 before the first one.
   std::int64_t state_entered_ns() const { return entered_ns_; }
   /// Incremented on every ACCEPTED start (0 until the first mission): the execution id.
   std::uint32_t mission_id() const { return mission_id_; }

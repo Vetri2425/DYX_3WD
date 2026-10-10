@@ -82,6 +82,12 @@ std::uint8_t placement_reason(PlacementError e) {
   }
 }
 
+std::int64_t steady_now_ns() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
 builtin_interfaces::msg::Time to_msg_time(std::int64_t ns) {
   builtin_interfaces::msg::Time t;
   t.sec = static_cast<std::int32_t>(ns / 1'000'000'000LL);
@@ -90,8 +96,9 @@ builtin_interfaces::msg::Time to_msg_time(std::int64_t ns) {
 }
 }  // namespace
 
-MissionNode::MissionNode(const rclcpp::NodeOptions& options)
-    : rclcpp::Node("dyx3_mission", options) {
+MissionNode::MissionNode(const rclcpp::NodeOptions& options, ClockFn clock)
+    : rclcpp::Node("dyx3_mission", options),
+      clock_(clock ? std::move(clock) : ClockFn(steady_now_ns)) {
   // Parameter classes (spec section 9): missions_dir RESTART, the rest IDLE_ONLY. Defaults and
   // their sources: docs/contracts/dyx3_mission.md section 9.
   missions_dir_ = declare_parameter<std::string>("missions_dir", "/var/lib/dyx3/missions");
@@ -115,6 +122,13 @@ MissionNode::MissionNode(const rclcpp::NodeOptions& options)
 
   // Every transition is logged and published at once (the gateway pushes it to the tablet).
   fsm_.set_observer([this](const Transition& t) {
+    // The FSM times its transitions on the steady clock; the message's state_entered is ROS time.
+    // A state change (a PAUSED self-transition on an EKF reset included) is the one thing that
+    // moves fsm_.changes(): record the ROS time of it here.
+    if (fsm_.changes() != stamped_changes_) {
+      stamped_changes_ = fsm_.changes();
+      state_entered_ros_ns_ = get_clock()->now().nanoseconds();
+    }
     RCLCPP_INFO(get_logger(), "mission %u %s: %s -> %s on %s reason=%u%s%s", fsm_.mission_id(),
                 t.refused ? "REFUSED" : "transition", to_string(t.from), to_string(t.to),
                 to_string(t.event), static_cast<unsigned>(t.reason), t.detail.empty() ? "" : " : ",
@@ -158,7 +172,7 @@ MissionNode::MissionNode(const rclcpp::NodeOptions& options)
       [this](const std::shared_ptr<dyx3_interfaces::srv::PauseMission::Request>,
              std::shared_ptr<dyx3_interfaces::srv::PauseMission::Response> res) {
         // PAUSED keeps the vehicle armed and in OFFBOARD; RPP and the guard stream STOP.
-        const Result r = fsm_.pause(now_ns());
+        const Result r = fsm_.pause(steady_ns());
         res->accepted = r.accepted;
         res->reason_code = r.accepted ? res->REASON_OK : res->REASON_NOT_RUNNING;
         advance();
@@ -174,7 +188,7 @@ MissionNode::MissionNode(const rclcpp::NodeOptions& options)
         const bool reference_ok = !paused || reference_matches_placement();
         const bool full = gate_ok(&why);
         const bool rpp_ok = rpp_status_fresh();
-        const Result r = fsm_.resume(reference_ok && full && rpp_ok, now_ns());
+        const Result r = fsm_.resume(reference_ok && full && rpp_ok, steady_ns());
         res->accepted = r.accepted;
         if (r.accepted) {
           res->reason_code = ResumeSrv::Response::REASON_OK;
@@ -196,7 +210,7 @@ MissionNode::MissionNode(const rclcpp::NodeOptions& options)
       "/dyx3/mission/abort",
       [this](const std::shared_ptr<dyx3_interfaces::srv::AbortMission::Request> req,
              std::shared_ptr<dyx3_interfaces::srv::AbortMission::Response> res) {
-        const Result r = fsm_.abort(req->reason_code, now_ns());
+        const Result r = fsm_.abort(req->reason_code, steady_ns());
         res->accepted = r.accepted;
         res->reason_code = r.accepted ? res->REASON_OK : res->REASON_NOT_ACTIVE;
         advance();
@@ -206,7 +220,7 @@ MissionNode::MissionNode(const rclcpp::NodeOptions& options)
       [this](const std::shared_ptr<dyx3_interfaces::srv::SkipPoint::Request>,
              std::shared_ptr<dyx3_interfaces::srv::SkipPoint::Response> res) {
         const bool has_point = journal_ && journal_->active_point().has_value();
-        const Result r = fsm_.skip_point(has_point, now_ns());
+        const Result r = fsm_.skip_point(has_point, steady_ns());
         res->accepted = r.accepted;
         if (r.accepted) {
           const auto ev = journal_->skip();
@@ -234,7 +248,7 @@ MissionNode::MissionNode(const rclcpp::NodeOptions& options)
         // callback (finishing here would report abort, not canceled): on_timer finalises it
         // (review H3 / fix plan A3).
         cancel_pending_ = true;
-        fsm_.abort(kReasonOperator, now_ns());
+        fsm_.abort(kReasonOperator, steady_ns());
         advance();
         return rclcpp_action::CancelResponse::ACCEPT;
       },
@@ -318,7 +332,7 @@ bool MissionNode::gate_ok(std::uint8_t* reason) {
   std::uint8_t why = MotionSetpointStatus::REASON_STALE;
   bool ok = false;
   if (gate_stamp_ns_) {
-    const double age = static_cast<double>(now_ns() - *gate_stamp_ns_) * 1e-9;
+    const double age = static_cast<double>(steady_ns() - *gate_stamp_ns_) * 1e-9;
     if (age <= gate_max_age_s_ && age >= -gate_max_age_s_) {
       ok = gate_flag_;
       why = gate_flag_ ? static_cast<std::uint8_t>(MotionSetpointStatus::REASON_OK) : gate_reason_;
@@ -332,7 +346,7 @@ bool MissionNode::pre_arm_ok(std::uint8_t* reason) {
   std::uint8_t why = MotionSetpointStatus::REASON_STALE;
   bool ok = false;
   if (gate_stamp_ns_) {
-    const double age = static_cast<double>(now_ns() - *gate_stamp_ns_) * 1e-9;
+    const double age = static_cast<double>(steady_ns() - *gate_stamp_ns_) * 1e-9;
     if (age <= gate_max_age_s_ && age >= -gate_max_age_s_) {
       ok = pre_arm_flag_;
       why = pre_arm_flag_ ? static_cast<std::uint8_t>(MotionSetpointStatus::REASON_OK)
@@ -345,13 +359,13 @@ bool MissionNode::pre_arm_ok(std::uint8_t* reason) {
 
 bool MissionNode::vehicle_fresh() {
   if (!vehicle_) return false;
-  const double age = static_cast<double>(now_ns() - vehicle_stamp_ns_) * 1e-9;
+  const double age = static_cast<double>(steady_ns() - vehicle_stamp_ns_) * 1e-9;
   return age >= 0.0 && age <= vehicle_state_max_age_s_;
 }
 
 bool MissionNode::rpp_status_fresh() {
   if (!rpp_stamp_ns_) return false;
-  const double age = static_cast<double>(now_ns() - *rpp_stamp_ns_) * 1e-9;
+  const double age = static_cast<double>(steady_ns() - *rpp_stamp_ns_) * 1e-9;
   return age >= 0.0 && age <= rpp_status_max_age_s_;  // a clock step back is not fresh either
 }
 
@@ -364,7 +378,7 @@ bool MissionNode::reference_matches_placement() {
 }
 
 void MissionNode::on_gate(const dyx3_interfaces::msg::SafetyGateStatus& m) {
-  gate_stamp_ns_ = now_ns();  // freshness is measured on OUR clock at receipt
+  gate_stamp_ns_ = steady_ns();  // freshness: steady clock at receipt, not the message stamp
   gate_flag_ = m.ok;
   gate_reason_ = m.reason_code;
   pre_arm_flag_ = m.pre_arm_ok;
@@ -381,21 +395,21 @@ void MissionNode::evaluate_gate() {
   const bool full = gate_ok(&full_why);
   if (pre_why == MotionSetpointStatus::REASON_ESTOP ||
       full_why == MotionSetpointStatus::REASON_ESTOP) {
-    fsm_.estop(now_ns());  // E-stop aborts and disarms (owner decision), in every active state
+    fsm_.estop(steady_ns());  // E-stop aborts and disarms (owner decision), in every active state
     return;
   }
   if (fsm_.before_running()) {
     // Before motion the vehicle may be disarmed: the pre-arm gate is the one that must hold.
-    if (!pre) fsm_.gate_lost(pre_why, now_ns());
+    if (!pre) fsm_.gate_lost(pre_why, steady_ns());
   } else if (fsm_.state() == State::kRunning) {
-    if (!full) fsm_.gate_lost(full_why, now_ns());
+    if (!full) fsm_.gate_lost(full_why, steady_ns());
   }
 }
 
 void MissionNode::on_rpp(const RppStatus& m) {
   if (m.mission_id != fsm_.mission_id()) return;  // only the current mission's RPP status counts
-  // Freshness is measured on OUR clock at receipt.
-  rpp_stamp_ns_ = now_ns();
+  // Freshness: steady clock at receipt, not the message stamp.
+  rpp_stamp_ns_ = steady_ns();
   run_.run_index = m.run_index;
   // Review H4 / fix plan A2: ERROR and COMPLETE are evaluated before the READY acknowledgement;
   // only a state that shows RPP holds this mission's path acknowledges it.
@@ -404,19 +418,19 @@ void MissionNode::on_rpp(const RppStatus& m) {
       m.state == RppStatus::STATE_STOPPING || m.state == RppStatus::STATE_PIVOTING ||
       m.state == RppStatus::STATE_CREEPING;
   if (m.state == RppStatus::STATE_ERROR) {
-    fsm_.rpp_error(now_ns());
+    fsm_.rpp_error(steady_ns());
   } else if (fsm_.state() == State::kReady && rpp_holds_path) {
     // Nothing reaches RUNNING without the full gate (armed + OFFBOARD included).
-    fsm_.rpp_ack(gate_ok(), now_ns());
+    fsm_.rpp_ack(gate_ok(), steady_ns());
   } else if (m.state == RppStatus::STATE_COMPLETE && fsm_.state() != State::kReady) {
-    fsm_.rpp_complete(now_ns());
+    fsm_.rpp_complete(steady_ns());
   }
   advance();
 }
 
 void MissionNode::on_vehicle(const dyx3_interfaces::msg::VehicleState& m) {
   vehicle_ = m;
-  vehicle_stamp_ns_ = now_ns();
+  vehicle_stamp_ns_ = steady_ns();
   check_ekf_reset();
   if (fsm_.state() == State::kRunning && journal_ && m.position_valid) {
     publish_points(journal_->update(m.north_m, m.east_m));
@@ -444,7 +458,7 @@ void MissionNode::check_ekf_reset() {
   if (why.empty()) return;
   ekf_reset_reported_ = true;  // reported once; a resume re-baselines
   RCLCPP_WARN(get_logger(), "%s", why.c_str());
-  fsm_.ekf_reset(why, now_ns());
+  fsm_.ekf_reset(why, steady_ns());
 }
 
 void MissionNode::on_timer() {
@@ -454,15 +468,15 @@ void MissionNode::on_timer() {
     // own command age). Pause; resuming is an explicit operator action, never automatic.
     RCLCPP_WARN(get_logger(), "RppStatus older than %.3f s while RUNNING: pausing",
                 rpp_status_max_age_s_);
-    fsm_.rpp_stale(now_ns());
+    fsm_.rpp_stale(steady_ns());
   }
   if (fsm_.state() == State::kReady && ready_since_ns_ &&
-      static_cast<double>(now_ns() - *ready_since_ns_) * 1e-9 >= rpp_ack_timeout_s_) {
+      static_cast<double>(steady_ns() - *ready_since_ns_) * 1e-9 >= rpp_ack_timeout_s_) {
     std::uint8_t why = 0;
     const bool full = gate_ok(&why);
     RCLCPP_ERROR(get_logger(), "READY for %.1f s without RUNNING (rpp ack seen: %s, gate ok: %s)",
                  rpp_ack_timeout_s_, rpp_stamp_ns_ ? "yes" : "no", full ? "yes" : "no");
-    fsm_.rpp_ack_timeout(full, why, now_ns());
+    fsm_.rpp_ack_timeout(full, why, steady_ns());
   }
   if (goal_ && goal_->is_active() && goal_->is_canceling()) finish_goal_if_terminal();
   advance();
@@ -514,7 +528,7 @@ MissionNode::StartOutcome MissionNode::begin_mission(const std::string& sha,
   run_.mission_id = fsm_.mission_id() + 1;
   run_.source_artifact_sha256 = sha;
   run_.request_id = request_id;
-  const Result r = fsm_.start(pre, now_ns());
+  const Result r = fsm_.start(pre, steady_ns());
   if (!r.accepted) {
     run_ = previous;
     out.reason = r.reject == Reject::kBusy ? StartSrv::Response::REASON_BUSY
@@ -542,7 +556,7 @@ MissionNode::StartOutcome MissionNode::begin_mission(const std::string& sha,
 // ------------------------------------------------------------------------------------------------
 void MissionNode::advance() {
   poll_jobs();
-  for (const auto& o : px4_.on_tick(now_ns())) {
+  for (const auto& o : px4_.on_tick(steady_ns())) {
     const auto it = px4_pending_.find(o.id);
     if (it != px4_pending_.end()) {
       if (it->second.arm_client) {
@@ -557,9 +571,9 @@ void MissionNode::advance() {
   // Entry actions, once per state change, including changes they cause themselves.
   while (entered_changes_ != fsm_.changes()) {
     entered_changes_ = fsm_.changes();
-    enter(fsm_.state(), now_ns());
+    enter(fsm_.state(), steady_ns());
   }
-  while (const auto req = px4_.next(now_ns())) send_px4(*req);
+  while (const auto req = px4_.next(steady_ns())) send_px4(*req);
   if (dirty_) publish_state();
 }
 
@@ -661,10 +675,10 @@ void MissionNode::poll_jobs() {
     if (job_mission_id_ == fsm_.mission_id() && fsm_.state() == State::kLoading) {
       if (!r.ok) {
         RCLCPP_ERROR(get_logger(), "artifact refused: %s", r.error.c_str());
-        fsm_.artifact_loaded(false, r.error, now_ns());
+        fsm_.artifact_loaded(false, r.error, steady_ns());
       } else {
         artifact_ = std::move(r.artifact);
-        fsm_.artifact_loaded(true, "artifact verified", now_ns());
+        fsm_.artifact_loaded(true, "artifact verified", steady_ns());
       }
     }
   }
@@ -674,19 +688,19 @@ void MissionNode::poll_jobs() {
     Placement& p = r.placement;
     if (!p.ok) {
       RCLCPP_ERROR(get_logger(), "placement refused: %s", p.detail.c_str());
-      fsm_.placed(false, placement_reason(p.error), p.detail, now_ns());
+      fsm_.placed(false, placement_reason(p.error), p.detail, steady_ns());
       return;
     }
     if (!r.stored) {
       RCLCPP_ERROR(get_logger(), "execution artifact not stored: %s", r.store_error.c_str());
-      fsm_.placed(false, kReasonInternalError, r.store_error, now_ns());
+      fsm_.placed(false, kReasonInternalError, r.store_error, steady_ns());
       return;
     }
     try {
       journal_ = std::make_unique<PointJournal>(p.execution.points, point_capture_radius_m_);
     } catch (const std::exception& e) {
       RCLCPP_ERROR(get_logger(), "point journal refused: %s", e.what());
-      fsm_.placed(false, kReasonPathError, e.what(), now_ns());
+      fsm_.placed(false, kReasonPathError, e.what(), steady_ns());
       return;
     }
     placement_->anchored = p.transformed;
@@ -695,7 +709,7 @@ void MissionNode::poll_jobs() {
     run_.point_index = active ? *active : 0U;
     RCLCPP_INFO(get_logger(), "placed %s -> execution %s (%s)", run_.source_artifact_sha256.c_str(),
                 p.execution.sha256.c_str(), p.detail.c_str());
-    fsm_.placed(true, kReasonNone, p.detail, now_ns());
+    fsm_.placed(true, kReasonNone, p.detail, steady_ns());
   }
 }
 
@@ -735,7 +749,7 @@ void MissionNode::send_px4(const Px4Request& r) {
 
 void MissionNode::on_px4_reply(std::uint64_t id, bool accepted, std::uint8_t reason) {
   px4_pending_.erase(id);
-  if (const auto o = px4_.on_response(id, accepted, reason, now_ns())) handle_px4(*o);
+  if (const auto o = px4_.on_response(id, accepted, reason, steady_ns())) handle_px4(*o);
   advance();
 }
 
@@ -757,12 +771,13 @@ void MissionNode::handle_px4(const Px4Outcome& o) {
   switch (o.op) {
     case Px4Op::kArm:
       if (fsm_.state() == State::kArming) {
-        fsm_.armed(ok, timeout ? kReasonArmTimeout : kReasonArmRefused, what, now_ns());
+        fsm_.armed(ok, timeout ? kReasonArmTimeout : kReasonArmRefused, what, steady_ns());
       }
       break;
     case Px4Op::kOffboardOn:
       if (fsm_.state() == State::kEngaging) {
-        fsm_.engaged(ok, timeout ? kReasonOffboardTimeout : kReasonOffboardRefused, what, now_ns());
+        fsm_.engaged(ok, timeout ? kReasonOffboardTimeout : kReasonOffboardRefused, what,
+                     steady_ns());
       }
       break;
     case Px4Op::kOffboardOff:
@@ -801,7 +816,7 @@ std::uint8_t MissionNode::waiting_on() const {
 void MissionNode::publish_state() {
   dirty_ = false;
   MissionState m;
-  m.stamp = get_clock()->now();
+  m.stamp = get_clock()->now();  // message stamp: ROS time (never used for an age)
   m.state = static_cast<std::uint8_t>(fsm_.state());
   m.mission_id = fsm_.mission_id();
   m.run_index = run_.run_index;
@@ -814,7 +829,7 @@ void MissionNode::publish_state() {
   if (!release_note_.empty()) m.reason_detail += "; release: " + release_note_;
   m.gate_reason_code = fsm_.gate_reason();
   m.waiting_on = waiting_on();
-  m.state_entered = to_msg_time(fsm_.state_entered_ns());
+  m.state_entered = to_msg_time(state_entered_ros_ns_);  // ROS time, see MissionState.msg
   state_pub_->publish(m);
   if (goal_ && goal_->is_active()) {
     auto fb = std::make_shared<ExecuteMission::Feedback>();
@@ -832,7 +847,7 @@ void MissionNode::publish_state() {
 
 void MissionNode::publish_point(const PointEvent& ev) {
   dyx3_interfaces::msg::PointResult m;
-  m.stamp = get_clock()->now();
+  m.stamp = get_clock()->now();  // message stamp: ROS time
   m.mission_id = fsm_.mission_id();
   m.point_index = ev.point_index;
   m.result_code = static_cast<std::uint8_t>(ev.outcome);

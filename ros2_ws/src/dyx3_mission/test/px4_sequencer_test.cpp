@@ -204,3 +204,35 @@ TEST(Px4Sequencer, BeginExecutionForgetsThePrevious) {
   s.release(false);
   EXPECT_FALSE(s.busy());
 }
+
+// The deadline is relative to the clock the node passes to next(): the steady clock counts from
+// boot, so its values are arbitrary and large, and no epoch is assumed.
+TEST(Px4Sequencer, DeadlinesAreRelativeToTheClockThatSentTheRequest) {
+  constexpr std::int64_t kBase = 987'654 * kS;
+  Px4Sequencer s;
+  s.set_timeouts({4.0, 5.0});
+  s.begin_execution();
+  s.engage(Px4Op::kArm);
+  drain(s, kBase);
+  EXPECT_TRUE(s.on_tick(0).empty());  // an earlier reading (another epoch) never expires it
+  EXPECT_TRUE(s.on_tick(kBase + 4 * kS - 1).empty());
+  const auto t = s.on_tick(kBase + 4 * kS);
+  ASSERT_EQ(t.size(), 1U);
+  EXPECT_EQ(t[0].result, Px4Result::kTimeout);
+}
+
+// px4_link's REASON_REJECTED_BY_FCU (2) is a definitive refusal, not a doubt: it is reported at
+// once with its code, owns nothing to disarm and is not a timeout.
+TEST(Px4Sequencer, ArmRejectedByTheFcuIsADefiniteRefusal) {
+  Px4Sequencer s;
+  s.begin_execution();
+  s.engage(Px4Op::kArm);
+  const auto r = drain(s, 0).at(0);
+  const auto o = s.on_response(r.id, false, 2, 1);  // REJECTED_BY_FCU
+  ASSERT_TRUE(o.has_value());
+  EXPECT_EQ(o->result, Px4Result::kRefused);
+  EXPECT_EQ(o->reason_code, 2);
+  EXPECT_FALSE(s.arm_owned());
+  s.release(false);
+  EXPECT_FALSE(s.busy());  // nothing to release
+}

@@ -5,6 +5,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <future>
 #include <map>
 #include <memory>
@@ -41,7 +42,14 @@ public:
   using ExecuteMission = dyx3_interfaces::action::ExecuteMission;
   using GoalHandle = rclcpp_action::ServerGoalHandle<ExecuteMission>;
 
-  explicit MissionNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions());
+  /// Monotonic nanoseconds. Every age, freshness check, timeout and deadline of the node and of
+  /// the PX4 sequencer is measured on this clock, never on ROS time: a wall-clock step (the first
+  /// NTP sync) must not make a fresh input look stale or let a deadline expire early.
+  using ClockFn = std::function<std::int64_t()>;
+
+  /// `clock` defaults to std::chrono::steady_clock; tests inject their own.
+  explicit MissionNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions(),
+                       ClockFn clock = nullptr);
   ~MissionNode() override;
 
   struct StartOutcome {
@@ -78,7 +86,9 @@ private:
     std::int64_t client_request_id = 0;
   };
 
-  std::int64_t now_ns() { return get_clock()->now().nanoseconds(); }
+  /// The node's monotonic clock (see ClockFn): the ONLY source for ages and deadlines. ROS time
+  /// (get_clock()) is used for message stamp fields only.
+  std::int64_t steady_ns() const { return clock_(); }
   /// Full guard verdict (SafetyGateStatus.ok); stale or never-seen == not ok.
   bool gate_ok(std::uint8_t* reason = nullptr);
   /// Pre-arm verdict (SafetyGateStatus.pre_arm_ok); stale or never-seen == not ok.
@@ -126,6 +136,7 @@ private:
   double placement_max_distance_m_;
   double vehicle_state_max_age_s_;
 
+  ClockFn clock_;
   MissionFsm fsm_;
   Px4Sequencer px4_;
   RunState run_;
@@ -135,6 +146,10 @@ private:
   bool ekf_reset_reported_ = false;
   std::string release_note_;  ///< outcome of a failed release step, appended to reason_detail
   std::uint64_t entered_changes_ = 0;
+  // MissionState.state_entered is documented as ROS time, while the FSM times its transitions on
+  // the steady clock: the ROS time of the latest state change is recorded here for the message.
+  std::int64_t state_entered_ros_ns_ = 0;
+  std::uint64_t stamped_changes_ = 0;
   bool dirty_ = false;
 
   // file work off the executor thread (one at a time); results of an execution that is no longer
@@ -144,6 +159,7 @@ private:
   std::uint32_t job_mission_id_ = 0;
 
   // latest guard verdict
+  // every *_ns_ below is on the steady clock (receipt times and READY entry), never ROS time
   std::optional<std::int64_t> gate_stamp_ns_;
   bool gate_flag_ = false;
   std::uint8_t gate_reason_ = 0;

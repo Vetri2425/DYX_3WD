@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <ctime>
@@ -41,6 +42,7 @@
 #include "dyx3_mission/sha256.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_action/rclcpp_action.hpp"
+#include "rosgraph_msgs/msg/clock.hpp"
 
 using namespace std::chrono_literals;
 namespace di = dyx3_interfaces;
@@ -107,6 +109,7 @@ protected:
     gate_pub_ = helper_->create_publisher<di::msg::SafetyGateStatus>("/dyx3/safety_gate", be);
     rpp_pub_ = helper_->create_publisher<di::msg::RppStatus>("/dyx3/rpp/status", be);
     veh_pub_ = helper_->create_publisher<di::msg::VehicleState>("/dyx3/vehicle_state", be);
+    clock_pub_ = helper_->create_publisher<rosgraph_msgs::msg::Clock>("/clock", rclcpp::ClockQoS());
     state_sub_ = helper_->create_subscription<MS>("/dyx3/mission/state",
                                                   rclcpp::QoS(100).reliable(), [this](const MS& m) {
                                                     last_state_ = m;
@@ -181,6 +184,9 @@ protected:
     fs::remove_all(dir_);
   }
 
+  // Production uses std::chrono::steady_clock for every age and deadline (the node's default). A
+  // test that drives time by hand sets manual_ns_ (the injected steady clock) and, to step ROS
+  // time independently of it, sim_time_ (the node follows the /clock this rig publishes).
   void make_node(std::vector<rclcpp::Parameter> extra = {}) {
     if (node_) exec_.remove_node(node_);
     node_.reset();
@@ -191,8 +197,11 @@ protected:
                                          {"arm_timeout_s", 2.1},
                                          {"offboard_timeout_s", 3.6}};
     for (auto& p : extra) ps.push_back(p);
+    if (sim_time_) ps.push_back(rclcpp::Parameter("use_sim_time", true));
     o.parameter_overrides(ps);
-    node_ = std::make_shared<dyx3_mission::MissionNode>(o);
+    dyx3_mission::MissionNode::ClockFn clock;
+    if (manual_ns_) clock = [m = manual_ns_] { return m->load(); };
+    node_ = std::make_shared<dyx3_mission::MissionNode>(o, clock);
     exec_.add_node(node_);
   }
 
@@ -234,12 +243,36 @@ protected:
       }
     }
   }
+  // The ROS clock of a sim_time_ node: constant until a test moves sim_ros_ns_ (a wall-clock step).
+  void publish_clock() {
+    if (!sim_time_) return;
+    rosgraph_msgs::msg::Clock c;
+    c.clock.sec = static_cast<std::int32_t>(sim_ros_ns_ / 1'000'000'000LL);
+    c.clock.nanosec = static_cast<std::uint32_t>(sim_ros_ns_ % 1'000'000'000LL);
+    clock_pub_->publish(c);
+  }
+  static std::int64_t ros_ns(const builtin_interfaces::msg::Time& t) {
+    return static_cast<std::int64_t>(t.sec) * 1'000'000'000LL + t.nanosec;
+  }
+  // Moves the injected steady clock forward by 100 ms per step, republishing the world between
+  // steps (no input ages out), until `pred` holds. Returns how far the steady clock was moved.
+  std::int64_t step_steady_until(const std::function<bool()>& pred, std::int64_t max_ns) {
+    std::int64_t moved = 0;
+    while (!pred() && moved < max_ns) {
+      *manual_ns_ += 100'000'000;
+      moved += 100'000'000;
+      pump(40ms);
+    }
+    return moved;
+  }
   bool spin_until(const std::function<bool()>& pred, std::chrono::milliseconds limit = 6000ms) {
     const auto end = std::chrono::steady_clock::now() + limit;
     auto next_world = std::chrono::steady_clock::now();
     while (std::chrono::steady_clock::now() < end) {
       if (std::chrono::steady_clock::now() >= next_world) {
+        publish_clock();
         publish_world();
+        if (manual_ns_ && steady_follows_world_) *manual_ns_ += 20'000'000;  // one world tick
         next_world += 20ms;
       }
       exec_.spin_once(5ms);
@@ -311,6 +344,7 @@ protected:
   rclcpp::Publisher<di::msg::SafetyGateStatus>::SharedPtr gate_pub_;
   rclcpp::Publisher<di::msg::RppStatus>::SharedPtr rpp_pub_;
   rclcpp::Publisher<di::msg::VehicleState>::SharedPtr veh_pub_;
+  rclcpp::Publisher<rosgraph_msgs::msg::Clock>::SharedPtr clock_pub_;
   rclcpp::Subscription<MS>::SharedPtr state_sub_;
   rclcpp::Subscription<di::msg::PointResult>::SharedPtr point_sub_;
   rclcpp::Service<di::srv::ArmDisarm>::SharedPtr arm_srv_;
@@ -321,6 +355,12 @@ protected:
   rclcpp::Client<di::srv::AbortMission>::SharedPtr abort_;
   rclcpp::Client<di::srv::SkipPoint>::SharedPtr skip_;
   rclcpp_action::Client<dyx3_mission::MissionNode::ExecuteMission>::SharedPtr action_;
+
+  // time (see make_node)
+  std::shared_ptr<std::atomic<std::int64_t>> manual_ns_;  ///< the injected steady clock, if any
+  bool steady_follows_world_ = false;  ///< manual_ns_ advances 20 ms per world tick
+  bool sim_time_ = false;
+  std::int64_t sim_ros_ns_ = 0;  ///< what the /clock this rig publishes says (sim_time_ only)
 
   // world
   bool world_on_ = true;
@@ -342,6 +382,20 @@ protected:
   std::size_t state_count_ = 0;
   std::vector<MS> states_;
   std::vector<di::msg::PointResult> points_;
+};
+
+// The node on a hand-driven steady clock, and ROS time (use_sim_time) that the test can step
+// independently of it. The rig is a /clock publisher: a real system wall-clock step cannot be made
+// from a test, a sim-time step is the same thing to the node (ROS time jumps, nothing else does).
+class MissionNodeClockTest : public MissionNodeTest {
+protected:
+  static constexpr std::int64_t kRosBaseNs = 1'000'000'000'000LL;  // 1000 s
+  MissionNodeClockTest() {  // runs before SetUp(), which builds the node
+    manual_ns_ = std::make_shared<std::atomic<std::int64_t>>(5'000'000'000LL);
+    steady_follows_world_ = true;
+    sim_time_ = true;
+    sim_ros_ns_ = kRosBaseNs;
+  }
 };
 
 }  // namespace
@@ -478,6 +532,23 @@ TEST_F(MissionNodeTest, ArmRefusedIsAnErrorWithNoOffboardAndNoDisarm) {
   EXPECT_TRUE(last_state_.path_artifact_sha256.empty());
 }
 
+TEST_F(MissionNodeTest, ArmRejectedByTheFcuIsRefusedAtOnceAndCarriesTheLinkReason) {
+  arm_reply_ = Reply::kRefuse;
+  arm_refuse_reason_ = di::srv::ArmDisarm::Response::REASON_REJECTED_BY_FCU;
+  pump(150ms);
+  const auto t0 = std::chrono::steady_clock::now();
+  ASSERT_TRUE(start(ekf_sha_)->accepted);
+  // Far below arm_timeout_s (2.1 s): a definitive refusal is not waited out.
+  ASSERT_TRUE(wait_state(MS::STATE_ERROR, 1500ms));
+  EXPECT_LT(std::chrono::steady_clock::now() - t0, 1500ms);
+  EXPECT_EQ(last_state_.reason_code, MS::REASON_ARM_REFUSED);
+  EXPECT_NE(last_state_.reason_detail.find("refused"), std::string::npos);
+  EXPECT_NE(last_state_.reason_detail.find("(reason 2)"), std::string::npos)
+      << last_state_.reason_detail;
+  pump(300ms);
+  EXPECT_EQ(ops(), (std::vector<std::string>{"arm"}));  // refused before commanding: no disarm
+}
+
 TEST_F(MissionNodeTest, ArmTimeoutIsAnErrorWithNoOffboardAndADisarmOnDoubt) {
   arm_reply_ = Reply::kSilent;
   pump(150ms);
@@ -550,6 +621,109 @@ TEST_F(MissionNodeTest, ReadyWaitsForTheFullGateEvenWithTheRppAck) {
   EXPECT_EQ(last_state_.reason_code, MS::REASON_SAFETY);
   EXPECT_EQ(last_state_.gate_reason_code, GuardReason::REASON_ARMING_GATE);
   for (const auto& m : states_) EXPECT_NE(m.state, MS::STATE_RUNNING);
+}
+
+// ------------------------------------------------------------------------------------------------
+// clocks: every age and deadline is on the steady clock; ROS time only stamps messages
+// ------------------------------------------------------------------------------------------------
+TEST_F(MissionNodeClockTest, AStepOfTheRosClockDoesNotMakeFreshInputsStale) {
+  // Tight ages, so a freshness computed on ROS time would trip on the 2 s step below.
+  ASSERT_TRUE(node_->set_parameters_atomically({rclcpp::Parameter("rpp_status_max_age_s", 0.5)})
+                  .successful);
+  start_running();  // the steady clock advances with the world (normally) while it gets there
+  const std::int64_t entered_running = ros_ns(last_state_.state_entered);
+  EXPECT_EQ(entered_running, kRosBaseNs);  // state_entered is ROS time, as MissionState.msg says
+  ASSERT_EQ(state(), MS::STATE_RUNNING);
+
+  // ROS time jumps forward by 2 s (what the first NTP sync does to a system clock). The inputs go
+  // quiet for 0.1 s of steady time, i.e. they are fresh on the steady clock and 2.1 s old on the
+  // ROS clock. The steady clock is held for the quiet window so the check does not depend on
+  // scheduling; the 10 Hz timer runs several times in it.
+  steady_follows_world_ = false;
+  world_on_ = false;
+  sim_ros_ns_ += 2'000'000'000LL;
+  *manual_ns_ += 100'000'000;
+  pump(450ms);
+  EXPECT_EQ(state(), MS::STATE_RUNNING);
+  world_on_ = true;
+  steady_follows_world_ = true;
+  pump(300ms);
+  EXPECT_EQ(state(), MS::STATE_RUNNING);
+  for (const auto& m : states_) {
+    EXPECT_NE(m.state, MS::STATE_PAUSED);
+    EXPECT_NE(m.reason_code, MS::REASON_RPP_STALE);
+    EXPECT_NE(m.reason_code, MS::REASON_SAFETY);
+  }
+  // The stamps stayed on ROS time and followed the step; state_entered still names the entry.
+  EXPECT_GE(ros_ns(last_state_.stamp), kRosBaseNs + 2'000'000'000LL);
+  EXPECT_EQ(ros_ns(last_state_.state_entered), entered_running);
+}
+
+TEST_F(MissionNodeClockTest, SilentRppStillPausesOnTheSteadyClockWhileRosTimeStandsStill) {
+  ASSERT_TRUE(node_->set_parameters_atomically({rclcpp::Parameter("rpp_status_max_age_s", 0.5)})
+                  .successful);
+  start_running();
+  // ROS time frozen (sim_ros_ns_ unchanged): only the steady clock tells RPP went quiet.
+  steady_follows_world_ = false;
+  rpp_auto_ = false;
+  pump(450ms);
+  EXPECT_EQ(state(), MS::STATE_RUNNING);  // 0 s of steady silence so far
+  step_steady_until([&] { return state() == MS::STATE_PAUSED; }, 1'500'000'000LL);
+  ASSERT_EQ(state(), MS::STATE_PAUSED);
+  EXPECT_EQ(last_state_.reason_code, MS::REASON_RPP_STALE);
+}
+
+TEST_F(MissionNodeClockTest, TheReadyAckTimeoutFiresOnTheSteadyClock) {
+  ASSERT_TRUE(
+      node_->set_parameters_atomically({rclcpp::Parameter("rpp_ack_timeout_s", 2.0)}).successful);
+  steady_follows_world_ = false;  // the test moves it
+  rpp_auto_ = false;              // RPP never acknowledges
+  pump(150ms);
+  ASSERT_TRUE(start(ekf_sha_)->accepted);
+  ASSERT_TRUE(wait_state(MS::STATE_READY));
+  // Real time passes, the steady clock and ROS time do not: no timeout.
+  pump(600ms);
+  EXPECT_EQ(state(), MS::STATE_READY);
+  const std::int64_t moved =
+      step_steady_until([&] { return state() == MS::STATE_ERROR; }, 4'000'000'000LL);
+  ASSERT_EQ(state(), MS::STATE_ERROR);
+  EXPECT_EQ(last_state_.reason_code, MS::REASON_RPP_ACK_TIMEOUT);
+  EXPECT_GE(moved, 2'000'000'000LL);  // not before rpp_ack_timeout_s of steady time
+  EXPECT_LE(moved, 3'000'000'000LL);
+}
+
+TEST_F(MissionNodeClockTest, TheArmDeadlineFiresOnTheSteadyClock) {
+  arm_reply_ = Reply::kSilent;
+  steady_follows_world_ = false;
+  pump(150ms);
+  ASSERT_TRUE(start(ekf_sha_)->accepted);
+  ASSERT_TRUE(wait_state(MS::STATE_ARMING));
+  ASSERT_TRUE(spin_until([&] { return called("arm"); }));
+  pump(600ms);  // real time only
+  EXPECT_EQ(state(), MS::STATE_ARMING);
+  const std::int64_t moved =
+      step_steady_until([&] { return state() == MS::STATE_ERROR; }, 4'000'000'000LL);
+  ASSERT_EQ(state(), MS::STATE_ERROR);
+  EXPECT_EQ(last_state_.reason_code, MS::REASON_ARM_TIMEOUT);
+  EXPECT_GE(moved, 2'100'000'000LL);  // arm_timeout_s 2.1
+  EXPECT_LE(moved, 3'100'000'000LL);
+}
+
+TEST_F(MissionNodeClockTest, TheOffboardDeadlineFiresOnTheSteadyClock) {
+  offboard_reply_ = Reply::kSilent;
+  steady_follows_world_ = false;
+  pump(150ms);
+  ASSERT_TRUE(start(ekf_sha_)->accepted);
+  ASSERT_TRUE(wait_state(MS::STATE_ENGAGING));
+  ASSERT_TRUE(spin_until([&] { return called("offboard_on"); }));
+  pump(600ms);
+  EXPECT_EQ(state(), MS::STATE_ENGAGING);
+  const std::int64_t moved =
+      step_steady_until([&] { return state() == MS::STATE_ERROR; }, 6'000'000'000LL);
+  ASSERT_EQ(state(), MS::STATE_ERROR);
+  EXPECT_EQ(last_state_.reason_code, MS::REASON_OFFBOARD_TIMEOUT);
+  EXPECT_GE(moved, 3'600'000'000LL);  // offboard_timeout_s 3.6
+  EXPECT_LE(moved, 4'600'000'000LL);
 }
 
 // ------------------------------------------------------------------------------------------------

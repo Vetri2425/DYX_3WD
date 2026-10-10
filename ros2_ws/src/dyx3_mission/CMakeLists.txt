@@ -45,6 +45,7 @@ ament_export_targets(export_dyx3_mission_core HAS_LIBRARY_TARGET)
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
+  find_package(rosgraph_msgs REQUIRED)  # the node test steps ROS time through /clock
   set(FIXTURES ${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures)
   foreach(t mission_fsm_test px4_sequencer_test frame_placement_test sha256_test path_artifact_test
           point_journal_test)
@@ -56,7 +57,7 @@ if(BUILD_TESTING)
   # The arm and OFFBOARD timeout cases wait for the minimum valid timeouts (> 2.0 s, > 3.5 s).
   ament_add_gtest(mission_node_test test/mission_node_test.cpp TIMEOUT 180)
   target_link_libraries(mission_node_test dyx3_mission_node_lib)
-  ament_target_dependencies(mission_node_test rclcpp rclcpp_action dyx3_interfaces)
+  ament_target_dependencies(mission_node_test rclcpp rclcpp_action dyx3_interfaces rosgraph_msgs)
   target_compile_definitions(mission_node_test PRIVATE DYX3_FIXTURES="${FIXTURES}")
 endif()
 
