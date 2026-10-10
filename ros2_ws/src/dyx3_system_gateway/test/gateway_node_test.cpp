@@ -1,16 +1,21 @@
 // In-process tests of the gateway node over a REAL Unix socket: fake services stand in for the
 // mission node, motion_guard, px4_link and spray; an injected clock; a private DDS domain.
+// No fixed wall-clock waits: DDS delivery is drained (dds_test_support.hpp) and anything owned by
+// the gateway's IPC thread (the inbox, client connections, socket replies) is waited on as a
+// condition with a bound that only limits a failure.
 #include "dyx3_system_gateway/gateway_node.hpp"
 
 #include <gtest/gtest.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
 #include <functional>
 #include <map>
 #include <memory>
 #include <thread>
 
+#include "dds_test_support.hpp"
 #include "dyx3_system_gateway/json.hpp"
 #include "sock_client.hpp"
 
@@ -38,9 +43,7 @@ struct Rig {
 
   Rig() {
     ctx = std::make_shared<rclcpp::Context>();
-    rclcpp::InitOptions io;
-    io.set_domain_id(120 + (getpid() % 100));
-    ctx->init(0, nullptr, io);
+    dyx3_test::init_isolated(ctx);
     sock = tmp_sock();
     rclcpp::NodeOptions go;
     go.context(ctx);
@@ -129,22 +132,19 @@ struct Rig {
         });
     p_rtk = world->create_publisher<dyx3_interfaces::msg::RtkStatus>("/dyx3/rtk_status",
                                                                      rclcpp::QoS(1).reliable());
-    const auto end = std::chrono::steady_clock::now() + 10s;
-    while (std::chrono::steady_clock::now() < end) {
-      exec->spin_some(5ms);
-      if (gw->count_subscribers("/dyx3/operator_link") > 0 &&
-          world->count_subscribers("/dyx3/rtk_status") > 0) {
-        // services discovered by the gateway's clients
-        bool all = true;
-        for (const char* n : {"/dyx3/mission/start", "/dyx3/motion_guard/set_emergency_stop",
-                              "/dyx3/px4_link/arm", "/dyx3/spray/set_manual"}) {
-          all = all && !gw->get_service_names_and_types_by_node("world", "/").empty();
-          (void)n;
-        }
-        if (all) break;
-      }
+    // Discovery: both topics matched and every one of the gateway's nine clients reaches its
+    // service (a client that does not would answer "service_unavailable").
+    const bool discovered = pump_until([this] {
+      return gw->count_subscribers("/dyx3/operator_link") > 0 &&
+             world->count_subscribers("/dyx3/rtk_status") > 0 && gw->unavailable_services().empty();
+    });
+    if (!discovered) {
+      std::string missing;
+      for (const auto& n : gw->unavailable_services()) missing += " " + n;
+      ADD_FAILURE() << "DDS discovery did not complete; unreachable:" << missing;
     }
-    pump(800);  // let the clients see the services
+    // every later deliver() relies on synchronous delivery: prove it
+    EXPECT_TRUE(dyx3_test::delivery_is_synchronous(ctx));
   }
   ~Rig() {
     exec.reset();
@@ -153,24 +153,30 @@ struct Rig {
     world.reset();
     ctx->shutdown("test done");
   }
-  void pump(int ms) {
-    const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
-    while (std::chrono::steady_clock::now() < end) exec->spin_some(2ms);
-  }
+  // Delivers everything published so far (topics, service requests and responses) and runs every
+  // callback it causes, then returns.
+  void deliver() { dyx3_test::drain(*exec); }
   // Drive the node until `done` holds. The limit only bounds a failure; no result depends on it.
   bool pump_until(const std::function<bool()>& done, int limit_ms = 10000) {
     const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(limit_ms);
-    while (!done() && std::chrono::steady_clock::now() < end) exec->spin_some(2ms);
+    while (std::chrono::steady_clock::now() < end) {
+      deliver();
+      if (done()) return true;
+      exec->spin_once(1ms);  // blocks only while nothing is ready (or the IPC thread is working)
+    }
+    deliver();
     return done();
   }
-  // Send one line, drive the node until a reply with this id arrives.
+  // Send one line, drive the node until a reply with this id arrives. The first 300 steps spread
+  // `advance` of link time; past them the clock stays put and only a wall-clock bound remains,
+  // which limits a failure (a reply that never comes) and decides nothing.
   JsonValue ask(const Sock& s, const std::string& line, int64_t id, double advance = 0.0) {
     s.write_all(line + "\n");
-    std::vector<std::string> lines;
     JsonValue v;
-    for (int i = 0; i < 300; ++i) {
-      pump(10);
-      now += advance / 300.0;
+    const auto end = std::chrono::steady_clock::now() + 15s;
+    for (int i = 0; i < 300 || std::chrono::steady_clock::now() < end; ++i) {
+      deliver();
+      if (i < 300) now += advance / 300.0;
       gw->step(now);
       for (const auto& l : s.read_lines(1, 5)) {
         JsonValue j;
@@ -233,14 +239,14 @@ TEST(GatewayNode, BadInputNeverReachesRosAndIsAnsweredWithTheId) {
   v = r.ask(c, R"({"v":1,"id":12,"cmd":"estop","args":{"asserted":true,"source":"root"}})", 12);
   EXPECT_EQ(code_of(v), "invalid_command");
   c.write_all("garbage\n");
-  r.pump(100);
-  const auto lines = c.read_lines(1);
+  r.deliver();
+  const auto lines = c.read_lines(1);  // waits for the reply (bounded)
   ASSERT_EQ(lines.size(), 1U);
   EXPECT_NE(lines[0].find("bad_message"), std::string::npos);
   // invalid UTF-8 is refused and the reply carries none of it (GW-008)
   c.write_all("{\"v\":1,\"id\":13,\"cmd\":\"\xC0\xAF\xFF\"}\n");
-  r.pump(100);
-  const auto bad = c.read_lines(1);
+  r.deliver();
+  const auto bad = c.read_lines(1);  // waits for the reply (bounded)
   ASSERT_EQ(bad.size(), 1U);
   EXPECT_NE(bad[0].find("bad_message"), std::string::npos);
   EXPECT_TRUE(is_valid_utf8(bad[0])) << bad[0];
@@ -278,9 +284,15 @@ TEST(GatewayNode, AnEstopThatCannotBeDeliveredIsNeverReportedAsAccepted) {
     const auto names = r.gw->get_service_names_and_types_by_node("world", "/");
     return names.find("/dyx3/motion_guard/set_emergency_stop") == names.end();
   };
-  for (int i = 0; i < 100 && !gone(); ++i) r.pump(50);
-  ASSERT_TRUE(gone());
-  r.pump(200);
+  ASSERT_TRUE(r.pump_until(gone, 5000));
+  // ... and the gateway's own client has lost it (not a bet on how long that takes)
+  ASSERT_TRUE(r.pump_until(
+      [&r] {
+        const auto down = r.gw->unavailable_services();
+        return std::find(down.begin(), down.end(), "/dyx3/motion_guard/set_emergency_stop") !=
+               down.end();
+      },
+      5000));
   v = r.ask(c, R"({"v":1,"id":24)" + assert_line, 24);
   EXPECT_FALSE(ok_of(v));
   EXPECT_EQ(code_of(v), "service_unavailable");
@@ -315,9 +327,11 @@ TEST(GatewayNode, EstopIsProcessedBeforeOtherQueuedCommands) {
               "\n"
               R"({"v":1,"id":33,"cmd":"estop","args":{"asserted":true,"source":"backend"}})"
               "\n");
-  r.pump(200);
+  // One step must see the whole burst: wait until the IPC thread has queued all three.
+  ASSERT_TRUE(r.pump_until([&r] { return r.gw->inbox_depth() == 3U; }))
+      << "inbox depth " << r.gw->inbox_depth();
   r.gw->step(r.now);
-  r.pump(300);
+  r.pump_until([&r] { return r.calls.size() >= 3U; });  // the three fake handlers ran
   // Service endpoints are separate DDS entities, so the executor may run the fake handlers in any
   // order: the guarantee under test is the order in which the GATEWAY processed the batch.
   const auto& batch = r.gw->last_batch();
@@ -396,7 +410,7 @@ TEST(GatewayNode, AnEstopBehindAHeartbeatFloodIsDispatchedFirstAndTheInboxStaysB
 TEST(GatewayNode, OperatorLinkFollowsTheHeartbeatAndFailsSafe) {
   Rig r;
   r.gw->step(r.now);
-  r.pump(200);
+  r.deliver();
   ASSERT_TRUE(r.link_seen);
   EXPECT_FALSE(r.link.alive);  // boot: nobody has spoken
   Sock c(r.sock);
@@ -404,21 +418,21 @@ TEST(GatewayNode, OperatorLinkFollowsTheHeartbeatAndFailsSafe) {
   EXPECT_TRUE(ok_of(r.ask(c, R"({"v":1,"id":41,"cmd":"heartbeat"})", 41)));
   r.now += 0.2;
   r.gw->step(r.now);
-  r.pump(200);
+  r.deliver();
   EXPECT_TRUE(r.link.alive);
   r.now += 1.0;  // within the 2 s timeout
   r.gw->step(r.now);
-  r.pump(200);
+  r.deliver();
   EXPECT_TRUE(r.link.alive);
   r.now += 1.5;  // timeout
   r.gw->step(r.now);
-  r.pump(200);
+  r.deliver();
   EXPECT_FALSE(r.link.alive);
   EXPECT_GT(r.link.age_s, 2.0F);
   EXPECT_TRUE(ok_of(r.ask(c, R"({"v":1,"id":42,"cmd":"heartbeat"})", 42)));
   r.now += 0.2;
   r.gw->step(r.now);
-  r.pump(200);
+  r.deliver();
   EXPECT_TRUE(r.link.alive);
   // the backend disappears: no client, so not alive even though the last heartbeat is fresh
   {
@@ -426,10 +440,10 @@ TEST(GatewayNode, OperatorLinkFollowsTheHeartbeatAndFailsSafe) {
   }
   c.~Sock();
   new (&c) Sock("/nonexistent");
-  r.pump(300);
+  ASSERT_TRUE(r.pump_until([&r] { return r.gw->ipc().clients() == 0; }));  // both hang-ups seen
   r.now += 0.1;
   r.gw->step(r.now);
-  r.pump(200);
+  r.deliver();
   EXPECT_FALSE(r.link.alive);
 }
 
@@ -441,27 +455,27 @@ TEST(GatewayNode, TheOperatorLinkDiesWithTheConnectionThatHeartbeated) {
   EXPECT_TRUE(ok_of(r.ask(*a, R"({"v":1,"id":61,"cmd":"heartbeat"})", 61)));
   r.now += 0.1;
   r.gw->step(r.now);
-  r.pump(200);
+  r.deliver();
   EXPECT_TRUE(r.link.alive);
   // A (the backend) goes away while B stays connected and silent: the link must drop on the
   // next publish, not after the heartbeat timeout.
   a.reset();
-  r.pump(300);  // the IPC thread sees the hang-up
+  r.pump_until([&r] { return r.gw->ipc().clients() == 1; });  // the IPC thread sees the hang-up
   ASSERT_EQ(r.gw->ipc().clients(), 1);
   r.now += 0.1;  // one publish period; the last heartbeat is only 0.2 s old
   r.gw->step(r.now);
-  r.pump(200);
+  r.deliver();
   EXPECT_FALSE(r.link.alive);
   EXPECT_LT(r.link.age_s, 1.0F);
   // B is not the operator until it heartbeats itself
   EXPECT_TRUE(ok_of(r.ask(b, R"({"v":1,"id":62,"cmd":"heartbeat"})", 62)));
   r.now += 0.1;
   r.gw->step(r.now);
-  r.pump(200);
+  r.deliver();
   EXPECT_TRUE(r.link.alive);
   r.now += 1.0;
   r.gw->step(r.now);
-  r.pump(200);
+  r.deliver();
   EXPECT_TRUE(r.link.alive);  // within the timeout, B still connected
 }
 
@@ -473,7 +487,7 @@ TEST(GatewayNode, SnapshotAndTelemetryPushCarryAgeAndFreshness) {
   m.fix_type = 6;
   m.horizontal_accuracy_m = 0.02F;
   r.p_rtk->publish(m);
-  r.pump(300);
+  r.deliver();
   auto v = r.ask(c, R"({"v":1,"id":51,"cmd":"get_snapshot"})", 51);
   ASSERT_TRUE(ok_of(v));
   const JsonValue* d = v.get("data");
@@ -494,30 +508,31 @@ TEST(GatewayNode, SnapshotAndTelemetryPushCarryAgeAndFreshness) {
   {
     std::vector<std::unique_ptr<Sock>> extra;  // max_clients is 4: the 5th connection is refused
     for (int i = 0; i < 4; ++i) extra.push_back(std::make_unique<Sock>(r.sock));
-    for (int i = 0; i < 100 && r.gw->ipc().rejected_full() < 1; ++i) r.pump(10);
+    r.pump_until([&r] { return r.gw->ipc().rejected_full() >= 1; });
   }
   v = r.ask(c, R"({"v":1,"id":52,"cmd":"get_snapshot"})", 52);
   EXPECT_EQ(v.get("data")->get("gateway")->get("ipc")->get("rejected_full")->i, 1);
   // a telemetry push arrives without being asked; once the data is old it says so
   r.now += 5.0;
   r.gw->step(r.now);
-  r.pump(100);
+  r.deliver();
   bool saw_stale = false;
-  for (const auto& l : c.read_lines(20, 300)) {
-    JsonValue j;
-    std::string e;
-    if (parse_json(l, &j, &e) && j.get("type") && j.get("type")->s == "telemetry") {
-      saw_stale = saw_stale || !j.get("snapshot")->get("rtk_status")->get("fresh")->b;
+  r.pump_until([&] {  // read pushes until the stale one arrives (bounded)
+    for (const auto& l : c.read_lines(1, 20)) {
+      JsonValue j;
+      std::string e;
+      if (parse_json(l, &j, &e) && j.get("type") && j.get("type")->s == "telemetry") {
+        saw_stale = saw_stale || !j.get("snapshot")->get("rtk_status")->get("fresh")->b;
+      }
     }
-  }
+    return saw_stale;
+  });
   EXPECT_TRUE(saw_stale);
 }
 
 TEST(GatewayNode, InvalidParametersStopTheNodeAtStart) {
   auto ctx = std::make_shared<rclcpp::Context>();
-  rclcpp::InitOptions io;
-  io.set_domain_id(120 + (getpid() % 100));
-  ctx->init(0, nullptr, io);
+  dyx3_test::init_isolated(ctx);
   rclcpp::NodeOptions o;
   o.context(ctx);
   o.append_parameter_override("socket_path", tmp_sock());

@@ -380,6 +380,17 @@ size_t GatewayNode::inbox_depth() const {
   return inbox_.size();
 }
 
+std::vector<std::string> GatewayNode::unavailable_services() const {
+  const rclcpp::ClientBase* clients[] = {cli_start_.get(),  cli_abort_.get(),    cli_pause_.get(),
+                                         cli_resume_.get(), cli_skip_.get(),     cli_estop_.get(),
+                                         cli_arm_.get(),    cli_offboard_.get(), cli_spray_.get()};
+  std::vector<std::string> out;
+  for (const auto* c : clients) {
+    if (!c->service_is_ready()) out.emplace_back(c->get_service_name());
+  }
+  return out;
+}
+
 void GatewayNode::process(const Inbound& in, double now_s) {
   const Command& c = in.pr.cmd;
   const auto base = [](auto& r, bool* acc) {
