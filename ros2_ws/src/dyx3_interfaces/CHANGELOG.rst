@@ -8,7 +8,7 @@ releases from 0.13.1 on, in the ROS package changelog format.
 
 0.15.0 (2026-10-10)
 -------------------
-Mission contract v2 (``docs/plans/2026-10-10_mission_contract_v2.md`` section 3).
+Mission contract v2 (``docs/plans/2026-10-10_mission_contract.md`` section 3).
 
 * ``MissionState.msg``: new states ``STATE_PLACING=8``, ``STATE_ARMING=9``, ``STATE_ENGAGING=10``;
   new reasons 6..17 (``EKF_RESET``, ``EKF_REFERENCE_INVALID``, ``PLACEMENT_OUT_OF_BOUNDS``,

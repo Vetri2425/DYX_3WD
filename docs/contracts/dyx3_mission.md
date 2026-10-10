@@ -1,6 +1,6 @@
 # Contract — `dyx3_mission`
 
-Spec §7.1/§7.4/§4.3.1; Phase plan P3; **mission contract v2** (`docs/plans/2026-10-10_mission_contract_v2.md` §3,
+Spec §7.1/§7.4/§4.3.1; Phase plan P3; **mission contract v2** (`docs/plans/2026-10-10_mission_contract.md` §3,
 interfaces 0.15.0). **Mission decides WHAT is executed and drives the vehicle's arm / OFFBOARD lifecycle through
 `dyx3_px4_link`; it never computes steering, never publishes `/fmu/**`, and never re-implements a safety gate.**
 Authored 2026-10-07 from the spec and the prototype's `mission_runner_node.py`/`mission_progress.py` semantics; rewritten
