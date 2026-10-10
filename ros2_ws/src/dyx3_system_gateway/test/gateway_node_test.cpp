@@ -17,7 +17,6 @@
 #include <memory>
 #include <mutex>
 #include <thread>
-#include <type_traits>
 
 #include "dds_test_support.hpp"
 #include "dyx3_system_gateway/json.hpp"
@@ -33,22 +32,6 @@ double steady_s() {
   return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
-// Same detection as the gateway's adapter point: StartMission.Request.request_id (string).
-template <class T, class = void>
-struct has_request_id : std::false_type {};
-template <class T>
-struct has_request_id<T, std::void_t<decltype(std::declval<T&>().request_id = std::string())>>
-    : std::true_type {};
-template <class Req>
-std::string request_id_of(const Req& rq) {
-  if constexpr (has_request_id<Req>::value) {
-    return rq.request_id;
-  } else {
-    (void)rq;
-    return "";
-  }
-}
-
 struct Rig {
   std::shared_ptr<rclcpp::Context> ctx;
   double now{50.0};
@@ -60,12 +43,16 @@ struct Rig {
   rclcpp::Publisher<dyx3_interfaces::msg::RtkStatus>::SharedPtr p_rtk;
   rclcpp::Publisher<dyx3_interfaces::msg::MissionState>::SharedPtr p_mission;
   rclcpp::Publisher<dyx3_interfaces::msg::EmergencyStopState>::SharedPtr p_estop;
+  rclcpp::Publisher<dyx3_interfaces::msg::SafetyGateStatus>::SharedPtr p_safety;
   rclcpp::Publisher<dyx3_interfaces::msg::Px4LinkStatus>::SharedPtr p_px4;
   dyx3_interfaces::msg::OperatorLinkStatus link;
   bool link_seen{false};
   // fake services; the *_answers flags false = the request is received but never answered
   std::atomic<bool> estop_answers{true}, estop_accepts{true}, start_accepts{true},
-      start_answers{true}, offboard_answers{true};
+      start_answers{true}, offboard_answers{true}, start_duplicate{false};
+  // the fake mission node's refusal (used when start_accepts is false) and the guard gate it names
+  std::atomic<uint8_t> start_refusal{srv::StartMission::Response::REASON_BUSY};
+  std::atomic<uint8_t> start_gate_reason{0};
   // Guarded by mu: an autonomous rig runs the fake services on its spin thread.
   std::mutex mu;
   std::vector<std::string> calls;
@@ -106,13 +93,15 @@ struct Rig {
           {
             std::lock_guard<std::mutex> lk(mu);
             calls.push_back("start:" + rq->path_artifact_sha256.substr(0, 4));
-            last_start_request_id = request_id_of(*rq);
+            last_start_request_id = rq->request_id;
           }
           if (!start_answers) return;
           srv::StartMission::Response rs;
           rs.accepted = start_accepts;
-          rs.reason_code = start_accepts ? 0 : srv::StartMission::Response::REASON_BUSY;
+          rs.reason_code = start_accepts ? 0 : start_refusal.load();
           rs.mission_id = 42;
+          rs.duplicate = start_duplicate;
+          rs.gate_reason_code = start_gate_reason;
           svc->send_response(*hdr, rs);
         });
     svc_keep[1] = world->create_service<srv::AbortMission>(
@@ -203,6 +192,8 @@ struct Rig {
         "/dyx3/mission/state", rclcpp::QoS(1).reliable());
     p_estop = world->create_publisher<dyx3_interfaces::msg::EmergencyStopState>(
         "/dyx3/emergency_stop_state", rclcpp::QoS(1).reliable());
+    p_safety = world->create_publisher<dyx3_interfaces::msg::SafetyGateStatus>(
+        "/dyx3/safety_gate", rclcpp::QoS(1).reliable());
     p_px4 = world->create_publisher<dyx3_interfaces::msg::Px4LinkStatus>("/dyx3/px4_link/status",
                                                                          rclcpp::QoS(1).reliable());
     // Discovery: every topic matched and every one of the gateway's nine clients reaches its
@@ -335,6 +326,23 @@ dyx3_interfaces::msg::MissionState mission(uint8_t state, uint8_t reason = 0, ui
   m.mission_id = 42;
   m.point_index = point;
   m.path_artifact_sha256 = std::string(64, 'c');
+  return m;
+}
+
+// A MissionState with every interfaces-0.15.0 field set to a value no other field shares, so a
+// field that is dropped or mixed up with another is seen.
+dyx3_interfaces::msg::MissionState mission_v2() {
+  using M = dyx3_interfaces::msg::MissionState;
+  M m = mission(M::STATE_PAUSED, M::REASON_EKF_RESET, 5);
+  m.run_index = 3;
+  m.path_artifact_sha256 = std::string(64, 'e');  // the execution artifact
+  m.source_artifact_sha256 = std::string(64, 'a');
+  m.request_id = "tab-1:9f2c";
+  m.reason_detail = "EKF reset (xy_reset_counter 4 -> 5); release: disarm \"timeout\"";
+  m.gate_reason_code = 7;
+  m.waiting_on = M::WAIT_OPERATOR;
+  m.state_entered.sec = 1791624580;
+  m.state_entered.nanosec = 500000000;
   return m;
 }
 
@@ -769,11 +777,9 @@ TEST(GatewayNode, StartMissionCarriesAndEchoesTheRequestId) {
   ASSERT_TRUE(ok_of(v));
   EXPECT_EQ(v.get("data")->get("request_id")->s, "req-7f3a");
   EXPECT_EQ(v.get("data")->get("mission_id")->i, 42);
-  if (GatewayNode::start_mission_carries_request_id()) {
-    EXPECT_EQ(r.last_start_request_id, "req-7f3a");  // passed to StartMission
-  } else {
-    std::printf("[ INFO ] StartMission.Request has no request_id yet: echo only\n");
-  }
+  EXPECT_EQ(r.last_start_request_id, "req-7f3a");  // passed to StartMission
+  EXPECT_FALSE(v.get("data")->get("duplicate")->b);
+  EXPECT_EQ(v.get("data")->get("gate_reason_code")->i, 0);
   // without a request id the reply carries none
   v = r.ask(
       c,
@@ -798,6 +804,72 @@ TEST(GatewayNode, StartMissionCarriesAndEchoesTheRequestId) {
             94);
   EXPECT_EQ(code_of(v), "invalid_command");
   EXPECT_EQ(r.calls.size(), n);
+}
+
+TEST(GatewayNode, RequestIdIsRefusedAtTheGatewayBeyondSixtyFourCharacters) {
+  Rig r;
+  Sock c(r.sock);
+  ASSERT_TRUE(c.ok());
+  const std::string sha(64, 'c');
+  // 64 characters (the bound mission and the backend share) pass and reach StartMission verbatim
+  const std::string ok_id(64, 'r');
+  auto v = r.ask(c,
+                 R"({"v":1,"id":95,"cmd":"start_mission","args":{"path_artifact_sha256":")" + sha +
+                     R"(","request_id":")" + ok_id + R"("}})",
+                 95);
+  EXPECT_TRUE(ok_of(v));
+  EXPECT_EQ(r.last_start_request_id, ok_id);
+  // 65 characters: a typed error at the gateway, nothing reaches ROS
+  const size_t n = r.calls.size();
+  v = r.ask(c,
+            R"({"v":1,"id":96,"cmd":"start_mission","args":{"path_artifact_sha256":")" + sha +
+                R"(","request_id":")" + std::string(65, 'r') + R"("}})",
+            96);
+  EXPECT_FALSE(ok_of(v));
+  EXPECT_EQ(code_of(v), "invalid_command");
+  EXPECT_EQ(r.calls.size(), n);
+}
+
+TEST(GatewayNode, StartReplyCarriesTheExecutionDuplicateAndGateReasonAndTypesAnInvalidRequest) {
+  Rig r;
+  Sock c(r.sock);
+  ASSERT_TRUE(c.ok());
+  const std::string start = R"({"v":1,"id":)";
+  const std::string args = R"(,"cmd":"start_mission","args":{"path_artifact_sha256":")" +
+                           std::string(64, 'c') + R"(","request_id":"dup-1"}})";
+  // a duplicate is an accepted start that names the existing execution and starts nothing new
+  r.start_duplicate = true;
+  auto v = r.ask(c, start + "97" + args, 97);
+  ASSERT_TRUE(ok_of(v));
+  EXPECT_EQ(code_of(v), "ok");
+  EXPECT_EQ(v.get("data")->get("mission_id")->i, 42);
+  EXPECT_TRUE(v.get("data")->get("duplicate")->b);
+  EXPECT_EQ(v.get("data")->get("gate_reason_code")->i, 0);
+  EXPECT_EQ(v.get("data")->get("request_id")->s, "dup-1");
+  // a refusal by the pre-arm gate names the failing guard gate, verbatim
+  r.start_duplicate = false;
+  r.start_accepts = false;
+  r.start_refusal = srv::StartMission::Response::REASON_SAFETY_GATE;
+  r.start_gate_reason = 6;
+  v = r.ask(c, start + "98" + args, 98);
+  EXPECT_FALSE(ok_of(v));
+  EXPECT_EQ(code_of(v), "rejected");
+  EXPECT_EQ(v.get("data")->get("reason_code")->i, srv::StartMission::Response::REASON_SAFETY_GATE);
+  EXPECT_EQ(v.get("data")->get("gate_reason_code")->i, 6);
+  EXPECT_FALSE(v.get("data")->get("duplicate")->b);
+  // the mission node refusing the request id is a typed gateway error, its reason code kept
+  r.start_refusal = srv::StartMission::Response::REASON_INVALID_REQUEST;
+  r.start_gate_reason = 0;
+  v = r.ask(c, start + "99" + args, 99);
+  EXPECT_FALSE(ok_of(v));
+  EXPECT_EQ(code_of(v), "invalid_command");
+  EXPECT_EQ(v.get("data")->get("reason_code")->i,
+            srv::StartMission::Response::REASON_INVALID_REQUEST);
+  EXPECT_EQ(v.get("data")->get("request_id")->s, "dup-1");
+  // every other refusal stays `rejected`
+  r.start_refusal = srv::StartMission::Response::REASON_INVALID_ARTIFACT;
+  v = r.ask(c, start + "100" + args, 100);
+  EXPECT_EQ(code_of(v), "rejected");
 }
 
 // ---- pushed events -----------------------------------------------------------------------------
@@ -863,6 +935,123 @@ TEST(GatewayNode, MissionStateTransitionsArePushedAsOrderedCoalescedEvents) {
               "mission_state");
   ASSERT_EQ(ev.size(), 1U);
   EXPECT_FALSE(ev[0].get("data")->get("fresh")->b);
+}
+
+TEST(GatewayNode, MissionStateEventAndSnapshotCarryEveryV2Field) {
+  Rig r;
+  Sock c(r.sock);
+  ASSERT_TRUE(c.ok());
+  ASSERT_TRUE(r.pump_until([&r] { return r.gw->ipc().clients() == 1; }));
+  const auto src = mission_v2();
+  r.p_mission->publish(src);
+  auto ev =
+      of_kind(read_events(r, c, [](const auto& e) { return !of_kind(e, "mission_state").empty(); }),
+              "mission_state");
+  ASSERT_EQ(ev.size(), 1U);
+  const auto check = [&](const JsonValue* d, const char* where) {
+    SCOPED_TRACE(where);
+    ASSERT_NE(d, nullptr);
+    EXPECT_EQ(d->get("state")->i, dyx3_interfaces::msg::MissionState::STATE_PAUSED);
+    EXPECT_EQ(d->get("mission_id")->i, 42);  // the execution id
+    EXPECT_EQ(d->get("run_index")->i, 3);
+    EXPECT_EQ(d->get("point_index")->i, 5);
+    EXPECT_EQ(d->get("reason_code")->i, dyx3_interfaces::msg::MissionState::REASON_EKF_RESET);
+    EXPECT_EQ(d->get("path_artifact_sha256")->s, std::string(64, 'e'));  // execution sha
+    EXPECT_EQ(d->get("source_artifact_sha256")->s, std::string(64, 'a'));
+    EXPECT_EQ(d->get("request_id")->s, "tab-1:9f2c");
+    EXPECT_EQ(d->get("reason_detail")->s, src.reason_detail);
+    EXPECT_EQ(d->get("gate_reason_code")->i, 7);
+    EXPECT_EQ(d->get("waiting_on")->i, dyx3_interfaces::msg::MissionState::WAIT_OPERATOR);
+    EXPECT_DOUBLE_EQ(d->get("state_entered")->n, 1791624580.5);
+  };
+  check(ev[0].get("data"), "event");
+  EXPECT_TRUE(ev[0].get("data")->get("fresh")->b);
+  const auto snap = r.ask(c, R"({"v":1,"id":61,"cmd":"get_snapshot"})", 61);
+  ASSERT_TRUE(ok_of(snap));
+  check(snap.get("data")->get("mission")->get("data"), "snapshot");
+  // a state that never carried an id or detail reports them as empty strings, not as absent
+  r.now += 0.05;
+  r.p_mission->publish(mission(1));
+  ev =
+      of_kind(read_events(r, c, [](const auto& e) { return !of_kind(e, "mission_state").empty(); }),
+              "mission_state");
+  ASSERT_EQ(ev.size(), 1U);
+  EXPECT_EQ(ev[0].get("data")->get("request_id")->s, "");
+  EXPECT_EQ(ev[0].get("data")->get("source_artifact_sha256")->s, "");
+  EXPECT_EQ(ev[0].get("data")->get("reason_detail")->s, "");
+  EXPECT_EQ(ev[0].get("data")->get("waiting_on")->i, 0);
+}
+
+TEST(GatewayNode, ChangeOfTheStepBeingWaitedOnIsATransitionEvenWithStateAndReasonUnchanged) {
+  using M = dyx3_interfaces::msg::MissionState;
+  Rig r;
+  Sock c(r.sock);
+  ASSERT_TRUE(c.ok());
+  ASSERT_TRUE(r.pump_until([&r] { return r.gw->ipc().clients() == 1; }));
+  const auto next_event = [&] {
+    return of_kind(
+        read_events(
+            r, c, [](const auto& e) { return !of_kind(e, "mission_state").empty(); }, 500),
+        "mission_state");
+  };
+  auto m = mission(M::STATE_ERROR, M::REASON_ARM_TIMEOUT);
+  m.waiting_on = M::WAIT_OFFBOARD_RELEASE;  // a release step is pending
+  r.p_mission->publish(m);
+  auto ev = next_event();
+  ASSERT_EQ(ev.size(), 1U);
+  EXPECT_EQ(ev[0].get("data")->get("waiting_on")->i, M::WAIT_OFFBOARD_RELEASE);
+  const int64_t seq1 = ev[0].get("seq")->i;
+  // the same publication again (10 Hz republish): no event
+  r.now += 0.05;
+  r.p_mission->publish(m);
+  r.deliver();
+  EXPECT_EQ(static_cast<int64_t>(r.gw->event_seq()), seq1);
+  // the release moves on to the disarm: same state, same reason, new step -> an event
+  r.now += 0.05;
+  m.waiting_on = M::WAIT_DISARM;
+  r.p_mission->publish(m);
+  ev = next_event();
+  ASSERT_EQ(ev.size(), 1U);
+  EXPECT_GT(ev[0].get("seq")->i, seq1);
+  EXPECT_EQ(ev[0].get("data")->get("state")->i, M::STATE_ERROR);
+  EXPECT_EQ(ev[0].get("data")->get("reason_code")->i, M::REASON_ARM_TIMEOUT);
+  EXPECT_EQ(ev[0].get("data")->get("waiting_on")->i, M::WAIT_DISARM);
+  // the release finished: waiting_on NONE is the last transition
+  r.now += 0.05;
+  m.waiting_on = M::WAIT_NONE;
+  r.p_mission->publish(m);
+  ev = next_event();
+  ASSERT_EQ(ev.size(), 1U);
+  EXPECT_EQ(ev[0].get("data")->get("waiting_on")->i, M::WAIT_NONE);
+}
+
+TEST(GatewayNode, SafetyGateSnapshotCarriesThePreArmVerdictAndItsReason) {
+  Rig r;
+  Sock c(r.sock);
+  ASSERT_TRUE(c.ok());
+  dyx3_interfaces::msg::SafetyGateStatus g;
+  g.ok = false;
+  g.reason_code = 9;
+  g.pre_arm_ok = true;  // everything but armed / OFFBOARD is fine
+  g.pre_arm_reason_code = 0;
+  r.p_safety->publish(g);
+  r.deliver();
+  auto v = r.ask(c, R"({"v":1,"id":62,"cmd":"get_snapshot"})", 62);
+  ASSERT_TRUE(ok_of(v));
+  const JsonValue* d = v.get("data")->get("safety_gate")->get("data");
+  ASSERT_NE(d, nullptr);
+  EXPECT_FALSE(d->get("ok")->b);
+  EXPECT_EQ(d->get("reason_code")->i, 9);
+  EXPECT_TRUE(d->get("pre_arm_ok")->b);
+  EXPECT_EQ(d->get("pre_arm_reason_code")->i, 0);
+  g.pre_arm_ok = false;
+  g.pre_arm_reason_code = 5;
+  r.p_safety->publish(g);
+  r.deliver();
+  v = r.ask(c, R"({"v":1,"id":63,"cmd":"get_snapshot"})", 63);
+  d = v.get("data")->get("safety_gate")->get("data");
+  EXPECT_FALSE(d->get("pre_arm_ok")->b);
+  EXPECT_EQ(d->get("pre_arm_reason_code")->i, 5);
 }
 
 TEST(GatewayNode, LinkAndEstopChangesArePushedAndANewClientGetsTheCurrentStateAtOnce) {

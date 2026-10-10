@@ -88,8 +88,6 @@ public:
   uint64_t event_seq() const { return events_->seq(); }
   // The answer deadline of a command (contract section 2, per-command timeouts).
   double timeout_for(CmdKind k) const;
-  // Adapter probe (mission contract v2): true once StartMission.Request has `request_id`.
-  static bool start_mission_carries_request_id();
 
 private:
   struct Inbound {

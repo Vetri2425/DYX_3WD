@@ -197,6 +197,9 @@ ParseResult P(const std::string& s) { return parse_command(s); }
 const std::string kSha(64, 'a');
 }  // namespace
 
+// The same bound as dyx3_mission (StartMission.request_id) and the backend: 1..64.
+static_assert(kMaxRequestIdLen == 64, "request_id bound must match dyx3_mission and the backend");
+
 TEST(Commands, ValidCommandsParseToTypedForms) {
   auto r = P(R"({"v":1,"id":7,"cmd":"heartbeat"})");
   ASSERT_TRUE(r.ok);

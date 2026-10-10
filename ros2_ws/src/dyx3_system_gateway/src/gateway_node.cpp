@@ -5,7 +5,6 @@
 #include <chrono>
 #include <cmath>
 #include <stdexcept>
-#include <type_traits>
 #include <utility>
 
 #include "dyx3_system_gateway/json.hpp"
@@ -64,70 +63,9 @@ double stamp_s(const builtin_interfaces::msg::Time& t) {
   return static_cast<double>(t.sec) + 1e-9 * static_cast<double>(t.nanosec);
 }
 
-// ---- Adapter points for the mission contract v2 interface release (dyx3_interfaces, owned by the
-// mission-lifecycle work). The two fields the plan names exactly are detected at compile time: the
-// code builds against the current interfaces and the field is used as soon as it exists (with a
-// type that fits). Every other v2 field has a plain TODO below and is wired after that release.
-template <class T, class = void>
-struct has_request_id : std::false_type {};
-template <class T>
-struct has_request_id<T, std::void_t<decltype(std::declval<T&>().request_id = std::string())>>
-    : std::true_type {};
-template <class T, class = void>
-struct has_pre_arm_ok : std::false_type {};
-template <class T>
-struct has_pre_arm_ok<T,
-                      std::void_t<decltype(static_cast<bool>(std::declval<const T&>().pre_arm_ok))>>
-    : std::true_type {};
-
-// StartMission.Request.request_id (string): the client's idempotency key.
-template <class Req>
-void set_request_id(Req& rq, const std::string& id) {
-  if constexpr (has_request_id<Req>::value) {
-    rq.request_id = id;
-  } else {
-    (void)rq;
-    (void)id;
-  }
-}
-// MissionState.request_id (string): the start request that created the execution.
-template <class Msg>
-void add_request_id(JsonLine& j, const Msg& m) {
-  if constexpr (has_request_id<Msg>::value) {
-    j.str("request_id", std::string(m.request_id));
-  } else {
-    (void)j;
-    (void)m;
-  }
-}
-// SafetyGateStatus.pre_arm_ok (bool): every gate except "armed" and "OFFBOARD".
-template <class Msg>
-void add_pre_arm_ok(JsonLine& j, const Msg& m) {
-  if constexpr (has_pre_arm_ok<Msg>::value) {
-    j.boolean("pre_arm_ok", static_cast<bool>(m.pre_arm_ok));
-  } else {
-    (void)j;
-    (void)m;
-  }
-}
-// TODO(mission-contract-v2): MissionState fields without an agreed name yet: the human-readable
-// detail, the execution id, the source and execution artifact sha256 and the step being waited on.
-// Add each here (snapshot `mission` and event `mission_state` data) once the interface release
-// names them.
-void add_mission_v2_fields(JsonLine& j, const dyx3_interfaces::msg::MissionState& m) {
-  add_request_id(j, m);
-}
-// TODO(mission-contract-v2): the step being waited on joins the transition key (a new step is a
-// transition even when state and reason stay), once MissionState carries it.
-std::string mission_key(const dyx3_interfaces::msg::MissionState& m) {
-  return std::to_string(m.state) + "/" + std::to_string(m.reason_code);
-}
-// TODO(mission-contract-v2): StartMission.Response execution id; add it to the reply data.
-void add_start_v2_fields(JsonLine& j, const dyx3_interfaces::srv::StartMission::Response& r) {
-  (void)j;
-  (void)r;
-}
-
+// MissionState as the tablet sees it (snapshot `mission` and the `mission_state` event data): every
+// field of interfaces 0.15.0. `mission_id` is the execution id; `path_artifact_sha256` the
+// execution artifact RPP loads, `source_artifact_sha256` the artifact the operator started.
 JsonLine mission_fields(const dyx3_interfaces::msg::MissionState& m) {
   JsonLine j;
   j.integer("state", m.state)
@@ -135,9 +73,34 @@ JsonLine mission_fields(const dyx3_interfaces::msg::MissionState& m) {
       .integer("run_index", m.run_index)
       .integer("point_index", m.point_index)
       .integer("reason_code", m.reason_code)
-      .str("path_artifact_sha256", m.path_artifact_sha256);
-  add_mission_v2_fields(j, m);
+      .str("path_artifact_sha256", m.path_artifact_sha256)
+      .str("source_artifact_sha256", m.source_artifact_sha256)
+      .str("request_id", m.request_id)
+      .str("reason_detail", m.reason_detail)
+      .integer("gate_reason_code", m.gate_reason_code)
+      .integer("waiting_on", m.waiting_on)
+      .raw("state_entered", json_dbl(stamp_s(m.state_entered)));
   return j;
+}
+
+// The transition key of the `mission_state` event: a change of state, reason or of the step being
+// waited on is a transition, even when the other two stay.
+std::string mission_key(const dyx3_interfaces::msg::MissionState& m) {
+  return std::to_string(m.state) + "/" + std::to_string(m.reason_code) + "/" +
+         std::to_string(m.waiting_on);
+}
+
+// The gateway code of a refused downstream answer. A refusal is `rejected` with the mission's
+// `reason_code` verbatim in `data`, except a request id the mission node refused: that is a
+// malformed command, the same typed error the gateway itself gives for a bad id.
+template <class Res>
+const char* refusal_code(const Res& /*res*/) {
+  return "rejected";
+}
+const char* refusal_code(const dyx3_interfaces::srv::StartMission::Response& res) {
+  return res.reason_code == dyx3_interfaces::srv::StartMission::Response::REASON_INVALID_REQUEST
+             ? "invalid_command"
+             : "rejected";
 }
 
 }  // namespace
@@ -310,10 +273,12 @@ GatewayNode::GatewayNode(const rclcpp::NodeOptions& options, ClockFn clock, bool
   subs_.push_back(create_subscription<SafetyGateStatus>(
       "/dyx3/safety_gate", kRel1,
       upd<SafetyGateStatus>(snap_, clock_, "safety_gate", [](const SafetyGateStatus& m) {
-        JsonLine j;
-        j.boolean("ok", m.ok).integer("reason_code", m.reason_code);
-        add_pre_arm_ok(j, m);
-        return j.dump();
+        return JsonLine()
+            .boolean("ok", m.ok)
+            .integer("reason_code", m.reason_code)
+            .boolean("pre_arm_ok", m.pre_arm_ok)
+            .integer("pre_arm_reason_code", m.pre_arm_reason_code)
+            .dump();
       })));
   subs_.push_back(create_subscription<EmergencyStopState>(
       "/dyx3/emergency_stop_state", kEventSrc,
@@ -510,10 +475,6 @@ double GatewayNode::timeout_for(CmdKind k) const {
   }
 }
 
-bool GatewayNode::start_mission_carries_request_id() {
-  return has_request_id<dyx3_interfaces::srv::StartMission::Request>::value;
-}
-
 void GatewayNode::note_dispatch(const Inbound& in) {
   const double us = (steady_now_s() - in.rx_steady_s) * 1e6;
   ++dispatch_.count;
@@ -597,7 +558,8 @@ void GatewayNode::call(const Inbound& in, double now_s, typename rclcpp::Client<
           RCLCPP_WARN(get_logger(), "%s from client %d: %s by motion_guard %s", p.what.c_str(),
                       p.client, accepted ? "ACCEPTED" : "REJECTED", data_json.c_str());
         }
-        reply(p.client, p.has_id, p.id, accepted, accepted ? "ok" : "rejected",
+        const char* const refused = refusal_code(*res);
+        reply(p.client, p.has_id, p.id, accepted, accepted ? "ok" : refused,
               accepted ? "" : "refused by the target (see data.reason_code)", data_json);
       });
   note_dispatch(in);
@@ -651,12 +613,13 @@ void GatewayNode::process(const Inbound& in, double now_s) {
           in, now_s, cli_start_, "mission start service",
           [&](auto& rq) {
             rq.path_artifact_sha256 = c.sha256;
-            set_request_id(rq, c.request_id);
+            rq.request_id = c.request_id;
           },
           [base](auto& r, bool* a) {
             JsonLine j = base(r, a);
-            j.integer("mission_id", r.mission_id);
-            add_start_v2_fields(j, r);
+            j.integer("mission_id", r.mission_id)
+                .boolean("duplicate", r.duplicate)
+                .integer("gate_reason_code", r.gate_reason_code);
             return j;
           });
       return;

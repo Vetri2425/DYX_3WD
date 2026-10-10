@@ -43,8 +43,10 @@ struct ParseResult {
 };
 
 constexpr int kProtocolVersion = 1;
-// start_mission.request_id: 1..kMaxRequestIdLen characters of [A-Za-z0-9._:-] (a UUID fits).
-constexpr size_t kMaxRequestIdLen = 128;
+// start_mission.request_id: 1..kMaxRequestIdLen characters of [A-Za-z0-9._:-] (a UUID fits). The
+// same bound as dyx3_mission (StartMission.request_id) and the backend, so a bad id is refused
+// here.
+constexpr size_t kMaxRequestIdLen = 64;
 ParseResult parse_command(const std::string& line);
 
 // E-stop and heartbeat are processed ahead of other work; the gateway node orders E-stop strictly

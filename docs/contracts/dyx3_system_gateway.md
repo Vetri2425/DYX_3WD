@@ -33,7 +33,9 @@ The gateway pushes a status change as an event the moment it sees it; the 5 Hz t
 {"v":1,"type":"event","event":"mission_state","seq":42,"t_mono_s":18234.512039871,"t_wall_ms":1791624580734,
  "coalesced":0,"replay":false,
  "data":{"state":3,"mission_id":7,"run_index":0,"point_index":0,"reason_code":0,
-         "path_artifact_sha256":"<64 hex>","fresh":true,"stamp_s":1791624580.733912}}
+         "path_artifact_sha256":"<64 hex>","source_artifact_sha256":"<64 hex>","request_id":"tab-1:9f2c",
+         "reason_detail":"","gate_reason_code":0,"waiting_on":4,"state_entered":1791624580.5,
+         "fresh":true,"stamp_s":1791624580.733912}}
 ```
 
 | field | meaning |
@@ -48,7 +50,7 @@ The gateway pushes a status change as an event the moment it sees it; the 5 Hz t
 
 | `event` | source | transition (pushed when it changes) | `data` |
 |---|---|---|---|
-| `mission_state` | `/dyx3/mission/state` | `state` or `reason_code` | the snapshot `mission` fields, `fresh`, `stamp_s` (the message stamp) |
+| `mission_state` | `/dyx3/mission/state` | `state`, `reason_code` or `waiting_on` | the snapshot `mission` fields (below), `fresh`, `stamp_s` (the message stamp) |
 | `operator_link` | the gateway's own operator link (section 4) | `alive` | `alive`, `age_s`, `cause`: `heartbeat` \| `timeout` \| `connection_closed` \| `never` |
 | `fcu_link` | `/dyx3/px4_link/status` | `session_alive` or `handshake_ok` | `fresh`, `session_alive`, `handshake_ok`, `fault`, `session_resets` |
 | `estop` | `/dyx3/emergency_stop_state` | `asserted` or `source` | `fresh`, `asserted`, `source` |
@@ -56,7 +58,23 @@ The gateway pushes a status change as an event the moment it sees it; the 5 Hz t
 * **Stale is a transition.** All three topic sources publish periodically. When one is older than `snapshot_fresh_s` its kind is pushed once with `data` = `{"fresh":false}`: the state is unknown, never the last value. The next message is a transition again.
 * **Coalescing** (`event_coalesce_s`, 10 ms): a transition is pushed at once unless an event of the same kind went out less than 10 ms ago; then it waits until 10 ms after that push (plus at most one 10 ms node tick), and every value arriving meanwhile folds into that one event, which carries the latest value and counts the folded transitions in `coalesced`. At most 100 events per second per kind. The topic sources are subscribed with a depth-10 history, so two transitions that arrive before the node runs are both seen (with depth 1 the first would be overwritten in DDS).
 * **On connect** the gateway sends every new client the latest event of each kind, in `seq` order, with `"replay":true` and the original `seq`, before anything else it reads from that client. A client therefore has the current state at once after a (re)connect and never polls. A push can race the connect, so the same event can arrive both live and as a replay: **per kind, the event with the highest `seq` is the current one**; an event with a lower or equal `seq` than the last one of its kind is a duplicate.
-* Mission contract v2 adds MissionState fields. `request_id` is copied into the `mission_state` data and the snapshot automatically once the interface has it. **OPEN (interface release):** detail, execution id, source and execution artifact sha256 and the step being waited on; the step will also join the transition key.
+* **The `mission_state` fields** (the snapshot's `mission.data` has exactly the same, minus `fresh`/`stamp_s`; mission contract v2, interfaces 0.15.0, `docs/contracts/dyx3_mission.md` sections 2 and 3). Every `MissionState` field is carried, none renamed or reinterpreted:
+
+| field | meaning |
+|---|---|
+| `state` | 0 IDLE, 1 LOADING, 2 READY, 3 RUNNING, 4 PAUSED, 5 COMPLETED, 6 ABORTED, 7 ERROR, 8 PLACING, 9 ARMING, 10 ENGAGING |
+| `mission_id` | the **execution id** (the same as `StartMission`'s reply) |
+| `run_index`, `point_index` | progress |
+| `reason_code` | 0 NONE, 1 OPERATOR, 2 SAFETY, 3 RTK, 4 PATH_ERROR, 5 INTERNAL_ERROR, 6 EKF_RESET, 7 EKF_REFERENCE_INVALID, 8 PLACEMENT_OUT_OF_BOUNDS, 9 NO_PLACEMENT_FRAME, 10 ARM_REFUSED, 11 ARM_TIMEOUT, 12 OFFBOARD_REFUSED, 13 OFFBOARD_TIMEOUT, 14 RPP_ACK_TIMEOUT, 15 ESTOP, 16 RPP_ERROR, 17 RPP_STALE |
+| `gate_reason_code` | with `reason_code` 2 / 3: the guard gate that failed (`MotionSetpointStatus.REASON_*`), else 0 |
+| `reason_detail` | human-readable cause (and `release: ...` for a failed release step); `""` when none |
+| `path_artifact_sha256` | the **execution** artifact RPP loads (the placed trajectory); `""` when nothing is placed |
+| `source_artifact_sha256` | the artifact the operator started; kept until the next start |
+| `request_id` | the `start_mission` idempotency key of this execution; `""` when none was given |
+| `waiting_on` | the step the lifecycle waits on: 0 NONE, 1 ARTIFACT, 2 PLACEMENT, 3 ARM, 4 OFFBOARD, 5 RPP_ACK, 6 OPERATOR, 7 OFFBOARD_RELEASE, 8 DISARM |
+| `state_entered` | when the current state was entered (the mission node's ROS clock, seconds since the epoch, float64) |
+
+  The transition key of `mission_state` is `(state, reason_code, waiting_on)`: a change of the step being waited on is an event even when state and reason stay (a release moving from `OFFBOARD_RELEASE` to `DISARM`, or ending in `NONE`). `reason_detail`, `gate_reason_code` and `state_entered` change only together with one of the three. The gateway does not interpret any value; it passes the numbers through (the names above are for readers).
 
 ## 2. Commands
 
@@ -64,7 +82,7 @@ The gateway pushes a status change as an event the moment it sees it; the 5 Hz t
 |---|---|---|---|
 | `heartbeat` | `{}` | (internal) | the tablet heartbeat relayed by the backend; see section 4 |
 | `get_snapshot` | `{}` | (internal) | reply `data` = the telemetry snapshot |
-| `start_mission` | `{"path_artifact_sha256": "<64 lowercase hex>", "request_id"?: "<1..128 of [A-Za-z0-9._:-]>"}` | `StartMission` | `request_id` (optional): the client's idempotency key; passed to `StartMission.request_id` once the interface has it, and echoed as `data.request_id` in every reply to that command (accepted, rejected, `timeout`, `service_unavailable`, `busy`) |
+| `start_mission` | `{"path_artifact_sha256": "<64 lowercase hex>", "request_id"?: "<1..64 of [A-Za-z0-9._:-]>"}` | `StartMission` | `request_id` (optional): the client's idempotency key, passed to `StartMission.request_id` and echoed as `data.request_id` in every reply to that command (accepted, rejected, `timeout`, `service_unavailable`, `busy`). The bound 1..64 is the one `dyx3_mission` and the backend enforce, so a longer or malformed id is refused here: `invalid_command`, nothing reaches ROS. **Reply `data`:** `accepted`, `reason_code`, `mission_id` (the execution id), `duplicate` (the `request_id` matched the most recent execution: that execution's `mission_id`, nothing new started) and `gate_reason_code` (with `reason_code` 3 SAFETY_GATE: the guard's first failing pre-arm gate). A mission refusal is `rejected` with these fields verbatim, **except** `reason_code` 4 INVALID_REQUEST (the mission node refused the id; the gateway's own check makes this unreachable unless the two bounds drift apart): that is `invalid_command`, `data` unchanged. Accepting a start does not mean it will run: progress and a failure arrive as `mission_state` events. |
 | `abort_mission` | `{"reason": "operator"\|"safety"\|"unspecified"}` | `AbortMission` | |
 | `pause_mission` / `resume_mission` / `skip_point` | `{}` | `PauseMission` / `ResumeMission` / `SkipPoint` | |
 | `estop` | `{"asserted": bool, "source": "tablet"\|"backend"\|"ble"\|"physical"}` | `SetEmergencyStop` (motion_guard) | **never queued behind other commands, never rate limited, never refused `busy`** |
@@ -87,7 +105,7 @@ available the reply is `service_unavailable` at once; if it does not answer with
 | commands | parameter | default | why |
 |---|---|---|---|
 | `estop` | `estop_timeout_s` | 1.0 | motion_guard answers inside its service callback, with no downstream wait. A failed E-stop must reach the operator first (so the physical stop is used): it must not exceed any other timeout (checked at start). |
-| `start_mission`, `pause_mission`, `resume_mission`, `abort_mission`, `skip_point`, `spray_manual` | `service_timeout_s` | 2.0 | fast accepts: the target decides and answers, progress comes as `mission_state` events. Kept at 2.0 while `StartMission` still reads and hashes the artifact synchronously; it can drop once start is an asynchronous accept (mission contract v2). |
+| `start_mission`, `pause_mission`, `resume_mission`, `abort_mission`, `skip_point`, `spray_manual` | `service_timeout_s` | 2.0 | fast accepts: the target decides and answers at once, progress comes as `mission_state` events. `StartMission` is an admission (no file read, no PX4 call; mission contract v2), so 2.0 s is generous; the default is unchanged. |
 | `arm` | `arm_timeout_s` | 4.0 | px4_link answers after PX4 confirms the arming state, within its `arm_confirm_timeout_s` (2.0); `vehicle_status` arrives at 2 Hz, so 2 s of margin covers that and DDS. |
 | `offboard` | `offboard_timeout_s` | 5.0 | px4_link answers after `offboard_prestream_s` (0.5) + `offboard_confirm_timeout_s` (2.0) + its 1.0 s service margin = 3.5 s; 1.5 s of margin. |
 
@@ -98,7 +116,7 @@ The old single 2.0 s returned `timeout` for an arm or OFFBOARD that px4_link lat
 One JSON object, assembled from the latest message of each source with its receive age. `null` = never received. Every source carries `age_s` (gateway steady clock) and `fresh`
 (age <= `snapshot_fresh_s`, default 1.0, DERIVED); a consumer must treat a stale or missing source as unknown, never as the last value. Sources: `vehicle_state`, `estimator_health`,
 `rtk_status`, `gnss_report`, `ntrip_status`, `px4_link`, `safety_gate`, `emergency_stop`, `motion_guard`, `rpp`, `mission`, `last_point_result`, `spray`, `recorder`, plus `gateway`
-(`operator_alive`, `operator_age_s`, `clients`, `schema`, and `ipc`: the cumulative `dropped_slow` / `overflows` / `rejected_full` socket counters, `event_seq` (the last event pushed) and `dispatch_last_us` / `dispatch_max_us` (command line received -> ROS service request sent), all added in place without a protocol version change). `safety_gate` gains `pre_arm_ok` (every gate except armed and OFFBOARD) once `SafetyGateStatus` has it. Field subsets are chosen for the tablet; the recorder, not the gateway, is the evidence path.
+(`operator_alive`, `operator_age_s`, `clients`, `schema`, and `ipc`: the cumulative `dropped_slow` / `overflows` / `rejected_full` socket counters, `event_seq` (the last event pushed) and `dispatch_last_us` / `dispatch_max_us` (command line received -> ROS service request sent), all added in place without a protocol version change). `safety_gate` carries `ok`, `reason_code` and, since interfaces 0.15.0, `pre_arm_ok` (every guard gate except armed and OFFBOARD, plus the EKF global reference) with `pre_arm_reason_code` (the first failing pre-arm gate, meaningful while `pre_arm_ok` is false). Field subsets are chosen for the tablet; the recorder, not the gateway, is the evidence path.
 The existing `ntrip_status` subset includes the selected security mode, verified TLS state, verification failure, plaintext credential warning, source bytes, valid frames, and RTK handoff count. The existing `px4_link` subset includes accepted/refused RTCM chunk counts. No credential or Authorization value is serialized. These are observation fields, not an RTK control API.
 
 ## 4. Operator link (R13)
@@ -129,6 +147,6 @@ local access control; the backend is the policy owner for who may send what.
 
 Off-target: JSON parser (strict, duplicate keys, depth, escapes), command validation table, snapshot ageing, operator-link timing, the socket server (framing, oversized line, slow consumer, max clients,
 stale socket), and a node test with fake services (reply routing; an E-stop that is accepted, rejected, delivered but never answered (exactly `timeout`) and undeliverable (exactly `service_unavailable`), never reported accepted unless the guard accepted it; heartbeat -> `OperatorLinkStatus`).
-Events: ordering, coalescing and replay (core); every kind pushed by the node, stale pushes, the connect replay; per-command deadlines (no `timeout` for an OFFBOARD still inside its 5 s); `request_id` passed and echoed (also on `timeout`); an E-stop during a pending 5 s OFFBOARD wait is dispatched and answered at once; a client that never reads is dropped while every event still reaches the other client at once.
+Events: ordering, coalescing and replay (core); every kind pushed by the node, stale pushes, the connect replay; per-command deadlines (no `timeout` for an OFFBOARD still inside its 5 s); `request_id` passed, bounded to 64 (65 refused at the gateway, nothing sent to ROS) and echoed (also on `timeout`); the start reply's `mission_id`, `duplicate` and `gate_reason_code`, and mission INVALID_REQUEST typed `invalid_command`; every v2 `MissionState` field in the event and the snapshot, and a `waiting_on` change alone producing an event; `safety_gate.pre_arm_ok` / `pre_arm_reason_code`; an E-stop during a pending 5 s OFFBOARD wait is dispatched and answered at once; a client that never reads is dropped while every event still reaches the other client at once.
 **Latency targets** (measured by `gateway_node_test` in a container on the development Mac, executor on its own thread; 20 repeats under full CPU load): MissionState publish -> event line on the socket, p50 < 5 ms (measured 0.4-0.5 ms idle, p95 < 3 ms loaded); command line received -> ROS service request sent, mean < 2 ms (measured 0.03 ms idle, 0.06-0.25 ms loaded).
 **Not provable off-target:** socket permissions under systemd, the real tablet path, latency on the Jetson.
