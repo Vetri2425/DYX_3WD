@@ -92,6 +92,7 @@ struct Rig {
   uint8_t mission_state{MissionState::STATE_READY};
   uint32_t mission_id{7};
   std::string mission_sha;
+  uint32_t start_run{0};  // MissionState.start_run_index (0.17.0)
   bool publish_vehicle{true};
   builtin_interfaces::msg::Time sample_stamp{};  // VehicleState.px4_sample_stamp of the next sample
   bool event{false};                             // the node's mode (event_driven)
@@ -191,6 +192,7 @@ struct Rig {
     m.state = mission_state;
     m.mission_id = mission_id;
     m.path_artifact_sha256 = mission_sha;
+    m.start_run_index = start_run;
     p_mission->publish(m);
   }
 
@@ -985,4 +987,119 @@ TEST(RppNode, TimerModeTicksOnlyOnTheTimer) {
   EXPECT_TRUE(r.pump_until([&] { return r.motion.size() == before + 1; }));
   r.rpp->on_watchdog(r.now + 2'000'000);
   EXPECT_TRUE(r.pump_until([&] { return r.motion.size() == before + 2; }));
+}
+
+// ---- interfaces 0.17.0: MissionState.start_run_index, RppStatus.pivot_timed_out -------------
+namespace {
+// Three runs (conditioned with the defaults): MARK North 0..3 m, TRANSIT East to (3, 2), MARK
+// South back to (0, 2). Both run boundaries are 90 degree turns.
+std::vector<ArtPoint> u_path() {
+  return {{0.0, 0.0, 1}, {1.0, 0.0, 1}, {2.0, 0.0, 1}, {3.0, 0.0, 1}, {3.0, 1.0, 0},
+          {3.0, 2.0, 0}, {2.0, 2.0, 1}, {1.0, 2.0, 1}, {0.0, 2.0, 1}};
+}
+}  // namespace
+
+TEST(RppNode, AStartRunIndexBeginsTheMissionAtThatRun) {
+  Rig r({}, true, u_path());
+  r.start_run = 2;  // a resumed execution: runs 0 and 1 are done
+  r.north = 3.0;    // standing still at the start of run 2, nose 17 degrees off North
+  r.east = 2.0;
+  r.heading = 0.3;
+  r.run(0.2);
+  ASSERT_EQ(r.status.state, RppStatus::STATE_LOADED);
+  EXPECT_EQ(r.status.run_index, 2U) << "the start run is installed at the load";
+  r.mission_state = MissionState::STATE_RUNNING;
+  const size_t first = r.motion.size();
+  // the first status after LOADED (event mode: the sample of the cycle that carries the RUNNING
+  // message may still find the node waiting)
+  for (int i = 0; i < 5 && r.status.state == RppStatus::STATE_LOADED; ++i) r.cycle();
+  EXPECT_EQ(r.status.state, RppStatus::STATE_PIVOTING)
+      << "the first RUNNING tick is the entry alignment of run 2 (the stop is already confirmed)";
+  EXPECT_EQ(r.status.run_index, 2U);
+  EXPECT_FALSE(r.status.pivot_timed_out);
+  ASSERT_GT(r.motion.size(), first);
+  EXPECT_EQ(r.motion.back().mode, MotionSetpoint::MODE_PIVOT);
+  for (size_t i = first; i + 1 < r.motion.size(); ++i)
+    EXPECT_EQ(r.motion[i].mode, MotionSetpoint::MODE_STOP) << "before the first RUNNING tick";
+  // driven from the commands: it aligns, tracks run 2 and completes it; never an earlier run
+  r.auto_drive = true;
+  r.accel_limit = 0.5;
+  for (int i = 0; i < 2000 && r.status.state != RppStatus::STATE_COMPLETE; ++i) {
+    r.cycle();
+    ASSERT_EQ(r.status.run_index, 2U) << "tick " << i;
+  }
+  EXPECT_EQ(r.status.state, RppStatus::STATE_COMPLETE) << "at n " << r.north << " e " << r.east;
+  EXPECT_NEAR(r.north, 0.0, 0.05);
+  EXPECT_NEAR(r.east, 2.0, 0.05);
+}
+
+TEST(RppNode, AStartRunOnTheRunningTransitionIsTakenALaterChangeIsIgnored) {
+  Rig r({}, true, u_path());
+  r.north = 3.0;
+  r.east = 2.0;
+  r.heading = 0.3;
+  r.run(0.2);  // READY, loaded at run 0
+  ASSERT_EQ(r.status.state, RppStatus::STATE_LOADED);
+  EXPECT_EQ(r.status.run_index, 0U);
+  r.mission_state = MissionState::STATE_RUNNING;  // the RUNNING transition carries the start run
+  r.start_run = 2;
+  r.run(0.1);
+  EXPECT_EQ(r.status.run_index, 2U);
+  EXPECT_EQ(r.status.state, RppStatus::STATE_PIVOTING);
+  r.start_run = 1;  // while running: latched, ignored
+  r.run(0.2);
+  EXPECT_EQ(r.status.run_index, 2U);
+  EXPECT_EQ(r.status.state, RppStatus::STATE_PIVOTING);
+}
+
+TEST(RppNode, AnInvalidStartRunIndexIsRefusedWithStopAndError) {
+  Rig r({}, true, u_path());
+  r.start_run = 3;  // the path has three runs: 0, 1, 2
+  r.mission_state = MissionState::STATE_RUNNING;
+  r.run(1.5);  // past the one-second retry of a failed load: still refused
+  EXPECT_EQ(r.status.state, RppStatus::STATE_ERROR);
+  EXPECT_EQ(r.status.mission_id, 7U);
+  EXPECT_TRUE(r.status.conditioned_execution_sha256.empty());
+  ASSERT_FALSE(r.motion.empty());
+  for (const auto& m : r.motion) EXPECT_EQ(m.mode, MotionSetpoint::MODE_STOP);
+  // a new mission id with a valid start run loads again
+  r.mission_id = 8;
+  r.start_run = 1;
+  r.run(0.1);
+  EXPECT_EQ(r.status.mission_id, 8U);
+  EXPECT_EQ(r.status.run_index, 1U);
+  EXPECT_NE(r.status.state, RppStatus::STATE_ERROR);
+}
+
+// Measured 2026-10-10: 25.8 s in PIVOT with an 86 degree error, every gate green, no signal. The
+// status now says so once the pivot watchdog expired while the heading is still outside the
+// release band. A resumed run budgets the worst case: max(1.0 + pi / 0.4, 5.0) = 8.85 s.
+TEST(RppNode, APivotThatNeverTurnsPublishesPivotTimedOut) {
+  Rig r({}, true, u_path());
+  r.start_run = 2;
+  r.north = 3.0;
+  r.east = 2.0;
+  r.heading = 0.3;  // the stand-in does not move: the heading never closes
+  r.mission_state = MissionState::STATE_RUNNING;
+  for (int i = 0; i < 5 && r.status.state != RppStatus::STATE_PIVOTING; ++i) r.cycle();
+  ASSERT_EQ(r.status.state, RppStatus::STATE_PIVOTING);
+  EXPECT_FALSE(r.status.pivot_timed_out);
+  for (int i = 0; i < 434; ++i) {  // 8.7 s from the first pivot tick
+    r.cycle();
+    ASSERT_EQ(r.status.state, RppStatus::STATE_PIVOTING) << "tick " << i;
+    EXPECT_FALSE(r.status.pivot_timed_out) << "inside the budget, tick " << i;
+  }
+  r.run(0.5);
+  EXPECT_EQ(r.status.state, RppStatus::STATE_PIVOTING) << "the core keeps pivoting";
+  EXPECT_TRUE(r.status.pivot_timed_out);
+  EXPECT_EQ(r.motion.back().mode, MotionSetpoint::MODE_PIVOT);
+  // released once the heading turns: the flag drops with the pivot
+  r.auto_drive = true;
+  for (int i = 0; i < 500 && r.status.state == RppStatus::STATE_PIVOTING; ++i) r.cycle();
+  EXPECT_NE(r.status.state, RppStatus::STATE_PIVOTING);
+  EXPECT_FALSE(r.status.pivot_timed_out);
+  // paused: no tick, never reported
+  r.mission_state = MissionState::STATE_PAUSED;
+  r.run(0.1);
+  EXPECT_FALSE(r.status.pivot_timed_out);
 }

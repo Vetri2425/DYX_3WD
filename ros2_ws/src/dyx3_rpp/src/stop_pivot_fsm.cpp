@@ -130,7 +130,6 @@ CornerOutput CornerFsm::step(const CornerInput& in) {
   const double angle_rad =
       std::isfinite(in.turn_angle_rad) ? in.turn_angle_rad : in.corner_deg * (M_PI / 180.0);
   const bool timed_out = stop_complete_ && pivot_.timed_out(in.now_ns, angle_rad, p_);
-  out.pivot_timed_out = timed_out;
 
   double release_tol = p_.heading_tolerance_rad;
   if (timed_out) release_tol = std::max(release_tol, p_.timeout_heading_tol_rad);
@@ -190,6 +189,10 @@ CornerOutput CornerFsm::step(const CornerInput& in) {
   go(FsmState::Pivot, "stopped, heading outside release band", in.now_ns);
   out.action = CornerAction::Pivot;
   out.state = state_;
+  // Exported (RppStatus.pivot_timed_out): still pivoting with the watchdog expired, i.e. the
+  // heading is outside even the widened release band. Only this path reports it; the widening
+  // above is unchanged and the mission decides to pause.
+  out.pivot_timed_out = timed_out;
   out.set_speed_memory = true;
   out.speed_memory = p_.corner_speed;
   return out;

@@ -1,6 +1,6 @@
 # dyx3_rpp node (`RppNode`) — contract
 
-**Status:** 2026-10-07 (cloud session). **Spec:** V1 section 7.4. The decision lives in `RppCore` (`rpp_orchestrator.md`); this node is the ROS wiring only.
+**Status:** 2026-10-07 (cloud session); 2026-10-10 interfaces 0.17.0 (start run, pivot timeout). **Spec:** V1 section 7.4. The decision lives in `RppCore` (`rpp_orchestrator.md`); this node is the ROS wiring only.
 **Authority:** none beyond the path-following decision. It publishes no safety verdict; `dyx3_motion_guard` is the last authority before PX4.
 
 ## 1. Interfaces
@@ -9,9 +9,9 @@
 |---|---|---|---|---|
 | in | `/dyx3/vehicle_state` | VehicleState | R1 | pose is fed only while `position_valid` and `attitude_valid` and north, east and heading are finite; velocity while `velocity_valid` and both components and the yaw rate are finite (RPP-002; the core repeats the check). An invalid sample is **not** fed: the pose ages out and the core stops (STALE) |
 | in | `/dyx3/rtk_status` | RtkStatus | R1 | `fix_type` and `horizontal_accuracy_m` (0 = unknown, passed as unknown) |
-| in | `/dyx3/mission/state` | MissionState | R1 | `path_artifact_sha256` + `mission_id` select the path; `state == RUNNING` is the only state in which the core ticks |
+| in | `/dyx3/mission/state` | MissionState | R1 | `path_artifact_sha256` + `mission_id` select the path; `state == RUNNING` is the only state in which the core ticks; `start_run_index` (0.17.0) the run the core begins at (section 2, "Start run") |
 | out | `/dyx3/rpp/motion_setpoint` | MotionSetpoint | R1 | every tick (per pose sample, or watchdog; section 2), always `valid`; STOP unless running. `source_pose_sample_stamp` (IF-003, 0.14.0) = `VehicleState.px4_sample_stamp` of the newest pose fed into the core, on every command including STOP; zero until a valid pose arrived (latency evidence, never gating) |
-| out | `/dyx3/rpp/status` | RppStatus | R1 | every tick; `mission_id` is the acknowledgement `dyx3_mission` waits for |
+| out | `/dyx3/rpp/status` | RppStatus | R1 | every tick; `mission_id` is the acknowledgement `dyx3_mission` waits for; `run_index` the run the core is on (the start run from the load on); `pivot_timed_out` (0.17.0) section 2, "Pivot timeout" |
 
 ## 2. Behaviour
 
@@ -36,6 +36,26 @@
   A missing or corrupt file, or a path that conditions to nothing, is `STATE_ERROR` (STOP) and is retried once a second. Filesystem
   calls use the `error_code` overloads and any exception inside the load is a failed load (XR-RPP-010); `main` sends its bounded STOP
   burst even when spinning ended with an exception.
+* **Start run (`MissionState.start_run_index`, 0.17.0).** A resumed execution (`StartMission.resume`, `dyx3_mission`) names the first
+  run not yet completed. The node passes the `start_run_index` of the message that triggers the load to the load: after conditioning,
+  an index that is not a run of the conditioned path (`>= runs`) is **refused**: STOP, `STATE_ERROR`, one error line, no conditioned
+  artifact, and **no retry** (the same artifact conditions to the same runs; the conditioning parameters are IDLE_ONLY while a mission is
+  loaded), until a new mission id loads. A valid index is installed with `RppCore::install_mission` then `RppCore::start_at_run(index)`,
+  which is `apply_run(index, pre_stopped = true)`: run N begins in exactly the state the run-boundary hold leaves behind when run N is
+  reached after the stop at a hard run boundary (entry alignment pending when the boundary turn is at least
+  `segment_corner_threshold_deg`, stop already confirmed, so the first RUNNING tick is the alignment pivot of run N; the per-run reset
+  of run N). One difference: the entry pose of a resumed run is unknown, so the alignment watchdog budgets the worst case (pi), as run 0
+  does, instead of the boundary turn (`rpp_stop_pivot_fsm.md` section 3.4). Index 0 is the plain start. The index is **latched at the
+  load**; the message that carries the RUNNING transition may still set it (`start_at_run` again) as long as no RUNNING tick of this load
+  has run; any other change while loaded is ignored with one warning. `RppStatus.run_index` reports the start run from the load on
+  (LOADED included), so the first RUNNING status already shows it, and no command is ever computed for a run before it.
+  DERIVED — NOT FROM V1 SPEC: the pre-stopped start (the mission arms and engages before RUNNING, so the rover stands still), the
+  worst-case budget, the no-retry refusal and the RUNNING-transition window.
+* **Pivot timeout (`RppStatus.pivot_timed_out`, 0.17.0).** True on a tick on which the core pivots (`STATE_PIVOTING`; the corner pivot
+  or the run-entry alignment pivot) with the pivot watchdog expired and the heading still outside the (widened) release band; false on
+  every other tick and whenever the core is not ticked (LOADED, paused, ERROR, COMPLETE). Origin: 2026-10-10, 25.8 s in PIVOT with an 86°
+  heading error, every gate green, and no signal. The core keeps pivoting and keeps the band widening (`rpp_stop_pivot_fsm.md` section
+  3.2); RPP decides nothing more: `dyx3_mission` pauses the mission on it (`REASON_RPP_PIVOT_TIMEOUT`). The rising edge is logged once.
 * **Not RUNNING** (loaded and waiting, or paused): STOP every tick, `STATE_LOADED`. On the RUNNING to not-RUNNING edge the core forgets its motion
   memory (`pause()`: speed memory, hard-curvature latch, stop confirmation; and, XR-RPP-008, the jump-guard position, the tick period,
   the projection hint of an open run, the precise-stop engagement and its timer, the stop latch: a resume is a fresh start of the same run, so a
@@ -82,7 +102,7 @@ shared with motion_guard, comes from the launch prefix in `dyx3_bringup/launch/c
 
 ## 5. Proof
 
-`rpp_node_test` (in-process, private DDS domain, injected monotonic clock, a kinematic stand-in vehicle): 23 cases — startup validation; load by id and
+`rpp_node_test` (in-process, private DDS domain, injected monotonic clock, a kinematic stand-in vehicle): 32 cases — startup validation; load by id and
 acknowledgement; a missing artifact; a **whole mission driven to COMPLETE** (the line is marked where the planner says, stops on the final point within 6 cm);
 stale pose; RTK drop with the reason; pause and resume from rest; entry pivot; parameter classes; the unported feature; every emitted mode contract-conforming; a final approach 3 cm to the side of the endpoint completes within 10 s
 with at most 2 speed reversals (XR-RPP-001); on an L-shaped mission the first heading after the corner pivot is the exit leg (XR-RPP-007).
@@ -90,6 +110,12 @@ Command-level cases (XR-RPP-006) drive the stand-in from the published `MotionSe
 cannot see: an L-shaped mission (corner pivot sign, heading per leg, at most 5 cm off the path, COMPLETE at the end); an endpoint 5 cm to the
 side (every creep moves toward it, ends within 2 cm); a pause with a 0.2 m coast and a resume (STOP while paused, ramp from rest, COMPLETE).
 A tangent run handover (smooth TRANSIT arc into a segment MARK line) crossed at speed publishes no STOP before COMPLETE (XR-RPP-002).
+0.17.0: `start_run_index = 2` on a three-run path: LOADED and the first RUNNING status show `run_index 2`, the first command is the
+alignment pivot of run 2, run 2 is driven to COMPLETE and no status ever shows an earlier run; a start run carried by the RUNNING
+transition is taken, a later change is ignored; an index past the last run is STOP + ERROR (also after the retry interval) and a new
+mission id loads again; a stationary pivot publishes `pivot_timed_out` only after the budget, still PIVOTING, and drops it once released.
+`rpp_core_test` / `rpp_modules_test` pin the same at core and FSM level (`ACornerPivotThatNeverTurns*`, `AStartAtRunN*`,
+`AnInvalidStartRun*`, `CornerFsm.PivotTimedOut*`).
 The stand-in can limit its acceleration (`accel_limit`) so a body-axis brake decelerates through zero as a vehicle does. `rpp_core_test` pins core behaviour the prototype did not have (the precise-stop timeout brake).
 The stand-in vehicle does exactly what the last command asks: it proves the wiring and the state machine, not the controller on a rover.
 
