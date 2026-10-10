@@ -11,8 +11,8 @@ events that must not drop); `R100` = point results.
 
 | Topic | Type | Publisher | Subscribers | QoS | Rate |
 |---|---|---|---|---|---|
-| `/dyx3/vehicle_state` | VehicleState | px4_link | rpp, motion_guard, spray, mission, gateway | R1 | on each FCU sample |
-| `/dyx3/estimator_health` | EstimatorHealth | px4_link | motion_guard, gateway | R1 | on each FCU sample |
+| `/dyx3/vehicle_state` | VehicleState | px4_link | rpp, motion_guard, spray, mission, gateway | R1 | 50 Hz, not per FCU sample: a 20 ms gate inside the 100 Hz writer tick republishes the newest cached sample (IF-005). The same sample can appear in consecutive messages and a new one waits up to one tick; `px4_sample_stamp` identifies the sample |
+| `/dyx3/estimator_health` | EstimatorHealth | px4_link | motion_guard, gateway | R1 | 10 Hz, newest cached `estimator_status_flags` sample (about 1 Hz from the FCU) |
 | `/dyx3/rtk_status` | RtkStatus | gnss_rtk | rpp, motion_guard, spray, gateway | R1 | 5 Hz |
 | `/dyx3/mission/state` | MissionState | mission | rpp, spray, motion_guard, recorder, gateway | R1 | 10 Hz (and on change) |
 | `/dyx3/rpp/motion_setpoint` | MotionSetpoint | **rpp** | motion_guard | R1 | 50 Hz, always (STOP when not running) |
