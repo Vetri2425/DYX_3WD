@@ -2646,3 +2646,25 @@ to the baseline and `config/px4/2026-10-10.params`; no other parameter changed.
 - **Secondary:** `RO_SPEED_TH` 0.1 makes the measured speed read 0 below 0.1 m/s; it only matters at crawl speed.
   Left unchanged.
 - **To verify:** re-run `1_Aug.plan` and check the speed setpoint and the measured speed on the legs.
+
+## 2026-10-10 (13:45) — Claude — Step 4 (PX4 Mission mode, controlled) passed
+
+- **Run:** `1_Aug.plan` (4 waypoints, 2.0–2.5 m legs, no speed item, so `RO_SPEED_LIM` 1.1). Log `log_57_2026-10-10-12-26-28.ulg`;
+  copies of it and `log_54` are in `bench_tools/logs_2026-10-10/`.
+- **Results:**
+
+  | Check | Result |
+  |---|---|
+  | Speed | setpoint 1.1 at each leg start, measured peak 0.78 m/s, braking over about the last 1 m (after `RO_JERK_LIM` 4) |
+  | Turns | 3 left spot-turns at about 26°/s (`RO_YAW_RATE_LIM` 30), about 4 s per 90° |
+  | Completion | mission finished, all waypoints reached |
+  | Corner accuracy | 4.8–4.9 cm from each waypoint (`NAV_ACC_RAD` 0.05), last 7.6 cm |
+  | Fusion | `cs_gnss_yaw` True the whole run, no fault; `fix_type` 6 throughout, eph ≤ 2.3 cm; `xy_valid` throughout |
+
+- **Notes:**
+  - PX4 stops at the edge of the acceptance radius, so the next leg starts with about 8 cm cross-track error, which
+    pure pursuit removes over about 1.5 m. That is expected in Mission mode; production corners use RPP's precise
+    stop (step 6).
+  - The logged local position is 10 Hz (logger profile); the DDS stream is 50 Hz.
+- **Still open from step 2:** the stopping distance from about 1 m/s with `RO_DECEL_LIM` 2.0 (manual stick release, or
+  the step 5 Jetson-loss test).
