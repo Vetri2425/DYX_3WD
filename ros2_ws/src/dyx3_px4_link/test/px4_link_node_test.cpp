@@ -102,7 +102,8 @@ struct Rig {
   uint64_t seq{0};
   bool fcu_answers_handshake{true};
   int hash_error_on{-1};  // lie about this topic's hash
-  bool alive{true}, lp_alive{true};
+  bool alive{true}, lp_alive{true}, att_alive{true};
+  double att_yaw_rate{0.0};  // rad/s, NED (clockwise positive); yaw = rate * (now - 100)
   uint8_t nav_state{0}, arming_state{1};
 
   explicit Rig(const rclcpp::ParameterValue* extra = nullptr, const std::string& defs = "",
@@ -145,8 +146,10 @@ struct Rig {
         fcu->create_publisher<px4_msgs::msg::SensorGps>("/fmu/out/vehicle_gps_position", sensor);
     p_resp = fcu->create_publisher<px4_msgs::msg::MessageFormatResponse>(
         "/fmu/out/message_format_response", rclcpp::QoS(10).best_effort());
+    // Every /fmu/out writer of the FCU is best effort (uxrce_dds_client/utilities.hpp): the fake
+    // FCU must be too, or a reliable-only subscription would pass here and never match on target.
     p_ulog = fcu->create_publisher<px4_msgs::msg::UlogStream>("/fmu/out/ulog_stream",
-                                                              rclcpp::QoS(16).reliable());
+                                                              rclcpp::QoS(16).best_effort());
     p_ack = fcu->create_publisher<px4_msgs::msg::VehicleCommandAck>("/fmu/out/vehicle_command_ack",
                                                                     sensor);
     p_spray = fcu->create_publisher<dyx3_interfaces::msg::SprayActuatorCommand>(
@@ -274,10 +277,16 @@ struct Rig {
       st.arming_state = arming_state;
       st.nav_state = nav_state;
       p_st->publish(st);
-      px4_msgs::msg::VehicleAttitude a;
-      a.q = {1.0F, 0.0F, 0.0F, 0.0F};
-      p_att->publish(a);
+      if (att_alive) {
+        px4_msgs::msg::VehicleAttitude a;
+        const double yaw = std::remainder(att_yaw_rate * (now - 100.0), 2.0 * 3.141592653589793);
+        a.q = {static_cast<float>(std::cos(yaw / 2)), 0.0F, 0.0F,
+               static_cast<float>(std::sin(yaw / 2))};
+        a.timestamp_sample = static_cast<uint64_t>(std::llround(now * 1e6));
+        p_att->publish(a);
+      }
       px4_msgs::msg::EstimatorStatusFlags fl;
+      fl.timestamp_sample = static_cast<uint64_t>(std::llround(now * 1e6));
       p_fl->publish(fl);
       px4_msgs::msg::SensorGps g;
       g.fix_type = 6;
@@ -597,6 +606,143 @@ TEST(Px4LinkNode, GuardSilenceFallsToExplicitZeroWithHeartbeatKept) {
   EXPECT_FLOAT_EQ(r.speed.back().speed_body_x, 0.3F);
 }
 
+// XR-GPX-007: the guard's command reaches PX4 only in a confirmed OFFBOARD session; before the
+// confirmation and after PX4 leaves OFFBOARD the heartbeat carries the explicit STOP.
+TEST(Px4LinkNode, HeartbeatCarriesStopOutsideAnActiveOffboardSession) {
+  Rig r;
+  r.bring_up();
+  r.nav_state = 0;  // PX4 has not entered OFFBOARD
+  auto req = std::make_shared<dyx3_interfaces::srv::SetOffboard::Request>();
+  req->enable = true;
+  auto fut = r.cli_off->async_send_request(req);
+  r.clear();
+  for (int i = 0; i < 80; ++i) {  // prestream, then the mode request, without confirmation
+    r.guard(2, 0.5F, NaN, 0.1F);
+    r.tick();
+  }
+  ASSERT_FALSE(r.speed.empty());
+  for (const auto& sp : r.speed) EXPECT_EQ(sp.speed_body_x, 0.0F);
+  ASSERT_TRUE(
+      std::any_of(r.cmds.begin(), r.cmds.end(), [](const auto& c) { return c.command == 176; }));
+  r.nav_state = 14;
+  for (int i = 0; i < 300 && fut.wait_for(0ms) != std::future_status::ready; ++i) {
+    r.guard(2, 0.5F, NaN, 0.1F);
+    r.tick();
+  }
+  ASSERT_EQ(fut.wait_for(0ms), std::future_status::ready);
+  ASSERT_TRUE(fut.get()->accepted);
+  r.guard(2, 0.5F, NaN, 0.1F);
+  r.tick();
+  r.guard(2, 0.5F, NaN, 0.1F);
+  r.tick();
+  EXPECT_FLOAT_EQ(r.speed.back().speed_body_x, 0.5F);  // Active: the guard's command goes through
+  r.nav_state = 0;                                     // PX4 left OFFBOARD (its own failsafe)
+  for (int i = 0; i < 20; ++i) {
+    r.guard(2, 0.5F, NaN, 0.1F);
+    r.tick();
+  }
+  r.clear();
+  for (int i = 0; i < 50; ++i) {
+    r.guard(2, 0.5F, NaN, 0.1F);
+    r.tick();
+  }
+  ASSERT_FALSE(r.speed.empty());
+  for (const auto& sp : r.speed) EXPECT_EQ(sp.speed_body_x, 0.0F);
+  EXPECT_TRUE(std::none_of(r.cmds.begin(), r.cmds.end(), [](const auto& c) {
+    return c.command == 176;
+  }));  // Lost: OFFBOARD is not re-requested
+}
+
+// PXL-002: SetOffboard(false) while moving puts STOP on the wire at the next writer tick, keeps
+// the heartbeat with STOP for offboard_disable_stop_s, then withdraws it.
+TEST(Px4LinkNode, DisableOffboardStreamsStopBeforeWithdrawingTheHeartbeat) {
+  Rig r;
+  r.bring_up();
+  r.nav_state = 14;
+  bool acc = false;
+  uint8_t rs = 0;
+  ASSERT_TRUE(r.call_offboard(true, &acc, &rs));
+  ASSERT_TRUE(acc);
+  for (int i = 0; i < 10; ++i) {
+    r.guard(2, 0.5F, NaN, 0.1F);
+    r.tick();
+  }
+  ASSERT_FLOAT_EQ(r.speed.back().speed_body_x, 0.5F);
+  r.clear();
+  auto req = std::make_shared<dyx3_interfaces::srv::SetOffboard::Request>();
+  req->enable = false;
+  auto fut = r.cli_off->async_send_request(req);
+  ASSERT_TRUE(r.pump_until([&] { return fut.wait_for(0ms) == std::future_status::ready; }));
+  EXPECT_TRUE(fut.get()->accepted);
+  r.guard(2, 0.5F, NaN, 0.1F);  // the guard still commands motion
+  r.tick();                     // next writer tick
+  ASSERT_TRUE(r.pump_until([&] { return !r.speed.empty(); }));
+  ASSERT_EQ(r.speed.size(), 1U);
+  EXPECT_EQ(r.speed.back().speed_body_x, 0.0F);
+  EXPECT_EQ(r.rate.back().yaw_rate_setpoint, 0.0F);
+  EXPECT_TRUE(std::isnan(r.att_sp.back().yaw_setpoint));
+  for (int i = 0; i < 15; ++i) {  // 0.15 s more: still inside the 0.3 s window
+    r.guard(2, 0.5F, NaN, 0.1F);
+    r.tick();
+  }
+  EXPECT_GE(r.ocm.size(), 10U);
+  EXPECT_EQ(r.ocm.size(), r.speed.size());
+  for (const auto& sp : r.speed) EXPECT_EQ(sp.speed_body_x, 0.0F);
+  EXPECT_TRUE(r.status.offboard_heartbeat_active);
+  for (int i = 0; i < 20; ++i) {
+    r.guard(2, 0.5F, NaN, 0.1F);
+    r.tick();
+  }
+  r.pump(50);
+  const size_t after_window = r.ocm.size();
+  for (const auto& sp : r.speed) EXPECT_EQ(sp.speed_body_x, 0.0F);
+  for (int i = 0; i < 20; ++i) {
+    r.guard(2, 0.5F, NaN, 0.1F);
+    r.tick();
+  }
+  r.pump(50);
+  EXPECT_EQ(r.ocm.size(), after_window);  // heartbeat withdrawn after the window
+  EXPECT_LE(after_window, 32U);
+  EXPECT_FALSE(r.status.offboard_heartbeat_active);
+}
+
+// X-010: the shutdown path publishes the explicit STOP set while the heartbeat is live, and
+// nothing when it was not running.
+TEST(Px4LinkNode, ShutdownStopPublishesStopOnlyWhereTheHeartbeatWasLive) {
+  Rig r;
+  r.bring_up();
+  r.run(0.1);
+  r.clear();
+  EXPECT_FALSE(r.link->publish_shutdown_stop());  // offboard never enabled: no stream started
+  r.pump(50);
+  EXPECT_TRUE(r.ocm.empty());
+
+  r.nav_state = 14;
+  bool acc = false;
+  uint8_t rs = 0;
+  ASSERT_TRUE(r.call_offboard(true, &acc, &rs));
+  ASSERT_TRUE(acc);
+  for (int i = 0; i < 5; ++i) {
+    r.guard(2, 0.5F, NaN, 0.1F);
+    r.tick();
+  }
+  ASSERT_FLOAT_EQ(r.speed.back().speed_body_x, 0.5F);
+  r.clear();
+  r.guard(2, 0.5F, NaN, 0.1F);  // a fresh motion command is pending
+  r.pump(20);
+  for (size_t i = 1; i <= 30; ++i) {  // the recording readers keep depth 1: drain each one
+    ASSERT_TRUE(r.link->publish_shutdown_stop());
+    ASSERT_TRUE(r.pump_until([&] { return r.speed.size() >= i && r.ocm.size() >= i; })) << i;
+  }
+  r.pump(30);
+  EXPECT_EQ(r.speed.size(), 30U);  // the writer tick did not run in between
+  for (const auto& sp : r.speed) EXPECT_EQ(sp.speed_body_x, 0.0F);
+  EXPECT_EQ(r.rate.back().yaw_rate_setpoint, 0.0F);
+  EXPECT_TRUE(std::isnan(r.att_sp.back().yaw_setpoint));
+  EXPECT_TRUE(all_nan3(r.traj.back().velocity));
+  EXPECT_TRUE(r.ocm.back().velocity);
+}
+
 TEST(Px4LinkNode, SilentTopicWhileSessionUpForcesZero) {  // upstream #27388
   Rig r;
   r.bring_up();
@@ -674,6 +820,9 @@ TEST(Px4LinkNode, UlogChunksAreAckedThenRepublished) {
   Rig r;
   r.bring_up();
   r.run(0.1);
+  ASSERT_TRUE(r.pump_until([&] { return r.fcu->count_subscribers("/fmu/out/ulog_stream") > 0; }));
+  // A best-effort FCU writer must actually match the link's reader (XR-GPX-004).
+  ASSERT_TRUE(r.pump_until([&] { return r.p_ulog->get_subscription_count() > 0; }));
   px4_msgs::msg::UlogStream u;
   u.msg_sequence = 7;
   u.flags = px4_msgs::msg::UlogStream::FLAGS_NEED_ACK;
@@ -851,6 +1000,51 @@ TEST(Px4LinkNode, TenThousandIdenticalOnReassertsReuseTheConfirmedLogicalTransac
   EXPECT_EQ(r.spray_acks.size(), 1U);  // the original logical transaction was already confirmed
   EXPECT_EQ(r.link->spray_identities_used(), 1U);
   unlink(path.c_str());
+}
+
+// XR-GPX-005: ACKs drawn by reasserts of the in-flight or confirmed epoch are expected and are
+// not counted as unmatched; an ACK for an identity no epoch holds still is.
+TEST(Px4LinkNode, AcksOfReassertedSprayCommandsAreExpectedNotUnmatched) {
+  using Cmd = dyx3_interfaces::msg::SprayActuatorCommand;
+  Rig r;
+  r.bring_up();
+  r.run(0.2);
+  r.clear();
+  Cmd on;
+  on.seq = 3;
+  on.source = Cmd::SOURCE_CONTROLLER;
+  on.backend = Cmd::BACKEND_ACTUATOR;
+  on.on = true;
+  on.actuator_set_index = 1;
+  on.value = 1.0F;
+  r.p_spray->publish(on);
+  ASSERT_TRUE(r.pump_until([&] { return r.cmds.size() >= 1U; }));
+  r.p_spray->publish(on);  // reassert while in flight: a second physical send
+  ASSERT_TRUE(r.pump_until([&] { return r.cmds.size() >= 2U; }));
+  px4_msgs::msg::VehicleCommandAck ack;
+  ack.command = 187;
+  ack.target_system = r.cmds.back().source_system;
+  ack.target_component = r.cmds.back().source_component;
+  ack.result = px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_ACCEPTED;
+  r.p_ack->publish(ack);  // answers the first send: completes the transaction
+  ASSERT_TRUE(r.pump_until([&] { return r.spray_acks.size() >= 1U; }));
+  r.p_ack->publish(ack);  // answers the second send
+  r.pump(50);
+  for (int i = 0; i < 5; ++i) {  // reasserts of the confirmed epoch, each answered by the FCU
+    r.p_spray->publish(on);
+    ASSERT_TRUE(r.pump_until([&] { return r.cmds.size() >= static_cast<size_t>(3 + i); }));
+    r.p_ack->publish(ack);
+    r.pump(20);
+  }
+  r.pump(50);
+  EXPECT_EQ(r.spray_acks.size(), 1U);
+  EXPECT_TRUE(r.spray_acks[0].success);
+  EXPECT_EQ(r.link->spray_late_ack_count(), 0U);
+  ack.target_component = static_cast<uint16_t>(ack.target_component + 500);  // nobody's identity
+  r.p_ack->publish(ack);
+  ASSERT_TRUE(r.pump_until([&] { return r.link->spray_late_ack_count() == 1U; }));
+  r.tick(0.11);
+  EXPECT_EQ(r.status.spray_unmatched_ack_count, 1U);
 }
 
 TEST(Px4LinkNode, TenThousandWatchdogOffReassertsUseOnePair) {
@@ -1175,7 +1369,7 @@ TEST(Px4LinkNode, ExhaustedIdentityCannotConfirmWatchdogOff) {
   unlink(path.c_str());
 }
 
-TEST(Px4LinkNode, SprayTransactionsSerializeAndWatchdogOffPreemptsQueuedOn) {
+TEST(Px4LinkNode, SprayTransactionsSerializeAndWatchdogOffPreemptsQueuedAndInFlightOn) {
   using Cmd = dyx3_interfaces::msg::SprayActuatorCommand;
   Rig r;
   r.bring_up();
@@ -1197,51 +1391,155 @@ TEST(Px4LinkNode, SprayTransactionsSerializeAndWatchdogOffPreemptsQueuedOn) {
     return std::find_if(r.cmds.rbegin(), r.cmds.rend(),
                         [](const auto& c) { return c.command == 187 || c.command == 183; });
   };
+  auto spray_sent = [&]() {
+    size_t sent = 0;
+    for (const auto& c : r.cmds)
+      if (c.command == 183 || c.command == 187) ++sent;
+    return sent;
+  };
 
   publish(1, Cmd::SOURCE_CONTROLLER, true, 1.0F);
+  ASSERT_TRUE(r.pump_until([&] { return spray_sent() >= 1U; }));
   ASSERT_NE(last_spray_command(), r.cmds.rend());
   const auto first_token = last_spray_command()->source_component;
   ASSERT_EQ(last_spray_command()->command, 187U);
   for (uint32_t seq = 2; seq <= 10; ++seq)
     publish(seq, Cmd::SOURCE_CONTROLLER, true, 0.8F);  // reassert flood; only newest remains queued
-  publish(11, Cmd::SOURCE_WATCHDOG, false, -1.0F);     // purges queued ON and jumps ahead
-
-  size_t sent = 0;
-  for (const auto& c : r.cmds)
-    if (c.command == 183 || c.command == 187) ++sent;
-  EXPECT_EQ(sent, 1U);  // only one spray VehicleCommand may be in flight
-  ASSERT_EQ(r.spray_acks.size(), 9U);
+  ASSERT_TRUE(r.pump_until([&] { return r.spray_acks.size() >= 8U; }));
+  EXPECT_EQ(spray_sent(), 1U);  // only one spray VehicleCommand may be in flight
+  ASSERT_EQ(r.spray_acks.size(), 8U);
   for (size_t i = 0; i < r.spray_acks.size(); ++i) {
     EXPECT_EQ(r.spray_acks[i].seq, i + 2);
     EXPECT_FALSE(r.spray_acks[i].success);
   }
 
-  px4_msgs::msg::VehicleCommandAck ack;
-  ack.target_system = 1;
-  ack.command = 187;
-  ack.target_component = first_token;
-  ack.result = px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_ACCEPTED;
-  r.p_ack->publish(ack);
-  r.pump(60);
-  ASSERT_NE(last_spray_command(), r.cmds.rend());
+  // Watchdog OFF purges the queued ON and pre-empts the unacknowledged in-flight ON: it goes on the
+  // wire at once instead of waiting for the ON's ACK or timeout.
+  publish(11, Cmd::SOURCE_WATCHDOG, false, -1.0F);
+  ASSERT_TRUE(r.pump_until([&] { return spray_sent() >= 2U && r.spray_acks.size() >= 10U; }));
+  EXPECT_EQ(spray_sent(), 2U);
+  ASSERT_EQ(r.spray_acks.size(), 10U);
+  EXPECT_EQ(r.spray_acks[8].seq, 10U);  // queued ON purged
+  EXPECT_EQ(r.spray_acks[9].seq, 1U);   // in-flight ON pre-empted
+  EXPECT_FALSE(r.spray_acks[9].success);
+  EXPECT_EQ(r.spray_acks[9].result, dyx3_interfaces::msg::SprayActuatorAck::RESULT_LINK_REFUSED);
   const auto watchdog_off = *last_spray_command();
   ASSERT_EQ(watchdog_off.command, 187U);
   EXPECT_EQ(watchdog_off.param1, -1.0F);
   EXPECT_EQ(watchdog_off.source_component, 3U);
   EXPECT_NE(watchdog_off.source_component, first_token);
 
-  // A duplicate late ACK for the earlier controller ON cannot confirm watchdog OFF.
+  // A late ACK for the pre-empted controller ON cannot confirm watchdog OFF.
+  px4_msgs::msg::VehicleCommandAck ack;
+  ack.target_system = 1;
+  ack.command = 187;
+  ack.target_component = first_token;
+  ack.result = px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_ACCEPTED;
   r.p_ack->publish(ack);
   r.pump(40);
   ASSERT_EQ(r.spray_acks.size(), 10U);
-  EXPECT_NE(r.spray_acks.back().source, Cmd::SOURCE_WATCHDOG);
   ack.target_component = watchdog_off.source_component;
   r.p_ack->publish(ack);
-  r.pump(60);
+  ASSERT_TRUE(r.pump_until([&] { return r.spray_acks.size() >= 11U; }));
   ASSERT_EQ(r.spray_acks.size(), 11U);
   EXPECT_EQ(r.spray_acks.back().seq, 11U);
   EXPECT_EQ(r.spray_acks.back().source, Cmd::SOURCE_WATCHDOG);
   EXPECT_TRUE(r.spray_acks.back().success);
+}
+
+// XR-GPX-001: an OFF never waits behind an ON whose ACK was lost. The link clock does not advance
+// between the OFF request and its dispatch, so no transaction timeout is involved.
+TEST(Px4LinkNode, OffPreemptsAnUnacknowledgedInFlightOnWithinOneTick) {
+  using Cmd = dyx3_interfaces::msg::SprayActuatorCommand;
+  for (const uint8_t off_source : {Cmd::SOURCE_WATCHDOG, Cmd::SOURCE_CONTROLLER}) {
+    Rig r;
+    r.bring_up();
+    r.run(0.2);
+    r.clear();
+    Cmd on;
+    on.seq = 5;
+    on.source = Cmd::SOURCE_CONTROLLER;
+    on.backend = Cmd::BACKEND_ACTUATOR;
+    on.on = true;
+    on.actuator_set_index = 1;
+    on.value = 1.0F;
+    r.p_spray->publish(on);
+    ASSERT_TRUE(r.pump_until([&] { return r.cmds.size() >= 1U; }));
+    const auto on_wire = r.cmds.back();
+    r.tick();  // the ON stays in flight: no ACK from the FCU
+
+    Cmd off = on;
+    off.seq = 6;
+    off.source = off_source;
+    off.on = false;
+    off.value = -1.0F;
+    const double requested_at = r.now;
+    r.p_spray->publish(off);
+    r.tick();  // one writer tick
+    ASSERT_TRUE(r.pump_until([&] { return r.cmds.size() >= 2U && r.spray_acks.size() >= 1U; }));
+    EXPECT_NEAR(r.now - requested_at, 0.01, 1e-9);
+    const auto off_wire = r.cmds.back();
+    EXPECT_EQ(off_wire.command, 187U);
+    EXPECT_FLOAT_EQ(off_wire.param1, -1.0F);
+    EXPECT_NE(off_wire.source_component, on_wire.source_component);
+    ASSERT_EQ(r.spray_acks.size(), 1U);
+    EXPECT_EQ(r.spray_acks[0].seq, 5U);  // the pre-empted ON fails
+    EXPECT_FALSE(r.spray_acks[0].success);
+    EXPECT_EQ(r.spray_acks[0].result, dyx3_interfaces::msg::SprayActuatorAck::RESULT_LINK_REFUSED);
+
+    px4_msgs::msg::VehicleCommandAck ack;
+    ack.command = 187;
+    ack.target_system = off_wire.source_system;
+    ack.target_component = off_wire.source_component;
+    ack.result = px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_ACCEPTED;
+    r.p_ack->publish(ack);
+    ASSERT_TRUE(r.pump_until([&] { return r.spray_acks.size() >= 2U; }));
+    EXPECT_EQ(r.spray_acks.back().seq, 6U);
+    EXPECT_EQ(r.spray_acks.back().source, off_source);
+    EXPECT_TRUE(r.spray_acks.back().success);
+  }
+}
+
+TEST(Px4LinkNode, UnansweredSprayTransactionTimesOutAfterTheConfiguredWindow) {
+  using Cmd = dyx3_interfaces::msg::SprayActuatorCommand;
+  Rig r;
+  r.bring_up();
+  r.run(0.2);
+  r.clear();
+  EXPECT_DOUBLE_EQ(r.link->params().spray_transaction_timeout_s, 0.3);
+  Cmd on;
+  on.seq = 9;
+  on.source = Cmd::SOURCE_CONTROLLER;
+  on.backend = Cmd::BACKEND_ACTUATOR;
+  on.on = true;
+  on.actuator_set_index = 1;
+  on.value = 1.0F;
+  r.p_spray->publish(on);
+  ASSERT_TRUE(r.pump_until([&] { return r.cmds.size() >= 1U; }));
+  const auto first = r.cmds.back();
+  r.tick(0.15);
+  r.p_spray->publish(on);  // a reassert while in flight is sent again with the same identity
+  ASSERT_TRUE(r.pump_until([&] { return r.cmds.size() >= 2U; }));
+  EXPECT_EQ(r.cmds.back().source_component, first.source_component);
+  EXPECT_EQ(r.cmds.back().source_system, first.source_system);
+  r.tick(0.14);  // 0.29 s after dispatch: still in flight
+  EXPECT_TRUE(r.spray_acks.empty());
+  r.tick(0.02);  // 0.31 s
+  ASSERT_TRUE(r.pump_until([&] { return !r.spray_acks.empty(); }));
+  EXPECT_EQ(r.spray_acks[0].seq, 9U);
+  EXPECT_FALSE(r.spray_acks[0].success);
+  EXPECT_EQ(r.spray_acks[0].result, dyx3_interfaces::msg::SprayActuatorAck::RESULT_LINK_REFUSED);
+}
+
+TEST(Px4LinkNode, RejectsNonPositiveSprayTransactionTimeout) {
+  auto ctx = std::make_shared<rclcpp::Context>();
+  init_ctx(ctx);
+  rclcpp::NodeOptions no;
+  no.context(ctx);
+  no.append_parameter_override("spray_transaction_timeout_s", 0.0);
+  no.append_parameter_override("msg_definitions_dir", std::string(DYX3_FIXTURES) + "/msgdefs");
+  EXPECT_THROW(Px4LinkNode(no, nullptr, false), std::invalid_argument);
+  ctx->shutdown("test done");
 }
 
 TEST(Px4LinkNode, LateSprayAckAfterTimeoutCannotMatchTheNextSameCommand) {
@@ -1422,10 +1720,36 @@ TEST(Px4LinkNode, EstimatorHealthDefaultsUnhealthyUntilFlagsArrive) {
   r.bring_up();
   r.run(0.3);
   EXPECT_TRUE(r.health.flags_valid);
-  EXPECT_FALSE(r.health.test_ratios_valid);  // estimator_status is not on DDS
+  // IF-002: the PX4 sample time of the flags, same convention as VehicleState.px4_sample_stamp.
+  const double stamp_s = r.health.px4_sample_stamp.sec + r.health.px4_sample_stamp.nanosec * 1e-9;
+  EXPECT_GT(stamp_s, r.now - 0.15);
+  EXPECT_LE(stamp_s, r.now + 1e-6);
+  EXPECT_EQ(r.health.px4_sample_stamp.nanosec % 1000U, 0U);  // microsecond source
+  EXPECT_FALSE(r.health.test_ratios_valid);                  // estimator_status is not on DDS
   r.alive = false;
   r.run(3.5);  // beyond the 3.0 s session limit (stale_timesync_s / stale_estimator_flags_s)
   EXPECT_FALSE(r.health.flags_valid);
+  EXPECT_EQ(r.health.px4_sample_stamp.sec, 0);  // stale: no sample time is presented
+  EXPECT_EQ(r.health.px4_sample_stamp.nanosec, 0U);
+}
+
+// RPP-009: yaw rate from attitude deltas on the PX4 sample clock; 0 when the attitude is stale.
+TEST(Px4LinkNode, VehicleStateYawRateFromAttitudeAndZeroWhenStale) {
+  Rig r;
+  r.bring_up();
+  r.att_yaw_rate = 0.2;
+  r.run(0.5);
+  EXPECT_TRUE(r.state.attitude_valid);
+  EXPECT_NEAR(r.state.yaw_rate_radps, 0.2, 0.01);
+  r.att_alive = false;
+  r.run(0.3);
+  EXPECT_FALSE(r.state.attitude_valid);
+  EXPECT_EQ(r.state.yaw_rate_radps, 0.0F);
+  r.att_alive = true;
+  r.att_yaw_rate = -0.3;  // counter-clockwise
+  r.run(0.5);
+  EXPECT_TRUE(r.state.attitude_valid);
+  EXPECT_NEAR(r.state.yaw_rate_radps, -0.3, 0.015);
 }
 
 TEST(Px4LinkNode, VehicleStateFanOut) {

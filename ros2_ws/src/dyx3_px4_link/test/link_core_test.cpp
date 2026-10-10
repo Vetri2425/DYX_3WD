@@ -209,12 +209,80 @@ TEST(Offboard, LinkLossWithdrawsHeartbeatAndRestartsPrestream) {
   EXPECT_FALSE(o.send_mode_command);  // must pre-stream again first
   EXPECT_TRUE(s.step(1.2, true, false).send_mode_command);
 }
-TEST(Offboard, DisableStopsHeartbeat) {
+TEST(Offboard, OnlyActiveForwardsTheCommandEveryOtherStateStreamsStop) {  // XR-GPX-007
   OffboardSession s{OffboardTiming{}};
   s.enable(true, 0.0);
-  s.step(0.6, true, true);
+  auto o = s.step(0.0, true, false);
+  EXPECT_EQ(o.state, OffboardState::Prestream);
+  EXPECT_TRUE(o.stop_only);
+  o = s.step(0.5, true, false);
+  EXPECT_EQ(o.state, OffboardState::Requested);
+  EXPECT_TRUE(o.stop_only);
+  o = s.step(0.6, true, true);
+  EXPECT_EQ(o.state, OffboardState::Active);
+  EXPECT_FALSE(o.stop_only);
+  o = s.step(0.7, true, false);
+  EXPECT_EQ(o.state, OffboardState::Lost);
+  EXPECT_TRUE(o.publish_heartbeat);
+  EXPECT_TRUE(o.stop_only);
+  OffboardSession f{OffboardTiming{}};
+  f.enable(true, 0.0);
+  f.step(0.5, true, false);
+  o = f.step(2.6, true, false);
+  EXPECT_EQ(o.state, OffboardState::Failed);
+  EXPECT_TRUE(o.stop_only);
+}
+TEST(Offboard, LinkLossFromActiveIsLostAndNeverReRequested) {  // XR-GPX-007
+  OffboardSession s{OffboardTiming{}};
+  s.enable(true, 0.0);
+  s.step(0.5, true, false);
+  ASSERT_EQ(s.step(0.6, true, true).state, OffboardState::Active);
+  auto o = s.step(0.7, false, true);
+  EXPECT_EQ(o.state, OffboardState::Lost);
+  EXPECT_FALSE(o.publish_heartbeat);
+  for (double t = 0.8; t < 5.0; t += 0.1) {  // the link returns, PX4 may still report OFFBOARD
+    o = s.step(t, true, t > 2.0);
+    EXPECT_EQ(o.state, OffboardState::Lost);
+    EXPECT_FALSE(o.send_mode_command);
+    EXPECT_TRUE(o.publish_heartbeat);
+    EXPECT_TRUE(o.stop_only);
+  }
+  s.enable(true, 5.0);  // only a new operator request starts a new session
+  EXPECT_EQ(s.step(5.0, true, false).state, OffboardState::Prestream);
+  EXPECT_TRUE(s.step(5.5, true, false).send_mode_command);
+}
+TEST(Offboard, DisableStreamsStopForTheWindowThenStopsHeartbeat) {  // PXL-002
+  OffboardSession s{OffboardTiming{}};
+  s.enable(true, 0.0);
+  s.step(0.5, true, false);
+  ASSERT_EQ(s.step(0.6, true, true).state, OffboardState::Active);
   s.enable(false, 0.7);
-  EXPECT_FALSE(s.step(0.8, true, true).publish_heartbeat);
+  for (const double t : {0.7, 0.8, 0.99}) {
+    const auto o = s.step(t, true, true);
+    EXPECT_EQ(o.state, OffboardState::Disabled);
+    EXPECT_TRUE(o.publish_heartbeat) << t;
+    EXPECT_TRUE(o.stop_only) << t;
+    EXPECT_FALSE(o.send_mode_command);
+  }
+  EXPECT_FALSE(s.step(1.0, true, true).publish_heartbeat);  // 0.3 s window over: withdrawn
+  EXPECT_FALSE(s.step(5.0, true, true).publish_heartbeat);
+  s.enable(false, 6.0);  // a repeated disable does not restart the window
+  EXPECT_FALSE(s.step(6.1, true, true).publish_heartbeat);
+}
+TEST(Offboard, DisableWindowNeedsAPriorEnableAndALink) {
+  OffboardSession never{OffboardTiming{}};
+  never.enable(false, 0.0);
+  EXPECT_FALSE(never.step(0.1, true, false).publish_heartbeat);
+  OffboardSession s{OffboardTiming{}};
+  s.enable(true, 0.0);
+  s.step(0.1, true, false);
+  s.enable(false, 0.2);
+  EXPECT_FALSE(s.step(0.25, false, false).publish_heartbeat);  // no trustworthy zero without link
+  const auto o = s.step(0.3, true, false);
+  EXPECT_TRUE(o.publish_heartbeat);
+  EXPECT_TRUE(o.stop_only);
+  s.enable(true, 0.4);  // re-enable cancels the window and restarts the sequence
+  EXPECT_EQ(s.step(0.4, true, false).state, OffboardState::Prestream);
 }
 
 // --- state assembler ---------------------------------------------------------------------------
@@ -258,10 +326,113 @@ TEST(Assembler, AttitudeNeedsHeadingGoodAndFreshPosition) {
   att.q[2] = std::numeric_limits<float>::quiet_NaN();
   EXPECT_FALSE(assemble(lp, att, st, Freshness{true, true, true}).attitude_valid);
 }
+TEST(Assembler, GlobalReferenceValidNeedsFiniteLatLonAlt) {  // PXL-006
+  LocalPositionSample lp;
+  lp.xy_global = true;
+  lp.ref_lat = 52.1;
+  lp.ref_lon = 4.3;
+  lp.ref_alt = 3.0F;
+  const Freshness f{true, true, true};
+  EXPECT_TRUE(assemble(lp, AttitudeSample{}, StatusSample{}, f).global_reference_valid);
+  EXPECT_FALSE(assemble(lp, AttitudeSample{}, StatusSample{}, Freshness{}).global_reference_valid);
+  for (int i = 0; i < 3; ++i) {
+    LocalPositionSample bad = lp;
+    if (i == 0) bad.ref_lat = std::numeric_limits<double>::quiet_NaN();
+    if (i == 1) bad.ref_lon = std::numeric_limits<double>::infinity();
+    if (i == 2) bad.ref_alt = std::numeric_limits<float>::quiet_NaN();
+    EXPECT_FALSE(assemble(bad, AttitudeSample{}, StatusSample{}, f).global_reference_valid) << i;
+  }
+  lp.xy_global = false;
+  EXPECT_FALSE(assemble(lp, AttitudeSample{}, StatusSample{}, f).global_reference_valid);
+}
 TEST(Assembler, NonFinitePositionIsInvalid) {
   LocalPositionSample lp;
   lp.xy_valid = true;
   lp.x = std::numeric_limits<float>::quiet_NaN();
   const auto o = assemble(lp, AttitudeSample{}, StatusSample{}, Freshness{true, true, true});
   EXPECT_FALSE(o.position_valid);
+}
+
+// --- yaw rate (RPP-009) --------------------------------------------------------------------------
+namespace {
+std::array<float, 4> q_of_yaw(double yaw) {  // rotation about NED down: positive is clockwise
+  return {static_cast<float>(std::cos(yaw / 2)), 0.0F, 0.0F, static_cast<float>(std::sin(yaw / 2))};
+}
+double wrap_pi(double a) { return std::remainder(a, 2.0 * 3.141592653589793); }
+}  // namespace
+
+TEST(YawRate, YawOfMatchesTheHeadingConvention) {
+  EXPECT_NEAR(yaw_of(q_of_yaw(0.5)), 0.5, 1e-6);
+  EXPECT_NEAR(yaw_of(q_of_yaw(-2.0)), -2.0, 1e-6);
+  EXPECT_NEAR(std::abs(yaw_of(q_of_yaw(3.141592653589793))), 3.141592653589793, 1e-6);
+}
+TEST(YawRate, ConstantRotationIsRecoveredWithinFivePercent) {
+  for (const double rate : {0.2, -0.2, 0.05, 1.0}) {
+    YawRateEstimator e{0.05};
+    EXPECT_FALSE(e.valid());
+    EXPECT_EQ(e.rate(), 0.0F);
+    const uint64_t t0 = 1'700'000'000'000'000ULL;  // system-clock domain microseconds
+    for (int k = 0; k <= 100; ++k) {               // 1 s at 100 Hz
+      e.update(q_of_yaw(wrap_pi(0.3 + rate * k * 0.01)), t0 + static_cast<uint64_t>(k) * 10000U, 0);
+      if (k >= 20)
+        ASSERT_NEAR(e.rate(), rate, 0.05 * std::abs(rate)) << "rate " << rate << " k " << k;
+    }
+    EXPECT_TRUE(e.valid());
+  }
+}
+TEST(YawRate, WrapAcrossPlusMinusPiIsContinuous) {
+  for (const double rate : {0.5, -0.5}) {
+    YawRateEstimator e{0.05};
+    const double start = rate > 0 ? 3.0 : -3.0;  // crosses +-pi after ~0.28 s
+    for (int k = 0; k <= 100; ++k) {
+      e.update(q_of_yaw(wrap_pi(start + rate * k * 0.01)), static_cast<uint64_t>(k) * 10000U + 1U,
+               0);
+      if (k >= 1)
+        ASSERT_NEAR(e.rate(), rate, 0.05 * std::abs(rate)) << "rate " << rate << " k " << k;
+    }
+  }
+}
+TEST(YawRate, UsesSampleTimeNotArrivalCadence) {
+  YawRateEstimator e{0.0};
+  e.update(q_of_yaw(0.0), 1000000U, 0);
+  e.update(q_of_yaw(0.02), 1020000U, 0);  // 0.02 rad over a 20 ms sample interval
+  EXPECT_NEAR(e.rate(), 1.0, 1e-4);
+}
+TEST(YawRate, StaleGapResetNonFiniteAndBackwardsTimeGiveNoRate) {
+  YawRateEstimator e{0.05};
+  uint64_t t = 1000000U;
+  double yaw = 0.0;
+  auto feed = [&](int n, uint8_t reset = 0) {
+    for (int k = 0; k < n; ++k) {
+      t += 10000U;
+      yaw += 0.003;
+      e.update(q_of_yaw(yaw), t, reset);
+    }
+  };
+  feed(20);
+  ASSERT_TRUE(e.valid());
+  EXPECT_NEAR(e.rate(), 0.3, 0.015);
+  e.update(q_of_yaw(yaw), t, 0);  // the same sample again: ignored
+  EXPECT_TRUE(e.valid());
+  t += 210000U;  // a gap over 0.2 s
+  yaw += 2.0;
+  e.update(q_of_yaw(yaw), t, 0);
+  EXPECT_FALSE(e.valid());
+  EXPECT_EQ(e.rate(), 0.0F);
+  feed(1);
+  EXPECT_TRUE(e.valid());
+  EXPECT_NEAR(e.rate(), 0.3, 0.015);  // restarted from the next delta, no spike from the gap
+  yaw += 1.0;                         // EKF yaw reset: the quaternion jumps, the counter moves
+  feed(1, 1);
+  EXPECT_FALSE(e.valid());
+  feed(1, 1);
+  EXPECT_NEAR(e.rate(), 0.3, 0.015);
+  e.update({std::numeric_limits<float>::quiet_NaN(), 0.0F, 0.0F, 0.0F}, t + 10000U, 1);
+  EXPECT_FALSE(e.valid());
+  t -= 50000U;  // sample time going backwards (FCU reboot): restart
+  feed(1, 1);
+  feed(1, 1);
+  EXPECT_TRUE(e.valid());
+  e.update(q_of_yaw(yaw), t - 5000U, 1);
+  EXPECT_FALSE(e.valid());
 }

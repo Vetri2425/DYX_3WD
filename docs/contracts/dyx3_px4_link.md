@@ -30,17 +30,21 @@ the DDS topic when the version is above 0:
 | out (we subscribe) | `/fmu/out/timesync_status` | TimesyncStatus | best effort | session liveness |
 | out | `/fmu/out/vehicle_local_position_v1` | VehicleLocalPosition (v1) | best effort | |
 | out | `/fmu/out/vehicle_status_v1` | VehicleStatus (v1) | best effort | **rate limited to 5 Hz by firmware** |
-| out | `/fmu/out/vehicle_attitude` | VehicleAttitude (v0) | best effort | q is FRD to NED |
+| out | `/fmu/out/vehicle_attitude` | VehicleAttitude (v0) | best effort | q is FRD to NED; `timestamp_sample` and `quat_reset_counter` feed the yaw rate (section 8) |
 | out | `/fmu/out/estimator_status_flags` | EstimatorStatusFlags | best effort | only estimator topic on DDS |
 | out | `/fmu/out/vehicle_gps_position` | SensorGps | best effort | |
-| out | `/fmu/out/message_format_response` | MessageFormatResponse | reliable | handshake |
-| out | `/fmu/out/ulog_stream` | UlogStream | reliable, depth 16 | no firmware rate limit |
+| out | `/fmu/out/vehicle_command_ack` | VehicleCommandAck | best effort | spray ACK matching (section 14) |
+| out | `/fmu/out/message_format_response` | MessageFormatResponse | best effort, depth 10 | handshake; a lost response is re-requested |
+| out | `/fmu/out/ulog_stream` | UlogStream | best effort, depth 16 | no firmware rate limit |
 
 **QoS of `/fmu/in`:** reliable. DERIVED — NOT FROM V1 SPEC: the XRCE agent's reader is reliable (the
 stock PX4 offboard examples publish with the default reliable QoS); a best-effort writer would not
-match it. Not provable off-target: confirm with `ros2 topic info -v` at GATE 1. `/fmu/out`
-subscriptions are best effort (match either), except `ulog_stream` (reliable: a dropped chunk
-corrupts the log).
+match it. Not provable off-target: confirm with `ros2 topic info -v` at GATE 1. Every `/fmu/out`
+subscription is best effort: the firmware's uXRCE-DDS writers are all best effort
+(`src/modules/uxrce_dds_client/utilities.hpp:80,137` at the flashed firmware), and a reliable
+reader never matches a best-effort writer (XR-GPX-004: `ulog_stream` used to be reliable and no
+chunk was ever received). A lost `ulog_stream` chunk shows as a `msg_sequence` gap to the
+consumer; the fake FCU in the tests publishes best effort so it cannot hide a mismatch.
 
 `estimator_status` (test ratios) and `estimator_aid_src_*` are **not** exposed over DDS at the
 flashed firmware. `EstimatorHealth.test_ratios_valid` is therefore always false until a firmware
@@ -109,15 +113,25 @@ setpoints* is the hole `COM_OF_LOSS_T` cannot see. The link never publishes a st
 publishes a **fresh explicit zero**, which is the strongest command available and keeps the
 vehicle in OFFBOARD instead of triggering PX4's own loss action (`COM_OBL_RC_ACT`) while the
 guard recovers. The heartbeat is withdrawn when the link itself cannot publish a trustworthy
-zero: `handshake_ok` false, `session_alive` false, or `set_offboard(false)`.
+zero: `handshake_ok` false or `session_alive` false. `set_offboard(false)` withdraws it only after
+an explicit STOP window (section 9).
 DERIVED — NOT FROM V1 SPEC: this interpretation of the F1.7 obligation. Flagged for the human.
 
 `command_max_age_s` is DERIVED from the prototype's `input_max_age_s` 0.2 (re-validate at GATE 4):
 the guard publishes its command at the RPP rate (50 Hz), so 0.2 s is ten missed ticks.
 
-**Not covered here, on purpose:** if this *process* dies, PX4 keeps the last setpoint for up to
-`COM_OF_LOSS_T` (upstream #27514, ~900 ms measured). That is firmware territory (F5 / A1.1) and
-the reason `COM_OF_LOSS_T` needs a human value. This package's obligation is the in-process part.
+**Orderly shutdown (X-010).** rclcpp's signal handler is disabled: SIGINT/SIGTERM only set a flag,
+the executor loop (`spin_once`, 5 ms) exits, and, while the context is still up and without
+spinning the writer timer again, the explicit STOP set is published at 100 Hz for 0.3 s
+(`Px4LinkNode::publish_shutdown_stop`). Only where the heartbeat was running on the last tick; no
+heartbeat is ever started at shutdown. Then the process exits and PX4's offboard-loss handling
+runs with STOP as the last setpoint. SIGPIPE is ignored.
+
+**Not covered here, on purpose:** if this *process* dies (SIGKILL, crash, hang) or the agent,
+Ethernet or Jetson goes, PX4 keeps the last setpoint for up to `COM_OF_LOSS_T` (upstream #27514,
+~900 ms measured). That is firmware territory (F5 / A1.1) and the reason `COM_OF_LOSS_T` needs a
+human value; the stop bound is an acceptance measurement (PXL-001). This package's obligation is
+the in-process part.
 
 ## 5. Per-topic staleness (upstream #27388)
 
@@ -178,7 +192,10 @@ system clock in microseconds and never applies `TimesyncStatus.estimated_offset`
 Jetson system-clock domain.
 All freshness decisions use the link's own steady clock and the local arrival time, never message
 timestamps, so a clock step on either side cannot make a stale sample look fresh.
-`VehicleState.px4_sample_stamp` carries `timestamp_sample` of the local-position sample.
+`VehicleState.px4_sample_stamp` carries `timestamp_sample` of the local-position sample, and
+`EstimatorHealth.px4_sample_stamp` carries `timestamp_sample` of the `estimator_status_flags`
+sample (IF-002), both converted from microseconds with no offset applied, and both zero while
+their source is stale.
 
 ## 8. State fan-out
 
@@ -187,9 +204,22 @@ timestamps, so a clock step on either side cannot make a stale sample look fresh
 `heading` to `heading_rad`. Validity: `position_valid = xy_valid`, `velocity_valid = v_xy_valid`,
 `attitude_valid = heading_good_for_control` and an attitude sample is fresh. Dead reckoning and
 estimator faults are *not* folded into these flags; the guard owns those gates through
-`EstimatorHealth`. A stale source clears its validity flags in the same tick. `yaw_rate_radps`
-is 0 until a `vehicle_angular_velocity` source is added (it is not on DDS today); no validity
-flag depends on it. `xy_reset_counter`, `delta_*` and the global reference are copied unchanged.
+`EstimatorHealth`. A stale source clears its validity flags in the same tick. `xy_reset_counter`
+and `delta_*` are copied unchanged. `global_reference_valid = xy_global` and finite
+`ref_lat`, `ref_lon`, `ref_alt` (PXL-006); the reference values are copied unchanged.
+
+`yaw_rate_radps` (RPP-009, interim Jetson-side source; `vehicle_angular_velocity` is not on DDS at
+the flashed firmware and enabling it is an owner decision): derived from consecutive
+`vehicle_attitude` samples on the **PX4 sample clock** (`timestamp_sample`), not on receipt time.
+Yaw = `atan2(2(wz + xy), 1 - 2(y² + z²))` of the FRD→NED quaternion; the wrap-safe yaw delta is
+divided by the sample interval and used only for 0 < dt ≤ 0.2 s; a first-order low-pass with time
+constant `yaw_rate_lpf_tau_s` (default 0.05 s, 0 = unfiltered) smooths it. A larger gap, a sample
+time that goes backwards, a `quat_reset_counter` change (EKF yaw reset) or a non-finite quaternion
+restarts the estimate; a repeated sample is ignored. Sign: NED, positive clockwise seen from
+above, the same convention as `heading_rad`. It is published only while `attitude_valid` and the
+estimate is running; otherwise it is **0, which also means "unknown"** (field semantics unchanged;
+no validity flag depends on it). Quantisation: float32 quaternions limit a single 10 ms delta to
+about 1e-5 rad, i.e. about 1 mrad/s of noise before the filter.
 
 ## 9. Arm and mode
 
@@ -204,7 +234,34 @@ refused unless the link is healthy; confirmation by `vehicle_status.arming_state
 `source_component=1`, `target_system=1`, `target_component=1` — DERIVED: stock companion
 addressing; no figure exists in the spec.
 
-Arm never starts motion by itself; the heartbeat carries STOP until the guard commands otherwise.
+Arm never starts motion by itself. **Only a confirmed OFFBOARD session (`Active`) forwards the
+guard's command** (XR-GPX-007): in `Prestream`, `Requested`, `Failed` and `Lost` the heartbeat
+carries the explicit STOP set (section 3) whatever the guard publishes, because PX4 may already be
+in OFFBOARD before `vehicle_status` (2 Hz) shows it. The session states:
+
+| State | Heartbeat (link healthy) | Leaves on |
+|---|---|---|
+| `Disabled` | none (except the STOP window after a disable, below) | `SetOffboard(true)` |
+| `Prestream` | STOP | `offboard_prestream_s` elapsed → mode command, `Requested` |
+| `Requested` | STOP | nav_state 14 → `Active`; `offboard_confirm_timeout_s` → `Failed` |
+| `Active` | guard command (through the gate, section 4) | nav_state ≠ 14 or link loss → `Lost` |
+| `Failed`, `Lost` | STOP | only a new `SetOffboard(true)`; **never re-requested automatically** |
+
+Link loss (handshake or session) withdraws the heartbeat in every state. From `Active` it goes to
+`Lost`: when the link returns the heartbeat resumes with STOP and OFFBOARD is not requested again.
+A request still in `Prestream`/`Requested` restarts from `Prestream` when the link returns.
+
+`SetOffboard(enable=false)` (PXL-002): from the next writer tick the heartbeat carries the explicit
+STOP set, whatever the guard commands, for `offboard_disable_stop_s` (default 0.3 s, validated
+> 0); then the heartbeat is withdrawn and PX4 leaves OFFBOARD through its own offboard-loss
+handling (`COM_OF_LOSS_T`, `COM_OBL_RC_ACT`) with a zero as the last setpoint. Dropping the
+stream at once would leave PX4 applying the last motion setpoint until the loss timeout. The
+window only runs while the link is healthy (otherwise there is no trustworthy zero to send), and a
+repeated disable does not restart it. The reply is immediate and unchanged: `accepted=true`,
+`REASON_OK` means "the link stopped commanding motion and started the STOP window", **not** "PX4
+left OFFBOARD" or "the rover stopped". No mode change or disarm is sent (owner policy, open).
+`Px4LinkStatus.offboard_heartbeat_active` is true while the heartbeat is actually published,
+including the STOP window.
 
 ## 10. ULog and RTCM
 
@@ -239,7 +296,10 @@ negative injected timestamps.
 | `stale_*_s` (6) | section 5 | IDLE_ONLY | DERIVED, re-validate GATE 4 |
 | `handshake_timeout_s`, `handshake_retry_s` | 5.0, 1.0 | IDLE_ONLY | DERIVED |
 | `offboard_prestream_s`, `offboard_confirm_timeout_s` | 0.5, 2.0 | IDLE_ONLY | DERIVED |
+| `offboard_disable_stop_s` | 0.3 | IDLE_ONLY | DERIVED (PXL-002): ≥ 20 ticks of STOP, well inside `COM_OF_LOSS_T` 1.0 s; validated > 0 |
 | `ulog_streaming_enabled` | true | IDLE_ONLY | |
+| `yaw_rate_lpf_tau_s` | 0.05 | IDLE_ONLY | DERIVED (RPP-009): 5 attitude samples at 100 Hz; validated ≥ 0 |
+| `spray_transaction_timeout_s` | 0.3 | RESTART | DERIVED (XR-GPX-001): pinned PX4 answers 187/183 at once; bounds how long a queued spray request can wait; validated > 0 |
 
 ## 13. Acceptance
 
@@ -258,6 +318,15 @@ source replaces that source's older queued request; a replaced request receives 
 failed `SprayActuatorAck`, `RESULT_LINK_REFUSED`) and is placed at the front of the queue (commit `6b8b4b1`). If all queue capacity is occupied by watchdog OFF requests, a new request is
 refused rather than displacing them. Link loss fails the in-flight request and all queued requests.
 
+**An OFF never waits behind an in-flight ON** (XR-GPX-001). FCU ACKs arrive on a best-effort
+topic, so one lost ACK would otherwise hold a line-end, watchdog or E-stop OFF until the ON timed
+out. Any OFF (controller or watchdog) that arrives while an ON is in flight fails that ON
+(`RESULT_LINK_REFUSED`), goes to the front of the queue and is dispatched in the same callback,
+without waiting for a tick. A late ACK of the pre-empted ON cannot confirm the OFF (different
+identity). An OFF does not pre-empt an in-flight OFF. An unanswered in-flight request is failed
+after `spray_transaction_timeout_s` (default 0.3 s, validated > 0); until then every exact reassert
+of it is republished with its identity.
+
 Each dispatched logical proof epoch receives a durable `(VehicleCommand.source_system,
 VehicleCommand.source_component)` identity. The allocator uses source systems 1..255 and component
 IDs 2..999, in that order, for 254,490 nonreused pairs per PX4/companion correlation epoch.
@@ -265,7 +334,12 @@ System 0 is excluded because MAVLink uses it for broadcast/unspecified targeting
 reserved for the companion's ordinary command identity; 1000+ has PX4 mode-executor semantics.
 The ordered-pair high-water mark is persisted at
 `/var/lib/dyx3/state/px4_link_spray_ack_next` before any corresponding VehicleCommand is
-published. New writes use `v2 <next-index>`; the old numeric component ledger 2..1000 is read as
+published. It is reserved in blocks of 64 pairs (PXL-004): when the in-memory block is used up, the
+mark is advanced by 64 with the same write + `fsync` + rename + directory `fsync`, and the next 64
+pairs are handed out from memory. One durable write per 64 transactions instead of two `fsync`s
+inside the 100 Hz writer tick per transaction. A restart (including after power loss) resumes at
+the persisted mark, so the unused rest of a block is skipped (at most 63 pairs per restart) and no
+pair is ever reused. A failed block write fails closed and latches until restart, as before. New writes use `v2 <next-index>`; the old numeric component ledger 2..1000 is read as
 the corresponding system-1 high-water mark, preserving every previously allocated pair. The
 first-install installer seeds the legacy-compatible value 2 only if the file does not exist.
 Process restart and upgrade preserve the ledger. Missing, corrupt, unwritable, or exhausted state
@@ -290,6 +364,10 @@ immediate UNSUPPORTED answer. Each physical transmission can produce a terminal 
 late ACKs for an old pair cannot prove a newer epoch because pairs are never reused. `IN_PROGRESS`
 is not terminal. This is idempotent retry semantics: an earlier accepted ACK for the exact same
 physical request may prove that request; it cannot prove changed mapping or intent.
+Because every reassert draws its own ACK, an ACK whose command and pair match a producer's
+confirmed or last dispatched epoch is expected and ignored (XR-GPX-005); only an ACK for a pair no
+current epoch holds increments `spray_unmatched_ack_count`, with a warning throttled to one per
+5 s.
 When watchdog OFF displaces a controller ON, the link retires that specific controller ON
 heartbeat: a late duplicate of it cannot reopen the valve after the OFF proof. A genuinely new
 controller verdict has a new logical identity.

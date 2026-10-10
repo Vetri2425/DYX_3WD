@@ -60,6 +60,10 @@ struct LinkParams {
   OffboardTiming offboard;
   double arm_confirm_timeout_s{2.0};
   bool ulog_streaming_enabled{true};
+  // An unanswered spray VehicleCommand is failed after this long (its reasserts keep republishing
+  // it until then). Short, because an OFF queued behind it waits that long.
+  double spray_transaction_timeout_s{0.3};
+  double yaw_rate_lpf_tau_s{0.05};
   std::string msg_definitions_dir;  // empty: <share of px4_msgs>/msg
   std::string spray_ack_token_state_path{"/var/lib/dyx3/state/px4_link_spray_ack_next"};
 };
@@ -72,6 +76,11 @@ public:
 
   // One publish cycle at link-clock time `now_s`. Public for deterministic tests.
   void step(double now_s);
+
+  // Process shutdown (X-010): cancels the writer timer and publishes one explicit STOP set if the
+  // heartbeat was running on the last tick. Returns false (nothing sent) otherwise. main() calls it
+  // at 100 Hz for a bounded time before exiting.
+  bool publish_shutdown_stop();
 
   // Read-only views for tests/diagnostics.
   const Handshake& handshake() const { return *handshake_; }
@@ -126,6 +135,7 @@ private:
   uint32_t ts_rtt_us_{0};
   bool ts_seen_{false};
   AttitudeSample att_;
+  std::unique_ptr<YawRateEstimator> yaw_rate_;
   StatusSample st_;
   double lp_t_{-1e18}, att_t_{-1e18}, st_t_{-1e18};
   px4_msgs::msg::EstimatorStatusFlags flags_;
@@ -137,7 +147,8 @@ private:
   GateOutput last_gate_;
   StalenessReport last_rep_;
   bool last_link_ok_{false};
-  std::string last_logged_reason_;
+  bool last_heartbeat_published_{false};
+  std::optional<Reason> logged_zero_reason_;  // empty while not failing to zero
 
   double last_step_s_{-1.0};
   double last_overrun_s_{-1.0};

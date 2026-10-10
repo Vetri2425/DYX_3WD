@@ -23,7 +23,6 @@ constexpr uint32_t kCmdLoggingStart = 2510;  // VEHICLE_CMD_LOGGING_START
 constexpr uint32_t kCmdDoSetServo = 183;     // VEHICLE_CMD_DO_SET_SERVO
 constexpr uint32_t kCmdDoSetActuator = 187;  // VEHICLE_CMD_DO_SET_ACTUATOR
 constexpr size_t kMaxSprayTransactions = 16;
-constexpr double kSprayTransactionTimeoutS = 5.0;
 
 struct UsedTopic {
   const char* request_name;  // BASE topic name: the firmware matches the uORB name, no _vN suffix
@@ -48,6 +47,15 @@ const UsedTopic kUsedTopics[] = {
     {"/fmu/out/vehicle_command_ack", "VehicleCommandAck"},
 };
 
+// PX4 timestamps already arrive in the system-clock domain (contract section 7): no offset to
+// apply, only the unit conversion.
+builtin_interfaces::msg::Time px4_stamp(uint64_t us) {
+  builtin_interfaces::msg::Time t;
+  t.sec = static_cast<int32_t>(us / 1000000ULL);
+  t.nanosec = static_cast<uint32_t>((us % 1000000ULL) * 1000ULL);
+  return t;
+}
+
 double steady_now_s() {
   return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
@@ -70,6 +78,7 @@ Px4LinkNode::Px4LinkNode(const rclcpp::NodeOptions& options, ClockFn clock, bool
   gate_ = std::make_unique<CommandGate>(p_.command_max_age_s);
   offboard_ = std::make_unique<OffboardSession>(p_.offboard);
   spray_ack_tokens_ = std::make_unique<SprayAckTokens>(p_.spray_ack_token_state_path);
+  yaw_rate_ = std::make_unique<YawRateEstimator>(p_.yaw_rate_lpf_tau_s);
   build_handshake();
 
   const auto reliable1 = rclcpp::QoS(1).reliable();
@@ -141,6 +150,7 @@ Px4LinkNode::Px4LinkNode(const rclcpp::NodeOptions& options, ClockFn clock, bool
       "/fmu/out/vehicle_attitude", sensor,
       [this](px4_msgs::msg::VehicleAttitude::ConstSharedPtr m) {
         for (size_t i = 0; i < 4; ++i) att_.q[i] = m->q[i];
+        yaw_rate_->update(att_.q, m->timestamp_sample, m->quat_reset_counter);
         att_t_ = clock_();
         mon_->on_sample(kAttitude, att_t_);
       });
@@ -179,8 +189,10 @@ Px4LinkNode::Px4LinkNode(const rclcpp::NodeOptions& options, ClockFn clock, bool
         handshake_->on_response(std::string(m->topic_name.begin(), m->topic_name.begin() + n),
                                 m->success, m->message_hash);
       });
+  // Best effort: the FCU's uXRCE-DDS writers are all best effort, and a reliable reader never
+  // matches a best-effort writer (no chunk would ever arrive). Loss shows as a msg_sequence gap.
   sub_ulog_ = create_subscription<px4_msgs::msg::UlogStream>(
-      "/fmu/out/ulog_stream", rclcpp::QoS(16).reliable(),
+      "/fmu/out/ulog_stream", rclcpp::QoS(16).best_effort(),
       [this](px4_msgs::msg::UlogStream::ConstSharedPtr m) {
         // The FCU blocks its stream on the ack, so ack first, always, regardless of link state.
         if ((m->flags & px4_msgs::msg::UlogStream::FLAGS_NEED_ACK) != 0) {
@@ -288,6 +300,9 @@ Px4LinkNode::Px4LinkNode(const rclcpp::NodeOptions& options, ClockFn clock, bool
         const double now = clock_();
         OffSrv::Response r;
         if (!req->enable) {
+          // OK means the link has stopped commanding motion: STOP is streamed for
+          // offboard_disable_stop_s, then the heartbeat is withdrawn. It does not mean PX4 has
+          // left OFFBOARD or the rover has stopped.
           offboard_->enable(false, now);
           r.accepted = true;
           r.reason_code = OffSrv::Response::REASON_OK;
@@ -346,11 +361,22 @@ void Px4LinkNode::declare_and_validate_params() {
   require(p_.handshake_retry_s > 0.0, "handshake_retry_s must be > 0");
   p_.offboard.prestream_s = declare_checked<double>(*this, "offboard_prestream_s", 0.5);
   p_.offboard.confirm_timeout_s = declare_checked<double>(*this, "offboard_confirm_timeout_s", 2.0);
-  require(p_.offboard.prestream_s >= 0.0 && p_.offboard.confirm_timeout_s > 0.0,
+  p_.offboard.disable_stop_s =
+      declare_checked<double>(*this, "offboard_disable_stop_s", p_.offboard.disable_stop_s);
+  require(p_.offboard.prestream_s >= 0.0 && p_.offboard.confirm_timeout_s > 0.0 &&
+              std::isfinite(p_.offboard.disable_stop_s) && p_.offboard.disable_stop_s > 0.0,
           "offboard timings");
   p_.arm_confirm_timeout_s = declare_checked<double>(*this, "arm_confirm_timeout_s", 2.0);
   require(p_.arm_confirm_timeout_s > 0.0, "arm_confirm_timeout_s must be > 0");
   p_.ulog_streaming_enabled = declare_checked<bool>(*this, "ulog_streaming_enabled", true);
+  p_.yaw_rate_lpf_tau_s =
+      declare_checked<double>(*this, "yaw_rate_lpf_tau_s", p_.yaw_rate_lpf_tau_s);
+  require(std::isfinite(p_.yaw_rate_lpf_tau_s) && p_.yaw_rate_lpf_tau_s >= 0.0,
+          "yaw_rate_lpf_tau_s must be >= 0");
+  p_.spray_transaction_timeout_s =
+      declare_checked<double>(*this, "spray_transaction_timeout_s", p_.spray_transaction_timeout_s);
+  require(std::isfinite(p_.spray_transaction_timeout_s) && p_.spray_transaction_timeout_s > 0.0,
+          "spray_transaction_timeout_s must be > 0");
   p_.spray_ack_token_state_path = declare_checked<std::string>(*this, "spray_ack_token_state_path",
                                                                p_.spray_ack_token_state_path);
   p_.msg_definitions_dir = declare_checked<std::string>(*this, "msg_definitions_dir", "");
@@ -598,6 +624,15 @@ void Px4LinkNode::on_spray_command(const dyx3_interfaces::msg::SprayActuatorComm
     }
   }
 
+  // An OFF never waits behind an in-flight ON: the ON's ACK may be lost (best-effort FCU topic) and
+  // the valve would stay open until the transaction timed out. The ON is failed, the OFF goes now.
+  const bool preempt_on = !request.on && spray_inflight_ && spray_inflight_->on;
+  if (preempt_on) {
+    publish_spray_ack(spray_inflight_->seq, spray_inflight_->source, false,
+                      dyx3_interfaces::msg::SprayActuatorAck::RESULT_LINK_REFUSED);
+    spray_inflight_.reset();
+  }
+
   const size_t active_count = spray_queue_.size() + (spray_inflight_ ? 1U : 0U);
   if (active_count >= kMaxSprayTransactions) {
     auto evict = std::find_if(spray_queue_.begin(), spray_queue_.end(), [](const SprayPending& p) {
@@ -613,7 +648,7 @@ void Px4LinkNode::on_spray_command(const dyx3_interfaces::msg::SprayActuatorComm
     spray_queue_.erase(evict);
   }
 
-  if (watchdog_off) {
+  if (watchdog_off || preempt_on) {
     spray_queue_.push_front(std::move(request));
   } else {
     spray_queue_.push_back(std::move(request));
@@ -627,9 +662,19 @@ void Px4LinkNode::on_vehicle_command_ack(const px4_msgs::msg::VehicleCommandAck&
       spray_inflight_->ack_system != a.target_system ||
       spray_inflight_->ack_token != a.target_component) {
     if (a.command == kCmdDoSetServo || a.command == kCmdDoSetActuator) {
+      // Each physical reassert of a confirmed or dispatched epoch draws its own ACK: expected,
+      // not unmatched. Such an ACK proves nothing new (only the in-flight match above completes).
+      const auto known_epoch = [&](const auto& entry) {
+        return entry.second.command == a.command && entry.second.ack_system == a.target_system &&
+               entry.second.ack_token == a.target_component;
+      };
+      if (std::any_of(spray_confirmed_.begin(), spray_confirmed_.end(), known_epoch) ||
+          std::any_of(spray_epochs_.begin(), spray_epochs_.end(), known_epoch)) {
+        return;
+      }
       ++spray_late_ack_count_;
-      RCLCPP_WARN(
-          get_logger(),
+      RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 5000,
           "discarded unmatched spray ACK command=%u target_component=%u (late/unmatched=%llu)",
           static_cast<unsigned>(a.command), static_cast<unsigned>(a.target_component),
           static_cast<unsigned long long>(spray_late_ack_count_));
@@ -700,7 +745,7 @@ void Px4LinkNode::service_spray_transactions(double now_s) {
     return;
   }
 
-  if (spray_inflight_ && now_s - spray_inflight_->sent_s > kSprayTransactionTimeoutS) {
+  if (spray_inflight_ && now_s - spray_inflight_->sent_s > p_.spray_transaction_timeout_s) {
     publish_spray_ack(spray_inflight_->seq, spray_inflight_->source, false,
                       dyx3_interfaces::msg::SprayActuatorAck::RESULT_LINK_REFUSED);
     spray_inflight_.reset();
@@ -759,17 +804,21 @@ void Px4LinkNode::step(double now_s) {
   service_spray_transactions(now_s);
 
   last_gate_ = gate_->step({now_s, hs_ok, last_rep_.session_alive, last_rep_.mask});
-  const std::string reason_key = std::to_string(static_cast<int>(last_gate_.reason));
-  if (last_gate_.failing_to_zero && reason_key != last_logged_reason_) {
-    RCLCPP_WARN(get_logger(), "failing to zero: reason code %s", reason_key.c_str());
+  // Logged once per fail-to-zero reason change; the enum is compared, no per-tick string.
+  if (last_gate_.failing_to_zero && logged_zero_reason_ != last_gate_.reason) {
+    RCLCPP_WARN(get_logger(), "failing to zero: reason code %d",
+                static_cast<int>(last_gate_.reason));
   }
-  last_logged_reason_ = last_gate_.failing_to_zero ? reason_key : std::string();
+  logged_zero_reason_ =
+      last_gate_.failing_to_zero ? std::optional<Reason>(last_gate_.reason) : std::nullopt;
 
   const bool nav_fresh = (now_s - st_t_) <= p_.stale.max_age_s[kVehicleStatus];
   nav_offboard_ = nav_fresh && st_.nav_state == kNavStateOffboard;
   const OffboardStep ofb = offboard_->step(now_s, last_link_ok_, nav_offboard_);
   const uint64_t t_us = stamp_us();
-  if (ofb.publish_heartbeat) publish_setpoint_set(last_gate_.sp, t_us);
+  last_heartbeat_published_ = ofb.publish_heartbeat;
+  if (ofb.publish_heartbeat)
+    publish_setpoint_set(ofb.stop_only ? stop_setpoint() : last_gate_.sp, t_us);
   if (ofb.send_mode_command)
     publish_vehicle_command(kCmdDoSetMode, 1.0F, 6.0F, t_us);  // 6 = OFFBOARD
   start_ulog_if_due(now_s, last_link_ok_);
@@ -777,6 +826,14 @@ void Px4LinkNode::step(double now_s) {
   service_pending(now_s, last_link_ok_, ofb);
   publish_state_and_health(now_s);
   publish_status(now_s, last_rep_, last_gate_);
+}
+
+bool Px4LinkNode::publish_shutdown_stop() {
+  if (timer_) timer_->cancel();
+  // Only where the stream was live: never start a heartbeat, and never write an unproven format.
+  if (!last_heartbeat_published_ || handshake_->state() != HandshakeState::Ok) return false;
+  publish_setpoint_set(stop_setpoint(), stamp_us());
+  return true;
 }
 
 void Px4LinkNode::service_pending(double now_s, bool link_healthy, const OffboardStep& ofb) {
@@ -831,10 +888,7 @@ void Px4LinkNode::publish_state_and_health(double now_s) {
     const auto o = assemble(lp_, att_, st_, f);
     dyx3_interfaces::msg::VehicleState s;
     s.stamp = ros_now();
-    // PX4 timestamps already arrive in the system-clock domain (contract section 7): no offset to
-    // apply.
-    s.px4_sample_stamp.sec = static_cast<int32_t>(o.px4_sample_us / 1000000ULL);
-    s.px4_sample_stamp.nanosec = static_cast<uint32_t>((o.px4_sample_us % 1000000ULL) * 1000ULL);
+    s.px4_sample_stamp = px4_stamp(o.px4_sample_us);
     s.position_valid = o.position_valid;
     s.velocity_valid = o.velocity_valid;
     s.attitude_valid = o.attitude_valid;
@@ -846,6 +900,8 @@ void Px4LinkNode::publish_state_and_health(double now_s) {
     s.velocity_down_mps = o.vd;
     for (size_t i = 0; i < 4; ++i) s.q_frd_to_ned[i] = o.q[i];
     s.heading_rad = o.heading;
+    // 0 also means "unknown": the rate is published only with a valid, fresh attitude.
+    s.yaw_rate_radps = o.attitude_valid && yaw_rate_->valid() ? yaw_rate_->rate() : 0.0F;
     s.xy_reset_counter = o.xy_reset_counter;
     s.delta_north_m = o.delta_north;
     s.delta_east_m = o.delta_east;
@@ -865,6 +921,7 @@ void Px4LinkNode::publish_state_and_health(double now_s) {
     h.stamp = ros_now();
     const bool fresh = (now_s - flags_t_) <= p_.stale.max_age_s[kEstimatorFlags];
     if (fresh) {
+      h.px4_sample_stamp = px4_stamp(flags_.timestamp_sample);  // same convention as VehicleState
       h.flags_valid = true;
       h.gnss_yaw_fusion_intended = flags_.cs_gnss_yaw;
       h.gnss_yaw_fault = flags_.cs_gnss_yaw_fault;
@@ -886,7 +943,7 @@ void Px4LinkNode::publish_status(double now_s, const StalenessReport& rep, const
   s.stamp = ros_now();
   s.session_alive = rep.session_alive;
   s.handshake_ok = handshake_->state() == HandshakeState::Ok;
-  s.offboard_heartbeat_active = offboard_->state() != OffboardState::Disabled && last_link_ok_;
+  s.offboard_heartbeat_active = last_heartbeat_published_;
   s.failing_to_zero = g.failing_to_zero;
   uint8_t fault = dyx3_interfaces::msg::Px4LinkStatus::FAULT_NONE;
   if (!rep.session_alive) {

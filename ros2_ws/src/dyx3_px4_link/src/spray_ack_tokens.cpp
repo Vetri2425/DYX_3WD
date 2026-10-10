@@ -53,10 +53,12 @@ bool SprayAckTokens::load() {
   }
   if (value > kCapacity) return false;
   next_ = value;
+  reserved_ = value;
   return true;
 }
 
 bool SprayAckTokens::persist(uint32_t next) {
+  ++persists_;
   const std::string temporary = state_path_ + ".tmp";
   const int fd = ::open(temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
                         S_IRUSR | S_IWUSR);
@@ -80,13 +82,17 @@ bool SprayAckTokens::persist(uint32_t next) {
 std::optional<SprayAckTokens::Identity> SprayAckTokens::reserve() {
   if (failed_) return std::nullopt;
   if (next_ == kCapacity) return std::nullopt;
-  const uint32_t index = next_;
-  const uint32_t advanced = index + 1U;
-  if (!persist(advanced)) {
-    failed_ = true;
-    return std::nullopt;
+  if (next_ == reserved_) {
+    // Block exhausted: durably move the high-water mark before any pair of the new block is
+    // handed out. This is the only disk write, once per kBlock transactions.
+    const uint32_t block_end = kCapacity - next_ < kBlock ? kCapacity : next_ + kBlock;
+    if (!persist(block_end)) {
+      failed_ = true;
+      return std::nullopt;
+    }
+    reserved_ = block_end;
   }
-  next_ = advanced;
+  const uint32_t index = next_++;
   return Identity{static_cast<uint8_t>(index / (kLast - kFirst + 1U) + 1U),
                   static_cast<uint16_t>(index % (kLast - kFirst + 1U) + kFirst)};
 }
