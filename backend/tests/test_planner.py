@@ -1,11 +1,10 @@
-"""BE-004: planning runs in its own process, one job at a time, within a wall-clock and a point budget."""
+"""BE-004: app-plan admission runs in its own process, one job at a time, within a wall-clock budget."""
 
 import asyncio
 import multiprocessing
 import os
 import threading
 import time
-from pathlib import Path
 
 import anyio
 import pytest
@@ -16,8 +15,6 @@ from dyx3_backend.config.settings import Settings
 from dyx3_backend.main import create_api
 from dyx3_backend.mission.planner import Planner
 from dyx3_backend.mission.service import MissionError
-
-DATA = Path(__file__).parent / "data" / "missions"
 
 
 def planners_alive() -> list:
@@ -75,32 +72,20 @@ def test_one_job_at_a_time_second_is_409_busy():
     assert planner.run(sleep_then, 0.0, "third") == "third"  # free again
 
 
-def test_busy_planner_is_409_on_every_planning_route(rig):
+def test_busy_planner_is_409_on_the_plan_route(rig):
     c, api, s = rig
+    plan = {"client": "t", "client_version": "1", "frame": "ekf_local_ned",
+            "runs": [{"type": "mark", "points": [[0, 0, 3], [1, 0, 1], [2, 0, 3]]}]}
     lock = api.state.missions.planner._lock
     assert lock.acquire(blocking=False)
     try:
-        dxf = (DATA / "square_2x2.dxf").read_bytes()
-        r = c.post("/api/missions", headers=H("oper-tok"), files={"file": ("s.dxf", dxf)})
-        assert r.status_code == 409 and r.json()["code"] == "busy"
-        r = c.post("/api/path/parse-dxf", headers=H("oper-tok"), files={"file": ("s.dxf", dxf)})
-        assert r.status_code == 409 and r.json()["code"] == "busy"
-        r = c.post("/api/missions/plan", headers=H("oper-tok"), json={"client": "x"})
+        r = c.post("/api/missions/plan", headers=H("oper-tok"), json=plan)
         assert r.status_code == 409 and r.json()["code"] == "busy"
     finally:
         lock.release()
     assert not os.path.isdir(s.missions_dir)
-    r = c.post("/api/missions", headers=H("oper-tok"), files={"file": ("s.dxf", dxf)})
+    r = c.post("/api/missions/plan", headers=H("oper-tok"), json=plan)
     assert r.status_code == 201, r.text
-
-
-def test_the_point_budget_refuses_an_oversized_plan(tmp_path):
-    s = Settings(data_dir=str(tmp_path), plan_max_points=3)
-    api, _, _ = create_api(s, tokens=token_store(), gateway=FakeGateway())
-    c = TestClient(api)
-    r = c.post("/api/missions", headers=H("oper-tok"), files={"file": ("s.dxf", (DATA / "square_2x2.dxf").read_bytes())})
-    assert r.status_code == 422 and r.json()["code"] == "points_limit_exceeded"
-    assert not os.path.isdir(s.missions_dir)
 
 
 def test_a_crashed_planning_process_is_an_error_not_a_hang():
@@ -120,10 +105,7 @@ def test_a_deeply_nested_app_plan_is_400_not_500(rig):
 
 
 def test_planning_budget_settings():
-    d = Settings.from_env({})
-    assert (d.plan_timeout_s, d.plan_max_points) == (60.0, 200_000)
-    e = Settings.from_env({"DYX3_PLAN_TIMEOUT_S": "5", "DYX3_PLAN_MAX_POINTS": "1000"})
-    assert (e.plan_timeout_s, e.plan_max_points) == (5.0, 1000)
-    for key in ("DYX3_PLAN_TIMEOUT_S", "DYX3_PLAN_MAX_POINTS"):
-        with pytest.raises(ValueError):
-            Settings.from_env({key: "0"})
+    assert Settings.from_env({}).plan_timeout_s == 60.0
+    assert Settings.from_env({"DYX3_PLAN_TIMEOUT_S": "5"}).plan_timeout_s == 5.0
+    with pytest.raises(ValueError):
+        Settings.from_env({"DYX3_PLAN_TIMEOUT_S": "0"})

@@ -15,7 +15,7 @@ Clean production rewrite of the DYX 3WD **precision ground-marking rover** softw
 
 ```
 ros2_ws/src/     12 packages — 11 C++ (ament_cmake) + 1 quarantined Python oracle
-backend/         FastAPI + Socket.IO + the CAD/CRS path engine. No rclpy.
+backend/         FastAPI + Socket.IO; admits tablet-planned missions. No rclpy.
 config/          runtime profiles, grouped by owning package
 deployment/      systemd units, network, udev
 installer/       install / upgrade / verify / rollback
@@ -46,7 +46,7 @@ docs/            architecture, contracts, interfaces, safety, validation
 ```bash
 cd ros2_ws && colcon build --symlink-install && colcon test
 cmake -S ros2_ws/src/dyx3_geometry -B build/geom_native -DDYX3_NATIVE_TESTS=ON && ctest --test-dir build/geom_native
-pip install -e "backend[dev,path-engine]" && pytest backend/tests
+pip install -e "backend[dev]" && pytest backend/tests
 ```
 
 CI on `ubuntu-24.04-arm` is authoritative — it matches the Jetson's architecture.

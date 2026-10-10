@@ -1,11 +1,11 @@
-"""Mission planning in a separate process, with a wall-clock and an output budget (BE-004).
+"""App-plan admission in a separate process, with a wall-clock budget (BE-004).
 
 Contract: docs/contracts/backend.md section 1 ("Planning budget").
 
-The path engine and the app-plan compiler are CPU-bound Python. In a worker thread they share the GIL with the event
-loop that relays the operator-link heartbeat, so a pathological DXF uploaded while the rover is marking could slow
-the relay into a false STOP and hold the planner indefinitely. Here every job runs in a fresh ``spawn``-ed process
-(never ``fork``: the backend has threads), one job at a time; a job over its wall-clock budget is terminated (then
+The app-plan compiler is CPU-bound Python working on a body of up to ``upload_max_bytes``. In a worker thread it
+would share the GIL with the event loop that relays the operator-link heartbeat, so a pathological plan posted while
+the rover is marking could slow the relay into a false STOP and hold the compiler indefinitely. Here every job runs
+in a fresh ``spawn``-ed process (never ``fork``: the backend has threads), one job at a time; a job over its wall-clock budget is terminated (then
 killed) and reported as an error. The caller blocks in ``Planner.run`` from a worker thread; that thread waits on a
 pipe with the GIL released, so the event loop is never blocked.
 
@@ -16,8 +16,6 @@ from __future__ import annotations
 
 import json
 import multiprocessing
-import os
-import tempfile
 import threading
 
 from dyx3_backend.mission import path_artifact as pa
@@ -28,35 +26,6 @@ _REAP_S = 2.0
 
 
 # ------------------------------------------------------------------------------------------------ jobs (child side)
-def plan_dxf_job(filename: str, data: bytes, params, engine_id: str, max_points: int) -> bytes:
-    """Run the path engine on an upload and encode the artifact. Returns the ``DYX3PATH 1`` bytes."""
-    ext = os.path.splitext(filename or "")[1].lower()
-    from dyx3_backend.path_engine.engine import PathEngine  # heavy import (ezdxf): child only
-
-    with tempfile.TemporaryDirectory(prefix="dyx3-upload-") as td:
-        path = os.path.join(td, "upload" + ext)  # the client's name is never used as a path
-        with open(path, "wb") as fh:
-            fh.write(data)
-        try:
-            plan = PathEngine().plan_file(
-                path,
-                unit_scale=params.unit_scale,
-                origin=(params.origin_n, params.origin_e),
-                rotation_deg=params.rotation_deg,
-                close_loop=params.close_loop,
-                anchor=params.anchor,
-            )
-        except Exception as exc:  # the engine raises many types for bad CAD input
-            raise MissionError(422, "plan_failed", f"{type(exc).__name__}: {exc}") from exc
-    n = len(getattr(plan, "merged_waypoints", ()) or ())
-    if n > max_points:
-        raise MissionError(422, "points_limit_exceeded", f"the plan has {n} points, over the {max_points} limit")
-    try:
-        return pa.encode_plan(plan, engine_id=engine_id, source_name=filename, source_bytes=data)
-    except (pa.ArtifactError, ValueError) as exc:
-        raise MissionError(422, "artifact_failed", f"{type(exc).__name__}: {exc}") from exc
-
-
 def app_plan_job(raw: bytes) -> bytes:
     """Parse and compile an app-planned mission body. Returns the ``DYX3PATH 1`` bytes."""
     from dyx3_backend.mission.app_plan import compile_plan
@@ -71,12 +40,6 @@ def app_plan_job(raw: bytes) -> bytes:
         return compile_plan(body)
     except pa.ArtifactError as exc:
         raise MissionError(422, "ARTIFACT_FAILED", f"{type(exc).__name__}: {exc}") from exc
-
-
-def parse_dxf_job(filename: str, data: bytes, max_bytes: int) -> dict:
-    from dyx3_backend.mission.parse_import import parse_dxf_upload
-
-    return parse_dxf_upload(filename, data, max_bytes)
 
 
 def _child(conn, fn, args) -> None:

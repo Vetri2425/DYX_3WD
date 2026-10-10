@@ -162,19 +162,6 @@ def test_plan_body_limit_bounds_stream_without_content_length(tmp_path):
     assert not Path(settings.missions_dir).exists()
 
 
-def test_route_never_imports_path_engine(rig, monkeypatch):
-    client, _ = rig
-    original = __import__
-
-    def guarded(name, *args, **kwargs):
-        if "path_engine" in name:
-            raise AssertionError(f"unexpected path engine import: {name}")
-        return original(name, *args, **kwargs)
-
-    monkeypatch.setattr("builtins.__import__", guarded)
-    assert client.post("/api/missions/plan", headers=H("oper-tok"), json=plan("mark")).status_code == 201
-
-
 def test_full_app_registers_route_once(tmp_path):
     app = create_app(Settings(data_dir=str(tmp_path)), tokens=token_store(), gateway=FakeGateway()).api
     routes = [*app.routes]

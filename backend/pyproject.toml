@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "dyx3-backend"
 version = "0.1.0"
-description = "DYX 3WD production backend: REST + Socket.IO, auth, mission, telemetry, RTK profiles, storage, and the CAD/CRS path engine. Never imports rclpy — reaches ROS only through dyx3_system_gateway."
+description = "DYX 3WD production backend: REST + Socket.IO, auth, tablet-planned mission admission, telemetry, RTK profiles, storage. Never imports rclpy — reaches ROS only through dyx3_system_gateway."
 requires-python = ">=3.10"
 license = { text = "Proprietary" }
 authors = [{ name = "Vetri", email = "vetri96anitha@gmail.com" }]
@@ -13,22 +13,11 @@ dependencies = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
     "python-socketio>=5.10",
-    "python-multipart>=0.0.9",
 ]
 
 [project.optional-dependencies]
-# The path engine stays Python by decision (architecture 7.2): it runs once per
-# mission upload, never in the loop, and carries a bug history that a C++ rewrite
-# would re-open for latency nobody needs.
-# Only what the carried engine actually imports (checked 2026-10-07): ezdxf (DXF) and
-# geographiclib (Karney geodesics). The earlier pyproj/numpy/shapely entries were guesses.
-path-engine = [
-    "ezdxf>=1.1",
-    "geographiclib>=2.0",
-]
 dev = [
     "pytest>=8.0",
-    "hypothesis>=6.0",
     "ruff>=0.4",
     "httpx>=0.27",
 ]
@@ -38,7 +27,3 @@ packages = ["src/dyx3_backend"]
 
 [tool.ruff]
 line-length = 100
-# The carried path engine and its tests are PX4_DXP code whose only edit is the import prefix
-# (provenance: src/dyx3_backend/path_engine/ORIGIN.sha256). Re-formatting it would destroy that
-# property, so it is lint-exempt. New code next to it (mission/path_artifact.py) is linted.
-extend-exclude = ["src/dyx3_backend/path_engine", "tests/path_engine"]

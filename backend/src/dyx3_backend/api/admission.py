@@ -24,13 +24,8 @@ from starlette.responses import JSONResponse
 
 from dyx3_backend.auth.tokens import TokenStore
 
-# Upload routes: their cap is ``upload_max_bytes``. The multipart routes get MULTIPART_ENVELOPE_BYTES on top,
-# because ``upload_max_bytes`` bounds the FILE (the routes check it exactly) and the multipart envelope (boundaries,
-# part headers, the small form fields) comes on top of it. ``/missions/plan`` is a raw JSON body: exact limit.
-MULTIPART_UPLOAD_PATHS = frozenset({"/api/missions", "/api/path/parse-dxf"})
+# The one upload route: ``/missions/plan`` is a raw JSON body, capped at exactly ``upload_max_bytes``.
 RAW_UPLOAD_PATHS = frozenset({"/api/missions/plan"})
-# DERIVED — NOT FROM V1 SPEC: the envelope of a multipart DXF upload is a few hundred bytes.
-MULTIPART_ENVELOPE_BYTES = 64 * 1024
 
 
 # DERIVED — NOT FROM V1 SPEC (BE-010): the deepest real JSON body (an RTK config with its profiles) is 4 levels.
@@ -116,12 +111,10 @@ class AdmissionMiddleware:
     @staticmethod
     def is_upload(path: str) -> bool:
         p = path.rstrip("/") or "/"
-        return p in MULTIPART_UPLOAD_PATHS or p in RAW_UPLOAD_PATHS
+        return p in RAW_UPLOAD_PATHS
 
     def cap_for(self, path: str) -> int:
         p = path.rstrip("/") or "/"
-        if p in MULTIPART_UPLOAD_PATHS:
-            return self._upload_max + MULTIPART_ENVELOPE_BYTES
         if p in RAW_UPLOAD_PATHS:
             return self._upload_max
         return self._json_max
@@ -157,7 +150,7 @@ class AdmissionMiddleware:
                 return
 
         # 3. Streamed size (chunked bodies, or a client sending more than it declared), and the JSON nesting depth on
-        #    the small JSON routes (the upload routes parse their bodies in the planning process).
+        #    the small JSON routes (the plan route parses its body in the planning process).
         scanner = None if self.is_upload(path) else JsonDepthScanner()
         received = 0
         refusal: tuple[int, str, str] | None = None

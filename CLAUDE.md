@@ -45,7 +45,7 @@ Do not assume the 4WD rules transfer. Four differences are load-bearing:
 | **Wheel encoders** | **Primary aid.** `EKF2_WENC_CTRL=1`; the lever-arm fix is field-verified at 1.52 → 0.50 cm pivot wobble. | Explicitly deferred. |
 | **Heading** | Dual-antenna UM982 GNSS heading is a first-class sensor with its own failure modes. | IMU + RTK position. |
 | **Marking actuator** | Spray valve with **geometric boundary semantics** — where it opens is part of the accuracy spec. | None comparable. |
-| **Path engine** | ~8 000 lines of CAD/DXF/CRS geometry. **Stays Python, in the backend** (spec 7.2). | C++ `dyx_trajectory`. |
+| **Trajectory authoring** | The tablet app is the single trajectory author (owner decision 2026-10-10); the backend only admits `POST /api/missions/plan` (`docs/contracts/app_planned_mission.md`) and has no path engine. | C++ `dyx_trajectory`. |
 
 Terrain is why the encoder decision differs: prepared surfaces here, loose soil there.
 `dyx3_` is the package prefix. Never share interfaces with the 4WD stack without an explicit
@@ -79,7 +79,7 @@ PX4 "rate RTCM injection 5.77 Hz", CRC OK (indoors: no fix, expected); upgrade f
 
 ### What exists
 
-- 12 implemented packages, backend + Python path engine, see `README.md` and `docs/agents/CLOUD_REVIEW_STATUS.md`.
+- 12 implemented packages, backend (admits tablet-planned missions), see `README.md` and `docs/agents/CLOUD_REVIEW_STATUS.md`.
 - Installer that installs **prebuilt, digest-verified CI artifacts** (`installer/lib/artifacts.sh`, proposal
   `2026-10-08_prebuilt-release-artifacts.md`, ACCEPTED), falls back to building on the Jetson, supports offline USB.
 - PX4 parameter baseline for this rover: `config/px4/3wd_6x_carry_from_proto.params` (prototype values carried,
@@ -218,7 +218,7 @@ Never force-push `master` or any shared branch. Never rewrite pushed history.
 | `ros2_ws/src/dyx3_mission/`, `dyx3_gnss_rtk/` | Claude, Codex | Claude |
 | `ros2_ws/src/dyx3_rpp_legacy/` | Claude | **Claude — see §8** |
 | `ros2_ws/src/dyx3_recorder/`, `dyx3_bringup/`, `dyx3_system_gateway/` | Codex, Agy | any |
-| `backend/` (incl. `path_engine/`) | Codex | Claude for `path_engine/` |
+| `backend/` | Codex | any |
 | `installer/`, `deployment/` | Agy, Codex | human |
 | `config/` | Claude | **human — field-affecting** |
 | `docs/` | any | any |
@@ -274,8 +274,8 @@ cd ros2_ws && colcon build --symlink-install && colcon test && colcon test-resul
 cmake -S ros2_ws/src/dyx3_geometry -B build/geom_native -DDYX3_NATIVE_TESTS=ON
 cmake --build build/geom_native && ctest --test-dir build/geom_native
 
-# Backend + path engine
-pip install -e "backend[dev,path-engine]" && ruff check backend/src backend/tests && pytest backend/tests
+# Backend
+pip install -e "backend[dev]" && ruff check backend/src backend/tests && pytest backend/tests
 ```
 
 **Authoritative:** CI on `ubuntu-24.04-arm`, matching the Jetson's architecture.

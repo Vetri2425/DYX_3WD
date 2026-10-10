@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 import os
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 
 
 def _f(env: dict, key: str, default: float) -> float:
@@ -24,15 +24,14 @@ class Settings:
     auth_file: str = ""
     gateway_socket: str = "/run/dyx3/gateway.sock"
     rtk_socket: str = "/run/dyx3/rtk-control.sock"
-    # DERIVED — NOT FROM V1 SPEC: large DXF drawings exist; the cap only bounds memory. OPEN.
+    # DERIVED — NOT FROM V1 SPEC: the cap on a POST /api/missions/plan body; it only bounds memory. OPEN.
     upload_max_bytes: int = 20 * 1024 * 1024
     # DERIVED — NOT FROM V1 SPEC: cap for every other /api request body (JSON commands, RTK config). The largest
     # real body (an RTK config with its NTRIP profiles) is a few KiB.
     json_body_max_bytes: int = 64 * 1024
-    # DERIVED — NOT FROM V1 SPEC (BE-004): wall-clock budget of one planning job (DXF plan, app plan, DXF parse),
-    # process start-up included, and the most points a DXF plan may generate. Over budget = terminated, an error.
+    # DERIVED — NOT FROM V1 SPEC (BE-004): wall-clock budget of one app-plan admission job, process start-up
+    # included. Over budget = terminated, an error.
     plan_timeout_s: float = 60.0
-    plan_max_points: int = 200_000
     # gateway reply wait; must exceed the gateway's own service_timeout_s (2.0) so its verdict arrives first
     request_timeout_s: float = 3.0
     # DERIVED — NOT FROM V1 SPEC (see contract section 3). OPEN.
@@ -43,7 +42,6 @@ class Settings:
     sio_ping_interval_s: float = 5.0
     # DERIVED — re-validate in field Wi-Fi. Tablet heartbeat owns the safety timeout.
     sio_ping_timeout_s: float = 5.0
-    allowed_extensions: tuple[str, ...] = field(default=(".dxf", ".csv", ".waypoints"))
     # Rover identity and LAN discovery beacon (contract section 1a). Empty id/name = derived from the
     # machine id and hostname. The beacon is off by default here (tests); from_env turns it on.
     rover_id: str = ""
@@ -85,7 +83,6 @@ class Settings:
             upload_max_bytes=int(_f(e, "DYX3_UPLOAD_MAX_BYTES", 20 * 1024 * 1024)),
             json_body_max_bytes=int(_f(e, "DYX3_JSON_BODY_MAX_BYTES", 64 * 1024)),
             plan_timeout_s=_f(e, "DYX3_PLAN_TIMEOUT_S", 60.0),
-            plan_max_points=int(_f(e, "DYX3_PLAN_MAX_POINTS", 200_000)),
             request_timeout_s=_f(e, "DYX3_REQUEST_TIMEOUT_S", 3.0),
             heartbeat_relay_s=_f(e, "DYX3_HEARTBEAT_RELAY_S", 0.5),
             tablet_heartbeat_timeout_s=_f(e, "DYX3_TABLET_HEARTBEAT_TIMEOUT_S", 1.5),

@@ -444,7 +444,7 @@ build_backend_venv() {
     return 0
   }
   log "building backend venv"
-  if ! run python3 -m venv "${rel}/venv" || ! run "${rel}/venv/bin/pip" install --quiet "${rel}/backend[path-engine]"; then
+  if ! run python3 -m venv "${rel}/venv" || ! run "${rel}/venv/bin/pip" install --quiet "${rel}/backend"; then
     warn "backend venv build FAILED (no network?); the backend will be unavailable until it is built"
     return 0
   fi

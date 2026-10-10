@@ -1,12 +1,10 @@
 name: CI
 
 # Mirrors the DYX_4WD CI contract: colcon build + test, clang-format, backend
-# checks, repo hygiene. Two jobs are 3WD-specific:
+# checks, repo hygiene. One job is 3WD-specific:
 #   - legacy_quarantine: dyx3_rpp_legacy is the ONE permitted Python package in
 #     the control graph (the shadow-run oracle). CI enforces that it stays
 #     quarantined and never reaches a production install.
-#   - path_engine tests run inside backend_checks, because the path engine is
-#     deliberately Python and lives in the backend, not in ros2_ws.
 # clang-tidy and interface-compatibility checks are not wired yet — no C++
 # sources and no frozen interfaces exist to check against.
 
@@ -177,7 +175,7 @@ jobs:
             -print0 | xargs -0 -r clang-format --dry-run --Werror
 
   backend_checks:
-    name: backend + path engine (ruff + pytest)
+    name: backend (ruff + pytest)
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -189,7 +187,7 @@ jobs:
       - name: Install backend + dev deps
         run: |
           python -m pip install --upgrade pip
-          pip install -e "backend[dev,path-engine]"
+          pip install -e "backend[dev]"
 
       - name: ruff
         run: ruff check backend/src backend/tests

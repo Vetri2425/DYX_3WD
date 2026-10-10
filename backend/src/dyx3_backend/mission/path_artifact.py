@@ -1,6 +1,6 @@
 """Versioned, content-hashed path artifact (architecture 7.2).
 
-The path engine runs once per mission upload and emits ONE immutable file. Its identity is the
+App-plan admission (``app_plan.py``) runs once per mission and emits ONE immutable file. Its identity is the
 SHA-256 of its exact bytes; that hash is what `StartMission.path_artifact_sha256` /
 `ExecuteMission` goals carry, what `dyx3_mission` verifies before loading, and what the run
 manifest records. A mission is therefore reproducible: same bytes, same hash, same path.
@@ -43,8 +43,8 @@ FLAG_MUST_HIT = 2
 _FLAG_MASK = FLAG_SPRAY | FLAG_MUST_HIT
 EXTENSION = ".dyx3path"
 
-# Keys removed from engine metadata because they differ per run/host (they would make the same
-# mission hash differently).
+# Keys removed from metadata because they differ per run/host (they would make the same mission hash
+# differently).
 _VOLATILE_KEYS = frozenset({"filepath", "planning_time_s"})
 
 
@@ -99,12 +99,6 @@ def _num(x: float) -> str:
     if not math.isfinite(x):
         raise ArtifactError(f"non-finite coordinate {x!r}")
     return repr(float(x))
-
-
-def engine_id_from_origin_file(origin_sha256_path: str) -> str:
-    """Identity of the carried path engine = hash of its provenance file (first 16 hex)."""
-    with open(origin_sha256_path, "rb") as fh:
-        return sha256_hex(fh.read())[:16]
 
 
 def encode(
@@ -196,50 +190,6 @@ def decode(data: bytes, *, expected_sha256: str | None = None) -> PathArtifact:
             raise ArtifactError(f"point {i}: coordinates not in canonical repr form")
         pts.append(PathPoint(north, east, flags))
     return PathArtifact(digest, FORMAT_VERSION, engine_id, meta, tuple(pts))
-
-
-def build_meta(plan, *, source_name: str | None = None, source_bytes: bytes | None = None) -> dict:
-    """Machine-independent metadata for a ``PlannedPath``.
-
-    Includes the engine's own planning/alignment metadata minus volatile keys, plus the source
-    file's name and SHA-256 so the artifact traces back to the uploaded CAD file.
-    """
-    meta: dict = {
-        "origin_ne_m": [float(plan.origin[0]), float(plan.origin[1])],
-        "total_mark_length_m": float(plan.total_mark_length),
-        "total_transit_length_m": float(plan.total_transit_length),
-        "num_waypoints": int(plan.num_waypoints),
-        "planning": _strip_volatile(copy.deepcopy(plan.planning_metadata)),
-        "alignment": _strip_volatile(copy.deepcopy(plan.alignment_metadata)),
-    }
-    if source_name is not None:
-        meta["source"] = {"name": os.path.basename(source_name)}
-        if source_bytes is not None:
-            meta["source"]["sha256"] = sha256_hex(source_bytes)
-    return meta
-
-
-def points_from_plan(plan) -> list[tuple[float, float, int]]:
-    """``PlannedPath`` -> ``(north, east, flags)``. Missing must-hit provenance => all False."""
-    n = len(plan.merged_waypoints)
-    if len(plan.spray_flags) != n:
-        raise ArtifactError("spray_flags length differs from merged_waypoints")
-    must = list(plan.must_hit) if plan.must_hit else [False] * n
-    if len(must) != n:
-        raise ArtifactError("must_hit length differs from merged_waypoints")
-    return [
-        (float(p[0]), float(p[1]), (FLAG_SPRAY if s else 0) | (FLAG_MUST_HIT if m else 0))
-        for p, s, m in zip(plan.merged_waypoints, plan.spray_flags, must, strict=True)
-    ]
-
-
-def encode_plan(plan, *, engine_id: str, source_name: str | None = None,
-                source_bytes: bytes | None = None) -> bytes:
-    return encode(
-        points_from_plan(plan),
-        engine_id=engine_id,
-        meta=build_meta(plan, source_name=source_name, source_bytes=source_bytes),
-    )
 
 
 def store(directory: str, data: bytes) -> tuple[str, str]:

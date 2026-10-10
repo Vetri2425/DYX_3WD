@@ -8,14 +8,14 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 import anyio
-from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, StrictBool, StrictStr
 
 from dyx3_backend.api.admission import bearer_identity
 from dyx3_backend.auth.tokens import Identity, Role
 from dyx3_backend.gateway.client import GatewayError
-from dyx3_backend.mission.service import MissionError, PlanParams, summarize
+from dyx3_backend.mission.service import MissionError, summarize
 from dyx3_backend.rtk.client import RtkRejected, RtkUnavailable
 from dyx3_backend.storage import runs as runs_store
 
@@ -238,28 +238,6 @@ async def ingest_app_plan(request: Request, _: Identity = Operator) -> JSONRespo
     return JSONResponse({"ok": True, "mission": summary, "normalisation": normalisation}, status_code=201)
 
 
-@router.post("/missions")
-async def upload_mission(
-    request: Request,
-    file: Annotated[UploadFile, File()],
-    origin_n: Annotated[float, Form()] = 0.0,
-    origin_e: Annotated[float, Form()] = 0.0,
-    rotation_deg: Annotated[float, Form()] = 0.0,
-    unit_scale: Annotated[float | None, Form()] = None,
-    close_loop: Annotated[bool, Form()] = False,
-    anchor: Annotated[str, Form()] = "drawing_origin",
-    _: Identity = Operator,
-) -> JSONResponse:
-    svc, settings = request.app.state.missions, request.app.state.settings
-    data = await file.read(settings.upload_max_bytes + 1)  # never buffer more than the limit + 1
-    params = PlanParams(origin_n, origin_e, rotation_deg, unit_scale, close_loop, anchor)
-    try:
-        summary = await anyio.to_thread.run_sync(svc.ingest, file.filename or "", data, params)
-    except MissionError as exc:
-        return _mission_error(exc)
-    return JSONResponse({"ok": True, "mission": summary}, status_code=201)
-
-
 @router.get("/missions")
 async def list_missions(request: Request, _: Identity = Viewer) -> dict:
     return {"missions": await anyio.to_thread.run_sync(request.app.state.missions.list)}
@@ -281,7 +259,7 @@ def _render_path(svc, sha: str) -> bytes:
     body = {
         "sha256": art.sha256,
         # What the points are relative to (meta, docs/contracts/backend.md section 1b): "local_ned" = the anchor's
-        # local NE, "ekf_local_ned" = the rover's EKF local frame. A DXF upload records no frame: "local_ned".
+        # local NE, "ekf_local_ned" = the rover's EKF local frame. A stored artifact that records no frame is read as "local_ned".
         "frame": meta.get("frame", "local_ned"),
         "anchor": meta.get("anchor"),
         "points": [[p.north_m, p.east_m, p.flags] for p in art.points],

@@ -22,8 +22,8 @@ from dyx3_backend.mission import path_artifact as pa
 from dyx3_backend.mission.service import MissionError
 
 MAX_POINTS = 50_000  # submitted points
-# DERIVED — NOT FROM V1 SPEC: bound on the STORED points after densify (same budget as a DXF plan's default
-# ``plan_max_points``). Without it a few submitted points spread over the envelope would densify into millions.
+# DERIVED — NOT FROM V1 SPEC: bound on the STORED points after densify. Without it a few submitted points spread over
+# the envelope would densify into millions.
 MAX_STORED_POINTS = 200_000
 MAX_STEP_M = 5.0
 ENVELOPE_M = 10_000.0

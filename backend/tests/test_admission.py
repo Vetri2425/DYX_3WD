@@ -65,7 +65,7 @@ def test_tokenless_bad_body_is_401_not_422(rig):
 async def test_a_50mb_tokenless_body_is_refused_without_reading_it(rig):
     _, gw, api = rig
     chunks = [b"x" * MiB] * 50
-    for path in ("/api/estop", "/api/missions", "/api/path/parse-dxf", "/api/missions/plan", "/api/rtk/config"):
+    for path in ("/api/estop", "/api/missions/plan", "/api/rtk/config"):
         for headers in ({"content-length": str(50 * MiB)}, {}):  # declared, and chunked (no length)
             status, hdrs, _body, pulled = await call_raw(api, "POST", path, headers, chunks)
             assert status == 401, path

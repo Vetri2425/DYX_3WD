@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-from pathlib import Path
 
 import pytest
 from backend_helpers import FakeGateway, H, token_store
@@ -11,7 +10,8 @@ from fastapi.testclient import TestClient
 from dyx3_backend.config.settings import Settings
 from dyx3_backend.main import create_api
 
-DATA = Path(__file__).parent / "data" / "missions"
+PLAN = {"client": "t", "client_version": "1", "frame": "ekf_local_ned",
+        "runs": [{"type": "mark", "points": [[0, 0, 3], [1, 0, 1], [2, 0, 3]]}]}
 
 
 def on_event_loop() -> bool:
@@ -27,7 +27,7 @@ def rig(tmp_path):
     gw = FakeGateway()
     api, _, _ = create_api(Settings(data_dir=str(tmp_path)), tokens=token_store(), gateway=gw)
     c = TestClient(api)
-    r = c.post("/api/missions", headers=H("oper-tok"), files={"file": ("s.dxf", (DATA / "square_2x2.dxf").read_bytes())})
+    r = c.post("/api/missions/plan", headers=H("oper-tok"), json=PLAN)
     assert r.status_code == 201, r.text
     return c, gw, api, r.json()["mission"]
 
@@ -51,7 +51,7 @@ def test_artifact_reads_run_in_a_worker_thread(rig, monkeypatch):
     # The pre-rendered /path body is the same JSON as before.
     assert path.status_code == 200 and path.headers["content-type"] == "application/json"
     body = path.json()
-    assert body["sha256"] == sha and body["frame"] == "local_ned" and len(body["points"]) == mission["num_points"]
+    assert body["sha256"] == sha and body["frame"] == "ekf_local_ned" and len(body["points"]) == mission["num_points"]
     assert path.content == json.dumps(body, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode()
 
 

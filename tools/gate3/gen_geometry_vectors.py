@@ -51,7 +51,14 @@ def sha(path: str) -> str:
 
 def corpus(cls):
     """name -> (points[(n, e)], flags[bool]) from the archived missions + verbatim conditioning."""
-    from dyx3_backend.path_engine.engine import PathEngine
+    try:
+        from dyx3_backend.path_engine.engine import PathEngine
+    except ImportError:
+        sys.exit(
+            "the corpus needs the carried path engine, which was removed from the backend (owner decision 2026-10-10: "
+            "the tablet app is the only trajectory author). The committed fixtures are the record; to regenerate "
+            "them, run this tool from a checkout that still has backend/src/dyx3_backend/path_engine/."
+        )
 
     out = {}
     for fname in sorted(os.listdir(MISSIONS)):

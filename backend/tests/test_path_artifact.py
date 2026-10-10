@@ -1,17 +1,12 @@
-"""Path artifact: determinism, strict decoding, content addressing, end-to-end on the corpus."""
+"""Path artifact: determinism, strict decoding, content addressing."""
 
 import math
 import os
 
 import pytest
 
-pytest.importorskip("ezdxf")
-pytest.importorskip("geographiclib")
-
 from dyx3_backend.mission import path_artifact as pa
-from dyx3_backend.path_engine.engine import PathEngine
 
-DATA = os.path.join(os.path.dirname(__file__), "data", "missions")
 ENGINE_ID = "abcd1234abcd1234"
 PTS = [(0.0, 0.0, 1), (0.05, 0.0, 3), (0.1, 0.0, 2), (0.1, 0.05, 0)]
 
@@ -130,45 +125,3 @@ def test_store_refuses_bytes_the_reader_would_refuse(tmp_path):
     with pytest.raises(pa.ArtifactError):
         pa.store(str(tmp_path), b"not an artifact\n")
     assert os.listdir(tmp_path) == []
-
-
-# --- end to end on the archived corpus (the DXF/waypoint inputs that ARE in Git) -------------
-# CHARACTERISATION of the carried engine as of 2026-10-07 (ezdxf 1.4.4, geographiclib 2.1): these
-# values pin today's output so an accidental behaviour change is caught. They are NOT ground truth.
-CORPUS = {
-    "square_2x2.dxf": {"n": 161, "spray": 161, "must": 5, "mark": 8.0, "transit": 0.0},
-    "soccer_pitch_fifa_edited.dxf": {"n": 19578, "spray": 17241, "must": 1309, "mark": 860.317323, "transit": 347.049473},
-    "soccer_field_penalty_area.dxf": {"n": 8699, "spray": 8474, "must": 4204, "mark": 423.324878, "transit": 33.256087},
-    "mission_straight_5m.waypoints": {"n": 105, "spray": 103, "must": 11, "mark": 4.994876, "transit": 0.1},
-}
-
-
-@pytest.mark.parametrize("name", sorted(CORPUS))
-def test_corpus_mission_to_artifact_roundtrip(name, tmp_path):
-    path = os.path.join(DATA, name)
-    with open(path, "rb") as fh:
-        src = fh.read()
-    plan = PathEngine().plan_file(path)
-    exp = CORPUS[name]
-    assert len(plan.merged_waypoints) == exp["n"]
-    assert sum(plan.spray_flags) == exp["spray"]
-    assert sum(plan.must_hit) == exp["must"]
-    assert plan.total_mark_length == pytest.approx(exp["mark"], abs=1e-5)
-    assert plan.total_transit_length == pytest.approx(exp["transit"], abs=1e-5)
-
-    data = pa.encode_plan(plan, engine_id=ENGINE_ID, source_name=path, source_bytes=src)
-    art = pa.decode(data)
-    assert len(art.points) == len(plan.merged_waypoints)
-    for p, w, s, m in zip(art.points, plan.merged_waypoints, plan.spray_flags, plan.must_hit, strict=True):
-        assert (p.north_m, p.east_m) == (w[0], w[1])  # bit-exact
-        assert p.spray is bool(s) and p.must_hit is bool(m)
-    assert art.meta["source"] == {"name": name, "sha256": pa.sha256_hex(src)}
-    assert "filepath" not in str(art.meta) and "planning_time_s" not in str(art.meta)
-
-    # planning twice (different wall-clock timings) must give the SAME artifact hash
-    again = pa.encode_plan(
-        PathEngine().plan_file(path), engine_id=ENGINE_ID, source_name=path, source_bytes=src
-    )
-    assert again == data
-    digest, _ = pa.store(str(tmp_path), data)
-    assert pa.load(str(tmp_path), digest).points == art.points

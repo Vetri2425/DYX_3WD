@@ -1,7 +1,8 @@
 """DYX 3WD backend entrypoint.
 
 Owns: REST, Socket.IO, auth, mission upload/report, telemetry delivery, settings,
-storage, NTRIP profile management, and CAD/CRS path ingestion.
+storage, NTRIP profile management, and admission of tablet-planned missions (the tablet app authors
+every trajectory; the backend validates and stores it, it never plans geometry).
 
 Does NOT own: rclpy, ROS executors, direct PX4 commands, motor safety logic,
 steering, or RPP corrections. Reaches ROS only through dyx3_system_gateway over a
@@ -19,7 +20,6 @@ import socketio
 from fastapi import FastAPI
 
 from dyx3_backend.api.admission import AdmissionMiddleware
-from dyx3_backend.api.parse_routes import router as parse_router
 from dyx3_backend.api.routes import router
 from dyx3_backend.auth.tokens import TokenStore
 from dyx3_backend.config.settings import Settings
@@ -97,7 +97,6 @@ def create_api(
     api.state.missions = missions or MissionService(settings)
     api.state.rtk = rtk or RtkClient(settings.rtk_socket, settings.request_timeout_s)
     api.include_router(router)
-    api.include_router(parse_router)
     # Bearer check + body cap before FastAPI reads any body (XR-BE-001). Wraps this FastAPI app only: the
     # Socket.IO app is routed beside it by Combined and authenticates on connect.
     api.add_middleware(

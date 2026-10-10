@@ -1,7 +1,6 @@
-"""Upload -> path engine -> content-addressed artifact -> start, through the REST surface."""
+"""App plan -> content-addressed artifact -> list / read / start, through the REST surface."""
 
 import os
-from pathlib import Path
 
 import pytest
 from backend_helpers import FakeGateway, H, token_store
@@ -9,8 +8,6 @@ from fastapi.testclient import TestClient
 
 from dyx3_backend.config.settings import Settings
 from dyx3_backend.main import create_api
-
-DATA = os.path.join(os.path.dirname(__file__), "data", "missions")
 
 
 @pytest.fixture
@@ -21,81 +18,64 @@ def rig(tmp_path):
     return TestClient(api), gw, s
 
 
-def up(c, name, data, **form):
-    return c.post("/api/missions", headers=H("oper-tok"), files={"file": (name, data)}, data=form)
+def body(**kw):
+    out = {"client": "t", "client_version": "1", "frame": "ekf_local_ned", "name": "square",
+           "runs": [{"type": "mark", "points": [[0, 0, 3], [1, 0, 1], [2, 0, 3]]},
+                    {"type": "travel", "points": [[2, 0, 2], [2, 1, 2]]}]}
+    out.update(kw)
+    return out
 
 
-def test_upload_plans_stores_and_is_idempotent(rig):
+def plan(c, **kw):
+    return c.post("/api/missions/plan", headers=H("oper-tok"), json=body(**kw))
+
+
+def test_plan_stores_lists_reads_and_is_idempotent(rig):
     c, _, s = rig
-    data = Path(os.path.join(DATA, "square_2x2.dxf")).read_bytes()
-    r = up(c, "square_2x2.dxf", data)
+    r = plan(c)
     assert r.status_code == 201, r.text
     m = r.json()["mission"]
-    assert len(m["sha256"]) == 64 and m["num_points"] > 4 and m["num_spray_points"] > 0
-    assert m["source"]["name"] == "square_2x2.dxf"
+    assert len(m["sha256"]) == 64 and m["num_points"] == 4 and m["num_spray_points"] == 3
+    assert m["source"]["name"] == "square"
     assert os.path.exists(os.path.join(s.missions_dir, m["sha256"] + ".dyx3path"))
-    again = up(c, "renamed.dxf", data).json()["mission"]
-    assert again["sha256"] != "" and again["num_points"] == m["num_points"]
+    assert plan(c).json()["mission"]["sha256"] == m["sha256"]  # same plan, same artifact
+    assert len(os.listdir(s.missions_dir)) == 1
     listing = c.get("/api/missions", headers=H("view-tok")).json()["missions"]
     assert m["sha256"] in [x["sha256"] for x in listing]
     one = c.get(f"/api/missions/{m['sha256']}", headers=H("view-tok")).json()["mission"]
     assert one["sha256"] == m["sha256"]
     path = c.get(f"/api/missions/{m['sha256']}/path", headers=H("view-tok")).json()
-    assert path["frame"] == "local_ned" and len(path["points"]) == m["num_points"]
+    assert path["frame"] == "ekf_local_ned" and len(path["points"]) == m["num_points"]
     assert all(len(p) == 3 for p in path["points"])
 
 
-def test_waypoints_file_and_parameters(rig):
+def test_a_different_plan_is_a_different_mission(rig):
     c, _, _ = rig
-    data = Path(os.path.join(DATA, "mission_straight_5m.waypoints")).read_bytes()
-    a = up(c, "m.waypoints", data).json()["mission"]
-    b = up(c, "m.waypoints", data, origin_n="1.5", origin_e="2.5").json()["mission"]
-    assert a["sha256"] != b["sha256"]  # a different origin is a different mission
-    assert b["bbox_ne_m"][0] == pytest.approx(a["bbox_ne_m"][0] + 1.5, abs=1e-6)
+    a = plan(c).json()["mission"]["sha256"]
+    b = plan(c, runs=[{"type": "mark", "points": [[0, 0, 3], [1.5, 0, 3]]}]).json()["mission"]["sha256"]
+    assert a != b
 
 
-@pytest.mark.parametrize(
-    "name,data,form,status",
-    [
-        ("evil.sh", b"x", {}, 415),
-        ("noext", b"x", {}, 415),
-        ("x.dxf", b"", {}, 422),
-        ("x.dxf", b"A" * 1_000_001, {}, 413),
-        ("x.dxf", b"this is not a dxf file", {}, 422),
-        ("x.dxf", b"0\nEOF\n", {"rotation_deg": "400"}, 422),
-        ("x.dxf", b"0\nEOF\n", {"origin_n": "nan"}, 422),
-        ("x.dxf", b"0\nEOF\n", {"anchor": "somewhere"}, 422),
-        ("x.dxf", b"0\nEOF\n", {"unit_scale": "-1"}, 422),
-    ],
-)
-def test_bad_uploads_are_refused_with_a_reason(rig, name, data, form, status):
+def test_planning_requires_the_operator_role(rig):
     c, _, s = rig
-    r = up(c, name, data, **form)
-    assert r.status_code == status, r.text
-    assert r.json()["ok"] is False and r.json()["code"]
-    assert not os.path.isdir(s.missions_dir) or os.listdir(s.missions_dir) == []
+    assert c.post("/api/missions/plan", headers=H("view-tok"), json=body()).status_code == 403
+    assert c.post("/api/missions/plan", json=body()).status_code == 401
+    assert not os.path.isdir(s.missions_dir)
 
 
-def test_the_client_filename_is_never_a_path(rig, tmp_path):
-    c, _, _s = rig
-    data = Path(os.path.join(DATA, "square_2x2.dxf")).read_bytes()
-    r = up(c, "../../../../tmp/evil.dxf", data)
-    assert r.status_code == 201
-    assert r.json()["mission"]["source"]["name"] == "evil.dxf"
-    assert not os.path.exists("/tmp/evil.dxf")
-
-
-def test_upload_requires_the_operator_role(rig):
-    c, _, _ = rig
-    r = c.post("/api/missions", headers=H("view-tok"), files={"file": ("a.dxf", b"x")})
-    assert r.status_code == 403
-    assert c.post("/api/missions", files={"file": ("a.dxf", b"x")}).status_code == 401
+@pytest.mark.parametrize("method,path", [("post", "/api/missions"), ("put", "/api/missions"),
+                                         ("post", "/api/path/parse-dxf")])
+def test_the_dxf_planning_routes_are_gone(rig, method, path):
+    # The tablet app is the only trajectory author: the backend has no file-upload planner and no DXF parser.
+    c, _, s = rig
+    r = getattr(c, method)(path, headers=H("oper-tok"), files={"file": ("square_2x2.dxf", b"0\nEOF\n")})
+    assert r.status_code in (404, 405), r.text
+    assert not os.path.isdir(s.missions_dir)
 
 
 def test_start_goes_to_the_gateway_only_for_a_readable_artifact(rig):
     c, gw, _ = rig
-    data = Path(os.path.join(DATA, "square_2x2.dxf")).read_bytes()
-    sha = up(c, "s.dxf", data).json()["mission"]["sha256"]
+    sha = plan(c).json()["mission"]["sha256"]
     r = c.post(f"/api/missions/{sha}/start", headers=H("oper-tok"))
     assert r.status_code == 202
     assert gw.calls[-1] == ("start_mission", {"path_artifact_sha256": sha})
@@ -108,8 +88,7 @@ def test_start_goes_to_the_gateway_only_for_a_readable_artifact(rig):
 
 def test_a_corrupt_artifact_is_skipped_by_the_listing(rig):
     c, _, s = rig
-    data = Path(os.path.join(DATA, "square_2x2.dxf")).read_bytes()
-    sha = up(c, "s.dxf", data).json()["mission"]["sha256"]
+    sha = plan(c).json()["mission"]["sha256"]
     with open(os.path.join(s.missions_dir, "f" * 64 + ".dyx3path"), "wb") as fh:
         fh.write(b"junk")
     shas = [m["sha256"] for m in c.get("/api/missions", headers=H("view-tok")).json()["missions"]]
