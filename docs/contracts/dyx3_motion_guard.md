@@ -99,7 +99,7 @@ Applied after every gate passed, to the forwarded command, never to STOP:
 
 | Hard envelope | Parameter | Default | Source |
 |---|---|---|---|
-| forward speed | `max_forward_speed_mps` | 1.0 | prototype `max_linear_vel` default. Field runs 0.35; re-validate at GATE 4 |
+| forward speed | `max_forward_speed_mps` | 1.0 | the prototype's `max_linear_vel` default. A backstop above RPP's own speed, not the working limit: RPP's `max_linear_vel` cap is 0.85 (PX4 `RO_SPEED_LIM`) and its `mission_speed` starts at 0.6 (`docs/tuning/parameter_registry.md`), so the guard clamps only an RPP command above 1.0. Re-validate at GATE 4 |
 | reverse speed | `max_reverse_speed_mps` | **0.10** | **DERIVED — human decision 2026-10-08 (review H6 / fix plan B1).** RPP's active brake is capped at 0.08 m/s and terminal creep is 0.10 m/s. Initial bench value; re-validate at GATE 1. |
 | absolute yaw rate | `max_yaw_rate_radps` | 0.45 | prototype `max_yaw_rate_body` default. Re-validate at GATE 4 |
 
