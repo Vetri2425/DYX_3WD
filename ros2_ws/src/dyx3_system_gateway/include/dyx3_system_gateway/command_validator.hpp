@@ -28,6 +28,7 @@ struct Command {
   CmdKind kind{CmdKind::Heartbeat};
   std::string sha256;       // StartMission
   std::string request_id;   // StartMission: optional client idempotency key, "" when absent
+  bool resume{false};       // StartMission: restore the artifact's persisted progress (0.17.0)
   uint8_t abort_reason{0};  // AbortMission: 0 unspecified, 1 operator, 2 safety
   bool flag{false};         // Estop.asserted / Arm.arm / Offboard.enable / SprayManual.on
   std::string source;       // Estop

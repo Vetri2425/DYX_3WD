@@ -48,6 +48,8 @@ class SprayBody(_Body):
 
 class StartBody(_Body):
     request_id: StrictStr | None = None
+    # interfaces 0.17.0: restore the artifact's persisted progress instead of starting at run 0 (the mission node decides).
+    resume: StrictBool | None = None
 
 
 class RtkSourceBody(_Body):
@@ -145,7 +147,7 @@ async def health(request: Request, _: Identity = Viewer) -> dict:
     }
 
 
-# Names of the MissionState numbers (ros2_ws/src/dyx3_interfaces/msg/MissionState.msg, interfaces 0.15.0; the rover contract
+# Names of the MissionState numbers (ros2_ws/src/dyx3_interfaces/msg/MissionState.msg, interfaces 0.17.0; the rover contract
 # is docs/contracts/dyx3_mission.md). The tablet gets the numbers in the ``mission_state`` event; these names are for /health.
 MISSION_STATES = {
     0: "IDLE", 1: "LOADING", 2: "READY", 3: "RUNNING", 4: "PAUSED", 5: "COMPLETED", 6: "ABORTED", 7: "ERROR",
@@ -155,7 +157,7 @@ MISSION_REASONS = {
     0: "NONE", 1: "OPERATOR", 2: "SAFETY", 3: "RTK", 4: "PATH_ERROR", 5: "INTERNAL_ERROR",
     6: "EKF_RESET", 7: "EKF_REFERENCE_INVALID", 8: "PLACEMENT_OUT_OF_BOUNDS", 9: "NO_PLACEMENT_FRAME", 10: "ARM_REFUSED",
     11: "ARM_TIMEOUT", 12: "OFFBOARD_REFUSED", 13: "OFFBOARD_TIMEOUT", 14: "RPP_ACK_TIMEOUT", 15: "ESTOP", 16: "RPP_ERROR",
-    17: "RPP_STALE",
+    17: "RPP_STALE", 18: "RPP_PIVOT_TIMEOUT",
 }
 MISSION_WAITING_ON = {
     0: "NONE", 1: "ARTIFACT", 2: "PLACEMENT", 3: "ARM", 4: "OFFBOARD", 5: "RPP_ACK", 6: "OPERATOR", 7: "OFFBOARD_RELEASE",
@@ -347,9 +349,12 @@ async def start_mission(
         await anyio.to_thread.run_sync(request.app.state.missions.get, sha)
     except MissionError as exc:
         return _mission_error(exc)
-    args = {"path_artifact_sha256": sha}
+    args: dict[str, object] = {"path_artifact_sha256": sha}
     if rid is not None:
         args["request_id"] = rid
+    # passed only when the client sent it, like request_id; absent means a fresh start at run 0
+    if body is not None and body.resume is not None:
+        args["resume"] = body.resume
     status, reply = await forward(request, "start_mission", args)
     if not reply["ok"]:
         return JSONResponse(reply, status_code=status)
@@ -360,6 +365,7 @@ async def start_mission(
         "request_id": rid,
         "duplicate": data.get("duplicate"),
         "gate_reason_code": data.get("gate_reason_code"),
+        "resumed_run_index": data.get("resumed_run_index"),
     }
     return JSONResponse({"ok": True, "accepted": True, "execution": execution, "data": data}, status_code=202)
 

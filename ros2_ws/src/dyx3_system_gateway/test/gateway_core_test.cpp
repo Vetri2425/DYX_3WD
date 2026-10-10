@@ -211,6 +211,16 @@ TEST(Commands, ValidCommandsParseToTypedForms) {
   EXPECT_FALSE(r.has_id);
   EXPECT_EQ(r.cmd.sha256, kSha);
   EXPECT_EQ(r.cmd.request_id, "");  // optional: absent is empty
+  EXPECT_FALSE(r.cmd.resume);       // optional: absent is false
+  r = P(R"({"v":1,"id":5,"cmd":"start_mission","args":{"path_artifact_sha256":")" + kSha +
+        R"(","resume":true}})");
+  ASSERT_TRUE(r.ok);
+  EXPECT_TRUE(r.cmd.resume);
+  r = P(R"({"v":1,"id":5,"cmd":"start_mission","args":{"path_artifact_sha256":")" + kSha +
+        R"(","request_id":"r-1","resume":false}})");
+  ASSERT_TRUE(r.ok);
+  EXPECT_FALSE(r.cmd.resume);
+  EXPECT_EQ(r.cmd.request_id, "r-1");
   r = P(R"({"v":1,"id":4,"cmd":"start_mission","args":{"path_artifact_sha256":")" + kSha +
         R"(","request_id":"5f0c-AB_9.x:1"}})");
   ASSERT_TRUE(r.ok);
@@ -274,6 +284,14 @@ TEST(Commands, EveryDeviationIsRejectedAndTheIdIsStillRecovered) {
       {R"({"v":1,"id":9,"cmd":"start_mission","args":{"path_artifact_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","request_id":null}})",
        "invalid_command"},
       {R"({"v":1,"id":9,"cmd":"pause_mission","args":{"request_id":"r1"}})", "invalid_command"},
+      // start_mission.resume: a boolean only
+      {R"({"v":1,"id":9,"cmd":"start_mission","args":{"path_artifact_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","resume":1}})",
+       "invalid_command"},
+      {R"({"v":1,"id":9,"cmd":"start_mission","args":{"path_artifact_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","resume":"true"}})",
+       "invalid_command"},
+      {R"({"v":1,"id":9,"cmd":"start_mission","args":{"path_artifact_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","resume":null}})",
+       "invalid_command"},
+      {R"({"v":1,"id":9,"cmd":"resume_mission","args":{"resume":true}})", "invalid_command"},
       {R"({"v":1,"id":9,"cmd":"estop","args":{"asserted":true}})", "invalid_command"},
       {R"({"v":1,"id":9,"cmd":"estop","args":{"asserted":"yes","source":"tablet"}})",
        "invalid_command"},

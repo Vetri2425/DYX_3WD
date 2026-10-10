@@ -64,7 +64,7 @@ double stamp_s(const builtin_interfaces::msg::Time& t) {
 }
 
 // MissionState as the tablet sees it (snapshot `mission` and the `mission_state` event data): every
-// field of interfaces 0.15.0. `mission_id` is the execution id; `path_artifact_sha256` the
+// field of interfaces 0.17.0. `mission_id` is the execution id; `path_artifact_sha256` the
 // execution artifact RPP loads, `source_artifact_sha256` the artifact the operator started.
 JsonLine mission_fields(const dyx3_interfaces::msg::MissionState& m) {
   JsonLine j;
@@ -79,7 +79,8 @@ JsonLine mission_fields(const dyx3_interfaces::msg::MissionState& m) {
       .str("reason_detail", m.reason_detail)
       .integer("gate_reason_code", m.gate_reason_code)
       .integer("waiting_on", m.waiting_on)
-      .raw("state_entered", json_dbl(stamp_s(m.state_entered)));
+      .raw("state_entered", json_dbl(stamp_s(m.state_entered)))
+      .integer("start_run_index", m.start_run_index);
   return j;
 }
 
@@ -190,6 +191,9 @@ GatewayNode::GatewayNode(const rclcpp::NodeOptions& options, ClockFn clock, bool
             .num("battery_voltage_v", m.battery_voltage_v)
             .num("battery_current_a", m.battery_current_a)
             .num("battery_remaining", m.battery_remaining)
+            // 0.17.0: the RC link as PX4 sees it; rc_link_ok is meaningful only while valid.
+            .boolean("rc_link_valid", m.rc_link_valid)
+            .boolean("rc_link_ok", m.rc_link_ok)
             .dump();
       })));
   subs_.push_back(create_subscription<EstimatorHealth>(
@@ -343,6 +347,7 @@ GatewayNode::GatewayNode(const rclcpp::NodeOptions& options, ClockFn clock, bool
             .integer("segment_state", m.segment_state)
             .integer("rtk_reason", m.rtk_reason)
             .boolean("spray_request", m.spray_request)
+            .boolean("pivot_timed_out", m.pivot_timed_out)
             .num("loop_jitter_max_us", m.loop_jitter_max_us)
             .integer("loop_overrun_count", static_cast<int64_t>(m.loop_overrun_count))
             .dump();
@@ -640,12 +645,14 @@ void GatewayNode::process(const Inbound& in, double now_s) {
           [&](auto& rq) {
             rq.path_artifact_sha256 = c.sha256;
             rq.request_id = c.request_id;
+            rq.resume = c.resume;
           },
           [base](auto& r, bool* a) {
             JsonLine j = base(r, a);
             j.integer("mission_id", r.mission_id)
                 .boolean("duplicate", r.duplicate)
-                .integer("gate_reason_code", r.gate_reason_code);
+                .integer("gate_reason_code", r.gate_reason_code)
+                .integer("resumed_run_index", r.resumed_run_index);
             return j;
           });
       return;

@@ -45,6 +45,8 @@ struct Rig {
   rclcpp::Publisher<dyx3_interfaces::msg::EmergencyStopState>::SharedPtr p_estop;
   rclcpp::Publisher<dyx3_interfaces::msg::SafetyGateStatus>::SharedPtr p_safety;
   rclcpp::Publisher<dyx3_interfaces::msg::Px4LinkStatus>::SharedPtr p_px4;
+  rclcpp::Publisher<dyx3_interfaces::msg::VehicleState>::SharedPtr p_vehicle;
+  rclcpp::Publisher<dyx3_interfaces::msg::RppStatus>::SharedPtr p_rpp;
   dyx3_interfaces::msg::OperatorLinkStatus link;
   bool link_seen{false};
   // fake services; the *_answers flags false = the request is received but never answered
@@ -57,6 +59,9 @@ struct Rig {
   std::mutex mu;
   std::vector<std::string> calls;
   std::string last_start_request_id;
+  bool last_start_resume{false};
+  // the fake mission node's resumed_run_index for a start with resume = true (0 without resume)
+  std::atomic<uint32_t> start_resumed_run{4};
   std::vector<double> estop_rx_s;  // steady time each E-stop request reached the guard
   rclcpp::ServiceBase::SharedPtr svc_keep[9];
   // Autonomous mode: the gateway runs on the real clock with its own timer and wake-up, and the
@@ -94,6 +99,7 @@ struct Rig {
             std::lock_guard<std::mutex> lk(mu);
             calls.push_back("start:" + rq->path_artifact_sha256.substr(0, 4));
             last_start_request_id = rq->request_id;
+            last_start_resume = rq->resume;
           }
           if (!start_answers) return;
           srv::StartMission::Response rs;
@@ -102,6 +108,7 @@ struct Rig {
           rs.mission_id = 42;
           rs.duplicate = start_duplicate;
           rs.gate_reason_code = start_gate_reason;
+          rs.resumed_run_index = rq->resume ? start_resumed_run.load() : 0U;
           svc->send_response(*hdr, rs);
         });
     svc_keep[1] = world->create_service<srv::AbortMission>(
@@ -196,6 +203,10 @@ struct Rig {
         "/dyx3/safety_gate", rclcpp::QoS(1).reliable());
     p_px4 = world->create_publisher<dyx3_interfaces::msg::Px4LinkStatus>("/dyx3/px4_link/status",
                                                                          rclcpp::QoS(1).reliable());
+    p_vehicle = world->create_publisher<dyx3_interfaces::msg::VehicleState>(
+        "/dyx3/vehicle_state", rclcpp::QoS(1).reliable());
+    p_rpp = world->create_publisher<dyx3_interfaces::msg::RppStatus>("/dyx3/rpp/status",
+                                                                     rclcpp::QoS(1).reliable());
     // Discovery: every topic matched and every one of the gateway's nine clients reaches its
     // service (a client that does not would answer "service_unavailable").
     const bool discovered = pump_until([this] {
@@ -204,7 +215,8 @@ struct Rig {
              world->count_subscribers("/dyx3/mission/state") > 0 &&
              world->count_subscribers("/dyx3/emergency_stop_state") > 0 &&
              world->count_subscribers("/dyx3/px4_link/status") > 0 &&
-             gw->unavailable_services().empty();
+             world->count_subscribers("/dyx3/vehicle_state") > 0 &&
+             world->count_subscribers("/dyx3/rpp/status") > 0 && gw->unavailable_services().empty();
     });
     if (!discovered) {
       std::string missing;
@@ -329,7 +341,7 @@ dyx3_interfaces::msg::MissionState mission(uint8_t state, uint8_t reason = 0, ui
   return m;
 }
 
-// A MissionState with every interfaces-0.15.0 field set to a value no other field shares, so a
+// A MissionState with every interfaces-0.17.0 field set to a value no other field shares, so a
 // field that is dropped or mixed up with another is seen.
 dyx3_interfaces::msg::MissionState mission_v2() {
   using M = dyx3_interfaces::msg::MissionState;
@@ -343,6 +355,7 @@ dyx3_interfaces::msg::MissionState mission_v2() {
   m.waiting_on = M::WAIT_OPERATOR;
   m.state_entered.sec = 1791624580;
   m.state_entered.nanosec = 500000000;
+  m.start_run_index = 2;  // 0.17.0
   return m;
 }
 
@@ -809,6 +822,80 @@ TEST(GatewayNode, EachCommandHasItsOwnAnswerDeadline) {
   EXPECT_TRUE(timed_out);
 }
 
+TEST(GatewayNode, StartMissionPassesResumeAndEchoesTheResumedRun) {
+  Rig r;
+  Sock c(r.sock);
+  ASSERT_TRUE(c.ok());
+  const std::string sha(64, 'c');
+  const std::string head = R"(,"cmd":"start_mission","args":{"path_artifact_sha256":")" + sha;
+  // resume true reaches StartMission.resume; the run the mission resumes from is in the reply
+  auto v = r.ask(c, R"({"v":1,"id":81)" + head + R"(","resume":true}})", 81);
+  ASSERT_TRUE(ok_of(v));
+  EXPECT_TRUE(r.last_start_resume);
+  EXPECT_EQ(v.get("data")->get("resumed_run_index")->i, 4);
+  EXPECT_EQ(v.get("data")->get("mission_id")->i, 42);
+  // resume false, and resume absent (default false), start at run 0
+  v = r.ask(c, R"({"v":1,"id":82)" + head + R"(","resume":false}})", 82);
+  ASSERT_TRUE(ok_of(v));
+  EXPECT_FALSE(r.last_start_resume);
+  EXPECT_EQ(v.get("data")->get("resumed_run_index")->i, 0);
+  r.last_start_resume = true;
+  v = r.ask(c, R"({"v":1,"id":83)" + head + R"("}})", 83);
+  ASSERT_TRUE(ok_of(v));
+  EXPECT_FALSE(r.last_start_resume);
+  EXPECT_EQ(v.get("data")->get("resumed_run_index")->i, 0);
+  // a non-boolean resume is refused at the gateway: nothing reaches the mission node
+  size_t starts = 0;
+  {
+    std::lock_guard<std::mutex> lk(r.mu);
+    starts = r.calls.size();
+  }
+  v = r.ask(c, R"({"v":1,"id":84)" + head + R"(","resume":1}})", 84);
+  EXPECT_FALSE(ok_of(v));
+  EXPECT_EQ(code_of(v), "invalid_command");
+  r.deliver();
+  std::lock_guard<std::mutex> lk(r.mu);
+  EXPECT_EQ(r.calls.size(), starts);
+}
+
+TEST(GatewayNode, SnapshotCarriesTheRcLinkAndThePivotTimeout) {
+  Rig r;
+  Sock c(r.sock);
+  ASSERT_TRUE(c.ok());
+  dyx3_interfaces::msg::VehicleState vs;
+  vs.rc_link_valid = true;
+  vs.rc_link_ok = false;
+  r.p_vehicle->publish(vs);
+  dyx3_interfaces::msg::RppStatus rp;
+  rp.pivot_timed_out = true;
+  r.p_rpp->publish(rp);
+  r.deliver();
+  auto v = r.ask(c, R"({"v":1,"id":85,"cmd":"get_snapshot"})", 85);
+  ASSERT_TRUE(ok_of(v));
+  const JsonValue* veh = v.get("data")->get("vehicle_state")->get("data");
+  ASSERT_NE(veh, nullptr);
+  EXPECT_TRUE(veh->get("rc_link_valid")->b);
+  EXPECT_FALSE(veh->get("rc_link_ok")->b);
+  const JsonValue* rpp = v.get("data")->get("rpp")->get("data");
+  ASSERT_NE(rpp, nullptr);
+  EXPECT_TRUE(rpp->get("pivot_timed_out")->b);
+  vs.rc_link_valid = false;
+  vs.rc_link_ok = true;
+  r.p_vehicle->publish(vs);
+  rp.pivot_timed_out = false;
+  r.p_rpp->publish(rp);
+  r.deliver();
+  v = r.ask(c, R"({"v":1,"id":86,"cmd":"get_snapshot"})", 86);
+  ASSERT_TRUE(ok_of(v));
+  veh = v.get("data")->get("vehicle_state")->get("data");
+  ASSERT_NE(veh, nullptr);
+  EXPECT_FALSE(veh->get("rc_link_valid")->b);
+  EXPECT_TRUE(veh->get("rc_link_ok")->b);
+  rpp = v.get("data")->get("rpp")->get("data");
+  ASSERT_NE(rpp, nullptr);
+  EXPECT_FALSE(rpp->get("pivot_timed_out")->b);
+}
+
 TEST(GatewayNode, StartMissionCarriesAndEchoesTheRequestId) {
   Rig r;
   Sock c(r.sock);
@@ -1007,6 +1094,7 @@ TEST(GatewayNode, MissionStateEventAndSnapshotCarryEveryV2Field) {
     EXPECT_EQ(d->get("gate_reason_code")->i, 7);
     EXPECT_EQ(d->get("waiting_on")->i, dyx3_interfaces::msg::MissionState::WAIT_OPERATOR);
     EXPECT_DOUBLE_EQ(d->get("state_entered")->n, 1791624580.5);
+    EXPECT_EQ(d->get("start_run_index")->i, 2);
   };
   check(ev[0].get("data"), "event");
   EXPECT_TRUE(ev[0].get("data")->get("fresh")->b);
@@ -1024,6 +1112,7 @@ TEST(GatewayNode, MissionStateEventAndSnapshotCarryEveryV2Field) {
   EXPECT_EQ(ev[0].get("data")->get("source_artifact_sha256")->s, "");
   EXPECT_EQ(ev[0].get("data")->get("reason_detail")->s, "");
   EXPECT_EQ(ev[0].get("data")->get("waiting_on")->i, 0);
+  EXPECT_EQ(ev[0].get("data")->get("start_run_index")->i, 0);
 }
 
 TEST(GatewayNode, ChangeOfTheStepBeingWaitedOnIsATransitionEvenWithStateAndReasonUnchanged) {
