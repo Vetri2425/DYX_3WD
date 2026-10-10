@@ -57,10 +57,10 @@ PY
   local i
   for i in $(seq 50); do [ -S "$1" ] && break; sleep 0.1; done
 }
-# gw_state <reply-file> <arming_state> <vehicle fresh> <mission state> <mission fresh>
+# gw_state <reply-file> <arming_state> <vehicle fresh> <mission state> <mission fresh> [<mission waiting_on>]
 gw_state() {
-  printf '{"v":1,"id":1,"ok":true,"code":"ok","reason":"","data":{"vehicle_state":{"age_s":0.1,"fresh":%s,"data":{"arming_state":%s}},"mission":{"age_s":0.1,"fresh":%s,"data":{"state":%s}},"gateway":{}}}\n' \
-    "$3" "$2" "$5" "$4" >"$1"
+  printf '{"v":1,"id":1,"ok":true,"code":"ok","reason":"","data":{"vehicle_state":{"age_s":0.1,"fresh":%s,"data":{"arming_state":%s}},"mission":{"age_s":0.1,"fresh":%s,"data":{"state":%s,"waiting_on":%s}},"gateway":{}}}\n' \
+    "$3" "$2" "$5" "$4" "${6:-0}" >"$1"
 }
 # agent_toggle: stands in for restart_enabled_services. The first call takes the fake XRCE agent down
 # (FAKE_NO_AGENT="${T}/agent_down"), the next brings it back: a fault that starts with the switch and ends with the revert.
@@ -868,6 +868,19 @@ F
   check "idle: a stale DISARMED is unknown, not idle" '[ "$(idle_rc)" = 2 ]'
   gw_state "${gwf}" 0 true 0 true
   check "idle: no FCU status (arming_state 0) is unknown, not idle" '[ "$(idle_rc)" = 2 ]'
+  # mission contract v2: the mission arms by itself a moment after LOADING, while the vehicle still reads DISARMED
+  for st in 1:LOADING 2:READY 8:PLACING 9:ARMING 10:ENGAGING; do
+    gw_state "${gwf}" 1 true "${st%%:*}" true
+    check "idle: a ${st##*:} mission refuses although the vehicle still reads DISARMED" '[ "$(idle_rc)" = 1 ] && grep -q "${st##*:}" "${T}/idle_reason"'
+  done
+  gw_state "${gwf}" 1 false 9 false
+  check "idle: a stale ARMING mission still refuses" '[ "$(idle_rc)" = 1 ] && grep -q "ARMING.*stale" "${T}/idle_reason"'
+  gw_state "${gwf}" 1 true 7 true 7
+  check "idle: an ERROR mission still releasing OFFBOARD refuses" '[ "$(idle_rc)" = 1 ] && grep -q "releasing OFFBOARD" "${T}/idle_reason"'
+  gw_state "${gwf}" 1 true 6 true 8
+  check "idle: an ABORTED mission still disarming refuses" '[ "$(idle_rc)" = 1 ] && grep -q disarming "${T}/idle_reason"'
+  gw_state "${gwf}" 1 true 6 true 0
+  check "idle: an ABORTED mission with the release finished and the vehicle disarmed is idle" '[ "$(idle_rc)" = 0 ]'
   gw_state "${gwf}" 1 true 4 true
   check "idle: a PAUSED mission is idle but named" '[ "$(idle_rc)" = 0 ] && grep -q PAUSED "${T}/idle_reason"'
   echo silent >"${gwf}"

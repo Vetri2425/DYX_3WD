@@ -5,12 +5,17 @@
 # The only authoritative, root-readable source is dyx3_system_gateway's Unix socket (newline JSON, protocol v1,
 # docs/contracts/dyx3_system_gateway.md). The installer asks it for one snapshot and reads:
 #   vehicle_state.data.arming_state   PX4 vehicle_status ABI: 1 = DISARMED, 2 = ARMED, 0 = no FCU status
-#   mission.data.state                dyx3_interfaces/MissionState: 3 = RUNNING, 4 = PAUSED
+#   mission.data.state                dyx3_interfaces/MissionState (0.15.0): 1 LOADING, 2 READY, 3 RUNNING, 4 PAUSED,
+#                                     8 PLACING, 9 ARMING, 10 ENGAGING
+#   mission.data.waiting_on           MissionState.waiting_on: 7 = releasing OFFBOARD, 8 = disarming
 # each with the gateway's own `fresh` flag (snapshot_fresh_s, 1 s).
 #
 # Rover idle (X-016), in this order:
 #   dyx3-ros not running and nothing listens on the socket   -> idle (nothing on the Jetson can move the rover)
-#   ARMED or mission RUNNING (fresh or not)                   -> busy: refuse
+#   ARMED, or a mission that is starting or driving (LOADING, PLACING, ARMING, ENGAGING, READY, RUNNING), or one
+#   still releasing OFFBOARD / disarming (fresh or not)       -> busy: refuse. The mission arms the vehicle by itself
+#                                                               a moment after LOADING, so the vehicle's own ARMED
+#                                                               flag alone would call that window idle.
 #   fresh vehicle_state DISARMED and fresh mission not RUNNING -> idle
 #   anything else (no answer, no FCU status, stale data)       -> unknown: refuse ("unknown is not idle")
 # Override: DYX3_FORCE_UNSAFE=1 (bench only; logged loudly).
@@ -97,6 +102,11 @@ def as_int(v):
     return v if isinstance(v, int) and not isinstance(v, bool) else None
 
 
+# MissionState.state values in which the mission is about to move the vehicle, is moving it, or is giving it back.
+STARTING = {1: "LOADING", 2: "READY", 3: "RUNNING", 8: "PLACING", 9: "ARMING", 10: "ENGAGING"}
+RELEASING = {7: "releasing OFFBOARD", 8: "disarming"}  # MissionState.waiting_on
+
+
 if mode == "px4_link":
     link, link_fresh = source("px4_link")
     if link is None or not link_fresh:
@@ -116,12 +126,15 @@ vs, vs_fresh = source("vehicle_state")
 ms, ms_fresh = source("mission")
 arming = as_int(vs.get("arming_state")) if vs else None
 mstate = as_int(ms.get("state")) if ms else None
+mwait = as_int(ms.get("waiting_on")) if ms else None
 
 # Any evidence of motion refuses, even stale: stale data cannot prove the opposite.
 if arming == 2:
     out("busy", "the vehicle is ARMED" + ("" if vs_fresh else " (last known, stale)"), 1)
-if mstate == 3:
-    out("busy", "a mission is RUNNING" + ("" if ms_fresh else " (last known, stale)"), 1)
+if mstate in STARTING:
+    out("busy", f"a mission is {STARTING[mstate]}" + ("" if ms_fresh else " (last known, stale)"), 1)
+if mwait in RELEASING:
+    out("busy", f"a mission is {RELEASING[mwait]}" + ("" if ms_fresh else " (last known, stale)"), 1)
 if vs is None or not vs_fresh:
     out("unknown", "no fresh vehicle_state from px4_link", 2)
 if ms is None or not ms_fresh:
