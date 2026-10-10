@@ -48,9 +48,9 @@ class FakeServer:
         except (ConnectionError, asyncio.CancelledError):
             pass
 
-    async def push(self, snapshot):
+    async def push(self, snapshot, **extra):
         for w in self.writers:
-            w.write((json.dumps({"v": 1, "type": "telemetry", "snapshot": snapshot}) + "\n").encode())
+            w.write((json.dumps({"v": 1, "type": "telemetry", **extra, "snapshot": snapshot}) + "\n").encode())
             await w.drain()
 
     async def push_event(self, kind, seq, data=None, **extra):
@@ -372,3 +372,61 @@ def test_request_timeout_outlasts_the_gateways_offboard_wait():
         Settings(request_timeout_s=3.0)
     with pytest.raises(ValueError):
         Settings().with_(request_timeout_s=5.0)
+
+
+async def test_telemetry_frame_passes_seq_and_t_mono_s_through(sock_path):
+    srv = FakeServer(sock_path)
+    await srv.start()
+    gw = GatewayClient(sock_path, request_timeout_s=1.0)
+    frames = []
+    gw.on_telemetry_frame(lambda f: frames.append(dict(f)))
+    await gw.start()
+    assert await wait_until(lambda: gw.connected)
+    await srv.push({"n": 1}, seq=41, t_mono_s=1234.5)
+    assert await wait_until(lambda: len(frames) == 1)
+    await srv.push({"n": 2})  # a gateway that sends neither: the fields are null, not invented
+    assert await wait_until(lambda: len(frames) == 2)
+    await srv.push({"n": 3}, seq=True, t_mono_s="x")  # wrong types are not passed on
+    assert await wait_until(lambda: len(frames) == 3)
+    assert frames[0] == {"snapshot": {"n": 1}, "seq": 41, "t_mono_s": 1234.5, "dropped": 0}
+    assert frames[1] == {"snapshot": {"n": 2}, "seq": None, "t_mono_s": None, "dropped": 0}
+    assert frames[2]["seq"] is None and frames[2]["t_mono_s"] is None
+    assert gw.telemetry_coalesced == 0
+    await gw.stop()
+    await srv.stop()
+
+
+async def test_slow_telemetry_subscriber_gets_the_newest_frame_and_the_gap_count(sock_path):
+    srv = FakeServer(sock_path)
+    await srv.start()
+    gw = GatewayClient(sock_path, request_timeout_s=1.0)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    frames = []
+
+    async def slow(frame):
+        frames.append(dict(frame))
+        entered.set()
+        await release.wait()
+
+    gw.on_telemetry_frame(slow)
+    await gw.start()
+    assert await wait_until(lambda: gw.connected)
+    await srv.push({"n": 1}, seq=1, t_mono_s=1.0)
+    await asyncio.wait_for(entered.wait(), 3.0)  # frame 1 is in flight, the subscriber is stuck
+    for n in (2, 3, 4):
+        await srv.push({"n": n}, seq=n, t_mono_s=float(n))
+    assert await wait_until(lambda: gw.snapshot == {"n": 4})  # all three read; the cache holds the newest
+    assert len(frames) == 1
+    release.set()
+    assert await wait_until(lambda: len(frames) == 2)
+    await asyncio.sleep(0.1)
+    assert [f["seq"] for f in frames] == [1, 4]  # 2 and 3 were never emitted
+    assert frames[0]["dropped"] == 0 and frames[1]["dropped"] == 2
+    assert gw.telemetry_coalesced == 2
+    # the count is per gap: the next frame after the burst reports no loss
+    await srv.push({"n": 5}, seq=5, t_mono_s=5.0)
+    assert await wait_until(lambda: len(frames) == 3)
+    assert frames[2]["seq"] == 5 and frames[2]["dropped"] == 0
+    await gw.stop()
+    await srv.stop()

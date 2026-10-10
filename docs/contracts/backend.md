@@ -230,8 +230,12 @@ Transport timing: `sio_ping_interval_s` 5.0 and `sio_ping_timeout_s` 20.0 (DERIV
 
 **Server -> client: two events.**
 
-* `telemetry` `{"snapshot": {...}|null, "age_s": float|null}` on every gateway snapshot push (5 Hz, `telemetry_hz`), to every session. The periodic picture; it carries no
-  ordering and no replay. (`GET /telemetry` returns `{"connected", "age_s", "snapshot"}`.)
+* `telemetry` `{"snapshot": {...}|null, "age_s": float|null, "seq": int|null, "t_mono_s": float|null, "dropped": int}` on every gateway snapshot push (5 Hz, `telemetry_hz`), to every session. The periodic picture; no replay.
+  (`GET /telemetry` returns `{"connected", "age_s", "snapshot"}`.)
+  * `seq`, `t_mono_s`: the gateway's telemetry frame counter and steady clock (`dyx3_system_gateway.md` section 1), passed through unchanged; `null` if the gateway's frame carries none. `seq` is the gateway's, not the backend's:
+    it restarts at 1 when the gateway restarts, and `t_mono_s` is comparable only within one gateway process. Within a run of `seq` values a gap, or a `seq` not above the last, is a lost or reordered frame.
+  * Newest only. If the event loop (or a subscriber) is behind, a frame still waiting is replaced by the next one: the backend never fans out a burst of stale frames. `dropped` is the number of frames replaced since the previous
+    `telemetry` event emitted (0 = none; the `seq` gap then also shows them), and the backend counts the total as `telemetry_coalesced`. `dropped` counts only what the backend discarded; a frame lost between the gateway and the backend shows as a `seq` gap with `dropped` 0.
 * `rover_event`: **the single status event.** Every status change reaches the tablet as one `rover_event` the moment it is known, so the tablet never polls. The old `gateway`
   event (`{"connected": bool}`) is gone: its information is the `gateway_link` kind below.
 

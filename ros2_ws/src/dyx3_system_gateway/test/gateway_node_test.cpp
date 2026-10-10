@@ -706,6 +706,50 @@ TEST(GatewayNode, SnapshotAndTelemetryPushCarryAgeAndFreshness) {
   EXPECT_TRUE(saw_stale);
 }
 
+// The telemetry frame carries its own counter and the gateway's steady clock, so a consumer can
+// see a dropped or reordered frame (contract section 1). Protocol version stays 1.
+TEST(GatewayNode, TelemetryFramesCarryIncreasingSeqAndSteadyStamp) {
+  Rig r;
+  Sock c(r.sock);
+  ASSERT_TRUE(c.ok());
+  ASSERT_TRUE(r.pump_until([&r] { return r.gw->ipc().clients() >= 1; }));
+  constexpr size_t kFrames = 5;
+  for (size_t i = 0; i < kFrames; ++i) {
+    r.now += 0.2;  // longer than one telemetry period: every step pushes exactly one frame
+    r.gw->step(r.now);
+    r.deliver();
+  }
+  std::vector<int64_t> seqs;
+  std::vector<double> stamps;
+  std::vector<std::string> lines;
+  lines.swap(c.stash);
+  const auto end = std::chrono::steady_clock::now() + 5s;
+  while (seqs.size() < kFrames && std::chrono::steady_clock::now() < end) {
+    if (lines.empty()) lines = c.read_lines(1, 50);
+    for (const auto& l : lines) {
+      JsonValue j;
+      std::string e;
+      if (!parse_json(l, &j, &e) || !j.get("type") || j.get("type")->s != "telemetry") continue;
+      EXPECT_EQ(j.get("v")->i, 1);
+      ASSERT_NE(j.get("snapshot"), nullptr);
+      ASSERT_NE(j.get("seq"), nullptr);
+      EXPECT_TRUE(j.get("seq")->is_int);
+      ASSERT_NE(j.get("t_mono_s"), nullptr);
+      EXPECT_EQ(j.get("t_mono_s")->type, JsonValue::Type::Number);
+      seqs.push_back(j.get("seq")->i);
+      stamps.push_back(j.get("t_mono_s")->n);
+    }
+    lines.clear();
+  }
+  ASSERT_EQ(seqs.size(), kFrames);
+  EXPECT_EQ(seqs.front(), 1);  // a separate counter, starting at 1 per gateway process
+  for (size_t i = 1; i < kFrames; ++i) {
+    EXPECT_EQ(seqs[i], seqs[i - 1] + 1) << "frame " << i;
+    EXPECT_GE(stamps[i], stamps[i - 1]) << "frame " << i;
+  }
+  EXPECT_DOUBLE_EQ(stamps.back(), r.now);  // the clock the node runs on, as for event t_mono_s
+}
+
 TEST(GatewayNode, InvalidParametersStopTheNodeAtStart) {
   auto ctx = std::make_shared<rclcpp::Context>();
   dyx3_test::init_isolated(ctx);

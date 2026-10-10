@@ -145,6 +145,9 @@ private:
   // Pushed status events (contract section 1.3). Built after ipc_ (it broadcasts through it).
   std::unique_ptr<EventStream> events_;
   double last_link_pub_s_{-1e18}, last_tel_s_{-1e18};
+  // Telemetry frames pushed so far (contract section 1): the frame's `seq`, separate from the event
+  // seq_.
+  uint64_t telemetry_seq_{0};
   // Audit log state (XR-GW-001): last logged operator-link state and IPC counters.
   bool link_alive_{false};
   double last_audit_s_{-1e18};

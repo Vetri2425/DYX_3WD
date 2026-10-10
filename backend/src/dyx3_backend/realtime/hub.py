@@ -95,8 +95,19 @@ class RealtimeHub:
                 "delivered": True}
 
     # ---- fan-out
-    async def broadcast_telemetry(self, snapshot: dict | None) -> None:
-        await self._emit("telemetry", {"snapshot": snapshot, "age_s": self._gw.snapshot_age()})
+    async def broadcast_telemetry(
+        self, snapshot: dict | None, *, seq: int | None = None, t_mono_s: float | None = None, dropped: int = 0
+    ) -> None:
+        """``seq`` / ``t_mono_s`` are the gateway's (null when its frame has none); ``dropped`` = frames coalesced before this one."""
+        await self._emit(
+            "telemetry",
+            {"snapshot": snapshot, "age_s": self._gw.snapshot_age(), "seq": seq, "t_mono_s": t_mono_s, "dropped": dropped},
+        )
+
+    async def broadcast_telemetry_frame(self, frame: dict) -> None:
+        await self.broadcast_telemetry(
+            frame.get("snapshot"), seq=frame.get("seq"), t_mono_s=frame.get("t_mono_s"), dropped=frame.get("dropped", 0)
+        )
 
     def _record(self, kind: str, data: dict, *, gateway_event: dict | None = None, wall_ms: int | None = None) -> dict:
         self._seq += 1
