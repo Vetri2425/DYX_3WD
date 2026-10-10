@@ -15,6 +15,7 @@ add_library(dyx3_motion_guard_core STATIC
   src/estop_gate.cpp
   src/rtk_gate.cpp
   src/mission_gate.cpp
+  src/actuator_plausibility.cpp
   src/fail_to_zero.cpp)
 target_include_directories(dyx3_motion_guard_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

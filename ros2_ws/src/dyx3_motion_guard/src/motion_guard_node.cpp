@@ -32,6 +32,8 @@ static_assert(static_cast<uint8_t>(Reason::EstimatorUnhealthy) ==
               MotionSetpointStatus::REASON_ESTIMATOR_UNHEALTHY);
 static_assert(static_cast<uint8_t>(Reason::GlobalReferenceInvalid) ==
               MotionSetpointStatus::REASON_GLOBAL_REFERENCE_INVALID);
+static_assert(static_cast<uint8_t>(Reason::ActuatorStall) ==
+              MotionSetpointStatus::REASON_ACTUATOR_STALL);
 
 int64_t to_ns(const builtin_interfaces::msg::Time& t) {
   return static_cast<int64_t>(t.sec) * 1'000'000'000LL + static_cast<int64_t>(t.nanosec);
@@ -65,6 +67,7 @@ MotionGuardNode::MotionGuardNode(const rclcpp::NodeOptions& options, ClockFn clo
   dc.command_max_age_s = age_.command;
   dc.gates = gate_cfg_;
   dc.limits = limits_;
+  dc.plausibility = plausibility_;
   core_ = std::make_unique<GuardCore>(accept_count_, dc);
 
   const auto rel1 = rclcpp::QoS(1).reliable();
@@ -112,6 +115,10 @@ MotionGuardNode::MotionGuardNode(const rclcpp::NodeOptions& options, ClockFn clo
         veh_.attitude_valid = m->attitude_valid;
         veh_.global_reference_valid = m->global_reference_valid;
         veh_.preflight_checks_pass = m->preflight_checks_pass;
+        veh_.rc_link_valid = m->rc_link_valid;
+        veh_.rc_link_ok = m->rc_link_ok;
+        veh_.measured_speed_mps = std::hypot(m->velocity_north_mps, m->velocity_east_mps);
+        veh_.measured_yaw_rate_radps = m->yaw_rate_radps;
         veh_pose_stamp_ = m->px4_sample_stamp;
         w_veh_.touch(clock_());
       });
@@ -168,10 +175,12 @@ MotionGuardNode::MotionGuardNode(const rclcpp::NodeOptions& options, ClockFn clo
                                [this]() { on_watchdog(clock_()); });
   }
   RCLCPP_INFO(get_logger(),
-              "motion_guard up: %s, %.0f Hz %s, command_max_age %.3f s, session_accept_count %u",
+              "motion_guard up: %s, %.0f Hz %s, command_max_age %.3f s, session_accept_count %u, "
+              "actuator plausibility %s, require_rc_link %s",
               event_driven_ ? "event-driven (decision per RPP command)" : "timer mode",
               publish_rate_hz_, event_driven_ ? "watchdog" : "decision loop", age_.command,
-              accept_count_);
+              accept_count_, plausibility_.enabled ? "on" : "OFF",
+              gate_cfg_.require_rc_link ? "true" : "false");
 }
 
 rcl_interfaces::msg::SetParametersResult MotionGuardNode::on_parameters(
@@ -211,6 +220,24 @@ void MotionGuardNode::declare_and_validate_params() {
   require(std::isfinite(gate_cfg_.rtk.max_hrms_m) && gate_cfg_.rtk.max_hrms_m > 0.0F,
           "rtk_max_hrms_m must be > 0");
   gate_cfg_.require_gnss_yaw_fusion = declare_parameter<bool>("require_gnss_yaw_fusion", true);
+  // 0.17.0: pre-arm RC link requirement. Default false until rc_link_valid is observed true on the
+  // rover (it needs PX4 failsafe_flags on DDS, unproven on the flashed firmware).
+  gate_cfg_.require_rc_link = declare_parameter<bool>("require_rc_link", false);
+  // 0.17.0 actuator plausibility (REASON_ACTUATOR_STALL). No new number: each default is the
+  // dyx3_rpp parameter named in its DERIVED note, re-declared here (startup-only, like the rest).
+  plausibility_.enabled = declare_parameter<bool>("require_actuator_plausibility", true);
+  // DERIVED — NOT FROM V1 SPEC: = dyx3_rpp segment_nominal_pivot_rate_rad_s (0.4).
+  plausibility_.demand_yaw_rate_radps = static_cast<float>(d("stall_yaw_rate_radps", 0.4));
+  // DERIVED — NOT FROM V1 SPEC: = dyx3_rpp min_approach_linear_velocity (0.1).
+  plausibility_.demand_speed_mps = static_cast<float>(d("stall_speed_mps", 0.1));
+  // DERIVED — NOT FROM V1 SPEC: = dyx3_rpp segment_stop_yaw_rate_threshold (0.05).
+  plausibility_.still_yaw_rate_radps = static_cast<float>(d("stall_measured_yaw_rate_radps", 0.05));
+  // DERIVED — NOT FROM V1 SPEC: = dyx3_rpp segment_stop_speed_threshold (0.02).
+  plausibility_.still_speed_mps = static_cast<float>(d("stall_measured_speed_mps", 0.02));
+  // DERIVED — NOT FROM V1 SPEC: = dyx3_rpp segment_pivot_spinup_margin_s (1.0).
+  plausibility_.stall_time_s = d("stall_time_s", 1.0);
+  require(plausibility_config_valid(plausibility_),
+          "stall_* must be finite and > 0, each measured threshold below its demand threshold");
   limits_.max_forward_speed_mps = static_cast<float>(d("max_forward_speed_mps", 1.0));
   limits_.max_reverse_speed_mps = static_cast<float>(d("max_reverse_speed_mps", 0.10));
   limits_.max_yaw_rate_radps = static_cast<float>(d("max_yaw_rate_radps", 0.45));
@@ -263,7 +290,12 @@ void MotionGuardNode::step(double now_s) {
   last_step_s_ = now_s;
 
   const GateInputs gates = gather(now_s);
+  const bool stalled_before = core_->actuator_stalled();
   const Decision d = core_->decide(now_s, dt, gates);
+  const bool stalled = core_->actuator_stalled();
+  // The stall latch is part of the published safety verdict: publish its change at once, not at
+  // the next 10 Hz slot, so dyx3_mission pauses on the tick the guard stopped.
+  if (stalled != stalled_before) force_safety_pub_ = true;
 
   MotionSetpoint out;
   out.stamp = ros_now();
@@ -310,7 +342,11 @@ void MotionGuardNode::step(double now_s) {
   if (force_safety_pub_ || now_s - last_gate_pub_s_ >= 0.1 - 1e-9) {
     force_safety_pub_ = false;
     last_gate_pub_s_ = now_s;
-    const Reason g = first_failing_safety_gate(gates, gate_cfg_);
+    Reason g = first_failing_safety_gate(gates, gate_cfg_);
+    // While the actuator-stall latch is set the full verdict fails with ACTUATOR_STALL (after
+    // every real gate, which keep their priority), so the mission pauses (REASON_SAFETY,
+    // gate_reason 14). Never in the pre-arm verdict: nothing is commanded before the arm.
+    if (g == Reason::Ok && stalled) g = Reason::ActuatorStall;
     dyx3_interfaces::msg::SafetyGateStatus gs;  // ok=false default
     gs.stamp = ros_now();
     gs.ok = g == Reason::Ok;

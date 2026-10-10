@@ -4,6 +4,7 @@
 
 #include <cstdint>
 
+#include "dyx3_motion_guard/actuator_plausibility.hpp"
 #include "dyx3_motion_guard/limits.hpp"
 #include "dyx3_motion_guard/mission_gate.hpp"
 #include "dyx3_motion_guard/motion_types.hpp"
@@ -35,6 +36,7 @@ struct DecisionConfig {
   double command_max_age_s{0.2};
   GateConfig gates;
   Limits limits;
+  PlausibilityConfig plausibility;
 };
 
 struct Decision {
@@ -58,6 +60,10 @@ public:
   // One decision tick. dt_s is the bounded time since the previous tick.
   Decision decide(double now_s, double dt_s, const GateInputs& gates);
 
+  // The actuator-stall latch (REASON_ACTUATOR_STALL). The node publishes it as the safety-gate
+  // verdict while it is set, so dyx3_mission pauses on it.
+  bool actuator_stalled() const { return stall_.latched(); }
+
   DecisionConfig& config() { return cfg_; }
   const DecisionConfig& config() const { return cfg_; }
 
@@ -67,6 +73,7 @@ private:
   bool have_cmd_{false};
   Command cmd_{};
   LimitState lim_{};
+  StallDetector stall_{};
 };
 
 }  // namespace dyx3_motion_guard

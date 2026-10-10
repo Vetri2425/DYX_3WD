@@ -42,6 +42,9 @@ Decision GuardCore::decide(double now_s, double dt_s, const GateInputs& gates) {
     d.clamped = false;
     d.out = canonical_stop();
     reset(lim_);  // fail-to-zero is immediate and leaves no ramp state behind
+    // A refusal before the stall detector restarts its timer and keeps its latch (the demand did
+    // not drop); the stall refusal itself leaves the detector as it set it.
+    if (r != Reason::ActuatorStall) stall_.interrupt();
     return d;
   };
 
@@ -53,6 +56,7 @@ Decision GuardCore::decide(double now_s, double dt_s, const GateInputs& gates) {
   const Mode mode = static_cast<Mode>(cmd_.mode);
   if (mode == Mode::Stop) {  // a clean STOP is always forwarded, whatever the gates say
     reset(lim_);
+    stall_.clear();  // the demand dropped: the actuator-stall latch clears
     d.reason = Reason::Ok;
     d.accepted = true;
     d.source_pose_sample_ns = cmd_.source_pose_sample_ns;
@@ -68,6 +72,11 @@ Decision GuardCore::decide(double now_s, double dt_s, const GateInputs& gates) {
   in.speed_body_x = cmd_.speed_body_x;
   in.yaw_setpoint = cmd_.yaw_setpoint;
   in.yaw_rate_setpoint = cmd_.yaw_rate_setpoint;
+  // Actuator plausibility, on the command about to be forwarded (before the hard envelopes): a
+  // demand the drivetrain has not executed for longer than stall_time_s stops the rover, and the
+  // STOP is held until the demand drops.
+  if (stall_.update(in, gates.vehicle, now_s, cfg_.plausibility))
+    return fail(Reason::ActuatorStall);
   const Limited lim = apply_limits(in, dt_s, cfg_.limits, lim_);
   d.out = lim.motion;
   d.accepted = true;
