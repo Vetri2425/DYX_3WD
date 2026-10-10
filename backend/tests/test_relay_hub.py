@@ -53,7 +53,7 @@ async def test_hub_auth_roles_heartbeat_and_disconnect():
     relay = OperatorLinkRelay(gw, relay_s=0.5, tablet_timeout_s=1.5, clock=clk)
     emitted = []
 
-    async def emit(ev, data):
+    async def emit(ev, data, to=None):
         emitted.append((ev, data))
 
     hub = RealtimeHub(token_store(), gw, relay, emit)
@@ -71,16 +71,21 @@ async def test_hub_auth_roles_heartbeat_and_disconnect():
     assert relay.tablet_alive() is True  # a viewer leaving does not drop the tablet
     hub.on_disconnect("o")
     assert relay.tablet_alive() is False  # the last operator session closing clears it at once
+    emitted.clear()  # (the connect replays ran meanwhile; covered below)
     await hub.broadcast_telemetry({"a": 1})
     await hub.broadcast_gateway_state(False)
     assert emitted[0][0] == "telemetry" and emitted[0][1]["snapshot"] == {"a": 1}
-    assert emitted[1] == ("gateway", {"connected": False})
+    assert emitted[1][0] == "rover_event"
+    assert emitted[1][1]["kind"] == "gateway_link" and emitted[1][1]["data"] == {"connected": False}
 
 
 async def test_hub_estop_rules_and_honest_verdicts():
     gw, clk = FakeGateway(), Clock()
     relay = OperatorLinkRelay(gw, relay_s=0.5, tablet_timeout_s=1.5, clock=clk)
-    hub = RealtimeHub(token_store(), gw, relay, lambda *_: None)
+    async def no_emit(*_a, **_k):
+        return None
+
+    hub = RealtimeHub(token_store(), gw, relay, no_emit)
     hub.on_connect("v", {"token": "view-tok"})
     hub.on_connect("o", {"token": "oper-tok"})
     assert (await hub.on_estop("ghost", {"asserted": True}))["code"] == "unauthenticated"
@@ -241,3 +246,140 @@ async def test_a_short_stall_keeps_a_truthful_heartbeat_and_on_time_ticks_change
     await relay.step()
     assert relay.stalls == 1
     assert len(gw.calls) == 12  # the pre-stall stamp is 0.9 s old: still alive, still relayed
+
+
+# ---- status events: one Socket.IO event, rover_event
+
+
+class Emitter:
+    def __init__(self):
+        self.out = []  # (event, data, to)
+
+    async def __call__(self, ev, data, to=None):
+        self.out.append((ev, data, to))
+
+    def status(self, to=None):
+        return [d for ev, d, t in self.out if ev == "rover_event" and t == to]
+
+
+def gw_event(kind, seq, data, **extra):
+    e = {"v": 1, "type": "event", "event": kind, "seq": seq, "t_mono_s": 5.0, "t_wall_ms": 1791624580123,
+         "coalesced": 0, "replay": False, "data": data}
+    e.update(extra)
+    return e
+
+
+async def test_gateway_events_are_relayed_at_once_with_the_hub_sequence():
+    import asyncio
+
+    gw, clk = FakeGateway(), Clock()
+    relay = OperatorLinkRelay(gw, relay_s=0.5, tablet_timeout_s=1.5, clock=clk)
+    em = Emitter()
+    hub = RealtimeHub(token_store(), gw, relay, em)
+    assert gw.event_cbs == [hub.broadcast_event]  # the hub subscribes itself to the gateway's events
+    await hub.broadcast_gateway_state(True)
+    await hub.broadcast_event(gw_event("mission_state", 11, {"state": 1, "reason_code": 0}))
+    await hub.broadcast_event(gw_event("estop", 12, {"asserted": True, "source": "ble"}, coalesced=2))
+    s = em.status()
+    assert [p["kind"] for p in s] == ["gateway_link", "mission_state", "estop"]
+    assert [p["seq"] for p in s] == sorted(p["seq"] for p in s) and len({p["seq"] for p in s}) == 3
+    assert s[0]["data"] == {"connected": True} and s[0]["gateway_seq"] is None and isinstance(s[0]["t_wall_ms"], int)
+    m = s[1]
+    assert m == {"kind": "mission_state", "seq": m["seq"], "gateway_seq": 11, "t_mono_s": 5.0, "t_wall_ms": 1791624580123,
+                 "coalesced": 0, "replay": False, "data": {"state": 1, "reason_code": 0}}
+    assert s[2]["coalesced"] == 2 and s[2]["data"]["asserted"] is True
+    # a session that connects now gets the latest of every kind, to itself only, in seq order, marked replay
+    em.out.clear()
+    assert hub.on_connect("o", {"token": "oper-tok"}) is True
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    mine = em.status(to="o")
+    assert [p["kind"] for p in mine] == ["gateway_link", "mission_state", "estop"]
+    assert all(p["replay"] for p in mine)
+    assert [p["seq"] for p in mine] == [p["seq"] for p in s]  # the original sequence numbers
+    assert em.status() == []  # nothing broadcast
+    # a newer mission state replaces the old one in the replay
+    await hub.broadcast_event(gw_event("mission_state", 13, {"state": 3, "reason_code": 0}))
+    em.out.clear()
+    hub.on_connect("v", {"token": "view-tok"})
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    kinds = {p["kind"]: p for p in em.status(to="v")}
+    assert kinds["mission_state"]["data"]["state"] == 3 and kinds["mission_state"]["gateway_seq"] == 13
+
+
+async def test_before_the_gateway_connects_a_session_learns_the_link_is_down():
+    import asyncio
+
+    gw, clk = FakeGateway(), Clock()
+    em = Emitter()
+    hub = RealtimeHub(token_store(), gw, OperatorLinkRelay(gw, relay_s=0.5, tablet_timeout_s=1.5, clock=clk), em)
+    hub.on_connect("v", {"token": "view-tok"})
+    await asyncio.sleep(0)
+    mine = em.status(to="v")
+    assert len(mine) == 1 and mine[0]["kind"] == "gateway_link" and mine[0]["data"] == {"connected": False}
+
+
+async def test_end_to_end_gateway_socket_to_socketio_emit():
+    """A real GatewayClient on a Unix socket: an event line becomes a rover_event emit, a reconnect resumes the flow."""
+    import asyncio
+    import json
+    import os
+    import tempfile
+
+    from dyx3_backend.gateway.client import GatewayClient
+
+    path = os.path.join(tempfile.mkdtemp(prefix="dyx3hub"), "g.sock")  # short: AF_UNIX paths are limited
+    writers = []
+
+    async def handle(_reader, writer):
+        writers.append(writer)
+        await asyncio.sleep(3600)
+
+    server = await asyncio.start_unix_server(handle, path=path)
+    gw = GatewayClient(path, request_timeout_s=1.0, reconnect_min_s=0.05, reconnect_max_s=0.1)
+    em = Emitter()
+    hub = RealtimeHub(token_store(), gw, OperatorLinkRelay(gw, relay_s=0.5, tablet_timeout_s=1.5), em)
+    gw.on_state(hub.broadcast_gateway_state)
+    await gw.start()
+    loop = asyncio.get_running_loop()
+
+    async def until(pred, timeout=2.0):
+        end = loop.time() + timeout
+        while loop.time() < end and not pred():
+            await asyncio.sleep(0.001)
+        return pred()
+
+    async def push(seq, state):
+        line = {"v": 1, "type": "event", "event": "mission_state", "seq": seq, "t_mono_s": 1.0, "t_wall_ms": 1, "coalesced": 0,
+                "replay": False, "data": {"state": state}}
+        writers[-1].write((json.dumps(line) + "\n").encode())
+        await writers[-1].drain()
+
+    def mission_states():
+        return [p["data"]["state"] for p in em.status() if p["kind"] == "mission_state"]
+
+    try:
+        assert await until(lambda: writers and gw.connected)
+        lat = []
+        for i in range(1, 21):
+            t0 = loop.time()
+            await push(i, i)
+            assert await until(lambda n=i: len(mission_states()) == n)
+            lat.append(loop.time() - t0)
+        lat.sort()
+        print(f"gateway event line -> Socket.IO emit: p50 {lat[10] * 1e3:.3f} ms, max {lat[-1] * 1e3:.3f} ms")
+        assert lat[10] < 0.005
+        writers[-1].close()  # the link drops and comes back
+        assert await until(lambda: [p["data"] for p in em.status() if p["kind"] == "gateway_link"][-1] == {"connected": False})
+        n = len(writers)
+        assert await until(lambda: len(writers) > n and gw.connected)
+        await push(21, 99)
+        assert await until(lambda: mission_states()[-1:] == [99])
+        links = [p["data"]["connected"] for p in em.status() if p["kind"] == "gateway_link"]
+        assert links == [True, False, True]
+    finally:
+        await gw.stop()
+        for w in writers:
+            w.close()
+        server.close()
