@@ -535,9 +535,19 @@ TEST(SprayNode, RuntimeParameterChangesObeyTheirClass) {
   Rig r;
   auto cli = std::make_shared<rclcpp::AsyncParametersClient>(r.world, "spray");
   ASSERT_TRUE(cli->wait_for_service(5s));
+  // Waits for the reply as a condition: deliver() returns at once when nothing is ready, so a count
+  // of drains is no wait at all. The wall-clock bound only limits a reply that never comes.
   const auto set = [&](const rclcpp::Parameter& p) {
     auto fut = cli->set_parameters({p});
-    for (int i = 0; i < 500 && fut.wait_for(0ms) != std::future_status::ready; ++i) r.deliver();
+    const auto end = std::chrono::steady_clock::now() + 10s;
+    while (fut.wait_for(0ms) != std::future_status::ready &&
+           std::chrono::steady_clock::now() < end) {
+      r.deliver();
+      r.exec->spin_once(1ms);  // blocks only while nothing is ready
+    }
+    EXPECT_EQ(fut.wait_for(0ms), std::future_status::ready) << "no reply to " << p.get_name();
+    if (fut.wait_for(0ms) != std::future_status::ready)
+      return rcl_interfaces::msg::SetParametersResult{};
     return fut.get()[0];
   };
   EXPECT_TRUE(set(rclcpp::Parameter("max_xtrack_error_m", 0.04))
