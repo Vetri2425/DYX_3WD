@@ -259,8 +259,9 @@ def _render_path(svc, sha: str) -> bytes:
     body = {
         "sha256": art.sha256,
         # What the points are relative to (meta, docs/contracts/backend.md section 1b): "local_ned" = the anchor's
-        # local NE, "ekf_local_ned" = the rover's EKF local frame. A stored artifact that records no frame is read as "local_ned".
-        "frame": meta.get("frame", "local_ned"),
+        # local NE, "ekf_local_ned" = the rover's EKF local frame. null = the artifact records no frame; the rover refuses
+        # to place it (NO_PLACEMENT_FRAME), so the preview must not invent one.
+        "frame": meta.get("frame"),
         "anchor": meta.get("anchor"),
         "points": [[p.north_m, p.east_m, p.flags] for p in art.points],
     }

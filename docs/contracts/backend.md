@@ -132,7 +132,8 @@ Errors: `{"ok": false, "code", "reason"}`; 400 `INVALID_PAYLOAD` (invalid JSON, 
 **Preview** `GET /missions/{sha}/path` returns the stored geometry, bit-exact what is driven before placement:
 `{"sha256", "frame", "anchor", "points": [[north_m, east_m, flags], ...]}`, e.g.
 `{"sha256": "45f5…", "frame": "local_ned", "anchor": {"alt": 519.5, "lat": 48.137154, "lon": 11.576124}, "points": [...]}`. `frame` and `anchor` come from the meta; an
-artifact without them (one stored before frame metadata existed) reads `"frame": "local_ned", "anchor": null`.
+artifact without them (one stored before frame metadata existed) reads `"frame": null, "anchor": null`; the rover
+refuses to place such an artifact (`NO_PLACEMENT_FRAME`).
 
 ## 1c. Mission start and health (mission contract v2)
 
