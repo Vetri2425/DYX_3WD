@@ -2522,3 +2522,29 @@ handshake OK, timesync 0.55 ms round trip; battery 26.46 V (86 %). Two notes:
   1 m/s.
 - **T1c passed (wheels down, log `04_14_36.ulg`):** stick right → gyro yaw +0.70 rad/s, stick left → −0.64 rad/s,
   straight forward (a slight left drift of −0.03 to −0.07 rad/s at 0.4 m/s; watch it in T4). **T1 closed.**
+
+## 2026-10-10 (10:00) — Claude — T2 safety parameters set (owner policy)
+
+**Owner policy:**
+- RC loss and QGC loss must not affect an autonomous run; the owner is always with the rover.
+- Only the PX4 ↔ Jetson link matters.
+
+| Parameter | Was | Now | Effect |
+|---|---|---|---|
+| `COM_RCL_EXCEPT` | 4 | **7** | RC loss ignored in Mission, Hold and Offboard |
+| `NAV_RCL_ACT` | 6 | 6 | RC loss in Manual still disarms |
+| `NAV_DLL_ACT` | **6 (Disarm after 10 s of QGC loss)** | **0** | QGC drop-outs never stop the rover |
+| `COM_OF_LOSS_T` | 1.0 (firmware default, not in the baseline) | **0.5** | Jetson / agent / Ethernet loss detected in 0.5 s |
+| `COM_OBL_RC_ACT` | 7 | 7 | offboard loss → **Disarm** |
+
+- **Why Disarm, not Hold:** the spray valve is FCU PWM (`PWM_AUX_FUNC1 301`, `PWM_AUX_DIS1 0`,
+  `PWM_AUX_FAIL1 0`), so Disarm stops the drive **and** closes the valve. Hold would ramp about 1.7 m with the
+  valve open. This addresses X-012 by configuration; bench proof pending (kill the XRCE agent during an Offboard run
+  with water).
+- **Unchanged by the owner's choice:** `RO_DECEL_LIM` 0.3 (accel and decel left as they are). The PC-5 EKF noise
+  values wait for T3 (RTK FIXED).
+- **Files:**
+  - the baseline `config/px4/3wd_6x_carry_from_proto.params` is updated;
+  - full FCU dump in `config/px4/2026-10-10.params` (915 params, reference only: it holds calibration);
+  - `open_items.md`: PC-2c done, X-011 decided, X-012 addressed (proof pending).
+- **Next:** RC kill switch test (wheels up, armed): kill stops the outputs at once.
