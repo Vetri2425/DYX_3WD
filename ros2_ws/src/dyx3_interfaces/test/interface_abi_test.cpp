@@ -68,6 +68,7 @@ TEST(MotionSetpointAbi, ConstantsAndSafeDefault) {
   EXPECT_FLOAT_EQ(message.yaw_setpoint, 0.0F);
   EXPECT_FLOAT_EQ(message.yaw_rate_setpoint, 0.0F);
   EXPECT_FALSE(message.valid);
+  ExpectZeroTime(message.source_pose_sample_stamp);  // IF-003: zero = no pose
 }
 
 TEST(MotionSetpointStatusAbi, ConstantsAndSafeDefault) {
@@ -194,6 +195,9 @@ TEST(Px4LinkAbi, DefaultsAreUnhealthyAndConstantsAreFrozen) {
   EXPECT_EQ(l.spray_unmatched_ack_count, 0U);
   EXPECT_EQ(l.rtcm_chunks_accepted, 0U);
   EXPECT_EQ(l.rtcm_chunks_dropped, 0U);
+  EXPECT_FALSE(l.pose_to_write_age_valid);  // IF-003
+  EXPECT_FLOAT_EQ(l.pose_to_write_age_s, 0.0F);
+  EXPECT_FLOAT_EQ(l.pose_to_write_age_max_s, 0.0F);
 
   const dyx3_interfaces::msg::GnssReport g{};
   EXPECT_FALSE(g.valid);
@@ -493,12 +497,12 @@ TEST(SchemaFingerprint, EveryInterfaceFieldListIsPinned) {
       {"msg/EstimatorHealth.msg", "b96bdedebc39b889"},
       {"msg/GnssReport.msg", "c1afc4b310e7c891"},
       {"msg/MissionState.msg", "4dda7d620e8829b8"},
-      {"msg/MotionSetpoint.msg", "6193360bc62e1794"},
+      {"msg/MotionSetpoint.msg", "b3e830129bf344f8"},
       {"msg/MotionSetpointStatus.msg", "c08907d8044e1b62"},
       {"msg/NtripStatus.msg", "612c65d90fa6068d"},
       {"msg/OperatorLinkStatus.msg", "0971532d2a94a362"},
       {"msg/PointResult.msg", "73d0b6b411d8b49f"},
-      {"msg/Px4LinkStatus.msg", "04c58bc9e1475cc8"},
+      {"msg/Px4LinkStatus.msg", "f9c81d10e8879983"},
       {"msg/RecorderStatus.msg", "cebd63e8913b96f9"},
       {"msg/RppStatus.msg", "fd1b086330d84a18"},
       {"msg/RtcmData.msg", "927edee98f0c6448"},

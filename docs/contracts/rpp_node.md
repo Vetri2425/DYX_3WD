@@ -10,7 +10,7 @@
 | in | `/dyx3/vehicle_state` | VehicleState | R1 | pose is fed only while `position_valid` and `attitude_valid` and north, east and heading are finite; velocity while `velocity_valid` and both components and the yaw rate are finite (RPP-002; the core repeats the check). An invalid sample is **not** fed: the pose ages out and the core stops (STALE) |
 | in | `/dyx3/rtk_status` | RtkStatus | R1 | `fix_type` and `horizontal_accuracy_m` (0 = unknown, passed as unknown) |
 | in | `/dyx3/mission/state` | MissionState | R1 | `path_artifact_sha256` + `mission_id` select the path; `state == RUNNING` is the only state in which the core ticks |
-| out | `/dyx3/rpp/motion_setpoint` | MotionSetpoint | R1 | every tick, always `valid`; STOP unless running |
+| out | `/dyx3/rpp/motion_setpoint` | MotionSetpoint | R1 | every tick, always `valid`; STOP unless running. `source_pose_sample_stamp` (IF-003, 0.14.0) = `VehicleState.px4_sample_stamp` of the newest pose fed into the core, on every command including STOP; zero until a valid pose arrived (latency evidence, never gating) |
 | out | `/dyx3/rpp/status` | RppStatus | R1 | every tick; `mission_id` is the acknowledgement `dyx3_mission` waits for |
 
 ## 2. Behaviour

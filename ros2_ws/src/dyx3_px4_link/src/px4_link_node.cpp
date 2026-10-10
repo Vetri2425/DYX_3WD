@@ -238,6 +238,10 @@ Px4LinkNode::Px4LinkNode(const rclcpp::NodeOptions& options, ClockFn clock, bool
         c.yaw_setpoint = m->yaw_setpoint;
         c.yaw_rate_setpoint = m->yaw_rate_setpoint;
         c.valid = m->valid;
+        c.source_pose_sample_us =
+            static_cast<uint64_t>(std::max<int64_t>(0, m->source_pose_sample_stamp.sec)) *
+                1000000ULL +
+            m->source_pose_sample_stamp.nanosec / 1000U;
         gate_->on_command(c, clock_());
       });
   sub_rtcm_ = create_subscription<dyx3_interfaces::msg::RtcmData>(
@@ -821,6 +825,19 @@ void Px4LinkNode::step(double now_s) {
   last_heartbeat_published_ = ofb.publish_heartbeat;
   if (ofb.publish_heartbeat)
     publish_setpoint_set(ofb.stop_only ? stop_setpoint() : last_gate_.sp, t_us);
+  // IF-003: pose-to-write age at the first write of each new forwarded guard command. Both stamps
+  // are Jetson system-clock microseconds (section 7), so the difference is the whole chain.
+  if (ofb.publish_heartbeat && !ofb.stop_only && last_gate_.forwarded &&
+      last_gate_.source_pose_sample_us != 0 &&
+      !(age_measured_seq_valid_ && age_measured_seq_ == last_gate_.seq)) {
+    age_measured_seq_valid_ = true;
+    age_measured_seq_ = last_gate_.seq;
+    const float age = static_cast<float>(
+        (static_cast<double>(t_us) - static_cast<double>(last_gate_.source_pose_sample_us)) * 1e-6);
+    age_max_s_ = age_valid_ ? std::max(age_max_s_, age) : age;
+    age_last_s_ = age;
+    age_valid_ = true;
+  }
   if (ofb.send_mode_command)
     publish_vehicle_command(kCmdDoSetMode, 1.0F, 6.0F, t_us);  // 6 = OFFBOARD
   start_ulog_if_due(now_s, last_link_ok_);
@@ -981,6 +998,11 @@ void Px4LinkNode::publish_status(double now_s, const StalenessReport& rep, const
   s.spray_unmatched_ack_count = spray_late_ack_count_;
   s.rtcm_chunks_accepted = rtcm_chunks_accepted_;
   s.rtcm_chunks_dropped = rtcm_chunks_dropped_;
+  s.pose_to_write_age_valid = age_valid_;  // IF-003, window = since the previous status
+  s.pose_to_write_age_s = age_valid_ ? age_last_s_ : 0.0F;
+  s.pose_to_write_age_max_s = age_valid_ ? age_max_s_ : 0.0F;
+  age_valid_ = false;
+  age_last_s_ = age_max_s_ = 0.0F;
   pub_status_->publish(s);
 }
 

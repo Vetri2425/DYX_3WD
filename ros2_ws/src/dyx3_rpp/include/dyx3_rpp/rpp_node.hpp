@@ -75,6 +75,9 @@ private:
   std::string pending_sha_;
 
   uint64_t seq_{0};
+  // IF-003: VehicleState.px4_sample_stamp of the newest pose fed into the core; copied into every
+  // MotionSetpoint.source_pose_sample_stamp. Zero until a valid pose arrived.
+  builtin_interfaces::msg::Time pose_sample_stamp_{};
   uint8_t last_state_{255};
   // XR-RPP-002: a running tick on which the core publishes no command (a run handover that needs
   // no alignment) repeats the previous running tick's command once, instead of a one-tick STOP

@@ -10,6 +10,10 @@ releases from 0.13.1 on, in the ROS package changelog format.
 -------------------
 * ``VehicleState.msg``: append ``vertical_position_valid`` and ``vertical_velocity_valid`` from
   PX4 ``z_valid`` / ``v_z_valid`` (IF-004).
+* ``MotionSetpoint.msg``: append ``source_pose_sample_stamp`` (PX4 sample time of the pose behind
+  the command; RPP fills it, the guard preserves it or stamps its own STOP) (IF-003).
+* ``Px4LinkStatus.msg``: append ``pose_to_write_age_valid``, ``pose_to_write_age_s``,
+  ``pose_to_write_age_max_s`` (IF-003).
 
 0.13.1 (2026-10-10)
 -------------------

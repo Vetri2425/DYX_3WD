@@ -68,6 +68,7 @@ RppNode::RppNode(const rclcpp::NodeOptions& options, ClockFn clock, bool create_
           p.e = m->east_m;
           p.yaw_ned = m->heading_rad;
           core_.on_pose(p, now);
+          pose_sample_stamp_ = m->px4_sample_stamp;
         }
         if (m->velocity_valid && std::isfinite(m->velocity_north_mps) &&
             std::isfinite(m->velocity_east_mps) && std::isfinite(m->yaw_rate_radps)) {
@@ -427,6 +428,7 @@ void RppNode::publish_motion(const MotionCommand& c) {
   m.yaw_setpoint = c.yaw_setpoint;
   m.yaw_rate_setpoint = c.yaw_rate_setpoint;
   m.valid = true;
+  m.source_pose_sample_stamp = pose_sample_stamp_;  // IF-003: the pose behind this command
   pub_motion_->publish(m);
 }
 

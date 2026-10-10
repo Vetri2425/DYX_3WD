@@ -55,6 +55,7 @@ Decision GuardCore::decide(double now_s, double dt_s, const GateInputs& gates) {
     reset(lim_);
     d.reason = Reason::Ok;
     d.accepted = true;
+    d.source_pose_sample_ns = cmd_.source_pose_sample_ns;
     return d;
   }
 
@@ -70,6 +71,7 @@ Decision GuardCore::decide(double now_s, double dt_s, const GateInputs& gates) {
   const Limited lim = apply_limits(in, dt_s, cfg_.limits, lim_);
   d.out = lim.motion;
   d.accepted = true;
+  d.source_pose_sample_ns = cmd_.source_pose_sample_ns;
   d.clamped = lim.clamped;
   d.reason = lim.clamped ? Reason::LimitClamped : Reason::Ok;
   return d;

@@ -412,3 +412,15 @@ not valid when the session is down or nothing arrived. **Values only.** F-tasks 
 source (the issue only says ~4 ms is expected), and inventing one would put an arbitrary number in a safety path. **OPEN (human):** the criterion (offset below X
 for Y seconds?) and who gates on it (`dyx3_mission` precondition vs `dyx3_motion_guard`). Until then the evidence is recorded: the recorder logs it at run start
 and end, and the gateway's telemetry shows it.
+
+## Pose-to-write age (interfaces 0.14.0, IF-003)
+
+`MotionSetpoint.source_pose_sample_stamp` names the PX4 local-position sample a command was computed from (RPP fills it, the guard preserves it on
+forwarded commands; `dyx3_motion_guard.md` section 1). It is `timestamp_sample` in the Jetson system-clock domain (section 7), the same base as the
+`timestamp` this link writes. At the **first write to PX4 of each new forwarded guard command** (OFFBOARD `Active`, gate reason `None` or `GuardStop`,
+stamp non-zero) the link computes `write timestamp - source_pose_sample_stamp`: the whole chain PX4 sample → `/fmu/out` → px4_link →
+`/dyx3/vehicle_state` → rpp → motion_guard → px4_link → `/fmu/in`. Rewrites of the same command by the heartbeat are not measured again.
+`Px4LinkStatus.pose_to_write_age_s` is the newest measurement and `pose_to_write_age_max_s` the largest, both over the window since the previous status
+message; `pose_to_write_age_valid` is false (values 0) when the window had no measurement. Evidence only: nothing gates on it (freshness stays on the
+link's steady clock). A system-clock step can make a value negative or large; read it next to `timesync_*`. Bench reading: arm, OFFBOARD with an idle
+mission (RPP's STOP commands are stamped too), record `/dyx3/px4_link/status`.

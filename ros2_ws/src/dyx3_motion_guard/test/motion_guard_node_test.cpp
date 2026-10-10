@@ -41,6 +41,7 @@ struct Rig {
   dyx3_interfaces::msg::SafetyGateStatus last_gate;
   dyx3_interfaces::msg::EmergencyStopState last_estop;
   uint64_t seq{0};
+  builtin_interfaces::msg::Time rpp_stamp{}, veh_stamp{};  // IF-003 pose sample stamps
   bool veh_ok{true}, rtk_ok{true}, op_ok{true}, link_ok{true}, est_ok{true}, mission_running{true};
 
   explicit Rig(const std::vector<rclcpp::Parameter>& params = {}) {
@@ -138,6 +139,7 @@ struct Rig {
       v.arming_state = 2;
       v.nav_state = 14;
       v.position_valid = v.velocity_valid = v.attitude_valid = true;
+      v.px4_sample_stamp = veh_stamp;
       p_veh->publish(v);
     }
     if (est_ok) {
@@ -173,6 +175,7 @@ struct Rig {
     m.yaw_setpoint = yaw;
     m.yaw_rate_setpoint = rate;
     m.valid = valid;
+    m.source_pose_sample_stamp = rpp_stamp;
     p_cmd->publish(m);
   }
   // Calls the E-stop service and pumps (no guard step, no world traffic) until the reply arrives.
@@ -420,6 +423,40 @@ TEST(MotionGuardNode, ShutdownStopPublishesCanonicalStopWhileMoving) {
     EXPECT_TRUE(m.valid);
     EXPECT_GT(m.seq, i == n_before ? seq_before : r.outs[i - 1].seq);
   }
+}
+
+// IF-003: a forwarded command keeps RPP's pose stamp; the guard's own STOP (refusal, shutdown)
+// names the newest VehicleState sample it received, and zero when it never received one.
+TEST(MotionGuardNode, ForwardedCommandsKeepThePoseStampOwnStopsUseTheNewestVehicleSample) {
+  {
+    Rig r;
+    r.rpp_stamp.sec = 1791590000;
+    r.rpp_stamp.nanosec = 100'000'000;
+    r.veh_stamp.sec = 1791590000;
+    r.veh_stamp.nanosec = 120'000'000;
+    r.run(0.3);
+    ASSERT_EQ(r.last_out.mode, MotionSetpoint::MODE_TRACK_RATE);
+    EXPECT_EQ(r.last_out.source_pose_sample_stamp, r.rpp_stamp);
+    r.tick(0.02, true, MotionSetpoint::MODE_STOP, 0.0F, NaN, 0.0F);  // a clean STOP is forwarded
+    EXPECT_TRUE(r.last_status.accepted);
+    EXPECT_EQ(r.last_out.source_pose_sample_stamp, r.rpp_stamp);
+    r.op_ok = false;  // operator link lost: the guard refuses and publishes its own STOP
+    r.now += 0.6;
+    r.tick();
+    EXPECT_EQ(r.last_out.mode, MotionSetpoint::MODE_STOP);
+    EXPECT_FALSE(r.last_status.accepted);
+    EXPECT_EQ(r.last_out.source_pose_sample_stamp, r.veh_stamp);
+    r.guard->shutdown_stop();
+    r.pump(5);
+    EXPECT_EQ(r.last_out.source_pose_sample_stamp, r.veh_stamp);
+  }
+  Rig never;             // after r is gone: two rigs share one DDS domain
+  never.veh_ok = false;  // no VehicleState ever: the guard's STOP has no pose to name
+  never.rpp_stamp.sec = 5;
+  never.run(0.2);
+  EXPECT_EQ(never.last_out.mode, MotionSetpoint::MODE_STOP);
+  EXPECT_EQ(never.last_out.source_pose_sample_stamp.sec, 0);
+  EXPECT_EQ(never.last_out.source_pose_sample_stamp.nanosec, 0U);
 }
 
 // MG-006: the reason-change log line is throttled, but every transition stays observable on the

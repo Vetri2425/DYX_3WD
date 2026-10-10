@@ -16,6 +16,9 @@ struct Command {
   float yaw_setpoint{0.0F};
   float yaw_rate_setpoint{0.0F};
   bool valid{false};
+  // IF-003: MotionSetpoint.source_pose_sample_stamp, microseconds on the Jetson system clock (the
+  // same base as stamp_us()); 0 = no pose. Latency evidence only, never a freshness input.
+  uint64_t source_pose_sample_us{0};
 };
 
 // The five-field explicit-control set. NaN is a value that is always sent, never omitted.
@@ -62,6 +65,11 @@ struct GateOutput {
   Reason reason{Reason::NoCommand};
   bool failing_to_zero{true};  // true for every reason except None and GuardStop
   double command_age_s{1.0e9};
+  // IF-003: sp is the guard's command (reason None or GuardStop); then seq and the pose stamp are
+  // that command's.
+  bool forwarded{false};
+  uint64_t seq{0};
+  uint64_t source_pose_sample_us{0};
 };
 
 class CommandGate {

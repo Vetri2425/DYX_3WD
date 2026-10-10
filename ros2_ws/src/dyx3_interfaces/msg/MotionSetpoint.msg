@@ -68,3 +68,16 @@ float32 yaw_rate_setpoint
 # Default message is MODE_STOP plus valid=false. A consumer must treat
 # valid=false as STOP regardless of the other field contents and fail to zero.
 bool valid
+
+# --- appended in interfaces 0.14.0 (IF-003) ---
+# PX4 timestamp_sample of the pose this command was computed from. Same time base as
+# VehicleState.px4_sample_stamp: the Jetson system clock (PX4 timestamps on /fmu/out arrive
+# already converted by the uXRCE-DDS client; dyx3_px4_link applies no offset). Zero = no pose.
+#   dyx3_rpp: VehicleState.px4_sample_stamp of the newest pose fed into its core before this
+#     command was computed, on every command including STOP; zero until a valid pose arrived.
+#   dyx3_motion_guard: preserved unchanged on every command it forwards from RPP (accepted,
+#     clamped, or a clean STOP). On its own canonical STOP (any refusal, no command, shutdown) it
+#     carries the px4_sample_stamp of the newest VehicleState the guard received (zero when that
+#     message reported no fresh local position), zero if it never received one.
+# Latency evidence only (dyx3_px4_link pose-to-write age). Never used for freshness or gating.
+builtin_interfaces/Time source_pose_sample_stamp

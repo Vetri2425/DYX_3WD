@@ -125,6 +125,9 @@ GateOutput CommandGate::step(const GateInputs& in) {
   if (validate(cmd_) != Verdict::Ok) return fail(Reason::CommandInvalid);
 
   out.sp = to_setpoint(cmd_);
+  out.forwarded = true;
+  out.seq = cmd_.seq;
+  out.source_pose_sample_us = cmd_.source_pose_sample_us;
   if (out.sp.mode == Mode::Stop) {
     out.reason = Reason::GuardStop;
     out.failing_to_zero = false;

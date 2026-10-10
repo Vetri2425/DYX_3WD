@@ -303,8 +303,10 @@ struct Rig {
       p_lp->publish(lp);
     }
   }
+  builtin_interfaces::msg::Time cmd_pose_stamp{};  // IF-003 source_pose_sample_stamp
   void guard(uint8_t mode, float v, float yaw, float rate, bool valid = true) {
     dyx3_interfaces::msg::MotionSetpoint m;
+    m.source_pose_sample_stamp = cmd_pose_stamp;
     m.seq = ++seq;
     m.mode = mode;
     m.speed_body_x = v;
@@ -1764,4 +1766,42 @@ TEST(Px4LinkNode, VehicleStateFanOut) {
   EXPECT_FLOAT_EQ(r.state.heading_rad, 0.5F);
   EXPECT_TRUE(r.state.vertical_position_valid);   // IF-004: z_valid
   EXPECT_FALSE(r.state.vertical_velocity_valid);  // v_z_valid false
+}
+
+// IF-003: the status reports the pose-to-write age of each new forwarded guard command, on the
+// system clock the stamps share; a window without such a write reports nothing.
+TEST(Px4LinkNode, StatusReportsPoseToWriteAgeOfForwardedCommands) {
+  Rig r;
+  r.bring_up();
+  r.nav_state = 14;
+  bool acc = false;
+  uint8_t rs = 0;
+  ASSERT_TRUE(r.call_offboard(true, &acc, &rs));
+  ASSERT_TRUE(acc);
+  r.run(0.2);
+  EXPECT_FALSE(r.status.pose_to_write_age_valid);  // no stamped command written yet
+  // The pose is 50 ms old (system clock) when the guard command is published.
+  const auto sys_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                          std::chrono::system_clock::now().time_since_epoch())
+                          .count() -
+                      50'000;
+  r.cmd_pose_stamp.sec = static_cast<int32_t>(sys_us / 1'000'000);
+  r.cmd_pose_stamp.nanosec = static_cast<uint32_t>((sys_us % 1'000'000) * 1000);
+  r.guard(2, 0.3F, NaN, 0.1F);
+  ASSERT_TRUE(r.pump_until([&] {
+    r.tick(0.01);
+    return r.status.pose_to_write_age_valid;
+  }));
+  // >= 50 ms by construction; the upper bound only rules out a unit or epoch error (test DDS and
+  // pumping add wall time on a loaded runner).
+  EXPECT_GE(r.status.pose_to_write_age_s, 0.05F);
+  EXPECT_LT(r.status.pose_to_write_age_s, 5.0F);
+  EXPECT_GE(r.status.pose_to_write_age_max_s, r.status.pose_to_write_age_s);
+  r.run(0.15);  // the same command rewritten: not a new measurement, the window empties
+  EXPECT_FALSE(r.status.pose_to_write_age_valid);
+  EXPECT_FLOAT_EQ(r.status.pose_to_write_age_s, 0.0F);
+  r.cmd_pose_stamp = builtin_interfaces::msg::Time{};  // no pose named: nothing to measure
+  r.guard(2, 0.3F, NaN, 0.1F);
+  r.run(0.25);
+  EXPECT_FALSE(r.status.pose_to_write_age_valid);
 }

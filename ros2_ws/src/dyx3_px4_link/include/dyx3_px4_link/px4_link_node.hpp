@@ -154,6 +154,13 @@ private:
   double last_overrun_s_{-1.0};
   uint64_t overruns_{0};
   double last_status_pub_s_{-1e18}, last_state_pub_s_{-1e18}, last_health_pub_s_{-1e18};
+  // IF-003 pose-to-write age over the current status window (first write of each forwarded
+  // command only; reset by publish_status).
+  bool age_measured_seq_valid_{false};
+  uint64_t age_measured_seq_{0};
+  bool age_valid_{false};
+  float age_last_s_{0.0F};
+  float age_max_s_{0.0F};
   bool ulog_started_{false};
   uint64_t last_ulog_gen_{~0ULL};
   std::deque<Pending> pending_;

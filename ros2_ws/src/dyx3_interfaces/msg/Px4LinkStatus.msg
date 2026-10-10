@@ -59,3 +59,15 @@ uint64 spray_unmatched_ack_count
 # These are px4_link-process lifetime counters, not proof of PX4 or receiver consumption.
 uint64 rtcm_chunks_accepted
 uint64 rtcm_chunks_dropped
+
+# --- appended in interfaces 0.14.0 (IF-003) ---
+# Pose-to-write age: at the first write to PX4 of each new forwarded guard command (OFFBOARD
+# Active, guard command fresh and valid), the link's system clock minus that command's
+# MotionSetpoint.source_pose_sample_stamp, in seconds. Both are Jetson system-clock time, so this
+# spans PX4 sample -> /fmu/out -> px4_link -> rpp -> motion_guard -> px4_link -> /fmu/in write.
+# Window: the writes since the previous Px4LinkStatus. valid=false and both values 0 when no such
+# write with a nonzero stamp happened in the window. A system-clock step can make it negative.
+# Evidence only; nothing gates on it.
+bool pose_to_write_age_valid
+float32 pose_to_write_age_s
+float32 pose_to_write_age_max_s

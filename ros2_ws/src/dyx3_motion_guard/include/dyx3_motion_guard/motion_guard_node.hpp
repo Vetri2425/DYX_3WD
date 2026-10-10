@@ -73,6 +73,8 @@ private:
   OperatorIn op_;
   Px4LinkIn link_;
   MissionIn mission_;
+  // IF-003: px4_sample_stamp of the newest VehicleState; stamps the guard's own canonical STOP.
+  builtin_interfaces::msg::Time veh_pose_stamp_{};
   double last_step_s_{-1.0};
   double last_gate_pub_s_{-1e18};
   bool force_safety_pub_{false};  // E-stop latch changed: publish gate + E-stop state this step

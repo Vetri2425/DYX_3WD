@@ -4,6 +4,12 @@
 
 - `VehicleState`: appended `vertical_position_valid` and `vertical_velocity_valid`, filled by `dyx3_px4_link` from PX4
   `vehicle_local_position.z_valid` / `v_z_valid` (false while the sample is stale or the value is non-finite) (IF-004).
+- `MotionSetpoint`: appended `source_pose_sample_stamp`, the PX4 `timestamp_sample` (Jetson system-clock domain, as
+  `VehicleState.px4_sample_stamp`) of the pose the command was computed from. `dyx3_rpp` fills it; `dyx3_motion_guard` preserves it
+  on forwarded commands and stamps its own canonical STOP with the newest `VehicleState.px4_sample_stamp` it received (zero if none)
+  (IF-003).
+- `Px4LinkStatus`: appended `pose_to_write_age_valid`, `pose_to_write_age_s`, `pose_to_write_age_max_s`: the link's write time minus
+  that stamp at the first write of each new forwarded command, over the status window (IF-003). Evidence only.
 - Migration: appended fields only; every consumer is rebuilt against 0.14.0 in the same release. Bags recorded with
   0.13.x carry the old `VehicleState` definition.
 

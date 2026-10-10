@@ -31,6 +31,17 @@ static_assert(static_cast<uint8_t>(Reason::ArmingGate) == MotionSetpointStatus::
 static_assert(static_cast<uint8_t>(Reason::EstimatorUnhealthy) ==
               MotionSetpointStatus::REASON_ESTIMATOR_UNHEALTHY);
 
+int64_t to_ns(const builtin_interfaces::msg::Time& t) {
+  return static_cast<int64_t>(t.sec) * 1'000'000'000LL + static_cast<int64_t>(t.nanosec);
+}
+
+builtin_interfaces::msg::Time from_ns(int64_t ns) {
+  builtin_interfaces::msg::Time t;
+  t.sec = static_cast<int32_t>(ns / 1'000'000'000LL);
+  t.nanosec = static_cast<uint32_t>(ns % 1'000'000'000LL);
+  return t;
+}
+
 double steady_now_s() {
   return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
@@ -71,6 +82,8 @@ MotionGuardNode::MotionGuardNode(const rclcpp::NodeOptions& options, ClockFn clo
                                                    c.yaw_setpoint = m->yaw_setpoint;
                                                    c.yaw_rate_setpoint = m->yaw_rate_setpoint;
                                                    c.valid = m->valid;
+                                                   c.source_pose_sample_ns =
+                                                       to_ns(m->source_pose_sample_stamp);
                                                    const double now = clock_();
                                                    core_->on_command(c, now);
                                                    w_cmd_.touch(now);
@@ -88,6 +101,7 @@ MotionGuardNode::MotionGuardNode(const rclcpp::NodeOptions& options, ClockFn clo
         veh_.position_valid = m->position_valid;
         veh_.velocity_valid = m->velocity_valid;
         veh_.attitude_valid = m->attitude_valid;
+        veh_pose_stamp_ = m->px4_sample_stamp;
         w_veh_.touch(clock_());
       });
   sub_est_ = create_subscription<dyx3_interfaces::msg::EstimatorHealth>(
@@ -240,6 +254,9 @@ void MotionGuardNode::step(double now_s) {
   out.yaw_setpoint = d.out.yaw_setpoint;
   out.yaw_rate_setpoint = d.out.yaw_rate_setpoint;
   out.valid = true;  // always a contract-conforming command: forwarded or the canonical STOP
+  // IF-003: a forwarded command keeps RPP's pose stamp; the guard's own STOP names the newest pose
+  // the guard knows (zero if none).
+  out.source_pose_sample_stamp = d.accepted ? from_ns(d.source_pose_sample_ns) : veh_pose_stamp_;
   pub_cmd_->publish(out);
 
   const bool reason_changed = d.reason != last_reason_;
@@ -298,6 +315,7 @@ void MotionGuardNode::shutdown_stop() {
   out.yaw_setpoint = stop.yaw_setpoint;
   out.yaw_rate_setpoint = stop.yaw_rate_setpoint;
   out.valid = true;
+  out.source_pose_sample_stamp = veh_pose_stamp_;  // IF-003: the guard's own STOP
   pub_cmd_->publish(out);
 }
 

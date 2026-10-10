@@ -75,6 +75,7 @@ struct Rig {
   uint32_t mission_id{7};
   std::string mission_sha;
   bool publish_vehicle{true};
+  builtin_interfaces::msg::Time sample_stamp{};  // VehicleState.px4_sample_stamp of the next sample
   double north{0.0}, east{0.0}, heading{0.0}, speed{0.0};
   uint8_t fix{6};
 
@@ -151,6 +152,7 @@ struct Rig {
       v.heading_rad = static_cast<float>(heading);
       v.velocity_north_mps = static_cast<float>(speed * std::cos(heading));
       v.velocity_east_mps = static_cast<float>(speed * std::sin(heading));
+      v.px4_sample_stamp = sample_stamp;
       p_veh->publish(v);
     }
     dyx3_interfaces::msg::RtkStatus r;
@@ -799,4 +801,38 @@ TEST(RppNode, AFilesystemErrorInTheLoadNeverEscapes) {
   EXPECT_TRUE(r.status.state == RppStatus::STATE_LOADED || r.status.state == RppStatus::STATE_ERROR)
       << int(r.status.state);
   EXPECT_EQ(r.motion.back().mode, MotionSetpoint::MODE_STOP);
+}
+
+// IF-003: every command names the PX4 sample of the pose it was computed from, STOP included; an
+// invalid sample is not a pose and does not move the stamp.
+TEST(RppNode, EveryCommandCarriesThePoseSampleItWasComputedFrom) {
+  Rig r;
+  r.publish_vehicle = false;
+  r.run(0.1);
+  ASSERT_FALSE(r.motion.empty());
+  EXPECT_EQ(r.motion.back().source_pose_sample_stamp.sec, 0);  // no pose yet
+  EXPECT_EQ(r.motion.back().source_pose_sample_stamp.nanosec, 0U);
+
+  r.publish_vehicle = true;
+  r.sample_stamp.sec = 1791590000;
+  r.sample_stamp.nanosec = 120'000'000;
+  r.cycle();
+  EXPECT_EQ(r.motion.back().mode, MotionSetpoint::MODE_STOP);  // READY: STOP, still stamped
+  EXPECT_EQ(r.motion.back().source_pose_sample_stamp.sec, 1791590000);
+  EXPECT_EQ(r.motion.back().source_pose_sample_stamp.nanosec, 120'000'000U);
+
+  r.mission_state = MissionState::STATE_RUNNING;
+  r.sample_stamp.nanosec = 140'000'000;
+  r.cycle();
+  EXPECT_EQ(r.motion.back().source_pose_sample_stamp.nanosec, 140'000'000U);
+
+  dyx3_interfaces::msg::VehicleState bad;  // position_valid=false: not fed, stamp unchanged
+  bad.px4_sample_stamp.sec = 1791590001;
+  r.p_veh->publish(bad);
+  r.pump(6);
+  r.now += 20'000'000;
+  r.rpp->step(r.now);
+  r.pump(6);
+  EXPECT_EQ(r.motion.back().source_pose_sample_stamp.sec, 1791590000);
+  EXPECT_EQ(r.motion.back().source_pose_sample_stamp.nanosec, 140'000'000U);
 }

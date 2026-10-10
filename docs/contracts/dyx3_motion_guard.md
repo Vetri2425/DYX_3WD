@@ -20,7 +20,7 @@ re-implements a gate. A backend or tablet E-stop is a *request* to this node.
 | in | `/dyx3/operator_link` | OperatorLinkStatus | tablet heartbeat (gateway owns the timeout) |
 | in | `/dyx3/px4_link/status` | Px4LinkStatus | link gate |
 | service | `/dyx3/motion_guard/set_emergency_stop` | SetEmergencyStop | latch / clear |
-| out | `/dyx3/motion_guard/command` | MotionSetpoint | consumed only by `dyx3_px4_link` |
+| out | `/dyx3/motion_guard/command` | MotionSetpoint | consumed only by `dyx3_px4_link`. `source_pose_sample_stamp` (IF-003, 0.14.0): preserved unchanged on every command forwarded from RPP (accepted, clamped, clean STOP); on the guard's own canonical STOP (any refusal, no command, `shutdown_stop`) the `px4_sample_stamp` of the newest `VehicleState` received (zero when that message had no fresh local position), zero if none was ever received. Never used for a decision |
 | out | `/dyx3/motion_guard/status` | MotionSetpointStatus | per decision: input seq, reason, applied command |
 | out | `/dyx3/safety_gate` | SafetyGateStatus | fixed 10 Hz, independent of RPP |
 | out | `/dyx3/emergency_stop_state` | EmergencyStopState | fixed 10 Hz |

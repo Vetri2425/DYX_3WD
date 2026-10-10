@@ -169,6 +169,28 @@ TEST(Gate, GuardStopIsForwardedNotAFault) {
   expect_stop(o.sp);
 }
 
+// IF-003: the forwarded command names its seq and pose stamp; a link-made STOP names neither.
+TEST(Gate, ForwardedOutputCarriesSeqAndPoseStamp) {
+  CommandGate g(0.2);
+  Command c = cmd(7, Mode::TrackRate, 0.35F, NaN, 0.1F);
+  c.source_pose_sample_us = 1791590000120000ULL;
+  g.on_command(c, 1.0);
+  auto o = g.step(ok(1.01));
+  EXPECT_TRUE(o.forwarded);
+  EXPECT_EQ(o.seq, 7U);
+  EXPECT_EQ(o.source_pose_sample_us, 1791590000120000ULL);
+  o = g.step(ok(1.5));  // stale: the link's own STOP
+  EXPECT_FALSE(o.forwarded);
+  EXPECT_EQ(o.source_pose_sample_us, 0U);
+  Command s = cmd(8, Mode::Stop, 0, NaN, 0);
+  s.source_pose_sample_us = 5;
+  g.on_command(s, 1.6);
+  o = g.step(ok(1.61));
+  EXPECT_EQ(o.reason, Reason::GuardStop);
+  EXPECT_TRUE(o.forwarded);  // the guard's STOP is the guard's command
+  EXPECT_EQ(o.source_pose_sample_us, 5U);
+}
+
 // Property: whatever the inputs, the output is either a contract-conforming forward of a fresh
 // valid command or the canonical STOP. Never a finite non-zero speed with a failing reason.
 TEST(Gate, RandomisedNeverLeaksMotionOnAFailure) {
