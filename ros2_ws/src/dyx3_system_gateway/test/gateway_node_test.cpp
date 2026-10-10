@@ -6,6 +6,8 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <functional>
+#include <map>
 #include <memory>
 #include <thread>
 
@@ -154,6 +156,12 @@ struct Rig {
   void pump(int ms) {
     const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
     while (std::chrono::steady_clock::now() < end) exec->spin_some(2ms);
+  }
+  // Drive the node until `done` holds. The limit only bounds a failure; no result depends on it.
+  bool pump_until(const std::function<bool()>& done, int limit_ms = 10000) {
+    const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(limit_ms);
+    while (!done() && std::chrono::steady_clock::now() < end) exec->spin_some(2ms);
+    return done();
   }
   // Send one line, drive the node until a reply with this id arrives.
   JsonValue ask(const Sock& s, const std::string& line, int64_t id, double advance = 0.0) {
@@ -331,37 +339,57 @@ TEST(GatewayNode, AnEstopBehindAHeartbeatFloodIsDispatchedFirstAndTheInboxStaysB
   burst += R"({"v":1,"id":99,"cmd":"estop","args":{"asserted":true,"source":"tablet"}})"
            "\n";
   c.write_all(burst);
-  r.pump(500);  // the IPC thread queues the whole burst; no step runs meanwhile
+  // No step runs until the IPC thread has handled the whole burst: the inbox then holds exactly
+  // kInboxCap heartbeats plus the E-stop (the last line on the wire, never refused), and every
+  // other heartbeat has been refused "busy". Waiting on that state, not on a fixed time, is what
+  // puts the E-stop and the heartbeats queued with it in ONE batch.
+  ASSERT_TRUE(r.pump_until([&r] { return r.gw->inbox_depth() == GatewayNode::kInboxCap + 1; }))
+      << "inbox depth " << r.gw->inbox_depth();
   r.gw->step(r.now);
-  r.pump(300);
+  // Collect replies until every heartbeat and the E-stop are answered. Telemetry is interleaved
+  // with the replies, so the number of lines is not fixed; a reply is matched by its id.
+  std::map<int64_t, int> answers;  // id -> replies received
+  int hb_ok = 0, hb_busy = 0;
+  bool estop_ok = false;
+  const auto all_answered = [&] { return answers.count(99) && hb_ok + hb_busy >= n; };
+  r.pump_until([&] {
+    for (const auto& l : c.read_lines(n + 2, 5)) {
+      JsonValue j;
+      std::string e;
+      EXPECT_TRUE(parse_json(l, &j, &e)) << e << ": " << l;
+      if (!j.get("id")) continue;  // telemetry
+      const int64_t id = j.get("id")->i;
+      ++answers[id];
+      if (id == 99) {
+        estop_ok = ok_of(j);
+      } else if (ok_of(j)) {
+        ++hb_ok;
+      } else {
+        EXPECT_EQ(code_of(j), "busy");
+        ++hb_busy;
+      }
+    }
+    return all_answered();
+  });
+  ASSERT_TRUE(all_answered()) << "E-stop answered " << answers.count(99) << ", heartbeats answered "
+                              << hb_ok + hb_busy << "/" << n;
+  // The E-stop was dispatched first, then ONE coalesced heartbeat.
   const auto& batch = r.gw->last_batch();
-  ASSERT_EQ(batch.size(), 2U);  // the E-stop, then ONE coalesced heartbeat
+  ASSERT_EQ(batch.size(), 2U);
   EXPECT_EQ(batch[0], CmdKind::Estop);
   EXPECT_EQ(batch[1], CmdKind::Heartbeat);
   ASSERT_FALSE(r.calls.empty());
   EXPECT_EQ(r.calls.front(), "estop:1:tablet");
-  int hb_ok = 0, hb_busy = 0;
-  bool estop_ok = false;
-  for (const auto& l : c.read_lines(n + 1, 5000)) {
-    JsonValue j;
-    std::string e;
-    ASSERT_TRUE(parse_json(l, &j, &e)) << e;
-    if (!j.get("id")) continue;  // telemetry
-    if (j.get("id")->i == 99) {
-      estop_ok = ok_of(j);
-    } else if (ok_of(j)) {
-      ++hb_ok;
-    } else {
-      EXPECT_EQ(code_of(j), "busy");
-      ++hb_busy;
-    }
-  }
   EXPECT_TRUE(estop_ok);
-  EXPECT_EQ(hb_ok + hb_busy, n);                               // every heartbeat is answered
-  EXPECT_LE(hb_ok, static_cast<int>(GatewayNode::kInboxCap));  // the inbox never exceeded its cap
-  EXPECT_GT(hb_busy, 0);
+  // Every heartbeat is answered exactly once, and the inbox never exceeded its cap: exactly
+  // kInboxCap of them were queued (ok), the rest refused busy.
+  EXPECT_EQ(answers.size(), static_cast<size_t>(n) + 1);
+  for (const auto& [id, count] : answers) EXPECT_EQ(count, 1) << "id " << id;
+  EXPECT_EQ(hb_ok, static_cast<int>(GatewayNode::kInboxCap));
+  EXPECT_EQ(hb_busy, n - static_cast<int>(GatewayNode::kInboxCap));
+  r.link_seen = false;
   r.gw->step(r.now + 0.1);
-  r.pump(200);
+  ASSERT_TRUE(r.pump_until([&r] { return r.link_seen; }));
   EXPECT_TRUE(r.link.alive);  // the coalesced heartbeat still counts
 }
 

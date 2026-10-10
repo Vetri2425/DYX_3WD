@@ -62,6 +62,8 @@ public:
   // Test hook: removes every request still pending inside the rclcpp clients and returns how many
   // there were. Requests the gateway already answered (reply or timeout) must not be among them.
   size_t prune_rclcpp_pending_requests();
+  // Test hook: commands queued for the next step (at most kInboxCap, plus any E-stops).
+  size_t inbox_depth() const;
 
 private:
   struct Inbound {
@@ -99,7 +101,7 @@ private:
   IpcServer ipc_;
   OperatorLink link_{2.0};
   TelemetrySnapshot snap_{1.0};
-  std::mutex inbox_mu_;
+  mutable std::mutex inbox_mu_;
   std::deque<Inbound> inbox_;
   std::atomic<uint64_t> inbox_refused_{0};
   std::map<uint64_t, Pending> pending_;

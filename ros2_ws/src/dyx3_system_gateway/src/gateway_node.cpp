@@ -375,6 +375,11 @@ size_t GatewayNode::prune_rclcpp_pending_requests() {
          cli_spray_->prune_pending_requests();
 }
 
+size_t GatewayNode::inbox_depth() const {
+  std::lock_guard<std::mutex> lk(inbox_mu_);
+  return inbox_.size();
+}
+
 void GatewayNode::process(const Inbound& in, double now_s) {
   const Command& c = in.pr.cmd;
   const auto base = [](auto& r, bool* acc) {
