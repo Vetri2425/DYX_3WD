@@ -45,6 +45,7 @@ const UsedTopic kUsedTopics[] = {
     {"/fmu/out/vehicle_gps_position", "SensorGps"},
     {"/fmu/out/ulog_stream", "UlogStream"},
     {"/fmu/out/vehicle_command_ack", "VehicleCommandAck"},
+    {"/fmu/out/battery_status", "BatteryStatus"},
 };
 
 // PX4 timestamps already arrive in the system-clock domain (contract section 7): no offset to
@@ -55,6 +56,9 @@ builtin_interfaces::msg::Time px4_stamp(uint64_t us) {
   t.nanosec = static_cast<uint32_t>((us % 1000000ULL) * 1000ULL);
   return t;
 }
+
+// battery_status arrives at 1 Hz: three missed samples make it unknown.
+constexpr double kBatteryFreshS = 3.0;
 
 double steady_now_s() {
   return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -155,6 +159,14 @@ Px4LinkNode::Px4LinkNode(const rclcpp::NodeOptions& options, ClockFn clock, bool
         st_.pre_flight_checks_pass = m->pre_flight_checks_pass;
         st_t_ = clock_();
         mon_->on_sample(kVehicleStatus, st_t_);
+      });
+  sub_battery_ = create_subscription<px4_msgs::msg::BatteryStatus>(
+      "/fmu/out/battery_status_v1", sensor, [this](px4_msgs::msg::BatteryStatus::ConstSharedPtr m) {
+        bat_.connected = m->connected;
+        bat_.voltage_v = m->voltage_v;
+        bat_.current_a = m->current_a;
+        bat_.remaining = m->remaining;
+        bat_t_ = clock_();
       });
   sub_att_ = create_subscription<px4_msgs::msg::VehicleAttitude>(
       "/fmu/out/vehicle_attitude", sensor,
@@ -992,6 +1004,13 @@ void Px4LinkNode::publish_state(double now_s) {
   s.preflight_checks_pass = o.preflight_checks_pass;
   s.vertical_position_valid = o.vertical_position_valid;
   s.vertical_velocity_valid = o.vertical_velocity_valid;
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  s.battery_valid = (now_s - bat_t_) <= kBatteryFreshS && bat_.connected &&
+                    std::isfinite(bat_.voltage_v) && bat_.voltage_v > 0.0F;
+  s.battery_voltage_v = s.battery_valid ? bat_.voltage_v : nan;
+  s.battery_current_a = s.battery_valid && bat_.current_a >= 0.0F ? bat_.current_a : nan;
+  s.battery_remaining =
+      s.battery_valid && bat_.remaining >= 0.0F && bat_.remaining <= 1.0F ? bat_.remaining : nan;
   pub_state_->publish(s);
 }
 

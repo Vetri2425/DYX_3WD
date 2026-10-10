@@ -27,6 +27,7 @@
 #include "dyx3_px4_link/rover_setpoint_writer.hpp"
 #include "dyx3_px4_link/spray_ack_tokens.hpp"
 #include "dyx3_px4_link/vehicle_state_assembler.hpp"
+#include "px4_msgs/msg/battery_status.hpp"
 #include "px4_msgs/msg/estimator_status_flags.hpp"
 #include "px4_msgs/msg/gps_inject_data.hpp"
 #include "px4_msgs/msg/message_format_request.hpp"
@@ -148,6 +149,12 @@ private:
   std::unique_ptr<YawRateEstimator> yaw_rate_;
   StatusSample st_;
   double lp_t_{-1e18}, att_t_{-1e18}, st_t_{-1e18};
+  // PX4 battery_status (1 Hz): display only, never a gate or a stale-topic bit.
+  struct Battery {
+    bool connected{false};
+    float voltage_v{0.0F}, current_a{-1.0F}, remaining{-1.0F};
+  } bat_;
+  double bat_t_{-1e18};
   // C1: timestamp_sample of the last local-position sample published on arrival.
   bool lp_published_valid_{false};
   uint64_t lp_published_sample_us_{0};
@@ -224,6 +231,7 @@ private:
   rclcpp::Subscription<px4_msgs::msg::TimesyncStatus>::SharedPtr sub_timesync_;
   rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr sub_lp_;
   rclcpp::Subscription<px4_msgs::msg::VehicleStatus>::SharedPtr sub_status_;
+  rclcpp::Subscription<px4_msgs::msg::BatteryStatus>::SharedPtr sub_battery_;
   rclcpp::Subscription<px4_msgs::msg::VehicleAttitude>::SharedPtr sub_att_;
   rclcpp::Subscription<px4_msgs::msg::EstimatorStatusFlags>::SharedPtr sub_flags_;
   rclcpp::Subscription<px4_msgs::msg::SensorGps>::SharedPtr sub_gps_;

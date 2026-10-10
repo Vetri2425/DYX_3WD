@@ -3,7 +3,7 @@
 **Status:** draft for review, written before the implementation. **Spec:** V1 §7.10, §4.3.1 (operator-link loss), R13. **Authority:** none over motion or safety.
 It is the **single ROS <-> backend boundary**: the backend (Python, no `rclpy`) talks to it over a Unix domain socket; it turns validated requests into ROS service calls and
 publishes a canonical telemetry snapshot. A backend or tablet E-stop is a **request** to `dyx3_motion_guard`; the gateway never stops anything itself. The one thing it owns
-is the **operator-link heartbeat** (§4.3.1): it publishes `OperatorLinkStatus`; `dyx3_motion_guard` requires `alive == true` to START a mission (pre-arm gate) and does not stop a running one on its loss (owner decision 2026-10-10).
+is the **operator-link heartbeat** (§4.3.1): it publishes `OperatorLinkStatus` for display and logs; it is not a motion gate (owner decision 2026-10-10: `dyx3_motion_guard` does not subscribe to it).
 
 ## 1. Transport
 
@@ -20,14 +20,14 @@ is the **operator-link heartbeat** (§4.3.1): it publishes `OperatorLinkStatus`;
 
 ### Gateway -> client
 * reply: `{"v":1,"id":<id>,"ok":<bool>,"code":"<snake_case>","reason":"<text>","data":{...}}`. Always this typed shape: `data` is an object (`{}` when there is nothing to report).
-* telemetry push: `{"v":1,"type":"telemetry","snapshot":{...}}` at `telemetry_hz` (5, DERIVED) to every client.
+* telemetry push: `{"v":1,"type":"telemetry","snapshot":{...}}` at `telemetry_hz` (10, DERIVED; the prototype rate) to every client.
 * event push: `{"v":1,"type":"event","event":"<kind>",...}` to every client, the moment a status changes (section 1.3).
 
 A client ignores a `type` it does not know, so message types can be added without a protocol version change; `v` changes only for an incompatible change.
 
 ### 1.3 Events (the status channel)
 
-The gateway pushes a status change as an event the moment it sees it; the 5 Hz telemetry snapshot stays as the complete periodic picture. One event family:
+The gateway pushes a status change as an event the moment it sees it; the 10 Hz telemetry snapshot stays as the complete periodic picture. One event family:
 
 ```json
 {"v":1,"type":"event","event":"mission_state","seq":42,"t_mono_s":18234.512039871,"t_wall_ms":1791624580734,
@@ -117,6 +117,11 @@ One JSON object, assembled from the latest message of each source with its recei
 (age <= `snapshot_fresh_s`, default 1.0, DERIVED); a consumer must treat a stale or missing source as unknown, never as the last value. Sources: `vehicle_state`, `estimator_health`,
 `rtk_status`, `gnss_report`, `ntrip_status`, `px4_link`, `safety_gate`, `emergency_stop`, `motion_guard`, `rpp`, `mission`, `last_point_result`, `spray`, `recorder`, plus `gateway`
 (`operator_alive`, `operator_age_s`, `clients`, `schema`, and `ipc`: the cumulative `dropped_slow` / `overflows` / `rejected_full` socket counters, `event_seq` (the last event pushed) and `dispatch_last_us` / `dispatch_max_us` (command line received -> ROS service request sent), all added in place without a protocol version change). `safety_gate` carries `ok`, `reason_code` and, since interfaces 0.15.0, `pre_arm_ok` (every guard gate except armed and OFFBOARD, plus the EKF global reference) with `pre_arm_reason_code` (the first failing pre-arm gate, meaningful while `pre_arm_ok` is false). Field subsets are chosen for the tablet; the recorder, not the gateway, is the evidence path.
+Live fields for the tablet (interfaces 0.16.0): `vehicle_state` adds `velocity_down_mps`, the derived `ground_speed_mps` and
+`forward_speed_mps` (along the heading, + forward), `global_reference_valid`, `xy_reset_counter` and the battery
+(`battery_valid`, `battery_voltage_v`, `battery_current_a`, `battery_remaining` 0..1; `null` when invalid); `gnss_report`
+adds `vertical_accuracy_m` and `heading_accuracy_rad`; `rpp` adds `heading_error_rad`, `dist_to_goal_m` (`null` when
+unknown), `path_travel_m`, `commanded_yaw_rate_radps`, `tick_state`, `segment_state`, `rtk_reason` and `spray_request`.
 The existing `ntrip_status` subset includes the selected security mode, verified TLS state, verification failure, plaintext credential warning, source bytes, valid frames, and RTK handoff count. The existing `px4_link` subset includes accepted/refused RTCM chunk counts. No credential or Authorization value is serialized. These are observation fields, not an RTK control API.
 
 ## 4. Operator link (R13)
@@ -136,7 +141,7 @@ second, any increase of the dropped-slow, overflow and refused-at-`max_clients` 
 
 ## 5. Parameters (RESTART)
 
-`socket_path`, `max_clients` 4, `telemetry_hz` 5, `operator_link_timeout_s` 2.0, `service_timeout_s` 2.0, `estop_timeout_s` 1.0, `arm_timeout_s` 4.0, `offboard_timeout_s` 5.0, `snapshot_fresh_s` 1.0, `operator_link_hz` 10, `event_coalesce_s` 0.01 (in [0, 1]). Invalid values stop the node at start (timeouts finite, > 0, <= 30 s, `estop_timeout_s` not above any other).
+`socket_path`, `max_clients` 4, `telemetry_hz` 10, `operator_link_timeout_s` 2.0, `service_timeout_s` 2.0, `estop_timeout_s` 1.0, `arm_timeout_s` 4.0, `offboard_timeout_s` 5.0, `snapshot_fresh_s` 1.0, `operator_link_hz` 10, `event_coalesce_s` 0.01 (in [0, 1]). Invalid values stop the node at start (timeouts finite, > 0, <= 30 s, `estop_timeout_s` not above any other).
 
 ## 6. Not in this package
 

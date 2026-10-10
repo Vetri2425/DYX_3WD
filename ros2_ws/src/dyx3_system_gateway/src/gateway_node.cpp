@@ -169,11 +169,23 @@ GatewayNode::GatewayNode(const rclcpp::NodeOptions& options, ClockFn clock, bool
             .num("down_m", m.down_m)
             .num("velocity_north_mps", m.velocity_north_mps)
             .num("velocity_east_mps", m.velocity_east_mps)
+            .num("velocity_down_mps", m.velocity_down_mps)
+            // Derived for the tablet: ground speed, and its component along the heading (+
+            // forward).
+            .num("ground_speed_mps", std::hypot(m.velocity_north_mps, m.velocity_east_mps))
+            .num("forward_speed_mps", m.velocity_north_mps * std::cos(m.heading_rad) +
+                                          m.velocity_east_mps * std::sin(m.heading_rad))
             .num("heading_rad", m.heading_rad)
             .num("yaw_rate_radps", m.yaw_rate_radps)
             .integer("arming_state", m.arming_state)
             .integer("nav_state", m.nav_state)
             .boolean("failsafe", m.failsafe)
+            .boolean("global_reference_valid", m.global_reference_valid)
+            .integer("xy_reset_counter", m.xy_reset_counter)
+            .boolean("battery_valid", m.battery_valid)
+            .num("battery_voltage_v", m.battery_voltage_v)
+            .num("battery_current_a", m.battery_current_a)
+            .num("battery_remaining", m.battery_remaining)
             .dump();
       })));
   subs_.push_back(create_subscription<EstimatorHealth>(
@@ -207,8 +219,10 @@ GatewayNode::GatewayNode(const rclcpp::NodeOptions& options, ClockFn clock, bool
             .boolean("valid", m.valid)
             .integer("fix_type", m.fix_type)
             .num("horizontal_accuracy_m", m.horizontal_accuracy_m)
+            .num("vertical_accuracy_m", m.vertical_accuracy_m)
             .integer("satellites_used", m.satellites_used)
             .num("heading_rad", m.heading_rad)
+            .num("heading_accuracy_rad", m.heading_accuracy_rad)
             .raw("latitude_deg", json_dbl(m.latitude_deg))
             .raw("longitude_deg", json_dbl(m.longitude_deg))
             .num("altitude_msl_m", m.altitude_msl_m)
@@ -316,7 +330,15 @@ GatewayNode::GatewayNode(const rclcpp::NodeOptions& options, ClockFn clock, bool
             .integer("mission_id", m.mission_id)
             .integer("run_index", m.run_index)
             .num("cross_track_right_m", m.cross_track_right_m)
+            .num("heading_error_rad", m.heading_error_rad)
+            .num("dist_to_goal_m", m.dist_to_goal_m)
+            .num("path_travel_m", m.path_travel_m)
             .num("commanded_speed_mps", m.commanded_speed_mps)
+            .num("commanded_yaw_rate_radps", m.commanded_yaw_rate_radps)
+            .integer("tick_state", m.tick_state)
+            .integer("segment_state", m.segment_state)
+            .integer("rtk_reason", m.rtk_reason)
+            .boolean("spray_request", m.spray_request)
             .num("loop_jitter_max_us", m.loop_jitter_max_us)
             .integer("loop_overrun_count", static_cast<int64_t>(m.loop_overrun_count))
             .dump();
@@ -399,7 +421,7 @@ GatewayNode::~GatewayNode() {
 void GatewayNode::declare_params() {
   socket_path_ = declare_parameter<std::string>("socket_path", "/run/dyx3/gateway.sock");
   max_clients_ = static_cast<int>(declare_parameter<int>("max_clients", 4));
-  telemetry_hz_ = declare_parameter<double>("telemetry_hz", 5.0);
+  telemetry_hz_ = declare_parameter<double>("telemetry_hz", 10.0);
   operator_link_timeout_s_ =
       declare_parameter<double>("operator_link_timeout_s", 2.0);  // DERIVED / OPEN, see contract
   service_timeout_s_ = declare_parameter<double>("service_timeout_s", 2.0);

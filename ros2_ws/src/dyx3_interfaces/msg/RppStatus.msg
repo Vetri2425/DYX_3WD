@@ -51,3 +51,7 @@ string conditioned_execution_sha256
 # path_travel_m is RPP's exact progress value used by its tracker.
 bool heading_evidence_valid
 float32 path_travel_m
+
+# --- appended in interfaces 0.16.0 ---
+# Straight-line distance from the rover to the end of the current run, metres; NaN when unknown.
+float32 dist_to_goal_m

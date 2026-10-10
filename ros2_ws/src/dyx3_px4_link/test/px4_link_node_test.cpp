@@ -51,7 +51,8 @@ const std::map<std::string, std::string> kTopicType = {
     {"/fmu/out/estimator_status_flags", "EstimatorStatusFlags"},
     {"/fmu/out/vehicle_gps_position", "SensorGps"},
     {"/fmu/out/ulog_stream", "UlogStream"},
-    {"/fmu/out/vehicle_command_ack", "VehicleCommandAck"}};
+    {"/fmu/out/vehicle_command_ack", "VehicleCommandAck"},
+    {"/fmu/out/battery_status", "BatteryStatus"}};
 
 void init_ctx(const std::shared_ptr<rclcpp::Context>& ctx) { dyx3_test::init_isolated(ctx); }
 
@@ -82,6 +83,7 @@ struct Rig {
   uint32_t ts_rtt{0};
   rclcpp::Publisher<px4_msgs::msg::VehicleLocalPosition>::SharedPtr p_lp;
   rclcpp::Publisher<px4_msgs::msg::VehicleStatus>::SharedPtr p_st;
+  rclcpp::Publisher<px4_msgs::msg::BatteryStatus>::SharedPtr p_bat;
   rclcpp::Publisher<px4_msgs::msg::VehicleAttitude>::SharedPtr p_att;
   rclcpp::Publisher<px4_msgs::msg::EstimatorStatusFlags>::SharedPtr p_fl;
   rclcpp::Publisher<px4_msgs::msg::SensorGps>::SharedPtr p_gps;
@@ -156,6 +158,8 @@ struct Rig {
         "/fmu/out/vehicle_local_position_v1", sensor);
     p_st =
         fcu->create_publisher<px4_msgs::msg::VehicleStatus>("/fmu/out/vehicle_status_v1", sensor);
+    p_bat =
+        fcu->create_publisher<px4_msgs::msg::BatteryStatus>("/fmu/out/battery_status_v1", sensor);
     p_att =
         fcu->create_publisher<px4_msgs::msg::VehicleAttitude>("/fmu/out/vehicle_attitude", sensor);
     p_fl = fcu->create_publisher<px4_msgs::msg::EstimatorStatusFlags>(
@@ -1832,6 +1836,30 @@ TEST(Px4LinkNode, StatusReportsPoseToWriteAgeOfForwardedCommands) {
   r.guard(2, 0.3F, NaN, 0.1F);
   r.run(0.25);
   EXPECT_FALSE(r.status.pose_to_write_age_valid);
+}
+
+// --- battery (interfaces 0.16.0): display only, valid while a sample is fresh --------------------
+TEST(Px4LinkNode, BatteryIsReportedInVehicleStateOnlyWhileFresh) {
+  Rig r;
+  r.bring_up();
+  px4_msgs::msg::BatteryStatus b;
+  b.connected = true;
+  b.voltage_v = 25.1F;
+  b.current_a = 3.4F;
+  b.remaining = 0.82F;
+  r.p_bat->publish(b);
+  r.run(0.1);
+  EXPECT_TRUE(r.state.battery_valid);
+  EXPECT_FLOAT_EQ(r.state.battery_voltage_v, 25.1F);
+  EXPECT_FLOAT_EQ(r.state.battery_current_a, 3.4F);
+  EXPECT_FLOAT_EQ(r.state.battery_remaining, 0.82F);
+  r.run(3.2);  // no new sample for longer than 3 s: unknown, never the last value
+  EXPECT_FALSE(r.state.battery_valid);
+  EXPECT_TRUE(std::isnan(r.state.battery_voltage_v));
+  b.connected = false;  // PX4 says no battery: never shown
+  r.p_bat->publish(b);
+  r.run(0.1);
+  EXPECT_FALSE(r.state.battery_valid);
 }
 
 // --- C1: VehicleState on each new local-position sample ------------------------------------------

@@ -1,5 +1,12 @@
 # Interface changelog
 
+## 0.16.0 — 2026-10-10 (live telemetry for the tablet)
+
+- `VehicleState`: appended `battery_valid`, `battery_voltage_v`, `battery_current_a`, `battery_remaining` (0..1), from
+  PX4 `battery_status` at 1 Hz. Display only: no gate reads them. Invalid (NaN values) unless a sample is fresh (3 s)
+  and PX4 reports the battery connected.
+- `RppStatus`: appended `dist_to_goal_m`, the straight-line distance to the end of the current run (NaN when unknown).
+
 ## 0.15.0 — 2026-10-10 (mission contract v2: rover-owned lifecycle)
 
 - `MissionState`: new states `PLACING=8`, `ARMING=9`, `ENGAGING=10` (values 0–7 unchanged). New reasons

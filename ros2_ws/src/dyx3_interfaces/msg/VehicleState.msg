@@ -40,3 +40,11 @@ bool preflight_checks_pass
 # does not consume the vertical estimate; these flags exist so no consumer ever has to assume it.
 bool vertical_position_valid
 bool vertical_velocity_valid
+
+# --- appended in interfaces 0.16.0 ---
+# PX4 battery_status (1 Hz), for display only: no gate reads it. battery_valid is true only while a
+# sample is fresh (3 s) and PX4 reports the battery connected; otherwise the values are NaN.
+bool battery_valid
+float32 battery_voltage_v
+float32 battery_current_a
+float32 battery_remaining        # 0..1

@@ -482,9 +482,14 @@ void RppNode::publish_status(uint8_t state, const TickOutput* out, const MotionC
   s.loop_jitter_max_us = static_cast<float>(timer_stats_.max_abs_jitter_us());
   s.loop_overrun_count = timer_stats_.overruns();
   if (loaded_) s.path_travel_m = finite_or_zero(core_.snapshot().path_travel_m);
+  s.dist_to_goal_m =
+      std::numeric_limits<float>::quiet_NaN();  // unknown unless this tick computed it
   if (out != nullptr) {
     s.cross_track_right_m = finite_or_zero(out->cross_track_right);  // right-positive
     s.heading_error_rad = finite_or_zero(out->debug.heading_err);
+    if (out->debug_valid && std::isfinite(out->debug.dist_goal)) {
+      s.dist_to_goal_m = static_cast<float>(out->debug.dist_goal);
+    }
     s.tick_state = static_cast<int8_t>(out->state);
     s.segment_state = static_cast<uint8_t>(out->segment_debug_valid ? out->segment_debug.state : 0);
     s.spray_request = out->debug.spray_active;

@@ -6,6 +6,14 @@ The full interface history from 0.1.0 is in ``docs/interfaces/CHANGELOG.md`` (CI
 every field change bumps ``package.xml`` and adds an entry there). This file records the
 releases from 0.13.1 on, in the ROS package changelog format.
 
+0.16.0 (2026-10-10)
+-------------------
+Live telemetry for the tablet.
+
+* ``VehicleState.msg``: appended ``battery_valid``, ``battery_voltage_v``, ``battery_current_a``,
+  ``battery_remaining`` (PX4 ``battery_status``, display only).
+* ``RppStatus.msg``: appended ``dist_to_goal_m`` (NaN when unknown).
+
 0.15.0 (2026-10-10)
 -------------------
 Mission contract v2 (``docs/plans/2026-10-10_mission_contract.md`` section 3).
