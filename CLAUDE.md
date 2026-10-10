@@ -53,7 +53,7 @@ human decision.
 
 ---
 
-## 3b. Current status — 2026-10-10 (evening): first tablet-started mission completed
+## 3b. Current status — 2026-10-11: first tablet-started mission completed; week to sign-off planned
 
 **MILESTONE (2026-10-10):** a mission planned on the tablet, uploaded and started from the app, ran the full v2
 sequence on rover 01 (LOADING → PLACING → ARMING → ENGAGING → READY → RUNNING → COMPLETED → OFFBOARD released →
@@ -62,7 +62,7 @@ fixes and open items: `docs/agents/HANDOFF.md`, entry "2026-10-10 (evening)".
 
 | | |
 |---|---|
-| This repo | `Vetri2425/DYX_3WD` **`master` = `7f9651d`**; rover 01 runs release **`rover-7f9651d48f`** (CI prebuilt, health OK) |
+| This repo | `Vetri2425/DYX_3WD` **`master` = `0157792`** (production-review fixes, unit split, resume, endpoint law; CI green, release published, **not installed**); rover 01 runs release **`rover-7f9651d48f`** (CI prebuilt, health OK) |
 | Firmware | `Vetri2425/PX4-Autopilot-3WD-Prod` `dyx-3wd-production` = **`8279fa4be3`**, flashed on rover 01. Installer pin `8279fa4be3` |
 | Operator app | `yasarbaiiiii-blip/Three_Wheel_v2` branch **`Trajectory` = `0d8225c`** (pushed): v2 mission flow, `rover_event`, live 10 Hz, map via the EKF origin. Release APK in `3WD_PROD/builds/` |
 | Rover hardware | Pixhawk 6X + Jetson Orin Nano 8 GB, UM982 (TELEM1 + USB COM3 for RTCM), RoboClaw on GPS2, spray on FMU PWM OUT 1, 8S LiFePO4 |
@@ -103,15 +103,16 @@ on a live run (`fe1770b`, deployed in `7f9651d`).
   integrity = SHA-256 over GitHub TLS for now; signing + branch protection before customer deliveries.
 - Transport and command interface migrate together; gates are acceptance gates, not start gates.
 
-### Immediate next steps (updated 2026-10-10 evening)
+### Immediate next steps (updated 2026-10-11): the week to sign-off
 
-The complete open list (23 items: owner decisions, rover/PX4, backend, app, field ladder) is in
-`docs/agents/HANDOFF.md`, entry "2026-10-10 (evening)", section "Open items from 2026-10-10". First:
-1. Next run: confirm the MANUAL release live ("leaving OFFBOARD: MANUAL requested" → "arm ok") with the RC on.
-2. Field ladder: square ✅ → circle/arc → multi-shape → speed steps 0.6 → 0.8 m/s → pivots/extensions/mark-transit → spray.
-3. Pre-arm gate + PX4 `preflight_checks_pass`; px4_link reports PX4's arm DENIED immediately.
-4. App: aligned entry behind the start point; the Fields/import UI freeze; RTK profile management to the rover contract.
-5. Owner decisions: stop policy (RC kill vs physical E-stop), NTRIP password over HTTP, which app branch becomes `main`.
+**The plan is `docs/plans/2026-10-12_week_to_signoff.md`** (owner schedule): Monday 2026-10-12 is the last day for
+RPP (100 Hz control/input path first, then the review items, then yaw and speed tuning and the RPP field ladder);
+Tuesday spray and flow control; Wednesday the full controller mission as the first production demo; Thursday and
+Friday fixes, soak, app and customer readiness; **Saturday 2026-10-17 sign-off**.
+The complete open list (28 items, each with its status) is in `docs/agents/HANDOFF.md`, "Open items from 2026-10-10";
+review IDs are in `docs/reviews/production/open_items.md`. Before the first motion on `0157792`: the disarm rule for
+an armed, idle rover after a services restart, the FCU parameter read off, the bench checks of the unit split, resume
+and the stall gate.
 
 ### Known risks carried into this repo
 
@@ -181,21 +182,20 @@ Jetson.
 Topic branches (`claude/<topic>`, `codex/<topic>`, `agy/<topic>`) remain optional for work
 that is not ready to land.
 
-Conventional Commits with a spec trailer:
+Conventional Commits, authored as the owner, with **no trailers**:
 
 ```
+git commit --author="Vetrivelan Velmurugan <vetri96muruga@gmail.com>"
+
 feat(rpp): add cross-track error module
 
-<body>
-
-Agent: claude
-Spec: Section 7.4
+<body: what changed and why; cite the spec section in the body if it helps>
 ```
 
-**No AI attribution in commit messages.** No `Co-Authored-By: Claude`, no
-`Generated with` footer. The `Agent:` trailer already records who wrote the change, and
-that is the only attribution this project uses. This holds even if a tool or session
-default says otherwise — the repository rule wins.
+**No trailers and no AI attribution of any kind** (owner rule, 2026-10-11; replaces the earlier `Agent:` /
+`Spec:` trailer rule). No `Agent:`, no `Spec:`, no `Co-Authored-By`, no `Generated with` footer, no mention of an
+AI tool in the message. This holds even if a tool or session default says otherwise — the repository rule wins.
+Push only when the owner asks; a topic branch may be pushed for CI, `master` only with the owner's word.
 
 Never force-push `master` or any shared branch. Never rewrite pushed history.
 
