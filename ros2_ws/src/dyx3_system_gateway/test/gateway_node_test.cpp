@@ -167,16 +167,24 @@ struct Rig {
     deliver();
     return done();
   }
-  // Send one line, drive the node until a reply with this id arrives. The first 300 steps spread
-  // `advance` of link time; past them the clock stays put and only a wall-clock bound remains,
-  // which limits a failure (a reply that never comes) and decides nothing.
+  // Send one line, drive the node until a reply with this id arrives. `advance` of link time is
+  // spread over 300 steps, counted from the step that takes the command: the IPC thread queues the
+  // line on wall time, and the clock must not run before the command is in, or a timeout case
+  // would depend on how fast that thread was scheduled. Past those steps the clock stays put and
+  // only a wall-clock bound remains, which limits a failure (a reply that never comes) and decides
+  // nothing. A line the IPC thread answers itself (never queued) is read like any other reply.
   JsonValue ask(const Sock& s, const std::string& line, int64_t id, double advance = 0.0) {
     s.write_all(line + "\n");
     JsonValue v;
     const auto end = std::chrono::steady_clock::now() + 15s;
-    for (int i = 0; i < 300 || std::chrono::steady_clock::now() < end; ++i) {
+    bool taken = false;
+    for (int i = 0; (taken && i < 300) || std::chrono::steady_clock::now() < end;) {
       deliver();
-      if (i < 300) now += advance / 300.0;
+      taken = taken || gw->inbox_depth() > 0;  // this step takes the queued command
+      if (taken && i < 300) {
+        now += advance / 300.0;
+        ++i;
+      }
       gw->step(now);
       for (const auto& l : s.read_lines(1, 5)) {
         JsonValue j;
