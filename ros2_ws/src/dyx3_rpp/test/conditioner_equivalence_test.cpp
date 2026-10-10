@@ -102,6 +102,59 @@ void expect_runs(Reader& rd, const std::vector<PointRun>& runs, const std::strin
   }
 }
 
+// DELIBERATE DIVERGENCE FROM THE PROTOTYPE (docs/contracts/rpp_path_conditioner.md, "Must-hit
+// divergence"). The recorded end-to-end vectors encode the prototype's defect: it moved or deleted
+// must-hit vertices in smooth runs and in absorbed connectors. A recorded `path_cb` case is
+// EXCLUDED from the vector comparison iff its must-hit set can change the result, i.e. iff
+//   (a) the profile is not forced to "segment" and, replaying the pipeline stages on the input,
+//       absorb_short_connectors on some spray-flag run returns a different polyline with the case's
+//       must-hit keys than without them (a must-hit vertex sits in a connector that the prototype
+//       absorbs); or
+//   (b) a run that is conditioned as SMOOTH (forced, or auto-classified) has a must-hit vertex that
+//       is neither its first nor its last point, while smooth_corners or resample is enabled
+//       (the prototype rounds it off or resamples it away).
+// Every other case (no must-hit, must-hit only in segment runs, only at run endpoints, or only in
+// connectors the prototype leaves alone) is still compared with the prototype, bit for bit as
+// before. Excluded cases are not skipped silently: they must satisfy the new contract instead
+// (every must-hit input vertex present at exactly its coordinates, flagged), and they are counted.
+bool diverges_by_must_hit(const In& in, const ConditionParams& p) {
+  if (in.keys.empty()) return false;
+  const std::string requested = normalize_tracking_profile(p.tracking_profile);
+  std::vector<PointRun> runs;
+  if (requested == "auto") {
+    for (const PointRun& run : split_runs_by_flag(in.pts, in.flags)) {
+      const PointRun legacy =
+          absorb_short_connectors(run.pts, run.flags, p.segment_corner_threshold_deg,
+                                  p.connector_absorb_m, p.connector_min_corner_deg);
+      const PointRun now =
+          absorb_short_connectors(run.pts, run.flags, p.segment_corner_threshold_deg,
+                                  p.connector_absorb_m, p.connector_min_corner_deg, &in.keys);
+      if (legacy.pts.size() != now.pts.size()) return true;
+      for (size_t k = 0; k < legacy.pts.size(); ++k) {
+        if (legacy.pts[k].n != now.pts[k].n || legacy.pts[k].e != now.pts[k].e) return true;
+      }
+      for (PointRun& sub :
+           split_run_at_corners(legacy.pts, legacy.flags, p.segment_corner_threshold_deg))
+        runs.push_back(std::move(sub));
+    }
+    runs = merge_collinear_runs(runs, p.segment_corner_threshold_deg, p.transit_merge_max_len_m);
+  } else {
+    runs.push_back({in.pts, in.flags});
+  }
+  if (!(p.corner_smooth_radius_m > 0.0 || p.path_resample_spacing_m > 0.0)) return false;
+  for (const PointRun& rr : runs) {
+    const bool smooth =
+        requested != "auto"
+            ? requested == "smooth"
+            : classify_auto_profile(rr.pts, p.segment_corner_threshold_deg) == Profile::Smooth;
+    if (!smooth) continue;
+    for (size_t k = 1; k + 1 < rr.pts.size(); ++k) {
+      if (in.keys.count(pt_key(rr.pts[k])) > 0) return true;
+    }
+  }
+  return false;
+}
+
 }  // namespace
 
 TEST(ConditionedExecutionArtifact, RoundTripsTheExactRppRunGeometryAndFlags) {
@@ -153,7 +206,7 @@ TEST(ConditionerEquivalence, AllVectors) {
   std::string line;
   ASSERT_TRUE(rd.next(&line));
   ASSERT_EQ(line, "GATE4COND 1");
-  size_t n_cases = 0, n_pathcb = 0, n_pts = 0;
+  size_t n_cases = 0, n_pathcb = 0, n_pts = 0, n_excluded = 0, n_excluded_musthit = 0;
   while (rd.next(&line)) {
     const auto t = split(line);
     if (t[0] == "PATH") {
@@ -220,6 +273,26 @@ TEST(ConditionerEquivalence, AllVectors) {
       for (size_t k = 0; k < in.pts.size(); ++k)
         raw.push_back({in.pts[k].n, in.pts[k].e, (in.flags[k] ? 1 : 0) | (in.must[k] ? 2 : 0)});
       const auto runs = condition_path(raw, p);
+      if (diverges_by_must_hit(in, p)) {
+        // Deliberate divergence: skip the recorded expectation, hold the new contract instead.
+        ++n_excluded;
+        while (rd.next(&line) && line != "END") {
+        }
+        for (size_t k = 0; k < in.pts.size(); ++k) {
+          if (!in.must[k]) continue;
+          ++n_excluded_musthit;
+          bool found = false;
+          for (const auto& run : runs) {
+            for (size_t q = 0; q < run.pts.size(); ++q)
+              found = found || (run.pts[q].n == in.pts[k].n && run.pts[q].e == in.pts[k].e &&
+                                run.must_hit[q] == 1);
+          }
+          EXPECT_TRUE(found) << "excluded case (" << t[2] << ", @" << t.back()
+                             << ") lost must-hit vertex " << k;
+        }
+        if (::testing::Test::HasFailure()) return;
+        continue;
+      }
       rd.next(&line);
       auto o = split(line);
       ASSERT_EQ(o[0], "=>");
@@ -251,8 +324,10 @@ TEST(ConditionerEquivalence, AllVectors) {
     if (::testing::Test::HasFailure()) return;
   }
   EXPECT_GT(n_cases, 1500U);
-  EXPECT_GT(n_pathcb, 150U);
+  EXPECT_GT(n_pathcb - n_excluded, 100U);  // still compared with the prototype
   std::printf(
-      "conditioner equivalence: %zu cases (%zu end-to-end _path_cb) over %zu input points\n",
-      n_cases, n_pathcb, n_pts);
+      "conditioner equivalence: %zu cases (%zu end-to-end _path_cb) over %zu input points; "
+      "%zu of the %zu _path_cb cases excluded as a deliberate must-hit divergence (%zu must-hit "
+      "vertices checked against the new contract instead), %zu compared with the prototype\n",
+      n_cases, n_pathcb, n_pts, n_excluded, n_pathcb, n_excluded_musthit, n_pathcb - n_excluded);
 }

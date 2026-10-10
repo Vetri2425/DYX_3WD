@@ -57,16 +57,23 @@ struct SimplifiedIdx {
 SimplifiedIdx simplify_with_indices(const std::vector<Point>& pts, const Flags& flags,
                                     double collinear_tol_deg = 5.0);
 
+// Deliberate divergence from the prototype (contract rpp_path_conditioner.md rule 7): a connector
+// is NOT absorbed when any raw vertex it would erase (b, c and any collinear vertex between them)
+// is in `must_hit`. With `must_hit` null or empty the behaviour is the prototype's.
 PointRun absorb_short_connectors(const std::vector<Point>& pts, const Flags& flags,
                                  double threshold_deg, double connector_absorb_m,
-                                 double min_corner_deg = 20.0);
+                                 double min_corner_deg = 20.0, const KeySet* must_hit = nullptr);
 std::vector<PointRun> split_run_at_corners(const std::vector<Point>& pts, const Flags& flags,
                                            double threshold_deg);
 
 // Replaces each interior vertex with an inscribed arc (kappa_max = 1/radius). `skipped` (optional)
 // counts vertices left sharp because the adjoining segments are too short for the radius.
+// Deliberate divergence from the prototype: an interior vertex in `must_hit` is never replaced; it
+// is copied through unchanged (sharp) and is not counted in `skipped`. With `must_hit` null or
+// empty the behaviour is the prototype's.
 PointRun smooth_corners(const std::vector<Point>& pts, double radius, int arc_pts,
-                        const Flags* flags, int* skipped = nullptr);
+                        const Flags* flags, int* skipped = nullptr,
+                        const KeySet* must_hit = nullptr);
 
 double pts_length(const std::vector<Point>& pts);
 std::vector<double> pts_cumulative_lengths(const std::vector<Point>& pts);

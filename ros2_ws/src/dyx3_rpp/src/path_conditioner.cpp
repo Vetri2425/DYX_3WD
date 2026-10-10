@@ -26,6 +26,16 @@ bool any_flag(const Flags& f) {
 }
 bool same(Point a, Point b) { return a.n == b.n && a.e == b.e; }
 
+// True when any raw vertex in [lo, hi] (inclusive) is must-hit. The absorb erases that whole raw
+// range, which holds b, c and any collinear vertex simplify_with_indices dropped between them.
+bool range_has_must_hit(const std::vector<Point>& pts, int lo, int hi, const KeySet* must_hit) {
+  if (must_hit == nullptr || must_hit->empty()) return false;
+  for (int k = lo; k <= hi; ++k) {
+    if (must_hit->count(pt_key(pts[static_cast<size_t>(k)])) > 0) return true;
+  }
+  return false;
+}
+
 void dp_mark_keep(const std::vector<Point>& pts, double eps, int lo, int hi,
                   std::vector<unsigned char>& keep) {
   std::vector<std::pair<int, int>> stack{{lo, hi}};
@@ -289,7 +299,7 @@ SimplifiedIdx simplify_with_indices(const std::vector<Point>& pts, const Flags& 
 
 PointRun absorb_short_connectors(const std::vector<Point>& pts, const Flags& flags,
                                  double threshold_deg, double connector_absorb_m,
-                                 double min_corner_deg) {
+                                 double min_corner_deg, const KeySet* must_hit) {
   (void)threshold_deg;  // kept for signature parity with the ancestor (unused there as well)
   PointRun unchanged{pts, flags};
   if (connector_absorb_m <= 0.0 || pts.size() < 4) return unchanged;
@@ -310,7 +320,9 @@ PointRun absorb_short_connectors(const std::vector<Point>& pts, const Flags& fla
     if (seg_len < connector_absorb_m) {
       const double bend_in = hdelta(seg_heading(a, b), seg_heading(b, c));
       const double bend_out = hdelta(seg_heading(b, c), seg_heading(c, d));
-      if (bend_in >= min_corner && bend_out >= min_corner) {
+      if (bend_in >= min_corner && bend_out >= min_corner &&
+          !range_has_must_hit(pts, v.idx[static_cast<size_t>(i)], v.idx[static_cast<size_t>(i + 1)],
+                              must_hit)) {
         const Point mid{(b.n + c.n) * 0.5, (b.e + c.e) * 0.5};
         const auto apex = dyx3_geometry::line_intersection(a, b, c, d);
         Point merge = mid;
@@ -375,7 +387,7 @@ std::vector<PointRun> split_run_at_corners(const std::vector<Point>& pts, const 
 }
 
 PointRun smooth_corners(const std::vector<Point>& pts, double radius, int arc_pts,
-                        const Flags* flags_in, int* skipped_out) {
+                        const Flags* flags_in, int* skipped_out, const KeySet* must_hit) {
   Flags flags;
   if (flags_in == nullptr || flags_in->size() != pts.size()) {
     flags.assign(pts.size(), 0);
@@ -397,6 +409,14 @@ PointRun smooth_corners(const std::vector<Point>& pts, double radius, int arc_pt
     const double v2n = bx - px, v2e = by - py;
     const double l1 = std::hypot(v1n, v1e);
     const double l2 = std::hypot(v2n, v2e);
+    // A must-hit vertex is never replaced by an arc: it is a survey/CAD vertex the rover must
+    // reach, so it stays sharp (exactly like the d > 0.45*min(l1, l2) case below).
+    const bool must = must_hit != nullptr && must_hit->count(pt_key(pts[i])) > 0;
+    if (must) {
+      out.pts.push_back(pts[i]);
+      out.flags.push_back(static_cast<unsigned char>(flags[i] != 0));
+      continue;
+    }
     if (l1 < 1e-9 || l2 < 1e-9) continue;
     const double u1n = v1n / l1, u1e = v1e / l1;
     const double u2n = v2n / l2, u2e = v2e / l2;
@@ -487,7 +507,7 @@ std::vector<ConditionedRun> condition_path(const std::vector<RawPoint>& raw,
   if (requested == "auto") {
     for (const PointRun& run : split_runs_by_flag(raw_pts, raw_flags)) {
       const PointRun absorbed = absorb_short_connectors(
-          run.pts, run.flags, threshold, p.connector_absorb_m, p.connector_min_corner_deg);
+          run.pts, run.flags, threshold, p.connector_absorb_m, p.connector_min_corner_deg, &must);
       for (PointRun& sub : split_run_at_corners(absorbed.pts, absorbed.flags, threshold))
         raw_runs.push_back(std::move(sub));
     }
@@ -507,10 +527,16 @@ std::vector<ConditionedRun> condition_path(const std::vector<RawPoint>& raw,
       c = rr;
       if (p.corner_smooth_radius_m > 0.0 && c.pts.size() >= 3) {
         c = smooth_corners(c.pts, p.corner_smooth_radius_m, std::max(2, p.corner_smooth_arc_pts),
-                           &c.flags);
+                           &c.flags, nullptr, &must);
       }
       if (p.path_resample_spacing_m > 0.0 && c.pts.size() >= 2) {
-        const auto rs = dyx3_geometry::resample(c.pts, p.path_resample_spacing_m, &c.flags);
+        // Must-hit vertices are fixed knots: each span between them is resampled on its own.
+        std::vector<size_t> fixed;
+        for (size_t k = 0; k < c.pts.size(); ++k) {
+          if (must.count(pt_key(c.pts[k])) > 0) fixed.push_back(k);
+        }
+        const auto rs =
+            dyx3_geometry::resample_fixed(c.pts, p.path_resample_spacing_m, &c.flags, fixed);
         c.pts = rs.pts;
         c.flags = rs.flags;
       }
