@@ -2783,7 +2783,7 @@ at 10 Hz): healthy client 48–49 events / 5 s for 170 s, backend ping 1–3 ms,
 ### Open items from 2026-10-10 (complete list; status as of 2026-10-11 in brackets)
 
 **Decisions for the owner**
-1. **[PARTLY: RC-link pre-arm option `fbb3bda` on branch `claude/funny-sagan-upnenq`, off by default; decision open]** **Stop policy without an operator link:** the operator link is no longer a gate, so the stops are the tablet E-stop
+1. **[PARTLY: RC-link pre-arm option `6159a87`, off by default; decision open]** **Stop policy without an operator link:** the operator link is no longer a gate, so the stops are the tablet E-stop
    (only while the tablet is connected), the RC kill and PX4 failsafes. Decide on the RC kill switch vs a physical
    E-stop for production.
 2. **[OPEN]** **NTRIP password over plain HTTP** on the site LAN / hotspot: accept for now, or plan HTTPS for the backend.
@@ -2795,14 +2795,14 @@ at 10 Hz): healthy client 48–49 events / 5 s for 170 s, backend ping 1–3 ms,
 
 **Rover / PX4 (verify on the next field session)**
 6. **[OPEN: field]** Confirm the MANUAL release live (`fe1770b`): log "leaving OFFBOARD: MANUAL requested" then "arm ok". RC must be on.
-7. **[CLOSED: ack matching `87d839b`, pre-arm check `f8bac88`; stale-OFFBOARD exemption `fbb3bda` on branch `claude/funny-sagan-upnenq`]** Pre-arm gate should include PX4 `preflight_checks_pass` (already in `VehicleState`), so Start is refused at once
+7. **[CLOSED: ack matching `87d839b`, pre-arm check `f8bac88`; stale-OFFBOARD exemption `6159a87`]** Pre-arm gate should include PX4 `preflight_checks_pass` (already in `VehicleState`), so Start is refused at once
    with a reason; px4_link should report PX4's arm DENIED (`REJECTED_BY_FCU`, from the command ack) instead of the 2 s
    timeout.
-8. **[PARTLY: actuator-stall gate `fbb3bda`, pivot-timeout pause `05da0b3` on branch `claude/funny-sagan-upnenq`; field: no false positive while driving]** Watch: `[roboclaw] ACK timeout` (3 seen) and the transient PX4 "horizontal position unstable / height estimate not
+8. **[PARTLY: actuator-stall gate `6159a87`, pivot-timeout pause `34f36aa`; field: no false positive while driving]** Watch: `[roboclaw] ACK timeout` (3 seen) and the transient PX4 "horizontal position unstable / height estimate not
    stable" (both before the arm denial at 18:58 IST).
 9. **[PARTLY: measured from the bags, 50 Hz event-driven, 1 overrun in 88 s on `7f9651d` (analysis §1c); timing under CPU load still open]** RPP loop jitter: max 20 ms with 4 overruns since start (step 8, timing under load, still to measure).
 10. **[OPEN: field]** 100 m north–south scale check (tape or RTK) to prove the ellipsoid placement.
-11. **[PARTLY: agent wait at start `626201b`, unit split `3d410db` on branch `claude/funny-sagan-upnenq`; recovery time not re-measured; RO_SPEED_RED still −1; MCAP open]** `RO_SPEED_RED` 1 (corner slowdown); STEP1-R1 (px4_link recovery 15.8 s after an agent restart); MCAP verification.
+11. **[PARTLY: agent wait at start `626201b`, unit split `618e25c`; recovery time not re-measured; RO_SPEED_RED still −1; MCAP open]** `RO_SPEED_RED` 1 (corner slowdown); STEP1-R1 (px4_link recovery 15.8 s after an agent restart); MCAP verification.
 12. **[OPEN]** Bench override in `/etc/dyx3/backend.env` (listen on all interfaces, "restore 10.42.0.1 for the field"), and the
     hotspot cannot start while the Wi-Fi is a client of the site router: settle the field network.
 
@@ -2811,7 +2811,7 @@ at 10 Hz): healthy client 48–49 events / 5 s for 170 s, backend ping 1–3 ms,
     last error with credentials masked); `POST /rtk/profiles/{id}/activate`; typed request bodies for profile
     create/patch; backend tests for profile POST/DELETE and for deleting the active profile.
 14. **[OPEN: minor, RtkClient timeout is 3 s]** `RtkClient` shares the 6 s gateway request timeout (minor; split if a hung RTK socket ever matters).
-15. **[CLOSED: `1f47834` on branch `claude/funny-sagan-upnenq`]** Recorder `mission_state_name` returns UNKNOWN for PLACING/ARMING/ENGAGING (never a final state; minor).
+15. **[CLOSED: `4fdb4bd`]** Recorder `mission_state_name` returns UNKNOWN for PLACING/ARMING/ENGAGING (never a final state; minor).
 16. **[CLOSED: moved out of the repo to `3WD_PROD/bench_tools/archive/` on 2026-10-10]** `tools/bench/phaseA_executor.py` is untracked in the checkout (Phase A DDS restart validation script): commit it
     under `tools/bench/` or delete it.
 
@@ -2839,8 +2839,10 @@ at 10 Hz): healthy client 48–49 events / 5 s for 170 s, backend ping 1–3 ms,
 **Added 2026-10-11 (from the production review, the mission analysis and the branch review)**
 24. **[OPEN]** The 100 Hz px4_link write into PX4 has never been measured: the SD logger records `offboard_control_mode`
     at 10 Hz and `/fmu/in` is not bagged. Raise the logger rate or bag `/fmu/in/offboard_control_mode` for one timing run.
-25. **[OPEN]** Endpoint node tests (`f8a30b3` on the branch) run on a symmetric 0.5 m/s² plant; rover 01 brakes at
-    `RO_DECEL_LIM` 2.0. Re-run them at decel 2.0 / accel 0.5 (+ 20 ms lag): completes, ≤ 2 reversals, ≤ 1 cm.
+25. **[PARTLY: `023b2da` + `7909faf`]** Endpoint law aims the brake at the deceleration profile; the node tests now run on rover
+    01's plant (decel 2.0 / accel 0.5, ± one tick of speed lag): at rest within 0.3 mm, 0 reversals. On the first-order
+    lag model (τ 0.1–0.3 s, the lag seen on mission 0001) the stop is 2.2–17.5 mm short: fit τ to the bags and measure
+    the stop on the rover (goal ≤ 1 cm, ≤ 2 reversals, no timeout finish).
 26. **[OPEN]** Cloud-phases leftovers still open in `docs/reviews/production/open_items.md` §0: PC-2 timing proposal,
     PC-2b firmware `dds_topics.yaml` (`estimator_status_flags` still 5 Hz), PC-3 unused RPP A/B options (all 9 still
     declared), PC-5 parameter values, PC-7c installer test, PC-1a–c, PC-9 firmware pin.

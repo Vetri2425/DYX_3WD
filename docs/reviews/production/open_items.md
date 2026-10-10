@@ -11,7 +11,7 @@ Goal the review is measured against:
 - no hang, stall or silent degradation; fail to STOP on any fault;
 - about 1 cm cross-track accuracy on straights and arcs.
 
-Review baseline: DYX_3WD `master` `252778e` (firmware `8279fa4be3`). Status updates 2026-10-11 against `master` `db8a687` and branch `claude/funny-sagan-upnenq` `cc8db98`.
+Review baseline: DYX_3WD `master` `252778e` (firmware `8279fa4be3`). Status updates 2026-10-11 against `master` after the `claude/funny-sagan-upnenq` merge.
 
 ## Severity
 
@@ -407,7 +407,7 @@ Confirmed good:
 | ID | Severity | Status | Area | Where | Item |
 |---|---|---|---|---|---|
 | MS-001 | MEDIUM (~~HIGH~~) | ACCEPTED ↓ (owner decision) | Points | `point_journal.cpp:47-88`; `docs/contracts/dyx3_mission.md:57-61` | `PointResult COMPLETED` means "came within 0.10 m", not "marked" |
-| MS-002 | MEDIUM (~~HIGH~~) | ACCEPTED ↓ (owner decision). Persisted progress + resume + re-engage from PAUSED: `05da0b3` on branch `claude/funny-sagan-upnenq`, not on `master` yet | Restart | `mission_node.cpp:379-383`; `mission_fsm.cpp` | Point progress lives in memory only; after a graph restart the mission is IDLE and progress is lost |
+| MS-002 | MEDIUM (~~HIGH~~) | **FIXED** `34f36aa` (persisted progress + resume + re-engage from PAUSED; not yet run on the rover) — was: ACCEPTED ↓ (owner decision) | Restart | `mission_node.cpp:379-383`; `mission_fsm.cpp` | Point progress lives in memory only; after a graph restart the mission is IDLE and progress is lost |
 | MS-003 | MEDIUM | **FIXED** `bd1f233` (hardening/2026-10-10) — was: ACCEPTED | Fault | `mission_node.cpp:252-300` | No RPP-status freshness check while RUNNING |
 | MS-006 | LOW (~~MEDIUM~~) | **FIXED** `399c446` (hardening/2026-10-10) — was: ACCEPTED ↓ | Fault | `mission_node.cpp:36,293-299` | `rpp_ack_timeout_s` = 0 disables the READY timeout |
 | MS-004 | LOW (~~MEDIUM~~) | **FIXED** `aab7260` (hardening/2026-10-10) — was: ACCEPTED ↓ | Stall | `path_artifact.cpp:122-127`; `mission_node.cpp:385-387` | Artifact read and SHA-256 with no size limit, inside the Start service callback |
@@ -805,7 +805,7 @@ Confirmed in code:
 | REC-002 | **HIGH** | **FIXED** `6c75da5` (hardening/2026-10-10) — was: ACCEPTED | Completeness | `recorder_node.cpp:147-149` | `param_nodes` omits **`rpp`** (119 tuning parameters) and `system_gateway` |
 | REC-004 | **HIGH** | **FIXED** `7599097` (hardening/2026-10-10) — was: ACCEPTED | Completeness | `recorder_node.cpp:204-284` | The bag starts only after RUNNING + up to 6 × 2 s of parameter RPCs + discovery: the first seconds of motion and spray are lost |
 | REC-005 | **HIGH** | **FIXED** `36af849` (hardening/2026-10-10) — was: ACCEPTED | Completeness | `ulog_capture.cpp:7-15`; `px4_link_node.cpp:716` | The per-run `.ulg` starts mid-stream with no ULog header, so it is probably unreadable |
-| REC-006 | **HIGH** | ACCEPTED. Running firmware + FCU parameters per run: `1f47834` on branch `claude/funny-sagan-upnenq`, not on `master` yet | Completeness | `recorder_node.cpp:224-234`; `release.sh:272` | Runs record the **expected** firmware SHA, not the running one; overlay hash and px4_msgs source missing |
+| REC-006 | **HIGH** | **FIXED** `4fdb4bd` (running firmware + FCU parameters per run; not yet run on the rover) — was: ACCEPTED | Completeness | `recorder_node.cpp:224-234`; `release.sh:272` | Runs record the **expected** firmware SHA, not the running one; overlay hash and px4_msgs source missing |
 | REC-003 | MEDIUM (~~HIGH~~) | **FIXED** `8603d07` (hardening/2026-10-10) — was: ACCEPTED ↓ | Completeness | `recorder_node.cpp:241-254,338-341` | Parameters snapshotted at start and end only; LIVE changes mid-run are not journaled |
 | REC-008 | MEDIUM (~~HIGH~~) | **FIXED** `0027730` (hardening/2026-10-10) — was: ACCEPTED ↓ | Lifecycle | `run_lifecycle.cpp:28-55` | A run never closes if MissionState stops for good (a restarted graph publishes IDLE and closes it) |
 | REC-009 | MEDIUM | **FIXED** `775211f` (hardening/2026-10-10) — was: ACCEPTED | Lifecycle | `recorder_node.cpp:70-114` | A recorder restart leaves the interrupted run directory unmarked |
