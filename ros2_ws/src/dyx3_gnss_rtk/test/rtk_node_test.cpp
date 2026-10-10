@@ -26,6 +26,7 @@ struct Rig {
   std::shared_ptr<rclcpp::Node> world;
   std::shared_ptr<rclcpp::executors::SingleThreadedExecutor> exec;
   rclcpp::Publisher<dyx3_interfaces::msg::GnssReport>::SharedPtr p_report;
+  rclcpp::Publisher<dyx3_interfaces::msg::MissionState>::SharedPtr p_mission;
   std::vector<rclcpp::SubscriptionBase::SharedPtr> keep;
   dyx3_interfaces::msg::RtkStatus rtk;
   dyx3_interfaces::msg::NtripStatus ntrip;
@@ -53,6 +54,8 @@ struct Rig {
     exec->add_node(world);
     p_report = world->create_publisher<dyx3_interfaces::msg::GnssReport>("/dyx3/gnss_report",
                                                                          rclcpp::QoS(5));
+    p_mission = world->create_publisher<dyx3_interfaces::msg::MissionState>(
+        "/dyx3/mission/state", rclcpp::QoS(1).reliable());
     keep.push_back(world->create_subscription<dyx3_interfaces::msg::RtkStatus>(
         "/dyx3/rtk_status", rclcpp::QoS(1).reliable(),
         [this](dyx3_interfaces::msg::RtkStatus::ConstSharedPtr m) { rtk = *m; }));
@@ -68,7 +71,8 @@ struct Rig {
       if (node->count_subscribers("/dyx3/rtk_status") > 0 &&
           node->count_subscribers("/dyx3/rtcm") > 0 &&
           node->count_subscribers("/dyx3/ntrip_status") > 0 &&
-          world->count_subscribers("/dyx3/gnss_report") > 0) {
+          world->count_subscribers("/dyx3/gnss_report") > 0 &&
+          world->count_subscribers("/dyx3/mission/state") > 0) {
         return;
       }
     }
@@ -96,6 +100,12 @@ struct Rig {
     r.latitude_deg = 48.0;
     r.longitude_deg = 11.0;
     p_report->publish(r);
+    pump();
+  }
+  void mission(uint8_t state) {
+    dyx3_interfaces::msg::MissionState m;
+    m.state = state;
+    p_mission->publish(m);
     pump();
   }
   std::vector<uint8_t> frame(size_t n) {
@@ -249,4 +259,81 @@ TEST(RtkNodeStartup, InvalidPersistedConfigStartsStoppedInsteadOfCrashing) {
   ctx->shutdown("test done");
   ::unsetenv("DYX3_RTK_STATE_DIR");
   std::filesystem::remove_all(dir);
+}
+
+TEST(RtkNodeConfigLock, FreshActiveMissionRefusesEveryWorkerRestartingCommand) {
+  using dyx3_interfaces::msg::MissionState;
+  for (const uint8_t state :
+       {MissionState::STATE_LOADING, MissionState::STATE_PLACING, MissionState::STATE_ARMING,
+        MissionState::STATE_ENGAGING, MissionState::STATE_READY, MissionState::STATE_RUNNING,
+        MissionState::STATE_PAUSED}) {
+    Rig r;
+    const auto before = r.node->handle_control({{"v", 1}, {"cmd", "GET_CONFIG"}})["data"];
+    const auto status_before = r.node->status_json(r.now);
+    r.mission(state);
+    r.now += 0.1;  // fresh: well inside the 1 s limit
+    auto changed = before;
+    changed["transport"] = "USB_DIRECT";
+    const Json set = {{"v", 1}, {"cmd", "SET_CONFIG"}, {"config", changed}};
+    for (const Json& request :
+         {set, Json{{"v", 1}, {"cmd", "START"}}, Json{{"v", 1}, {"cmd", "STOP"}}}) {
+      const auto reply = r.node->handle_control(request);
+      EXPECT_FALSE(reply["ok"].get<bool>()) << "state " << static_cast<int>(state);
+      EXPECT_EQ(reply["code"], "conflict");
+      EXPECT_EQ(reply["reason"], "mission active: configuration is locked");
+    }
+    // Config unchanged and the worker untouched: same revision, transport, worker state and
+    // desired state, and an RTCM frame still reaches the DDS transport.
+    const auto after = r.node->handle_control({{"v", 1}, {"cmd", "GET_CONFIG"}})["data"];
+    EXPECT_EQ(after, before);
+    const auto status_after = r.node->status_json(r.now);
+    EXPECT_EQ(status_after["config_revision"], status_before["config_revision"]);
+    EXPECT_EQ(status_after["worker_state"], status_before["worker_state"]);
+    EXPECT_EQ(status_after["desired_state"], status_before["desired_state"]);
+    EXPECT_EQ(status_after["transport"]["selected"], "PX4_DDS");
+    EXPECT_EQ(status_after["events"], status_before["events"]);  // no RECONFIGURING transition
+    r.node->on_frame(r.frame(40));
+    r.pump();
+    EXPECT_EQ(r.chunks.size(), 1U);
+    // Reads stay allowed while the lock is held.
+    EXPECT_TRUE(r.node->handle_control({{"v", 1}, {"cmd", "GET_STATUS"}})["ok"].get<bool>());
+    EXPECT_TRUE(r.node->handle_control({{"v", 1}, {"cmd", "GET_CONFIG"}})["ok"].get<bool>());
+  }
+}
+
+TEST(RtkNodeConfigLock, NoMissionStateIdleTerminalOrStaleStateDoNotLock) {
+  using dyx3_interfaces::msg::MissionState;
+  auto set_usb = [](Rig& r) {
+    auto config = r.node->handle_control({{"v", 1}, {"cmd", "GET_CONFIG"}})["data"];
+    config["transport"] = config["transport"] == "USB_DIRECT" ? "PX4_DDS" : "USB_DIRECT";
+    return r.node->handle_control({{"v", 1}, {"cmd", "SET_CONFIG"}, {"config", config}});
+  };
+  {  // the RTK service starts before the graph: no state ever seen
+    Rig r;
+    EXPECT_TRUE(set_usb(r)["ok"].get<bool>());
+  }
+  for (const uint8_t state : {MissionState::STATE_IDLE, MissionState::STATE_COMPLETED,
+                              MissionState::STATE_ABORTED, MissionState::STATE_ERROR}) {
+    Rig r;
+    r.mission(state);
+    r.now += 0.1;
+    const auto reply = set_usb(r);
+    EXPECT_TRUE(reply["ok"].get<bool>()) << "state " << static_cast<int>(state);
+    EXPECT_EQ(reply["data"]["revision"].get<uint64_t>(), 2U);
+  }
+  {  // RUNNING, but the last MissionState is older than the freshness limit (1 s)
+    Rig r;
+    r.mission(MissionState::STATE_RUNNING);
+    r.now += 2.0;
+    EXPECT_TRUE(set_usb(r)["ok"].get<bool>());
+  }
+  {  // the lock lifts as soon as the mission ends
+    Rig r;
+    r.mission(MissionState::STATE_RUNNING);
+    r.now += 0.1;
+    EXPECT_FALSE(set_usb(r)["ok"].get<bool>());
+    r.mission(MissionState::STATE_COMPLETED);
+    r.now += 0.1;
+    EXPECT_TRUE(set_usb(r)["ok"].get<bool>());
+  }
 }

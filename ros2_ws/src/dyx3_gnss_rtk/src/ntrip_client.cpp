@@ -16,6 +16,7 @@
 #include <csignal>
 #include <cstring>
 #include <limits>
+#include <system_error>
 
 namespace dyx3_gnss_rtk {
 
@@ -222,7 +223,109 @@ std::string short_errno(const char* what) {
   return std::string(what) + ": " + std::strerror(errno);
 }
 
+int system_resolver(const std::string& host, const std::string& port, addrinfo** result) {
+  addrinfo hints{};
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+  return ::getaddrinfo(host.c_str(), port.c_str(), &hints, result);
+}
+
 }  // namespace
+
+// ---------------------------------------------------------------------------------------------------------
+// Everything the helper thread touches lives here and is owned jointly by the helper and the
+// waiting caller (shared_ptr); the last owner frees the result and closes the pipe.
+struct DnsLookup {
+  std::string host;
+  std::string port;
+  ResolverFn resolver;
+  int notify[2]{-1, -1};  // helper writes one byte when finished; the caller polls the read end
+  std::atomic<bool> done{false};
+  int rc{EAI_FAIL};           // written by the helper before `done`
+  addrinfo* result{nullptr};  // written by the helper before `done`; owned by this object
+  DnsLookup() = default;
+  DnsLookup(const DnsLookup&) = delete;
+  DnsLookup& operator=(const DnsLookup&) = delete;
+  ~DnsLookup() {
+    if (result) ::freeaddrinfo(result);
+    for (int fd : notify)
+      if (fd >= 0) ::close(fd);
+  }
+};
+
+ResolveStatus resolve_with_deadline(const std::string& host, const std::string& port,
+                                    double timeout_s, int wake_fd,
+                                    std::shared_ptr<DnsLookup>& inflight, addrinfo** result,
+                                    const ResolverFn& resolver) {
+  *result = nullptr;
+  in_addr ip4{};
+  in6_addr ip6{};
+  if (!resolver && (::inet_pton(AF_INET, host.c_str(), &ip4) == 1 ||
+                    ::inet_pton(AF_INET6, host.c_str(), &ip6) == 1)) {
+    // A numeric address is converted without any name service: it cannot block.
+    addrinfo hints{};
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_NUMERICHOST | AI_NUMERICSERV;
+    if (::getaddrinfo(host.c_str(), port.c_str(), &hints, result) != 0 || *result == nullptr) {
+      *result = nullptr;
+      return ResolveStatus::Failed;
+    }
+    return ResolveStatus::Resolved;
+  }
+  // A lookup that already finished (while we were backing off) is stale: ask again.
+  if (inflight && inflight->done.load(std::memory_order_acquire)) inflight.reset();
+  if (!inflight) {
+    auto lookup = std::make_shared<DnsLookup>();
+    lookup->host = host;
+    lookup->port = port;
+    lookup->resolver = resolver ? resolver : ResolverFn(system_resolver);
+    if (::pipe2(lookup->notify, O_CLOEXEC | O_NONBLOCK) != 0) {
+      lookup->notify[0] = lookup->notify[1] = -1;
+      return ResolveStatus::Failed;
+    }
+    try {
+      std::thread([lookup] {
+        addrinfo* found = nullptr;
+        int rc = EAI_FAIL;
+        try {
+          rc = lookup->resolver(lookup->host, lookup->port, &found);
+        } catch (...) {
+          rc = EAI_FAIL;
+        }
+        if (rc != 0 && found != nullptr) {
+          ::freeaddrinfo(found);
+          found = nullptr;
+        }
+        lookup->rc = rc;
+        lookup->result = found;
+        lookup->done.store(true, std::memory_order_release);
+        const char byte = 1;
+        [[maybe_unused]] const ssize_t w = ::write(lookup->notify[1], &byte, 1);
+      }).detach();
+    } catch (const std::system_error&) {
+      return ResolveStatus::Failed;
+    }
+    inflight = lookup;
+  }
+  const std::shared_ptr<DnsLookup> lookup = inflight;
+  if (!lookup->done.load(std::memory_order_acquire)) {
+    const int w = wait_fd(lookup->notify[0], POLLIN, wake_fd, timeout_s);
+    if (w == 0) return ResolveStatus::Timeout;  // `inflight` is kept: the next attempt rejoins it
+    if (w < 0) return ResolveStatus::Stopped;
+  }
+  if (!lookup->done.load(std::memory_order_acquire)) return ResolveStatus::Failed;
+  addrinfo* found = lookup->result;
+  lookup->result = nullptr;
+  const int rc = lookup->rc;
+  inflight.reset();
+  if (rc != 0 || found == nullptr) {
+    if (found) ::freeaddrinfo(found);
+    return ResolveStatus::Failed;
+  }
+  *result = found;
+  return ResolveStatus::Resolved;
+}
 
 NtripClient::NtripClient(NtripConfig cfg, FrameSink sink, GgaSource gga)
     : cfg_(std::move(cfg)), sink_(std::move(sink)), gga_(std::move(gga)) {
@@ -385,14 +488,22 @@ bool NtripClient::own_fd(int fd) {
 
 bool NtripClient::connect_and_handshake(int* out_fd, std::vector<uint8_t>* leftover,
                                         std::string* error) {
-  addrinfo hints{};
-  hints.ai_family = AF_UNSPEC;
-  hints.ai_socktype = SOCK_STREAM;
   addrinfo* res = nullptr;
   const std::string port = std::to_string(cfg_.port);
-  if (::getaddrinfo(cfg_.host.c_str(), port.c_str(), &hints, &res) != 0 || res == nullptr) {
-    *error = "cannot resolve caster host";
-    return false;
+  // DERIVED — NOT FROM V1 SPEC: the lookup is bounded by the existing connect_timeout_s (the same
+  // budget a TCP connect gets), so a hung resolver can neither stall the worker nor make
+  // stop() (which joins it) wait for the resolver.
+  switch (resolve_with_deadline(cfg_.host, port, cfg_.connect_timeout_s, wake_[0], dns_inflight_,
+                                &res, resolver_)) {
+    case ResolveStatus::Resolved:
+      break;
+    case ResolveStatus::Timeout:
+      *error = "caster host resolution timeout";
+      return false;
+    case ResolveStatus::Stopped:
+    case ResolveStatus::Failed:
+      *error = stop_ ? "stopped" : "cannot resolve caster host";
+      return false;
   }
   int fd = -1;
   for (addrinfo* a = res; a != nullptr && fd < 0 && !stop_; a = a->ai_next) {
@@ -508,8 +619,13 @@ void NtripClient::run() {
       double next_gga =
           now_s();  // VRS casters withhold RTCM until the first position: feed at once
       double last_rx = now_s();
+      // Liveness is CRC-valid RTCM, not bytes: a caster (or a proxy in front of it) that keeps the
+      // socket busy with HTTP chunks, keep-alives or garbage must not hold a dead stream open.
+      double last_frame = last_rx;
       auto deliver = [&](const uint8_t* d, size_t n) {
-        for (const auto& f : parser.feed(d, n)) {
+        const auto frames = parser.feed(d, n);
+        if (!frames.empty()) last_frame = now_s();
+        for (const auto& f : frames) {
           {
             std::lock_guard<std::mutex> lk(m_);
             snap_.last_message_type = rtcm_message_type(f);
@@ -529,6 +645,19 @@ void NtripClient::run() {
       if (!pending.empty()) deliver(pending.data(), pending.size());
       while (!stop_) {
         const double t = now_s();
+        // DERIVED — NOT FROM V1 SPEC: the valid-frame deadline reuses stream_timeout_s, the limit
+        // the byte-level timeout below already enforces. It is checked first so a stream that
+        // trickles bytes without ever completing a frame cannot postpone it.
+        if (t - last_frame >= cfg_.stream_timeout_s) {
+          if (parser.buffered() > 0) parser.clear();
+          {
+            std::lock_guard<std::mutex> lk(m_);
+            ++snap_.frame_timeouts;
+          }
+          error = "no valid RTCM frame within the stream timeout";
+          had_error = true;
+          break;
+        }
         if (t >= next_gga) {
           next_gga = t + cfg_.gga_interval_s;
           const auto gga = gga_ ? gga_() : std::nullopt;
@@ -550,7 +679,8 @@ void NtripClient::run() {
           }
         }
         const double until_gga = std::max(0.0, next_gga - now_s());
-        const double until_timeout = std::max(0.0, cfg_.stream_timeout_s - (now_s() - last_rx));
+        const double until_timeout = std::max(
+            0.0, cfg_.stream_timeout_s - std::max(now_s() - last_rx, now_s() - last_frame));
         uint8_t buf[4096];
         const ssize_t n = read_some(fd, tls_, buf, sizeof buf, wake_[0], stop_,
                                     now_s() + std::min(until_gga, until_timeout) + 0.001);

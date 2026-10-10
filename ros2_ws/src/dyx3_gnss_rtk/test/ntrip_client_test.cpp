@@ -4,6 +4,7 @@
 #include <arpa/inet.h>
 #include <dirent.h>
 #include <gtest/gtest.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <pthread.h>
@@ -13,6 +14,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <memory>
 #include <mutex>
 #include <thread>
 
@@ -673,4 +675,197 @@ TEST(NtripClient, UnreachableCasterBacksOffAndStopsPromptly) {
   const auto t0 = std::chrono::steady_clock::now();
   c.stop();
   EXPECT_LT(std::chrono::steady_clock::now() - t0, 1s);
+}
+
+// ---- valid-frame liveness (a stream of bytes is not a stream of RTCM)
+// -------------------------------------
+TEST(NtripClient, KeepAliveBytesWithoutValidFramesTimeOutAndReconnect) {
+  FakeCaster caster;
+  Script s;
+  s.payload = {'\r', '\n'};  // no 0xD3 preamble: bytes arrive, no RTCM frame ever completes
+  s.repeat_payload = 150;    // ... every 20 ms for 3 s, far beyond stream_timeout_s (0.5 s)
+  caster.push_script(s);
+  std::atomic<int> delivered{0};
+  NtripClient c(
+      cfg_for(caster.port()), [&](const std::vector<uint8_t>&) { ++delivered; },
+      [] { return std::nullopt; });
+  const auto t0 = std::chrono::steady_clock::now();
+  c.start();
+  // Bytes keep flowing for 3 s; a byte-level timeout would not fire before they stop.
+  ASSERT_TRUE(wait_for([&] { return c.snapshot().frame_timeouts >= 1; }, 2.5));
+  EXPECT_LT(std::chrono::steady_clock::now() - t0, 2500ms);
+  ASSERT_TRUE(wait_for(
+      [&] { return c.snapshot().last_error.find("no valid RTCM frame") != std::string::npos; },
+      1.0));
+  const auto snap = c.snapshot();
+  EXPECT_GE(snap.reconnects, 1U);
+  EXPECT_GT(snap.bytes, s.payload.size());  // the keep-alives were really being received
+  EXPECT_EQ(snap.frames, 0U);
+  EXPECT_EQ(delivered.load(), 0);
+  c.stop();
+}
+
+TEST(NtripClient, ValidFramesKeepTheStreamAliveBeyondTheStreamTimeout) {
+  FakeCaster caster;
+  Script s;
+  s.payload = make_frame(30, 9);
+  s.repeat_payload = 60;  // 1.2 s of valid frames, 20 ms apart, stream_timeout_s is 0.5 s
+  caster.push_script(s);
+  NtripClient c(
+      cfg_for(caster.port()), [](const std::vector<uint8_t>&) {}, [] { return std::nullopt; });
+  c.start();
+  ASSERT_TRUE(wait_for([&] { return c.snapshot().frames >= 50; }, 5.0));
+  const auto snap = c.snapshot();
+  EXPECT_EQ(snap.frame_timeouts, 0U);
+  EXPECT_EQ(snap.reconnects, 0U);
+  EXPECT_EQ(snap.state, NtripState::Streaming);
+  c.stop();
+}
+
+// ---- DNS with a deadline
+// ------------------------------------------------------------------------------------
+namespace {
+// A resolver that blocks until released. Everything the helper thread touches is shared_ptr-owned
+// so it stays valid after the test (and the call that started it) is gone.
+struct HungResolver {
+  std::shared_ptr<std::atomic<int>> calls = std::make_shared<std::atomic<int>>(0);
+  std::shared_ptr<std::atomic<bool>> release = std::make_shared<std::atomic<bool>>(false);
+  ResolverFn fn() const {
+    return [calls = calls, release = release](const std::string&, const std::string&, addrinfo**) {
+      ++*calls;
+      const auto end = std::chrono::steady_clock::now() + 20s;  // safety net, never reached
+      while (!*release && std::chrono::steady_clock::now() < end) std::this_thread::sleep_for(5ms);
+      return EAI_AGAIN;
+    };
+  }
+};
+double seconds_since(std::chrono::steady_clock::time_point t0) {
+  return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+}
+}  // namespace
+
+TEST(NtripDns, UnresolvableNameFailsWithinTheConnectTimeout) {
+  NtripConfig cfg = cfg_for(2101);
+  cfg.host = "dyx3-no-such-host.invalid";  // RFC 6761: never resolves
+  cfg.connect_timeout_s = 1.0;
+  cfg.backoff_base_s = 30.0;
+  cfg.backoff_max_s = 60.0;
+  NtripClient c(cfg, [](const std::vector<uint8_t>&) {}, [] { return std::nullopt; });
+  const auto t0 = std::chrono::steady_clock::now();
+  c.start();
+  ASSERT_TRUE(wait_for([&] { return c.snapshot().state == NtripState::Reconnecting; },
+                       cfg.connect_timeout_s + 2.0));
+  EXPECT_LT(seconds_since(t0), cfg.connect_timeout_s + 1.5);
+  // Either the resolver answered "no such name" or the deadline cut it off: both are the error
+  // path.
+  const std::string error = c.snapshot().last_error;
+  EXPECT_TRUE(error == "cannot resolve caster host" || error == "caster host resolution timeout")
+      << error;
+  EXPECT_FALSE(c.snapshot().connected);
+  EXPECT_GE(c.snapshot().reconnects, 1U);
+  const auto t1 = std::chrono::steady_clock::now();
+  c.stop();
+  EXPECT_LT(seconds_since(t1), 1.0);
+}
+
+TEST(NtripDns, ResolveWithDeadlineStatuses) {
+  std::shared_ptr<DnsLookup> inflight;
+  addrinfo* res = nullptr;
+  {  // numeric address: no resolver, no helper thread
+    ASSERT_EQ(resolve_with_deadline("127.0.0.1", "2101", 1.0, -1, inflight, &res),
+              ResolveStatus::Resolved);
+    ASSERT_NE(res, nullptr);
+    ::freeaddrinfo(res);
+    EXPECT_EQ(inflight, nullptr);
+  }
+  {  // a resolver that answers
+    const ResolverFn ok = [](const std::string&, const std::string& port, addrinfo** out) {
+      addrinfo hints{};
+      hints.ai_family = AF_INET;
+      hints.ai_socktype = SOCK_STREAM;
+      hints.ai_flags = AI_NUMERICHOST;
+      return ::getaddrinfo("127.0.0.1", port.c_str(), &hints, out);
+    };
+    ASSERT_EQ(resolve_with_deadline("caster.example", "2101", 2.0, -1, inflight, &res, ok),
+              ResolveStatus::Resolved);
+    ASSERT_NE(res, nullptr);
+    ::freeaddrinfo(res);
+    EXPECT_EQ(inflight, nullptr);
+  }
+  {  // a resolver that fails
+    const ResolverFn fail = [](const std::string&, const std::string&, addrinfo**) {
+      return static_cast<int>(EAI_NONAME);
+    };
+    EXPECT_EQ(resolve_with_deadline("caster.example", "2101", 2.0, -1, inflight, &res, fail),
+              ResolveStatus::Failed);
+    EXPECT_EQ(res, nullptr);
+    EXPECT_EQ(inflight, nullptr);
+  }
+}
+
+TEST(NtripDns, HungResolverTimesOutAndIsRejoinedNotRestarted) {
+  HungResolver hung;
+  std::shared_ptr<DnsLookup> inflight;
+  addrinfo* res = nullptr;
+  auto t0 = std::chrono::steady_clock::now();
+  EXPECT_EQ(resolve_with_deadline("caster.example", "2101", 0.2, -1, inflight, &res, hung.fn()),
+            ResolveStatus::Timeout);
+  EXPECT_GE(seconds_since(t0), 0.15);
+  EXPECT_LT(seconds_since(t0), 1.0);
+  EXPECT_EQ(res, nullptr);
+  ASSERT_NE(inflight, nullptr);
+  // The next attempt waits on the same lookup: still one helper thread, one resolver call.
+  t0 = std::chrono::steady_clock::now();
+  EXPECT_EQ(resolve_with_deadline("caster.example", "2101", 0.2, -1, inflight, &res, hung.fn()),
+            ResolveStatus::Timeout);
+  EXPECT_LT(seconds_since(t0), 1.0);
+  EXPECT_EQ(hung.calls->load(), 1);
+  // Once the resolver finally answers, the result is collected and the handle released.
+  *hung.release = true;
+  EXPECT_EQ(resolve_with_deadline("caster.example", "2101", 2.0, -1, inflight, &res, hung.fn()),
+            ResolveStatus::Failed);  // EAI_AGAIN from the fake
+  EXPECT_EQ(res, nullptr);
+  EXPECT_EQ(inflight, nullptr);
+  EXPECT_EQ(hung.calls->load(), 1);
+}
+
+TEST(NtripDns, StopRequestInterruptsALookupImmediately) {
+  HungResolver hung;
+  int wake[2];
+  ASSERT_EQ(::pipe(wake), 0);
+  std::shared_ptr<DnsLookup> inflight;
+  addrinfo* res = nullptr;
+  std::thread stopper([&] {
+    std::this_thread::sleep_for(100ms);
+    const char c = 1;
+    [[maybe_unused]] const ssize_t w = ::write(wake[1], &c, 1);
+  });
+  const auto t0 = std::chrono::steady_clock::now();
+  EXPECT_EQ(
+      resolve_with_deadline("caster.example", "2101", 10.0, wake[0], inflight, &res, hung.fn()),
+      ResolveStatus::Stopped);
+  EXPECT_LT(seconds_since(t0), 1.0);
+  stopper.join();
+  ::close(wake[0]);
+  ::close(wake[1]);
+  *hung.release = true;  // lets the abandoned helper finish and free its own state
+}
+
+TEST(NtripDns, HungResolverNeitherStallsTheWorkerNorBlocksStop) {
+  HungResolver hung;
+  NtripConfig cfg = cfg_for(2101);
+  cfg.host = "hung.example";
+  cfg.connect_timeout_s = 0.3;
+  cfg.backoff_base_s = 0.05;
+  cfg.backoff_max_s = 0.1;
+  NtripClient c(cfg, [](const std::vector<uint8_t>&) {}, [] { return std::nullopt; });
+  c.set_resolver(hung.fn());
+  c.start();
+  ASSERT_TRUE(wait_for([&] { return c.snapshot().reconnects >= 2; }, 5.0));
+  EXPECT_EQ(c.snapshot().last_error, "caster host resolution timeout");
+  EXPECT_EQ(hung.calls->load(), 1);  // every attempt rejoined the one pending lookup
+  const auto t0 = std::chrono::steady_clock::now();
+  c.stop();  // joins the worker: must not wait for the resolver
+  EXPECT_LT(seconds_since(t0), 1.0);
+  *hung.release = true;
 }
