@@ -2631,3 +2631,18 @@ to the baseline and `config/px4/2026-10-10.params`; no other parameter changed.
 - Mission mode still plans waypoint braking with `RO_JERK_LIM` 0.3, so the approach stays gentle: braking from
   1 m/s starts about 0.8 m before the point.
 - **To verify:** the step 4 Mission log, and a measured stop from about 1 m/s (`wheel_encoders` and local position).
+
+## 2026-10-10 (13:30) — Claude — Mission crawled at 0.15 m/s: RO_JERK_LIM 0.3 → 4
+
+- **Symptom (QGC log `log_54_2026-10-10-12-20-42.ulg`):** in Mission mode the speed setpoint peaked at 0.146 m/s on
+  2 m legs (`cruising_speed` was 1.1); each leg took about 36 s.
+- **Cause:** PX4 waypoint braking `computeMaxSpeedFromDistance` (`TrajMath.hpp:61`, used at
+  `DifferentialPosControl.cpp:68`): `v = ½(−b + √(b² + 8ad))` with `b = 4a²/jerk`. With the new
+  `RO_DECEL_LIM 2.0` and the old `RO_JERK_LIM 0.3`, b = 53.3, so v = 0.146 m/s at 1.95 m, which is exactly the
+  logged value. The planned braking zone from 1.1 m/s was 15 m.
+- **Fix:** `RO_JERK_LIM 4`: braking zone 1.4 m from 1.1 m/s; about 0.83 m/s with 1 m to go. `RO_JERK_LIM` is used
+  only by the Mission/auto waypoint approach; a stick release or STOP still uses `RO_DECEL_LIM` 2.0.
+- Persisted to the baseline and `config/px4/2026-10-10.params`; the baseline matches the FCU 105/105.
+- **Secondary:** `RO_SPEED_TH` 0.1 makes the measured speed read 0 below 0.1 m/s; it only matters at crawl speed.
+  Left unchanged.
+- **To verify:** re-run `1_Aug.plan` and check the speed setpoint and the measured speed on the legs.
