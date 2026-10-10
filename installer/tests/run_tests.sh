@@ -1318,6 +1318,22 @@ F
   as_root health_dds "${rel}" >"${T}/hd_dds" 2>&1
   check "px4_link: no sample at all warns and names the environment" 'grep -q "^WARN  px4_link: no /dyx3/px4_link/status sample from the gateway or from ros2 as dyx3 (ROS_DOMAIN_ID=42, ROS_LOCALHOST_ONLY=1)" "${T}/hd_dds" && ! grep -q "^FAIL" "${T}/hd_dds"'
 
+  # ---- PC-7a: a live session proves PX4 UXRCE_DDS_DOM_ID = ROS_DOMAIN_ID; a dead one names the likely causes
+  hd_status true true 0 0
+  as_root health_dds "${rel}" >"${T}/hd_dds" 2>&1
+  check "PC-7a: a live session proves the PX4 DDS domain matches ROS_DOMAIN_ID 42" 'grep -q "^PASS  DDS domain: px4_link sees PX4 on ROS_DOMAIN_ID 42, so PX4 UXRCE_DDS_DOM_ID matches" "${T}/hd_dds"'
+  hd_status false false 1 1
+  rm -f "${T}/hd_agent_down"
+  FAKE_NO_AGENT="${T}/hd_agent_down" as_root health_dds "${rel}" >"${T}/hd_dds" 2>&1
+  check "PC-7a: session down while the agent listens names UXRCE_DDS_DOM_ID and UXRCE_DDS_PTCFG" 'grep -q "^WARN  DDS domain: the XRCE agent listens on udp/8888 but px4_link sees no PX4 session on ROS_DOMAIN_ID 42; likely PX4 UXRCE_DDS_DOM_ID != 42 or UXRCE_DDS_PTCFG != 1" "${T}/hd_dds" && ! grep -q "^PASS  DDS domain" "${T}/hd_dds"'
+  : >"${T}/hd_agent_down"
+  FAKE_NO_AGENT="${T}/hd_agent_down" as_root health_dds "${rel}" >"${T}/hd_dds" 2>&1
+  check "PC-7a: session down with nothing on the agent port says the agent is down" 'grep -q "^WARN  DDS domain: no PX4 session and nothing listens on udp/8888: the XRCE agent is down" "${T}/hd_dds"'
+  printf 'DYX3_XRCE_PORT=9999\n' >"${DYX3_ETC}/platform.env"
+  (have() { [ "$1" != ss ] && command -v "$1" >/dev/null 2>&1; }; as_root health_dds "${rel}") >"${T}/hd_dds" 2>&1
+  check "PC-7a: without ss all three causes are named" 'grep -q "^WARN  DDS domain: no PX4 session on ROS_DOMAIN_ID 42; likely the XRCE agent is down, PX4 UXRCE_DDS_DOM_ID != 42, or UXRCE_DDS_PTCFG != 1" "${T}/hd_dds" && ! grep -q "^FAIL" "${T}/hd_dds"'
+  rm -f "${DYX3_ETC}/platform.env" "${T}/hd_agent_down"
+
   # ---- the same sample from the gateway's get_snapshot (INS-005 query), ros2 only when it has no fresh entry
   local gwf="${T}/hd_gw"
   export DYX3_GATEWAY_QUERY_TIMEOUT_S=1

@@ -343,12 +343,27 @@ _px4_stale_names() {
   printf '%s' "${out# }"
 }
 
+# _xrce_port / _xrce_listening: the agent's UDP port (platform.env, read not executed); rc 0 something listens on it,
+# 1 nothing does, 2 ss is missing.
+_xrce_port() {
+  local p
+  p="$(sed -n 's/^DYX3_XRCE_PORT=//p' "${DYX3_ETC}/platform.env" 2>/dev/null | tail -n1)"
+  printf '%s' "${DYX3_XRCE_PORT:-${p:-8888}}"
+}
+_xrce_listening() {
+  have ss || return 2
+  ss -H -lun "sport = :$(_xrce_port)" 2>/dev/null | grep -q .
+}
+
 # health_dds: deep. Is the FCU session up? Authoritative: one /dyx3/px4_link/status sample (WARN, never FAIL); it replaces
 # counting /fmu topics, which said nothing about the link and under-reported right after a start.
 # DERIVED — NOT FROM V1 SPEC: the sample is healthy with session_alive, handshake_ok and no stale topic. `fault` is
 # reported, not judged: COMMAND_STALE is what px4_link reports while no guard command flows.
+# PC-7a: px4_link sees /fmu only when PX4's UXRCE_DDS_DOM_ID equals ROS_DOMAIN_ID and UXRCE_DDS_PTCFG=1 matches the
+# localhost-only graph. A live session therefore proves the domains match; a dead one while the agent listens names the
+# likely causes. No FCU parameter is read.
 health_dds() {
-  local rel="${1:-${DYX3_CURRENT}}" s sa ho f m stale detail
+  local rel="${1:-${DYX3_CURRENT}}" s sa ho f m stale detail dom rc=0
   _enabled dyx3-ros "${rel}/installer/manifests/production.manifest" || return 0
   if ! s="$(_px4_link_sample "${rel}")"; then
     _warn "px4_link: no /dyx3/px4_link/status sample from the gateway or from ros2 as ${DYX3_USER} ($(_ros_env_desc)); dyx3-ros down?"
@@ -360,13 +375,20 @@ health_dds() {
   m="$(_kv stale_topics_mask "${s}")"
   stale="$(_px4_stale_names "${m}")"
   detail="session_alive=${sa} handshake_ok=${ho} fault=${f} $(_px4_fault_name "${f}") stale_topics_mask=${m}${stale:+ (${stale})}; via $(_kv source "${s}")"
-  if [ "${sa}" != true ]; then
-    _warn "px4_link: FCU session down (${detail})"
-  elif [ "${ho}" = true ] && [ "${m}" = 0 ]; then
-    _pass "px4_link: FCU session alive (${detail})"
-  else
-    _warn "px4_link: FCU session alive but not healthy (${detail})"
+  dom="$(_ros_env_value ROS_DOMAIN_ID)"
+  dom="${dom:-unset}"
+  if [ "${sa}" = true ]; then
+    if [ "${ho}" = true ] && [ "${m}" = 0 ]; then _pass "px4_link: FCU session alive (${detail})"; else _warn "px4_link: FCU session alive but not healthy (${detail})"; fi
+    _pass "DDS domain: px4_link sees PX4 on ROS_DOMAIN_ID ${dom}, so PX4 UXRCE_DDS_DOM_ID matches"
+    return 0
   fi
+  _warn "px4_link: FCU session down (${detail})"
+  _xrce_listening || rc=$?
+  case "${rc}" in
+    0) _warn "DDS domain: the XRCE agent listens on udp/$(_xrce_port) but px4_link sees no PX4 session on ROS_DOMAIN_ID ${dom}; likely PX4 UXRCE_DDS_DOM_ID != ${dom} or UXRCE_DDS_PTCFG != 1 (localhost-only); else FCU power or the Ethernet cable" ;;
+    1) _warn "DDS domain: no PX4 session and nothing listens on udp/$(_xrce_port): the XRCE agent is down (dyx3-platform)" ;;
+    *) _warn "DDS domain: no PX4 session on ROS_DOMAIN_ID ${dom}; likely the XRCE agent is down, PX4 UXRCE_DDS_DOM_ID != ${dom}, or UXRCE_DDS_PTCFG != 1 (localhost-only)" ;;
+  esac
 }
 
 # ---- baseline (INS-006): a check that already fails on the running release (a second CH340, an unplugged receiver)
