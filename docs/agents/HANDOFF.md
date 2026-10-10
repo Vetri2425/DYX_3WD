@@ -1,5 +1,7 @@
 # HANDOFF
 
+**Pinned next session:** the owner's schedule is [the week plan to sign-off](../plans/2026-10-12_week_to_signoff.md) (Mon 2026-10-12 last RPP day, 100 Hz path first; Tue spray; Wed first production demo; Sat 2026-10-17 sign-off). Its review inputs: [Customer readiness — short review and fix order (2026-10-11)](../reviews/2026-10-11_customer_readiness.md) (Codex, reviewed master `0157792`; start with restart ownership and safe resume).
+
 Append a section per work session. Newest last.
 
 ---
@@ -3059,3 +3061,56 @@ googletest (19 + 1 pass); the node tests in CI: **green at `998d3b1` (run #181, 
 
 **Owed to the field (unchanged):** the stop position at the next endpoint on rover 01 (expect ≤ 1 reversal, no timeout finish, within
 1 cm along the line); which plant rover 01 is (rate-limited PI vs first-order lag) decides whether the first-order table applies.
+
+## 2026-10-11 — Codex — customer-readiness review, pinned for next session
+
+**Changed (master, reviewed head `0157792`):** added
+[the short customer-readiness review](../reviews/2026-10-11_customer_readiness.md) and pinned it
+at the top of this handoff. Broad agreement with Astra's ~7.5/10; prioritize restart ownership,
+resumed-entry alignment and conditioning-compatible progress, then measured bench/field acceptance.
+Documentation only; no runtime/configuration changes, commit, push or deployment.
+
+**Checked:** current recovery/RPP/persistence/parameter-save code, contracts, systemd split,
+artifact workflow and installer digest checks. GitHub run `38080153223` for `0157792` is now
+success (11 jobs); artifact/check overlap confirmed, first job start to publication finish 5m41s.
+GitHub's branch-protection API reports master unprotected. Markdown links and `git diff --check`
+verified. No local build/runtime tests or hardware checks run for these documentation changes.
+
+**Correction to the previous gap table:** mission and spray run in **services**, not control;
+control contains px4_link, motion_guard and RPP. See the current launch files and units.
+
+**DERIVED — NOT FROM V1 SPEC:** review priorities and proposed closure criteria are recommendations,
+not approved changes to stop policy, tuning or acceptance thresholds. No new tuning values proposed.
+**Next/open:** decide restart ownership and resume behavior, reproduce the focused cases, then
+follow the linked note. Field/paint proof, signing, protection and customer stop/network decisions
+remain open; the existing open-item register remains authoritative.
+
+## 2026-10-11 (night) — Claude — week plan to sign-off; CLAUDE.md commit rule; reviews committed
+
+**Changed (master):**
+- `335457d`: `docs/plans/2026-10-12_week_to_signoff.md`, the owner's schedule. Monday 2026-10-12 is the last RPP day:
+  - first the 100 Hz control, input and streaming path and a more reliable link;
+  - then the Fable and Codex review items;
+  - then yaw and speed tuning and the RPP ladder.
+
+  Tuesday is spray and flow control, Wednesday the first production demo, Thursday and Friday fixes, soak, app and
+  customer readiness, and Saturday 2026-10-17 sign-off. CLAUDE.md §5 is also in that commit: commits are authored as
+  the owner with **no trailers**, which withdraws the old `Agent:` / `Spec:` rule (the reason the Fable session's first
+  commits carried trailers). CLAUDE.md §3b and the README status now match master and the rover.
+- This commit:
+  - Codex's customer-readiness review and its HANDOFF entry, committed as written;
+  - the pin at the top of this file now names the week plan first.
+
+**Facts for Monday:**
+- EKF2 already predicts at 100 Hz (`EKF2_PREDICT_US` 10000).
+- The 50 Hz control rate comes from the firmware's `dds_topics.yaml`: `vehicle_local_position` `rate_limit: 50`,
+  `vehicle_angular_velocity` commented out, `estimator_status_flags` at 5 Hz.
+- Going to 100 Hz is therefore a firmware change (CI build, archive, flash on the owner's word).
+- RPP ticks once per sample, so it follows the input rate.
+- Tablet telemetry stays at 10–20 Hz: the app's JS thread caused the link drops.
+
+**Not run:** nothing built or deployed tonight. Rover 01 is still on `rover-7f9651d48f`. Master CI on `0157792` was
+green (run 38080153223, 5m41s from first job to published release).
+
+**Open:** the four items before the first motion on `0157792`, in the week plan's section M0.
+
