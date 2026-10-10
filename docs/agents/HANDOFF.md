@@ -2716,3 +2716,17 @@ chain.
 - **Verified (13:10 IST, log `forward_5s_tuned.ulg`):** Offboard 0.20 m/s now gives 0.199 m/s measured, 0.201 m/s from
   the wheels and 0.199 m/s along the heading (steady state; it was 0.157 before). The first second is the
   `RO_ACCEL_LIM` ramp. Next: the Mission square at the new limits.
+- **Mission re-run with the tuning (13:15 IST, log `bench_tools/logs_2026-10-10/mission_tuned_07_28_03.ulg`), same
+  plan:**
+
+  | Metric | Before (log_57) | After |
+  |---|---|---|
+  | Speed tracking vs the ramped setpoint (mean / p95) | −0.159 / 0.313 m/s | **−0.015 / 0.069 m/s** |
+  | Mission time | 40.8 s | **36.2 s** |
+  | Spot-turns | about 4 s | **3.1–3.4 s** |
+  | Corners | 4.8–4.9 cm | **4.8–5.0 cm** |
+
+  Mission finished. Small overshoots to watch: peak speed 0.905 against the 0.85 cap; peak yaw rate 33.7°/s against
+  the 30°/s limit.
+- **Next tuning (separate change):** `RO_SPEED_RED` 1 (corner slowdown); `RO_SPEED_I`/`RO_YAW_RATE_P` only if the
+  overshoot matters.
