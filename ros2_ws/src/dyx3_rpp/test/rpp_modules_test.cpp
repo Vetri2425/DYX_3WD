@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <cstring>
 #include <limits>
 
 #include "dyx3_rpp/guidance.hpp"
@@ -176,6 +177,27 @@ TEST(StopPivot, StaleVelocityTimesOutAfterTheCapOnly) {
   EXPECT_FALSE(c.satisfied(1900 * kMs, t, p));
   EXPECT_TRUE(c.satisfied(2000 * kMs, t, p));
 }
+// XR-RPP-011: the stale cap counts from when the velocity went stale, not from the hold entry.
+TEST(StopPivot, TheStaleCapCountsFromTheStalenessNotFromTheHoldEntry) {
+  const StopPivotParams p;
+  StopConfirm c;
+  StopTelemetry moving_fresh;
+  moving_fresh.vel_fresh = true;
+  moving_fresh.speed = 0.3;  // braking, still above the threshold
+  for (int t = 0; t <= 2500; t += 20) EXPECT_FALSE(c.satisfied(t * kMs, moving_fresh, p)) << t;
+  StopTelemetry stale;
+  stale.vel_fresh = false;
+  EXPECT_FALSE(c.satisfied(2520 * kMs, stale, p)) << "one stale tick after 2.5 s of braking";
+  EXPECT_FALSE(c.satisfied(4500 * kMs, stale, p)) << "1.98 s stale";
+  EXPECT_TRUE(c.satisfied(4520 * kMs, stale, p)) << "2.0 s stale";
+  // a fresh sample restarts the stale count
+  StopConfirm d;
+  EXPECT_FALSE(d.satisfied(0, stale, p));
+  EXPECT_FALSE(d.satisfied(1900 * kMs, stale, p));
+  EXPECT_FALSE(d.satisfied(1920 * kMs, moving_fresh, p));
+  EXPECT_FALSE(d.satisfied(3000 * kMs, stale, p));
+  EXPECT_TRUE(d.satisfied(5000 * kMs, stale, p));
+}
 TEST(StopPivot, DwellAndItsReset) {
   StopPivotParams p;  // dwell 0.30 s
   StopConfirm c;
@@ -246,8 +268,29 @@ TEST(CornerFsm, HardCornerWalksBrakePivotSettleAdvance) {
   EXPECT_FALSE(o.collinear);
   EXPECT_EQ(f.state(), FsmState::Tracking);  // reset for the next corner
   // every transition was logged with a reason
-  ASSERT_GE(f.log().size(), 4U);
-  for (const auto& tr : f.log()) EXPECT_FALSE(tr.reason.empty());
+  ASSERT_GE(f.log_size(), 4U);
+  for (size_t i = 0; i < f.log_size(); ++i) {
+    ASSERT_NE(f.log_entry(i).reason, nullptr);
+    EXPECT_GT(std::strlen(f.log_entry(i).reason), 0U);
+    if (i > 0) EXPECT_EQ(f.log_entry(i).seq, f.log_entry(i - 1).seq + 1);  // oldest first
+  }
+}
+// XR-RPP-009: the transition log is a fixed ring: it keeps the newest kLogCapacity entries.
+TEST(CornerFsm, TheTransitionLogIsABoundedRing) {
+  StopPivotParams p;
+  CornerFsm f(p);
+  int64_t t = 0;
+  for (int corner = 0; corner < 200; ++corner) {  // brake -> pivot -> settle -> advance, repeated
+    CornerOutput o;
+    for (int k = 0; k < 200 && o.action != CornerAction::Advance; ++k, t += 20) {
+      const double err = k < 30 ? 1.0 : 0.01;
+      o = f.step(corner_in(t, err, 90.0, stopped()));
+    }
+  }
+  ASSERT_EQ(f.log_size(), CornerFsm::kLogCapacity);
+  for (size_t i = 1; i < f.log_size(); ++i)
+    EXPECT_EQ(f.log_entry(i).seq, f.log_entry(i - 1).seq + 1);
+  EXPECT_GT(f.log_entry(0).seq, 1U);  // the oldest entries were overwritten
 }
 TEST(CornerFsm, NeverReleasesGrosslyMisheadedEvenAfterTheWatchdog) {
   StopPivotParams p;
@@ -371,14 +414,14 @@ TEST(RppCommand, EveryKindMapsToAContractConformingCommand) {
   EXPECT_EQ(command_from_tick(o, true, 0.45).mode, MotionMode::Stop);
   // TRACK: segment -> heading; smooth -> rate
   o.cmd = CmdKind::Track;
-  o.v_n = 0.3;
-  o.v_e = 0.0;
+  o.v_n = 0.3 * std::cos(0.1);  // the core's vector and its heading agree above 1 cm/s
+  o.v_e = 0.3 * std::sin(0.1);
   o.track_heading_ned = 0.1;
   o.yaw_rate = 0.2;
   MotionCommand c = command_from_tick(o, true, 0.45);
   EXPECT_EQ(c.mode, MotionMode::TrackHeading);
   EXPECT_FLOAT_EQ(c.speed_body_x, 0.3F);
-  EXPECT_FLOAT_EQ(c.yaw_setpoint, 0.1F);
+  EXPECT_NEAR(c.yaw_setpoint, 0.1F, 1e-6);
   EXPECT_TRUE(std::isnan(c.yaw_rate_setpoint));
   // B3: the explicit segment rate selector uses the rate RppCore already computed from
   // segment_yaw_rate_gain * theta_e.
@@ -391,8 +434,17 @@ TEST(RppCommand, EveryKindMapsToAContractConformingCommand) {
   EXPECT_EQ(c.mode, MotionMode::TrackRate);
   EXPECT_FLOAT_EQ(c.yaw_rate_setpoint, 0.2F);
   EXPECT_TRUE(std::isnan(c.yaw_setpoint));
+  // XR-RPP-007: a slow but non-zero vector (below the core's 1 cm/s heading-memory threshold)
+  // is commanded along its own bearing, not the stale frozen heading
+  o.v_n = 0.004 * std::cos(1.5);
+  o.v_e = 0.004 * std::sin(1.5);
+  o.track_heading_ned = 0.0;  // the previous leg's heading, still in the core's memory
+  c = command_from_tick(o, true, 0.45);
+  EXPECT_EQ(c.mode, MotionMode::TrackHeading);
+  EXPECT_NEAR(c.yaw_setpoint, 1.5, 1e-5);
   // zero speed keeps the frozen heading: no snap to North
   o.v_n = 0.0;
+  o.v_e = 0.0;
   o.track_heading_ned = 1.2;
   c = command_from_tick(o, true, 0.45);
   EXPECT_EQ(c.mode, MotionMode::TrackHeading);
@@ -417,9 +469,11 @@ TEST(RppCommand, EveryKindMapsToAContractConformingCommand) {
   EXPECT_EQ(c.mode, MotionMode::Pivot);
   EXPECT_EQ(c.speed_body_x, 0.0F);
   EXPECT_FLOAT_EQ(c.yaw_rate_setpoint, -0.45F);
-  // CREEP: signed, no turn
+  // CREEP: signed, no turn (the vector lies on the nose axis, here behind it: reverse)
   o.cmd = CmdKind::Creep;
   o.creep_speed = -0.03;
+  o.v_n = -0.03 * std::cos(2.0);
+  o.v_e = -0.03 * std::sin(2.0);
   c = command_from_tick(o, true, 0.45);
   EXPECT_EQ(c.mode, MotionMode::Creep);
   EXPECT_FLOAT_EQ(c.speed_body_x, -0.03F);
@@ -429,4 +483,63 @@ TEST(RppCommand, EveryKindMapsToAContractConformingCommand) {
   o.v_n = std::nan("");
   c = command_from_tick(o, true, 0.45);
   EXPECT_EQ(c.mode, MotionMode::Stop);
+}
+
+// XR-RPP-001: the precise stop's diagonal correction must reach the vehicle. A CREEP vector off the
+// nose becomes a heading command toward it (forward ahead of the beam, reverse behind it), with
+// the same magnitude; a vector within kCreepSteerMinRad of the nose axis keeps the plain CREEP.
+TEST(RppCommand, CreepOffTheNoseSteersTowardTheCorrectionVector) {
+  TickOutput o;
+  o.cmd = CmdKind::Creep;
+  o.yaw_ned = 0.0;  // nose North
+  // ahead and to the right (east): forward, heading toward the vector
+  const double b = std::atan2(-0.03, 0.07);  // endpoint 7 cm ahead, rover 3 cm east of the line
+  o.v_n = 0.1 * std::cos(b);
+  o.v_e = 0.1 * std::sin(b);
+  o.creep_speed = 0.1;
+  MotionCommand c = command_from_tick(o, true, 0.45);
+  EXPECT_EQ(c.mode, MotionMode::TrackHeading);
+  EXPECT_FLOAT_EQ(c.speed_body_x, 0.1F);
+  EXPECT_NEAR(c.yaw_setpoint, b, 1e-5);
+  EXPECT_TRUE(std::isnan(c.yaw_rate_setpoint));
+  // behind and to the left: reverse, the nose turned toward the opposite bearing (never a spot
+  // turn to drive it forward)
+  const double back = M_PI - 0.4;  // 157 deg: behind the beam, to the right
+  o.v_n = 0.05 * std::cos(back);
+  o.v_e = 0.05 * std::sin(back);
+  o.creep_speed = -0.05;
+  c = command_from_tick(o, true, 0.45);
+  EXPECT_EQ(c.mode, MotionMode::TrackHeading);
+  EXPECT_FLOAT_EQ(c.speed_body_x, -0.05F);
+  EXPECT_NEAR(c.yaw_setpoint, std::atan2(-o.v_e, -o.v_n), 1e-5);
+  EXPECT_NEAR(c.yaw_setpoint, -0.4, 1e-5);
+  // nearly on the nose (1 deg): the plain CREEP mapping, unchanged
+  o.v_n = 0.05 * std::cos(0.0175);
+  o.v_e = 0.05 * std::sin(0.0175);
+  o.creep_speed = 0.05;
+  c = command_from_tick(o, true, 0.45);
+  EXPECT_EQ(c.mode, MotionMode::Creep);
+  EXPECT_FLOAT_EQ(c.speed_body_x, 0.05F);
+  EXPECT_FLOAT_EQ(c.yaw_rate_setpoint, 0.0F);
+  // nearly straight behind (179 deg): plain reverse CREEP
+  o.v_n = -0.05 * std::cos(0.0175);
+  o.v_e = -0.05 * std::sin(0.0175);
+  o.creep_speed = -0.05;
+  c = command_from_tick(o, true, 0.45);
+  EXPECT_EQ(c.mode, MotionMode::Creep);
+  EXPECT_FLOAT_EQ(c.speed_body_x, -0.05F);
+  // the nose wraps: nose 179 deg, vector -170 deg is 11 deg off, forward
+  o.yaw_ned = M_PI - 0.0175;
+  o.v_n = 0.05 * std::cos(-M_PI + 0.1745);
+  o.v_e = 0.05 * std::sin(-M_PI + 0.1745);
+  o.creep_speed = 0.05;
+  c = command_from_tick(o, true, 0.45);
+  EXPECT_EQ(c.mode, MotionMode::TrackHeading);
+  EXPECT_FLOAT_EQ(c.speed_body_x, 0.05F);
+  EXPECT_NEAR(c.yaw_setpoint, -M_PI + 0.1745, 1e-5);
+  // zero vector: plain CREEP (speed 0)
+  o.v_n = 0.0;
+  o.v_e = 0.0;
+  o.creep_speed = 0.0;
+  EXPECT_EQ(command_from_tick(o, true, 0.45).mode, MotionMode::Creep);
 }

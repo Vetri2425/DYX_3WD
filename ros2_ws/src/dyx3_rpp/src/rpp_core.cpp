@@ -16,6 +16,9 @@ namespace {
 
 constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
 constexpr double kPi = M_PI;
+// XR-RPP-009: upper bound of the smooth-profile curvature preview count (= the parameter bound of
+// preview_curvature_n). DERIVED — NOT FROM V1 SPEC.
+constexpr int kMaxPreviewN = 64;
 // _CORNER_MAX_BEARING_OFFSET_RAD = math.radians(75.0)
 constexpr double kMaxBearingOffsetRad = 75.0 * (M_PI / 180.0);
 
@@ -155,6 +158,8 @@ bool RppCore::advance_run(bool pre_stopped) {
 // inputs
 // ------------------------------------------------------------------------------------------------
 void RppCore::on_pose(const NedPose& pose, int64_t now_ns) {
+  // RPP-002: a non-finite sample is not a pose; the last good one ages out into STALE.
+  if (!std::isfinite(pose.n) || !std::isfinite(pose.e) || !std::isfinite(pose.yaw_ned)) return;
   if (have_pose_) {
     const double gap_s = ns_to_s(now_ns - pose_recv_ns_);
     if (gap_s > 0.0 && gap_s < 1.0) {
@@ -169,6 +174,9 @@ void RppCore::on_pose(const NedPose& pose, int64_t now_ns) {
 }
 
 void RppCore::on_velocity(double v_north, double v_east, double yaw_rate_ned, int64_t now_ns) {
+  // RPP-002: a non-finite velocity is not fed (a NaN with a fresh stamp made brake_speed return
+  // +cap forward); the last good sample goes stale instead.
+  if (!std::isfinite(v_north) || !std::isfinite(v_east) || !std::isfinite(yaw_rate_ned)) return;
   vel_n_ = v_north;
   vel_e_ = v_east;
   yaw_rate_ned_ = yaw_rate_ned;
@@ -254,6 +262,7 @@ void RppCore::publish_yaw_rate(double yr) { out_.yaw_rate = yr; }
 
 void RppCore::publish_debug(const DebugRow& row) {
   out_.debug = row;
+  out_.cross_track_right = row.cross_track;
   out_.state = static_cast<StateCode>(row.state);
   out_.debug_valid = true;
 }
@@ -631,7 +640,8 @@ bool RppCore::precise_stop_tick(double pos_n, double pos_e, double yaw_ned, doub
   un /= seg_len;
   ue /= seg_len;
 
-  // residual: + endpoint ahead on the final segment, - overshot
+  // residual: + endpoint ahead on the final segment, - overshot. cross: the prototype's sign,
+  // LEFT of the final segment positive (only |cross| feeds control; the status reports -cross).
   const double dn = b.n - pos_n;
   const double de = b.e - pos_e;
   const double residual = dn * un + de * ue;
@@ -671,8 +681,9 @@ bool RppCore::precise_stop_tick(double pos_n, double pos_e, double yaw_ned, doub
     return true;
   }
   const double max_s = params_.num(P::segment_endpoint_precise_max_s);
-  if (max_s > 0.0 && endpoint_stop_started_ &&
-      static_cast<double>(now_ns - endpoint_stop_start_ns_) * 1e-9 >= max_s && stopped) {
+  const bool timed_out = max_s > 0.0 && endpoint_stop_started_ &&
+                         static_cast<double>(now_ns - endpoint_stop_start_ns_) * 1e-9 >= max_s;
+  if (timed_out && stopped) {
     finish();  // timeout: accept the best position, only once stopped
     return true;
   }
@@ -681,11 +692,27 @@ bool RppCore::precise_stop_tick(double pos_n, double pos_e, double yaw_ned, doub
   last_speed_cmd_ = 0.0;
   const double age_ms = pose_age_s * 1000.0;
 
+  if (timed_out) {
+    // XR-RPP-001 (BEHAVIOUR CHANGE, not in the prototype): past the timeout the correction is over.
+    // The prototype kept creeping until a stop happened to be confirmed, which a rover rocking
+    // through the end plane never reaches. Brake to a confirmed stop instead; the shared stop
+    // confirmation then finishes on a later tick (a stale velocity confirms after its 2 s cap), so
+    // the endpoint always completes and reports the miss it was left with.
+    double hv = 0.0;
+    publish_brake(yaw_ned, tel, &hv);
+    publish_debug(hold_row(cross, 0.0, dist_to_goal, hv, dist_to_goal, age_ms, false));
+    out_.cross_track_right = -cross;  // XR-RPP-005: `cross` is left-positive
+    publish_segment_debug(SegState::CornerStop, std::max(0, static_cast<int>(run_->pts.size()) - 2),
+                          std::max(0.0, residual), dist_to_goal, kNaN, kNaN, kNaN, 0.0);
+    return true;
+  }
+
   if (radial > correction_limit && std::fabs(cross) > cross_tol) {
     // lateral miss outside the correction envelope: brake, no aggressive diagonal chase
     double hv = 0.0;
     publish_brake(yaw_ned, tel, &hv);
     publish_debug(hold_row(cross, 0.0, dist_to_goal, hv, dist_to_goal, age_ms, false));
+    out_.cross_track_right = -cross;  // XR-RPP-005: `cross` is left-positive
     return true;
   }
 
@@ -724,6 +751,7 @@ bool RppCore::precise_stop_tick(double pos_n, double pos_e, double yaw_ned, doub
       std::copysign(std::hypot(v_n, v_e), v_n * std::cos(yaw_ned) + v_e * std::sin(yaw_ned));
   publish_debug(
       hold_row(cross, 0.0, dist_to_goal, std::hypot(v_n, v_e), dist_to_goal, age_ms, false));
+  out_.cross_track_right = -cross;  // XR-RPP-005: `cross` is left-positive
   publish_segment_debug(SegState::CornerStop, std::max(0, static_cast<int>(run_->pts.size()) - 2),
                         std::max(0.0, residual), dist_to_goal, kNaN, kNaN, kNaN, 0.0);
   return true;
@@ -780,15 +808,16 @@ void RppCore::control_loop_impl(int64_t now_ns) {
   const double effective_max_age = max_age_s + (use_extrap ? extrap_horizon : 0.0);
 
   const double pose_age_s = ns_to_s(now_ns - pose_recv_ns_);
-  if (pose_age_s > effective_max_age) {
+  // RPP-004: a negative (a pose stamped after this tick) or non-finite age is not fresh.
+  if (!std::isfinite(pose_age_s) || pose_age_s < 0.0 || pose_age_s > effective_max_age) {
     publish_zero(StateCode::Stale, pose_age_s * 1000);
     return;
   }
 
   double use_n = pose_.n, use_e = pose_.e;
-  if (use_extrap && vel_.has) {
+  if (use_extrap && vel_.has && std::isfinite(vel_n_) && std::isfinite(vel_e_)) {
     const double vel_age_s = ns_to_s(now_ns - vel_.ns);
-    if (vel_age_s < extrap_horizon) {
+    if (vel_age_s >= 0.0 && vel_age_s < extrap_horizon) {
       const double dt = pose_age_s + std::max(0.0, params_.num(P::pose_latency_bias_s));
       const double d_n = vel_n_ * dt;
       const double d_e = vel_e_ * dt;
@@ -862,6 +891,13 @@ void RppCore::control_loop_impl(int64_t now_ns) {
   dyx3_geometry::PathProjection smooth_proj;
   if (!profile_segment_) {
     smooth_proj = dyx3_geometry::project_onto_path(Point{pos_n, pos_e}, path, hint_);
+    // GEO-002 (consumer side): no valid projection, no guidance. Fail to zero.
+    if (!smooth_proj.valid) {
+      hint_.seg = 0;
+      hint_.valid = false;
+      publish_zero(StateCode::Idle, pose_age_s * 1000);
+      return;
+    }
     update_path_progress(smooth_proj.seg_idx, smooth_proj.t);
   }
 
@@ -965,8 +1001,14 @@ void RppCore::control_smooth(double pos_n, double pos_e, double yaw_ned, double 
 
   int n_eff = n_preview;
   const double preview_dist_m = params_.num(P::preview_curvature_distance_m);
-  if (preview_dist_m > 0.0 && l_d > 1e-9)
-    n_eff = std::max(n_preview, static_cast<int>(std::ceil(preview_dist_m / l_d)));
+  if (preview_dist_m > 0.0 && l_d > 1e-9) {
+    // XR-RPP-009: bounded per-tick work. The distance / lookahead ratio is computed in double and
+    // capped before the int conversion (a large distance over a small lookahead overflowed).
+    const double want =
+        std::min(std::ceil(preview_dist_m / l_d), static_cast<double>(kMaxPreviewN));
+    n_eff = std::max(n_preview, static_cast<int>(want));
+  }
+  n_eff = std::min(n_eff, kMaxPreviewN);
   const double kappa_speed =
       n_eff > 1 ? dyx3_geometry::max_preview_curvature(path, seg_idx, foot, l_d, n_eff)
                 : std::fabs(kappa);
@@ -1105,6 +1147,10 @@ void RppCore::control_segment(double pos_n, double pos_e, double yaw_ned, double
 
     const bool final_segment = seg_idx >= n_pts - 2;
     const auto sp = dyx3_geometry::project_onto_segment(Point{pos_n, pos_e}, path, seg_idx);
+    if (!sp.valid) {  // GEO-002 (consumer side): no valid projection, no guidance
+      publish_zero(StateCode::Idle, pose_age_s * 1000.0, dist_to_goal);
+      return;
+    }
     const double signed_xtrack = sp.signed_cross;
     const double dist_to_end_along = sp.dist_to_end_along;
     update_path_progress(seg_idx, sp.t);
@@ -1318,6 +1364,28 @@ void RppCore::pause() {
   last_speed_cmd_ = 0.0;
   kappa_hard_latched_ = false;
   reset_corner_pivot_state();
+  // XR-RPP-008: a resume is a fresh start of the same run from wherever the rover came to rest.
+  // - jump guard: the rover may coast while paused (no command), so the first pose after a resume
+  //   is not a jump. Without this the coast was a JumpSkip (a STOP tick and a lost hint) or, with
+  //   ekf_reset_compensation, a PERMANENT EKF offset equal to the coast.
+  have_last_pos_ = false;
+  // - tick period: the first tick after the pause uses the nominal period, not the pause length
+  //   (clamped to 0.1 s) for the speed slew.
+  have_last_tick_ = false;
+  // - projection hint: the coast can leave the hint window; search the whole open run once, as
+  //   after a JumpSkip. A closed run keeps its hint: a full scan near the closure point can tie
+  //   with segment 0 or the last segment, and the windowed search follows a coast within a few
+  //   ticks.
+  if (run_ != nullptr && !run_->closed) {
+    hint_.seg = 0;
+    hint_.valid = false;
+  }
+  // - endpoint precise stop: its timeout counted through the pause. Disengage it; it re-engages
+  //   from the trigger test with a fresh start time.
+  segment_endpoint_stop_active_ = false;
+  endpoint_stop_started_ = false;
+  // - stop latch: re-evaluated from the rest position.
+  stop_latched_ = false;
 }
 
 CoreState RppCore::snapshot() const {

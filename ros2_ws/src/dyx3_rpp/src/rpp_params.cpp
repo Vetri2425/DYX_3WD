@@ -1,5 +1,6 @@
 #include "dyx3_rpp/rpp_params.hpp"
 
+#include <climits>
 #include <cmath>
 #include <cstring>
 #include <sstream>
@@ -89,6 +90,12 @@ SetResult ParamSet::validate(const Descriptor& d, double num, const std::string&
     r.reason = std::string(d.name) + " must be an integer";
     return r;
   }
+  // XR-RPP-009: an Int must fit an int whatever its table bound says (integer() never overflows).
+  if (d.kind == Kind::Int &&
+      (num < static_cast<double>(INT_MIN) || num > static_cast<double>(INT_MAX))) {
+    r.reason = std::string(d.name) + " out of range";
+    return r;
+  }
   if (d.kind != Kind::Bool) {
     if (num < d.lo || num > d.hi) {
       r.reason = std::string(d.name) + " out of range";
@@ -174,7 +181,7 @@ SetResult ParamSet::set_many(const std::vector<Item>& items, const SetContext& c
       return fail;
     }
     if (d.cls == ParamClass::IdleOnly && ctx.mission_running) {
-      fail.reason = it.name + " is IDLE_ONLY: refused while a mission is running";
+      fail.reason = it.name + " is IDLE_ONLY: refused while a mission is loaded or running";
       return fail;
     }
     const auto v = validate(d, it.num, it.str);

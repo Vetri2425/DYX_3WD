@@ -26,22 +26,31 @@ int main(int argc, char** argv) {
   if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0)
     std::fprintf(stderr, "rpp_node: mlockall failed (continuing unlocked)\n");
   int rc = 0;
+  // XR-RPP-010: the node and the executor outlive the try block, so an exception thrown while
+  // spinning (a callback, a load) still ends with the bounded STOP burst below.
+  std::shared_ptr<dyx3_rpp::RppNode> node;
+  rclcpp::executors::SingleThreadedExecutor ex;
   try {
-    auto node = std::make_shared<dyx3_rpp::RppNode>();
-    rclcpp::executors::SingleThreadedExecutor ex;
+    node = std::make_shared<dyx3_rpp::RppNode>();
     ex.add_node(node);
     // spin_once blocks until work is ready (at most 5 ms, so a stop request is seen within 5 ms).
     // spin_some never waits for work: in this loop it polled about 14 000 times a second, and at
     // SCHED_FIFO on the core shared with motion_guard a poll loop delays the guard on every pass.
     while (rclcpp::ok() && !g_stop.load()) ex.spin_once(std::chrono::milliseconds(5));
-    for (int i = 0; i < 5;
-         ++i) {  // a bounded burst of STOPs so the guard sees the last word before we go
-      node->shutdown_stop();
-      ex.spin_some(std::chrono::milliseconds(5));
-    }
   } catch (const std::exception& e) {
     std::fprintf(stderr, "rpp_node: %s\n", e.what());
     rc = 1;
+  }
+  if (node) {
+    try {
+      for (int i = 0; i < 5; ++i) {  // a bounded burst of STOPs so the guard sees the last word
+        node->shutdown_stop();
+        ex.spin_some(std::chrono::milliseconds(5));
+      }
+    } catch (const std::exception& e) {
+      std::fprintf(stderr, "rpp_node: STOP burst: %s\n", e.what());
+      rc = 1;
+    }
   }
   rclcpp::shutdown();
   return rc;

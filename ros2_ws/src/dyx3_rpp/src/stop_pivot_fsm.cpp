@@ -41,12 +41,19 @@ bool StopConfirm::satisfied(int64_t now_ns, const StopTelemetry& tel, const Stop
     entered_ = true;
     entered_ns_ = now_ns;
   }
-  const double held = static_cast<double>(now_ns - entered_ns_) * 1e-9;
   if (!tel.vel_fresh) {
     settle_ = false;
-    // Only a STALE velocity may time out into a pivot (I3).
-    return held >= p.stale_vel_hold_s;
+    // Only a STALE velocity may time out into a pivot (I3), and only once it has been stale for
+    // the cap. XR-RPP-011: counted from the first stale tick of this hold (the hold entry at the
+    // earliest), not from the hold entry: after 2 s of braking on a fresh velocity, one stale tick
+    // must not confirm the stop on a frozen measurement.
+    if (!stale_) {
+      stale_ = true;
+      stale_ns_ = now_ns;
+    }
+    return static_cast<double>(now_ns - stale_ns_) * 1e-9 >= p.stale_vel_hold_s;
   }
+  stale_ = false;
   const bool speed_ok = tel.speed < p.stop_speed_threshold;
   const bool yaw_rate_ok = std::fabs(tel.yaw_rate) < p.stop_yaw_rate_threshold;
   if (speed_ok && yaw_rate_ok) {
@@ -86,10 +93,15 @@ bool PivotWatchdog::timed_out(int64_t now_ns, double turn_angle_rad, const StopP
   return true;
 }
 
+void CornerFsm::record(FsmState from, FsmState to, const char* reason, int64_t now_ns) {
+  log_[log_head_] = Transition{++seq_, from, to, reason, now_ns};
+  log_head_ = (log_head_ + 1) % kLogCapacity;
+  if (log_count_ < kLogCapacity) ++log_count_;
+}
+
 void CornerFsm::go(FsmState to, const char* reason, int64_t now_ns) {
   if (to == state_) return;
-  log_.push_back({++seq_, state_, to, reason, now_ns});
-  if (log_.size() > 256) log_.erase(log_.begin());
+  record(state_, to, reason, now_ns);
   state_ = to;
 }
 
@@ -172,7 +184,7 @@ CornerOutput CornerFsm::step(const CornerInput& in) {
       return out;
     }
     stop_complete_ = true;
-    log_.push_back({++seq_, state_, state_, "stop confirmed", in.now_ns});
+    record(state_, state_, "stop confirmed", in.now_ns);
   }
 
   go(FsmState::Pivot, "stopped, heading outside release band", in.now_ns);

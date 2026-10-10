@@ -45,6 +45,7 @@ private:
   ConditionParams condition_params() const;
   void on_mission_state(const dyx3_interfaces::msg::MissionState& m);
   void load_mission(uint32_t mission_id, const std::string& sha);
+  void load_mission_impl(uint32_t mission_id, const std::string& sha);
   void unload_mission();
   void publish_motion(const MotionCommand& c);
   void publish_status(uint8_t state, const TickOutput* out, const MotionCommand& cmd);
@@ -59,6 +60,10 @@ private:
 
   // mission
   bool mission_running_{false};
+  // RPP-006: a mission is loaded or active (MissionState LOADING, READY, RUNNING or PAUSED).
+  // IDLE_ONLY parameters are refused while true: several are read every tick (require_rtk_fix,
+  // pose_max_age_s, ...) and a change while PAUSED would apply on resume.
+  bool mission_active_{false};
   bool wants_mission_{false};
   bool loaded_{false};
   bool load_failed_{false};
@@ -71,6 +76,12 @@ private:
 
   uint64_t seq_{0};
   uint8_t last_state_{255};
+  // XR-RPP-002: a running tick on which the core publishes no command (a run handover that needs
+  // no alignment) repeats the previous running tick's command once, instead of a one-tick STOP
+  // while driving. Bounded: a second consecutive silent tick is STOP.
+  bool repeat_available_{false};
+  MotionCommand last_running_cmd_;
+  uint8_t last_running_state_{0};
   bool stopped_for_shutdown_{false};
 
   rclcpp::Publisher<dyx3_interfaces::msg::MotionSetpoint>::SharedPtr pub_motion_;

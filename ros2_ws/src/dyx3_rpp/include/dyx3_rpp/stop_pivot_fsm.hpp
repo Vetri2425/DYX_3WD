@@ -11,9 +11,11 @@
 //   I3  "stopped" = measured speed AND yaw rate below their thresholds continuously for the dwell;
 //   a FRESH
 //       velocity above the threshold NEVER times out into a pivot, only a STALE one does (after 2.0
-//       s).
+//       s of continuous staleness inside the hold; XR-RPP-011).
 #pragma once
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <string>
@@ -63,6 +65,7 @@ public:
   void reset() {
     entered_ = false;
     settle_ = false;
+    stale_ = false;
   }
   bool entered() const { return entered_; }
 
@@ -71,6 +74,8 @@ private:
   int64_t entered_ns_{0};
   bool settle_{false};
   int64_t settle_ns_{0};
+  bool stale_{false};  // the velocity has been stale since stale_ns_ (XR-RPP-011)
+  int64_t stale_ns_{0};
 };
 
 // Angle-aware pivot watchdog. The turn angle is captured on the first call.
@@ -109,7 +114,7 @@ struct Transition {
   uint64_t seq;
   FsmState from;
   FsmState to;
-  std::string reason;
+  const char* reason;  // a string literal: recording a transition never allocates (XR-RPP-009)
   int64_t t_ns;
 };
 
@@ -154,10 +159,16 @@ public:
   void carry_stop_complete() { stop_complete_ = true; }  // run boundary: the stop was already done
   FsmState state() const { return state_; }
   bool stop_complete() const { return stop_complete_; }
-  const std::vector<Transition>& log() const { return log_; }
+  // The most recent transitions, oldest first, in a fixed ring (no allocation in the tick).
+  static constexpr size_t kLogCapacity = 256;
+  size_t log_size() const { return log_count_; }
+  const Transition& log_entry(size_t i) const {
+    return log_[(log_head_ + kLogCapacity - log_count_ + i) % kLogCapacity];
+  }
 
 private:
   void go(FsmState to, const char* reason, int64_t now_ns);
+  void record(FsmState from, FsmState to, const char* reason, int64_t now_ns);
   StopPivotParams p_;
   StopConfirm own_stop_;
   StopConfirm* stop_;
@@ -166,7 +177,9 @@ private:
   bool settle_active_{false};
   int64_t settle_since_ns_{0};
   FsmState state_{FsmState::Tracking};
-  std::vector<Transition> log_;
+  std::array<Transition, kLogCapacity> log_{};
+  size_t log_head_{0};
+  size_t log_count_{0};
   uint64_t seq_{0};
 };
 

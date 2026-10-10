@@ -85,7 +85,8 @@ All inputs and outputs are recorded; the C++ replays the **same inputs** and com
 fifth) 26 state fields. Episodes run to `DONE` (or the tick budget).
 
 `test/fixtures/gate4_orchestrator_vectors_{1,2,3}.txt` (each under the repository's 5 MB limit):
-**101 episodes, 13 905 ticks, 0 mismatches**. States reached: STALE, IDLE, TRACKING, APPROACH, DONE, RTK_WAIT, JUMP_SKIP; segment states:
+**101 episodes, 13 905 ticks, 0 mismatches** outside the documented deviations, which the test pins by scenario, tick window and
+count: `seg_square_nohold_vel` ticks 85-86 (10 values), XR-RPP-011 (`rpp_stop_pivot_fsm.md` section 3.1). States reached: STALE, IDLE, TRACKING, APPROACH, DONE, RTK_WAIT, JUMP_SKIP; segment states:
 TRACK, PRE_CORNER, CORNER_ALIGN, DONE, CORNER_STOP; commands STOP / TRACK / BRAKE / PIVOT (about 740 brake and 830 pivot ticks).
 Episodes include a full square (four hard corners), entry alignments (large, small, stale velocity, smooth profile, the
 `entry_prealign_enabled` pivot), two runs with a hard boundary, the endpoint precise stop with several parameter sets, and the
@@ -131,3 +132,9 @@ episodes that start part-way along a run) is not a case the prototype supports e
 * The explicit FSM reproduced the prototype's behaviour on every tick of the fixture; where the contract proposed cleaner semantics
   (`rpp_stop_pivot_fsm.md`) they were NOT adopted, because the equivalence is the Gate 7 oracle. Decide before changing any.
 * `progress_publish_enabled` / point handshake: port, drop, or move to the mission layer.
+
+## Input hardening (RPP-002 / RPP-004 / GEO-002, production, not in the prototype)
+`on_pose` / `on_velocity` drop a sample with any non-finite field (the previous one ages out). A pose age that is negative or non-finite is
+STALE (STOP). Extrapolation uses the velocity only when it is finite and its age is in `[0, imu_max_extrap_age_s)`. A projection with
+`valid == false` (geometry may return it for a degenerate window) publishes zero (IDLE) and drops the hint. Behaviour-neutral for valid
+input: the equivalence vectors are unchanged.

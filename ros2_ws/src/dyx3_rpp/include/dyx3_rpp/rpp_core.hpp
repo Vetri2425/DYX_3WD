@@ -64,7 +64,9 @@ enum class CmdKind : uint8_t {
   Track,     // follow: the NED velocity vector (v_n, v_e) with the body yaw rate
   Brake,     // active body-axis brake: signed speed along the nose (brake_speed)
   Pivot,     // in-place turn toward the exit heading (pivot_heading_err, wrapped target - yaw)
-  Creep,     // endpoint precise stop: a small signed speed along the nose (creep_speed), no turn
+  Creep,     // endpoint precise stop: a small signed speed along the nose (creep_speed), no turn;
+             // (v_n, v_e) carries the correction direction, which the command layer steers toward
+             // when it is off the nose (XR-RPP-001, rpp_command.hpp)
 };
 const char* to_string(CmdKind k);
 
@@ -120,6 +122,10 @@ struct TickOutput {
       false};  // the prototype returned without publishing a command (run switch)
   bool debug_valid{false};
   DebugRow debug;
+  // Cross-track for RppStatus.cross_track_right_m: metres, RIGHT of the directed path positive
+  // (frames.md). Equal to debug.cross_track, except in the endpoint precise stop, whose legacy
+  // debug value is left-positive (kept for the equivalence with the prototype; XR-RPP-005).
+  double cross_track_right{std::numeric_limits<double>::quiet_NaN()};
   bool segment_debug_valid{false};
   SegmentDebugRow segment_debug;
   int segment_debug_publishes{0};
@@ -178,7 +184,10 @@ public:
   void test_set_last_speed_cmd(double v) { last_speed_cmd_ = v; }
 
   // Not running (paused, waiting): forget the motion memory exactly as a zero publish does, and
-  // restart the stop confirmation. The node calls this instead of ticking.
+  // restart the stop confirmation. The node calls this instead of ticking. Also forgets what makes
+  // a resume differ from a fresh start of the same run (XR-RPP-008): the jump-guard position, the
+  // tick period, the projection hint (open runs), the precise-stop engagement and its timer, and
+  // the stop latch.
   void pause();
   bool path_done() const { return path_done_; }
   bool profile_segment() const { return profile_segment_; }

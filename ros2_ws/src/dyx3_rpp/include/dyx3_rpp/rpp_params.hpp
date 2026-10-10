@@ -2,12 +2,13 @@
 // recording. See docs/contracts/dyx3_rpp.md section on parameters. Pure C++, no ROS.
 //
 // Every tunable is classified LIVE / IDLE_ONLY / RESTART (spec section 9). A change is validated
-// before it is applied, an IDLE_ONLY change while a mission is running and any RESTART change at
-// runtime are REFUSED with a reason (never deferred), and every applied change is recorded.
-// Defaults are the prototype's, verbatim, and must be re-validated at GATE 4.
+// before it is applied, an IDLE_ONLY change while a mission is loaded or running and any RESTART
+// change at runtime are REFUSED with a reason (never deferred), and every applied change is
+// recorded. Defaults are the prototype's, verbatim, and must be re-validated at GATE 4.
 #pragma once
 
 #include <array>
+#include <climits>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -52,8 +53,10 @@ struct Change {
 };
 
 struct SetContext {
-  bool mission_running{false};  // IDLE_ONLY changes are refused while true
-  std::string source;           // who asked ("tablet", "backend", "cli"): recorded with the change
+  // IDLE_ONLY changes are refused while true. The node sets it for the whole life of a mission
+  // (loaded or active: LOADING, READY, RUNNING, PAUSED), not only while RUNNING (RPP-006).
+  bool mission_running{false};
+  std::string source;  // who asked ("tablet", "backend", "cli"): recorded with the change
 };
 
 struct SetResult {
@@ -74,7 +77,13 @@ public:
   // Hot-path accessors: array index, no allocation, no hashing.
   double num(P id) const { return num_[static_cast<size_t>(id)]; }
   bool flag(P id) const { return num_[static_cast<size_t>(id)] != 0.0; }
-  int integer(P id) const { return static_cast<int>(std::llround(num_[static_cast<size_t>(id)])); }
+  // XR-RPP-009: saturates instead of overflowing (validate() already keeps an Int inside int).
+  int integer(P id) const {
+    const double v = num_[static_cast<size_t>(id)];
+    if (!(v > static_cast<double>(INT_MIN))) return INT_MIN;  // also NaN
+    if (!(v < static_cast<double>(INT_MAX))) return INT_MAX;
+    return static_cast<int>(std::lround(v));
+  }
   const std::string& str(P id) const { return str_[static_cast<size_t>(id)]; }
 
   // Validate and apply one change / an atomic batch (all or nothing, cross-parameter relations

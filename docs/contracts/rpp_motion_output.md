@@ -20,6 +20,11 @@ Consequences that shaped the controller: pivots were commanded as a small vector
 | corner / run-alignment pivot | `PIVOT` | 0 | NaN | explicit rate toward the exit heading |
 | terminal approach (`segment_endpoint_approach_speed` 0.03 m/s) | `CREEP` | `+v` (small) | NaN | ω |
 | brake / precise-stop reverse | `TRACK_HEADING`/`CREEP` with **negative** speed (reverse), nose heading held | `−|v|` | nose | NaN |
+| endpoint precise stop with a **lateral** correction (core vector more than 2° off the nose axis) — XR-RPP-001 | `TRACK_HEADING` toward the vector: ahead of the beam forward, heading `atan2(v_e, v_n)`; behind it reverse, heading `atan2(−v_e, −v_n)` | `±|v|` (the core's magnitude, unchanged caps) | toward the vector | NaN |
+
+The precise stop's correction vector is diagonal when the lateral miss is between `segment_endpoint_cross_tolerance_m` and
+`segment_endpoint_max_correction_m`; the prototype's firmware steered along it. A nose-only CREEP dropped it, so the rover rocked
+through the end plane without removing the miss (XR-RPP-001). Within 2° of the nose axis the plain `CREEP` row applies.
 
 Frames/signs: NED, yaw 0 = North, clockwise-positive, rad and rad/s (`docs/contracts/frames.md`). **No ENU conversion anywhere.** `valid = false` ⇒ STOP.
 The legacy yaw rate is already closed on the pose (pure-pursuit κ·v or P on θe), so `TRACK_RATE` is meaningful without extra feedback.
