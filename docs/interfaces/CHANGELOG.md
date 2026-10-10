@@ -1,5 +1,11 @@
 # Interface changelog
 
+## 0.13.1 — 2026-10-10 (comment only, IF-007)
+
+- `SetEmergencyStop`: the request and response are documented. Accepted `source` values are exactly `tablet`, `backend`, `ble`, `physical`
+  (lowercase, compared byte for byte by `dyx3_motion_guard`); anything else is `REASON_INVALID_SOURCE` and changes nothing; any accepted source
+  may clear; an accepted assert is applied inside the call (MG-007). No field or constant changed (the IF-006 schema fingerprint is unchanged).
+
 ## 0.13.0 — 2026-10-08 (Cloud Review E3 explicit NTRIP security)
 
 - `NtripStatus` appends `security` (`UNSPECIFIED` only for invalid legacy environment, `PLAINTEXT`, `TLS`), `tls_verified`, `tls_verification_failed`, and `plaintext_credentials_warning`. No secret or Authorization value is included. Rebuild interface consumers together before deployment.
