@@ -69,7 +69,10 @@ TEST(RppParams, EveryDefaultIsValidAndRelationsHold) {
     EXPECT_TRUE(ParamSet::validate(d[i], d[i].dflt, d[i].sdflt).ok) << d[i].name;
   }
   EXPECT_TRUE(p.check_relations().ok);
-  EXPECT_DOUBLE_EQ(p.num(P::max_linear_vel), 1.0);
+  // Field-test speed defaults (not the prototype's 1.0): physical cap = PX4 RO_SPEED_LIM, start
+  // 0.6.
+  EXPECT_DOUBLE_EQ(p.num(P::max_linear_vel), 0.85);
+  EXPECT_DOUBLE_EQ(p.num(P::mission_speed), 0.6);
   EXPECT_EQ(p.str(P::tracking_profile), "auto");
   EXPECT_EQ(p.str(P::segment_command_mode), "heading");
   EXPECT_TRUE(p.flag(P::require_rtk_fix));
