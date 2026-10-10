@@ -10,6 +10,8 @@
 #include <limits>
 #include <thread>
 
+#include "dds_test_support.hpp"
+
 using namespace dyx3_motion_guard;
 using namespace std::chrono_literals;
 
@@ -57,9 +59,7 @@ struct Rig {
 
   explicit Rig(const std::vector<rclcpp::Parameter>& params = {}) {
     ctx = std::make_shared<rclcpp::Context>();
-    rclcpp::InitOptions io;
-    io.set_domain_id(120 + (getpid() % 100));
-    ctx->init(0, nullptr, io);
+    dyx3_test::init_isolated(ctx);
     rclcpp::NodeOptions no;
     no.context(ctx);
     no.append_parameter_override("max_reverse_speed_mps", 0.3);
@@ -126,6 +126,8 @@ struct Rig {
           world->count_subscribers("/dyx3/rtk_status") > 0 &&
           world->count_subscribers("/dyx3/operator_link") > 0 &&
           world->count_subscribers("/dyx3/px4_link/status") > 0 && cli_estop->service_is_ready()) {
+        // every later deliver() relies on synchronous delivery: prove it
+        EXPECT_TRUE(dyx3_test::delivery_is_synchronous(ctx));
         return;
       }
     }
@@ -139,19 +141,22 @@ struct Rig {
     ctx->shutdown("test done");
   }
 
+  // Delivers until `done` holds or the wall-clock deadline passes. The injected clock does not
+  // move here; the deadline only bounds a genuinely missing message.
   template <typename Done>
   bool pump_until(Done done, int timeout_ms = 3000) {
     const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     while (std::chrono::steady_clock::now() < end) {
-      exec->spin_some(2ms);
+      deliver();
       if (done()) return true;
+      exec->spin_once(1ms);  // blocks only while nothing is ready
     }
+    deliver();
     return done();
   }
-  void pump(int ms = 12) {
-    const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
-    while (std::chrono::steady_clock::now() < end) exec->spin_some(2ms);
-  }
+  // Delivers everything published so far and runs every callback it causes (and the ones those
+  // cause), then returns: nothing is left in flight, so a negative check after it is exact.
+  void deliver() { dyx3_test::drain(*exec); }
   void publish_world() {
     if (mission_running) {
       dyx3_interfaces::msg::MissionState m;
@@ -220,13 +225,13 @@ struct Rig {
     now += dt;
     publish_world();
     if (with_rpp) rpp(mode, v, yaw, rate);
-    pump();
+    deliver();
     if (event) {
       guard->on_watchdog(now);  // a no-op when the RPP command was decided on arrival
     } else {
       guard->step(now);
     }
-    pump();
+    deliver();
   }
   void run(double seconds, bool with_rpp = true) {
     for (double t = 0; t < seconds; t += 0.02) tick(0.02, with_rpp);
@@ -237,9 +242,7 @@ struct Rig {
 
 TEST(MotionGuardNode, RejectsBadParameters) {
   auto ctx = std::make_shared<rclcpp::Context>();
-  rclcpp::InitOptions io;
-  io.set_domain_id(120 + (getpid() % 100));
-  ctx->init(0, nullptr, io);
+  dyx3_test::init_isolated(ctx);
   rclcpp::NodeOptions no;
   no.context(ctx);
   no.append_parameter_override("max_yaw_rate_radps", -1.0);
@@ -400,7 +403,7 @@ TEST(MotionGuardNode, EmergencyStopAssertAndClearWithinOneGatePeriodAreBothPubli
   r.estops.clear();
 
   ASSERT_TRUE(r.call_estop(true, "tablet"));
-  r.pump();
+  r.deliver();
   ASSERT_FALSE(r.gates.empty()) << "assert must publish the gate state without waiting for 10 Hz";
   ASSERT_FALSE(r.estops.empty());
   EXPECT_FALSE(r.gates.back().ok);
@@ -410,7 +413,7 @@ TEST(MotionGuardNode, EmergencyStopAssertAndClearWithinOneGatePeriodAreBothPubli
 
   r.now += 0.03;  // 30 ms later: still inside the same 100 ms gate period
   ASSERT_TRUE(r.call_estop(false, "tablet"));
-  r.pump();
+  r.deliver();
   ASSERT_GE(r.gates.size(), 2U) << "the clear must be published as well";
   ASSERT_GE(r.estops.size(), 2U);
   EXPECT_TRUE(r.gates.back().ok);
@@ -438,7 +441,7 @@ TEST(MotionGuardNode, ShutdownStopPublishesCanonicalStopWhileMoving) {
   const size_t n_before = r.outs.size();
   for (int i = 0; i < 5; ++i) {
     r.guard->shutdown_stop();
-    r.pump(5);
+    r.deliver();
   }
   ASSERT_EQ(r.outs.size(), n_before + 5);
   for (size_t i = n_before; i < r.outs.size(); ++i) {
@@ -474,7 +477,7 @@ TEST(MotionGuardNode, ForwardedCommandsKeepThePoseStampOwnStopsUseTheNewestVehic
     EXPECT_FALSE(r.last_status.accepted);
     EXPECT_EQ(r.last_out.source_pose_sample_stamp, r.veh_stamp);
     r.guard->shutdown_stop();
-    r.pump(5);
+    r.deliver();
     EXPECT_EQ(r.last_out.source_pose_sample_stamp, r.veh_stamp);
   }
   Rig never;             // after r is gone: two rigs share one DDS domain
@@ -500,9 +503,9 @@ TEST(MotionGuardNode, EveryReasonChangeIsOnTheStatusTopicWhateverTheLogRate) {
       r.now += 0.02;
       r.publish_world();
       r.rpp(MotionSetpoint::MODE_TRACK_RATE, 0.3F, NaN, 0.1F, valid);
-      r.pump();
+      r.deliver();
       r.guard->step(r.now);
-      r.pump();
+      r.deliver();
     }
   }
   int to_invalid = 0, to_ok = 0;
@@ -517,7 +520,7 @@ TEST(MotionGuardNode, EveryReasonChangeIsOnTheStatusTopicWhateverTheLogRate) {
 }
 
 // XR-GPX-009: E-stop immediacy. Nothing but the service call happens: no tick, no world traffic,
-// no explicit step. The STOP must already be on the command topic one pump after the reply.
+// no explicit step. The STOP must already be on the command topic one deliver() after the reply.
 TEST(MotionGuardNode, EmergencyStopOutputsStopWithinOnePumpOfTheReply) {
   Rig r;
   r.run(0.3);
@@ -525,7 +528,7 @@ TEST(MotionGuardNode, EmergencyStopOutputsStopWithinOnePumpOfTheReply) {
   ASSERT_GT(r.last_out.speed_body_x, 0.0F);
   const size_t n_before = r.outs.size();
   ASSERT_TRUE(r.call_estop(true, "physical"));
-  r.pump();
+  r.deliver();
   ASSERT_GT(r.outs.size(), n_before) << "the service callback must publish at once";
   EXPECT_EQ(r.last_out.mode, MotionSetpoint::MODE_STOP);
   EXPECT_EQ(r.last_out.speed_body_x, 0.0F);
@@ -616,7 +619,7 @@ TEST(MotionGuardNode, EventDrivenForwardsEachCommandInItsCallback) {
     r.rpp(MotionSetpoint::MODE_TRACK_RATE, v, NaN, 0.1F);
     ASSERT_TRUE(r.pump_until([&] { return r.outs.size() == before + 1; })) << i;
     EXPECT_FLOAT_EQ(r.last_out.speed_body_x, v);
-    r.pump(10);
+    r.deliver();
     EXPECT_EQ(r.outs.size(), before + 1) << "one decision per command";
   }
 }
@@ -631,7 +634,7 @@ TEST(MotionGuardNode, EventDrivenWatchdogNeverDoubleDecidesACommand) {
   const auto watchdog = [&](double at) {
     r.now = at;
     r.guard->on_watchdog(at);
-    r.pump(10);
+    r.deliver();
     return r.outs.size();
   };
   EXPECT_EQ(watchdog(t0 + 0.001), n);
@@ -672,7 +675,7 @@ TEST(MotionGuardNode, TimerModeDecidesOnlyOnTheTimer) {
   r.run(0.2);
   const size_t before = r.outs.size();
   r.rpp(MotionSetpoint::MODE_TRACK_RATE, 0.3F, NaN, 0.1F);
-  r.pump(50);
+  r.deliver();
   EXPECT_EQ(r.outs.size(), before);
   r.guard->on_watchdog(r.now + 0.001);
   EXPECT_TRUE(r.pump_until([&] { return r.outs.size() == before + 1; }));

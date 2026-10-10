@@ -6,7 +6,9 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <string>
@@ -38,9 +40,12 @@ struct Sock {
     std::vector<std::string> out;
     std::string& buf = partial;
     const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-    while (out.size() < want && std::chrono::steady_clock::now() < end) {
+    for (auto now = std::chrono::steady_clock::now(); out.size() < want && now < end;
+         now = std::chrono::steady_clock::now()) {
       pollfd p{fd, POLLIN, 0};
-      if (poll(&p, 1, 50) > 0) {
+      // never past the caller's timeout (a fixed 50 ms poll made a 5 ms read take 50 ms)
+      const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(end - now).count();
+      if (poll(&p, 1, static_cast<int>(std::max<int64_t>(1, std::min<int64_t>(50, left)))) > 0) {
         char b[4096];
         const ssize_t n = read(fd, b, sizeof b);
         if (n <= 0) break;

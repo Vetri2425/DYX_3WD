@@ -11,6 +11,7 @@
 #include <fstream>
 #include <thread>
 
+#include "dds_test_support.hpp"
 #include "dyx3_gnss_rtk/rtcm_parser.hpp"
 
 using namespace dyx3_gnss_rtk;
@@ -36,9 +37,7 @@ struct Rig {
     config_dir = ::mkdtemp(pattern);
     ::setenv("DYX3_RTK_STATE_DIR", config_dir.c_str(), 1);
     ctx = std::make_shared<rclcpp::Context>();
-    rclcpp::InitOptions io;
-    io.set_domain_id(150 + (getpid() % 80));
-    ctx->init(0, nullptr, io);
+    dyx3_test::init_isolated(ctx);
     rclcpp::NodeOptions no;
     no.context(ctx);
     auto config = RtkConfigStore::initial_from_environment();
@@ -231,9 +230,7 @@ TEST(RtkNodeStartup, InvalidPersistedConfigStartsStoppedInsteadOfCrashing) {
   }
   ::setenv("DYX3_RTK_STATE_DIR", dir.c_str(), 1);
   auto ctx = std::make_shared<rclcpp::Context>();
-  rclcpp::InitOptions io;
-  io.set_domain_id(150 + (getpid() % 80));
-  ctx->init(0, nullptr, io);
+  dyx3_test::init_isolated(ctx);
   rclcpp::NodeOptions no;
   no.context(ctx);
   double now = 10.0;

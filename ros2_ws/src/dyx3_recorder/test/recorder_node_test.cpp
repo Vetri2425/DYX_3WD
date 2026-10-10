@@ -1,5 +1,8 @@
 // In-process tests of the recorder node: a fake world publishes MissionState and ULog chunks, the
 // bag command is a fake child, the clock is injected, DDS runs on a private domain.
+// DDS delivery is drained, never waited for (deliver(), dds_test_support.hpp). The remaining
+// wall-clock waits (pump) are for the fake bag child: a real process on real time that has to
+// start, write, die or finalise on SIGINT, which the recorder only sees through its own state.
 #include "dyx3_recorder/recorder_node.hpp"
 
 #include <gtest/gtest.h>
@@ -14,6 +17,7 @@
 #include <sstream>
 #include <thread>
 
+#include "dds_test_support.hpp"
 #include "ulog_synth.hpp"
 
 using namespace dyx3_recorder;
@@ -57,9 +61,7 @@ struct Rig {
                const std::string& bag_exe = "/bin/sh",
                const std::vector<rclcpp::Parameter>& extra = {}) {
     ctx = std::make_shared<rclcpp::Context>();
-    rclcpp::InitOptions io;
-    io.set_domain_id(120 + (getpid() % 100));
-    ctx->init(0, nullptr, io);
+    dyx3_test::init_isolated(ctx);
     root = (fs::temp_directory_path() / ("dyx3_recnode_" + std::to_string(getpid()) + "_" +
                                          std::to_string(reinterpret_cast<uintptr_t>(this))))
                .string();
@@ -110,6 +112,8 @@ struct Rig {
           world->count_subscribers("/dyx3/ulog_chunk") > 0 &&
           world->count_subscribers("/dyx3/px4_link/status") > 0 &&
           rec->count_subscribers("/dyx3/recorder/status") > 0) {
+        // every later deliver() relies on synchronous delivery: prove it
+        EXPECT_TRUE(dyx3_test::delivery_is_synchronous(ctx));
         return;
       }
     }
@@ -125,9 +129,23 @@ struct Rig {
     std::error_code ec;
     fs::remove_all(root, ec);
   }
+  // Real time for the fake bag child (see the file comment); DDS traffic needs only deliver().
   void pump(int ms = 60) {
     const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
     while (std::chrono::steady_clock::now() < end) exec->spin_some(2ms);
+  }
+  // Delivers everything published so far and runs every callback it causes, then returns.
+  void deliver() { dyx3_test::drain(*exec); }
+  template <typename Done>
+  bool pump_until(Done done, int timeout_ms = 10000) {
+    const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (std::chrono::steady_clock::now() < end) {
+      deliver();
+      if (done()) return true;
+      exec->spin_once(1ms);  // blocks only while nothing is ready
+    }
+    deliver();
+    return done();
   }
   void mission(uint8_t state, uint32_t id = 42, uint32_t run = 0) {
     MissionState m;
@@ -144,7 +162,7 @@ struct Rig {
     c.first_message_offset = first_message_offset;
     c.data = std::move(d);
     p_ulog->publish(c);
-    pump(30);
+    deliver();
   }
   std::string run_dir() const {
     for (const auto& e : fs::directory_iterator(root + "/runs")) return e.path().string();
@@ -197,7 +215,7 @@ TEST(RecorderNode, FullRunProducesAnEvidenceDirectoryWithProvenance) {
     r.chunk(st.chunks[ci].seq, st.chunks[ci].data, st.chunks[ci].first_message_offset);
   }
   r.rec->step(r.now += 1.0);
-  r.pump(100);
+  r.deliver();
   EXPECT_EQ(r.status.state, RecorderStatus::STATE_RECORDING);
   EXPECT_TRUE(r.status.bag_healthy);
   EXPECT_GT(r.status.bytes_written, 200U);
@@ -231,7 +249,7 @@ TEST(RecorderNode, FullRunProducesAnEvidenceDirectoryWithProvenance) {
   // provenance is honestly incomplete (no FCU parameter read path yet)
   EXPECT_NE(summary.find("\"provenance_complete\": false"), std::string::npos);
   r.rec->step(r.now += 1.0);
-  r.pump(100);
+  r.deliver();
   EXPECT_EQ(r.status.state, RecorderStatus::STATE_IDLE);
 }
 
@@ -243,7 +261,7 @@ TEST(RecorderNode, TimesyncAtStartAndEndIsRecordedAndAStaleSampleIsNotPassedOffA
     s.timesync_offset_us = off;
     s.timesync_round_trip_us = rtt;
     r.p_link->publish(s);
-    r.pump(150);
+    r.deliver();
   };
   send(true, -40000, 900);  // the #28519 symptom at the start of the run
   r.mission(MissionState::STATE_RUNNING);
@@ -316,7 +334,7 @@ TEST(RecorderNode, ABagThatDiesMidRunIsReportedAndRecorded) {
   r.rec->step(r.now += 1.0);  // first death: restarted once (max_bag_restarts 1)
   r.pump(600);
   r.rec->step(r.now += 1.0);  // second death: given up
-  r.pump(100);
+  r.deliver();
   EXPECT_EQ(r.status.state, RecorderStatus::STATE_ERROR);
   EXPECT_FALSE(r.status.bag_healthy);
   r.mission(MissionState::STATE_COMPLETED);
@@ -341,7 +359,7 @@ TEST(RecorderNode, ABagThatDiesOnceIsRestartedIntoANewDirectory) {
   r.rec->step(r.now += 1.0);
   r.pump(400);
   r.rec->step(r.now += 1.0);
-  r.pump(100);
+  r.deliver();
   EXPECT_EQ(r.status.state, RecorderStatus::STATE_RECORDING);
   EXPECT_TRUE(r.status.bag_healthy);
   r.mission(MissionState::STATE_COMPLETED);
@@ -356,7 +374,7 @@ TEST(RecorderNode, AnUnstartableBagIsAnErrorButTheRunDirectoryAndMissionAreUntou
   Rig r("", true, "/nonexistent/ros2");
   r.mission(MissionState::STATE_RUNNING);
   r.rec->step(r.now += 1.0);
-  r.pump(100);
+  r.deliver();
   EXPECT_EQ(r.status.state, RecorderStatus::STATE_ERROR);
   const std::string d = r.run_dir();
   EXPECT_TRUE(fs::exists(d + "/manifest.json"));  // the provenance that could be written, was
@@ -431,9 +449,7 @@ TEST(RecorderDefaults, ParamNodesCoverTheWholeLaunchGraph) {
 // reachable=false with a note, never an exception, and a missing node is unreachable too.
 TEST(ParamCollector, ANodeThatNeverSpinsIsUnreachableNotACrash) {
   auto ctx = std::make_shared<rclcpp::Context>();
-  rclcpp::InitOptions io;
-  io.set_domain_id(20 + (getpid() % 100));
-  ctx->init(0, nullptr, io);
+  dyx3_test::init_isolated(ctx);
   rclcpp::NodeOptions o;
   o.context(ctx);
   auto silent = std::make_shared<rclcpp::Node>("silent_node", o);  // created, never spun
@@ -454,9 +470,7 @@ TEST(ParamCollector, ANodeThatNeverSpinsIsUnreachableNotACrash) {
 
 TEST(RecorderNode, AThrowingCollectorNeverEscapesTheNode) {
   auto ctx = std::make_shared<rclcpp::Context>();
-  rclcpp::InitOptions io;
-  io.set_domain_id(20 + (getpid() % 100));
-  ctx->init(0, nullptr, io);
+  dyx3_test::init_isolated(ctx);
   const std::string root =
       (fs::temp_directory_path() / ("dyx3_recthrow_" + std::to_string(getpid()))).string();
   rclcpp::NodeOptions o;
@@ -554,7 +568,7 @@ TEST(RecorderNode, LowDiskNeverStartsTheBagAndStopsARunningOne) {
   EXPECT_FALSE(fs::exists(d1 + "/rosbag2"));
   EXPECT_FALSE(fs::exists(d1 + "/config_snapshot"));
   r.rec->step(r.now += 1.0);
-  r.pump(100);
+  r.deliver();
   EXPECT_EQ(r.status.state, RecorderStatus::STATE_ERROR);
   EXPECT_EQ(r.status.free_bytes, uint64_t{1} << 30);
   r.mission(MissionState::STATE_IDLE, 0);
@@ -572,11 +586,11 @@ TEST(RecorderNode, LowDiskNeverStartsTheBagAndStopsARunningOne) {
   r.mission(MissionState::STATE_RUNNING, 2);
   r.pump(300);
   r.rec->step(r.now += 1.0);
-  r.pump(100);
+  r.deliver();
   EXPECT_EQ(r.status.state, RecorderStatus::STATE_RECORDING);
   free_b = uint64_t{1} << 20;  // the disk fills up during the run
   r.rec->step(r.now += 1.0);
-  r.pump(100);
+  r.deliver();
   EXPECT_EQ(r.status.state, RecorderStatus::STATE_ERROR);
   EXPECT_FALSE(r.status.bag_healthy);
   const uint64_t stopped_at =
@@ -677,13 +691,13 @@ TEST(RecorderNode, ConditionedExecutionShaIsRecorded) {
       "/dyx3/rpp/status", rclcpp::QoS(1).reliable());
   const auto until = std::chrono::steady_clock::now() + 10s;
   while (p_rpp->get_subscription_count() == 0 && std::chrono::steady_clock::now() < until)
-    r.pump(10);
+    r.deliver();
   auto rpp = [&](uint32_t mission, const std::string& sha) {
     dyx3_interfaces::msg::RppStatus m;
     m.mission_id = mission;
     m.conditioned_execution_sha256 = sha;
     p_rpp->publish(m);
-    r.pump(80);
+    r.deliver();
   };
   const std::string a(64, 'c'), b(64, 'd');
   rpp(42, a);  // RPP has loaded the geometry for mission 42 (state LOADED)
@@ -736,7 +750,7 @@ TEST(RecorderNode, AFailedRunDirectoryIsRetriedWithBackoff) {
   r.mission(MissionState::STATE_READY, 5);
   EXPECT_FALSE(r.rec->recording());
   r.rec->step(r.now += 0.1);
-  r.pump(100);
+  r.deliver();
   EXPECT_EQ(r.status.state, RecorderStatus::STATE_ERROR);
   fs::remove(blocker);
   fs::create_directories(blocker);          // the operator fixed it
@@ -747,7 +761,7 @@ TEST(RecorderNode, AFailedRunDirectoryIsRetriedWithBackoff) {
   EXPECT_TRUE(r.rec->recording());
   EXPECT_TRUE(fs::exists(r.rec->current_run_dir() + "/manifest.json"));
   r.rec->step(r.now += 0.1);
-  r.pump(100);
+  r.deliver();
   EXPECT_EQ(r.status.state, RecorderStatus::STATE_RECORDING);
   r.mission(MissionState::STATE_IDLE, 0);
   std::error_code ec;

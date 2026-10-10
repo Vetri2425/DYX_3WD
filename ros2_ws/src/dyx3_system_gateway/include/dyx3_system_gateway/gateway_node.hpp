@@ -64,6 +64,8 @@ public:
   size_t prune_rclcpp_pending_requests();
   // Test hook: commands queued for the next step (at most kInboxCap, plus any E-stops).
   size_t inbox_depth() const;
+  // Test hook (read-only): the downstream services this node's clients cannot reach right now.
+  std::vector<std::string> unavailable_services() const;
 
 private:
   struct Inbound {

@@ -13,6 +13,7 @@
 #include <fstream>
 #include <thread>
 
+#include "dds_test_support.hpp"
 #include "dyx3_mission/path_artifact.hpp"
 #include "dyx3_mission/sha256.hpp"
 #include "dyx3_spray/safety_watchdog_node.hpp"
@@ -94,9 +95,7 @@ struct Rig {
   explicit Rig(bool with_artifact = true, const std::vector<rclcpp::Parameter>& spray_params = {},
                bool wrong_conditioned_source = false) {
     ctx = std::make_shared<rclcpp::Context>();
-    rclcpp::InitOptions io;
-    io.set_domain_id(120 + (getpid() % 100));
-    ctx->init(0, nullptr, io);
+    dyx3_test::init_isolated(ctx);
     dir = (std::filesystem::temp_directory_path() /
            ("dyx3_spray_test_" + std::to_string(getpid()) + "_" +
             std::to_string(reinterpret_cast<uintptr_t>(this))))
@@ -170,6 +169,8 @@ struct Rig {
           world->count_subscribers("/dyx3/spray/actuator_ack") >= 2 &&
           wd->count_subscribers("/dyx3/spray/watchdog_status") > 0 &&
           world->count_subscribers("/dyx3/spray/lease") >= 1 && cli_manual->service_is_ready()) {
+        // every later deliver() relies on synchronous delivery: prove it
+        EXPECT_TRUE(dyx3_test::delivery_is_synchronous(ctx));
         return;
       }
     }
@@ -186,10 +187,9 @@ struct Rig {
     std::filesystem::remove_all(dir, ec);
   }
 
-  void pump(int ms = 10) {
-    const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
-    while (std::chrono::steady_clock::now() < end) exec->spin_some(2ms);
-  }
+  // Delivers everything published so far and runs every callback it causes (and the ones those
+  // cause), then returns: nothing is left in flight, so a negative check after it is exact.
+  void deliver() { dyx3_test::drain(*exec); }
 
   void publish_world() {
     dyx3_interfaces::msg::VehicleState v;
@@ -232,10 +232,10 @@ struct Rig {
   void cycle(bool spray_alive = true) {
     now += 0.02;
     publish_world();
-    pump(6);
+    deliver();
     if (spray_alive) spray->step(now);
     wd->step(now);
-    pump(6);
+    deliver();
   }
 
   // Startup: the watchdog's very first OFF can be lost to DDS discovery and is retried after
@@ -257,9 +257,7 @@ struct Rig {
 
 TEST(SprayNode, RejectsAnInvalidParameterAtStartup) {
   auto ctx = std::make_shared<rclcpp::Context>();
-  rclcpp::InitOptions io;
-  io.set_domain_id(120 + (getpid() % 100));
-  ctx->init(0, nullptr, io);
+  dyx3_test::init_isolated(ctx);
   rclcpp::NodeOptions o;
   o.context(ctx);
   o.append_parameter_override("max_xtrack_error_m", -1.0);
@@ -353,18 +351,18 @@ TEST(SprayNode, NoWatchdogHeartbeatNoSpray) {
   for (r.north = 0.0; r.north < 1.9; r.north += 0.007) {
     r.now += 0.02;
     r.publish_world();
-    r.pump(6);
+    r.deliver();
     r.spray->step(r.now);
-    r.pump(6);
+    r.deliver();
     if (r.now > 205.0) break;
   }
   for (int i = 0; i < 300; ++i) {  // 6 s without the watchdog stepping
     r.now += 0.02;
     r.north = 3.0;
     r.publish_world();
-    r.pump(6);
+    r.deliver();
     r.spray->step(r.now);
-    r.pump(6);
+    r.deliver();
   }
   EXPECT_FALSE(r.status.spraying);
   EXPECT_FALSE(r.status.safety_ok);
@@ -537,9 +535,19 @@ TEST(SprayNode, RuntimeParameterChangesObeyTheirClass) {
   Rig r;
   auto cli = std::make_shared<rclcpp::AsyncParametersClient>(r.world, "spray");
   ASSERT_TRUE(cli->wait_for_service(5s));
+  // Waits for the reply as a condition: deliver() returns at once when nothing is ready, so a count
+  // of drains is no wait at all. The wall-clock bound only limits a reply that never comes.
   const auto set = [&](const rclcpp::Parameter& p) {
     auto fut = cli->set_parameters({p});
-    for (int i = 0; i < 500 && fut.wait_for(0ms) != std::future_status::ready; ++i) r.pump(5);
+    const auto end = std::chrono::steady_clock::now() + 10s;
+    while (fut.wait_for(0ms) != std::future_status::ready &&
+           std::chrono::steady_clock::now() < end) {
+      r.deliver();
+      r.exec->spin_once(1ms);  // blocks only while nothing is ready
+    }
+    EXPECT_EQ(fut.wait_for(0ms), std::future_status::ready) << "no reply to " << p.get_name();
+    if (fut.wait_for(0ms) != std::future_status::ready)
+      return rcl_interfaces::msg::SetParametersResult{};
     return fut.get()[0];
   };
   EXPECT_TRUE(set(rclcpp::Parameter("max_xtrack_error_m", 0.04))
@@ -566,7 +574,7 @@ TEST(WatchdogNode, ShutdownSendsOff) {
   r.run(1.6, false);
   r.cmds.clear();
   r.wd->shutdown_off();
-  r.pump(30);
+  r.deliver();
   ASSERT_FALSE(r.cmds.empty());
   EXPECT_FALSE(r.cmds.back().on);
   EXPECT_EQ(r.cmds.back().source, SprayActuatorCommand::SOURCE_WATCHDOG);
