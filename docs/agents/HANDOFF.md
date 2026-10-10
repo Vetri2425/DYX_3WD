@@ -2548,3 +2548,38 @@ handshake OK, timesync 0.55 ms round trip; battery 26.46 V (86 %). Two notes:
   - full FCU dump in `config/px4/2026-10-10.params` (915 params, reference only: it holds calibration);
   - `open_items.md`: PC-2c done, X-011 decided, X-012 addressed (proof pending).
 - **Next:** RC kill switch test (wheels up, armed): kill stops the outputs at once.
+
+## 2026-10-10 (11:30) — Claude — Step 0 (upgrade) passed, Step 1 (PX4 ↔ Jetson link) conditional pass
+
+**Step 0:** rover 01 upgraded to `347036d` (CI `rover-347036d…`). The old installer ran detached and the switch took
+about 30 s. The download took about 7 min: the site router uplink is about 100 KiB/s and the release is 45 MB.
+After the upgrade: `health: OK`, `event_driven=True` in px4_link/rpp/motion_guard, `spray_unmatched_ack_count` 0
+(XR-GPX-005 confirmed).
+
+**Step 1 results** (evidence: `bench_tools/logs_2026-10-10/link_soak_20261010_1045.csv`, `recovery.json`):
+
+| Gate | Result |
+|---|---|
+| 30-min idle soak | 1800/1800 s session alive, handshake OK, fault 0, stale 0, 0 resets, 0 gap events; overruns 1 (start-up, no growth) |
+| Pose and vehicle_state | pose 50 Hz, worst gap 24.4 ms; `/dyx3/vehicle_state` 50 Hz, worst gap 28.8 ms |
+| Timesync round trip | p50 0.63 ms, p99 1.0 ms, max 1.9 ms |
+| Topic rates | attitude 100 Hz, `vehicle_status` 2.5 Hz, GPS 5 Hz, `estimator_status_flags` and `timesync_status` 1 Hz. `worst_topic_age` about 1 s is these 1 Hz topics against their 3 s limit, so it is expected |
+
+**Recovery test** (`pkill -x MicroXRCEAgent` at 11:18:16, disarmed):
+
+| After the kill | Event |
+|---|---|
+| +0.2 s | TOPIC_STALE → fail to zero |
+| +2.8 s | session lost |
+| +10.7 s | pose back |
+| +15.8 s | handshake OK, fault 0 |
+
+`dyx3-ros` was not restarted.
+
+**Verdict:** safety PASS. Recovery **15.8 s against the 5 s target → open finding STEP1-R1:**
+- the platform restart delay is about 2 s (fix: 0.5 s);
+- PX4's XRCE client reconnect is about 8 s (firmware);
+- the px4_link format handshake is about 5 s (fix: faster).
+
+Not blocking: availability only, and the rover disarms 0.5 s after offboard loss.
+**New finding:** `dyx3-health` DDS WARN is false (wrong DDS environment); a fix is in progress.
