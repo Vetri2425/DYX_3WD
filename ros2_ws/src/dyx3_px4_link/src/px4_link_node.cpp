@@ -118,6 +118,8 @@ Px4LinkNode::Px4LinkNode(const rclcpp::NodeOptions& options, ClockFn clock, bool
       [this](px4_msgs::msg::VehicleLocalPosition::ConstSharedPtr m) {
         lp_.xy_valid = m->xy_valid;
         lp_.v_xy_valid = m->v_xy_valid;
+        lp_.z_valid = m->z_valid;
+        lp_.v_z_valid = m->v_z_valid;
         lp_.x = m->x;
         lp_.y = m->y;
         lp_.z = m->z;
@@ -913,6 +915,8 @@ void Px4LinkNode::publish_state_and_health(double now_s) {
     s.nav_state = o.nav_state;
     s.failsafe = o.failsafe;
     s.preflight_checks_pass = o.preflight_checks_pass;
+    s.vertical_position_valid = o.vertical_position_valid;
+    s.vertical_velocity_valid = o.vertical_velocity_valid;
     pub_state_->publish(s);
   }
   if (now_s - last_health_pub_s_ >= 0.1 - 1e-9) {

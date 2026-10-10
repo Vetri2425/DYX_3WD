@@ -1,5 +1,12 @@
 # Interface changelog
 
+## 0.14.0 — 2026-10-10 (latency hardening)
+
+- `VehicleState`: appended `vertical_position_valid` and `vertical_velocity_valid`, filled by `dyx3_px4_link` from PX4
+  `vehicle_local_position.z_valid` / `v_z_valid` (false while the sample is stale or the value is non-finite) (IF-004).
+- Migration: appended fields only; every consumer is rebuilt against 0.14.0 in the same release. Bags recorded with
+  0.13.x carry the old `VehicleState` definition.
+
 ## 0.13.1 — 2026-10-10 (comment only, IF-007)
 
 - `SetEmergencyStop`: the request and response are documented. Accepted `source` values are exactly `tablet`, `backend`, `ble`, `physical`

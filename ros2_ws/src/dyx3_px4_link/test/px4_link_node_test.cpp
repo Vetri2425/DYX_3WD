@@ -296,6 +296,7 @@ struct Rig {
     if (alive && lp_alive) {
       px4_msgs::msg::VehicleLocalPosition lp;
       lp.xy_valid = lp.v_xy_valid = lp.heading_good_for_control = true;
+      lp.z_valid = true;  // v_z_valid stays false: the two vertical flags are mapped separately
       lp.x = 3.0F;
       lp.y = 4.0F;
       lp.heading = 0.5F;
@@ -1761,4 +1762,6 @@ TEST(Px4LinkNode, VehicleStateFanOut) {
   EXPECT_FLOAT_EQ(r.state.north_m, 3.0F);
   EXPECT_FLOAT_EQ(r.state.east_m, 4.0F);
   EXPECT_FLOAT_EQ(r.state.heading_rad, 0.5F);
+  EXPECT_TRUE(r.state.vertical_position_valid);   // IF-004: z_valid
+  EXPECT_FALSE(r.state.vertical_velocity_valid);  // v_z_valid false
 }

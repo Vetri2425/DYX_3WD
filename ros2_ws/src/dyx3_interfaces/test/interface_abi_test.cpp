@@ -125,6 +125,8 @@ TEST(VehicleStateAbi, SafeDefault) {
   EXPECT_EQ(message.nav_state, 0U);
   EXPECT_FALSE(message.failsafe);
   EXPECT_FALSE(message.preflight_checks_pass);
+  EXPECT_FALSE(message.vertical_position_valid);  // IF-004
+  EXPECT_FALSE(message.vertical_velocity_valid);
 }
 
 TEST(EstimatorHealthAbi, DefaultIsUnhealthyByConstruction) {
@@ -509,7 +511,7 @@ TEST(SchemaFingerprint, EveryInterfaceFieldListIsPinned) {
       {"msg/SprayStatus.msg", "51b3e4008c5a254b"},
       {"msg/SprayWatchdogStatus.msg", "bb125bd8577303dd"},
       {"msg/UlogChunk.msg", "96184389cd7fe3f0"},
-      {"msg/VehicleState.msg", "259d2e4c02ecbf6c"},
+      {"msg/VehicleState.msg", "c1e82ab59ec538a6"},
       {"srv/AbortMission.srv", "5ae70e76041f429f"},
       {"srv/ArmDisarm.srv", "bf791453c6047365"},
       {"srv/PauseMission.srv", "a0b1b334b33646ea"},

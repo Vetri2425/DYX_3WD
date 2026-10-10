@@ -2,7 +2,7 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>dyx3_interfaces</name>
-  <version>0.13.1</version>
+  <version>0.14.0</version>
   <description>Shared msg/srv/action definitions. No logic. MotionSetpoint is the single canonical command; nothing downstream of RPP invents motion and nothing upstream bypasses it.</description>
   <maintainer email="vetri96anitha@gmail.com">Vetri</maintainer>
   <license>Proprietary</license>

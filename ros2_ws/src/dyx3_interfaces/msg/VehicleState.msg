@@ -33,3 +33,10 @@ uint8 arming_state
 uint8 nav_state
 bool failsafe
 bool preflight_checks_pass
+
+# --- appended in interfaces 0.14.0 (IF-004) ---
+# PX4 vehicle_local_position z_valid / v_z_valid for down_m / velocity_down_mps: true only while
+# the local-position sample is fresh, the PX4 flag is set and the value is finite. Ground marking
+# does not consume the vertical estimate; these flags exist so no consumer ever has to assume it.
+bool vertical_position_valid
+bool vertical_velocity_valid

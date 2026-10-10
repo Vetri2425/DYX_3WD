@@ -10,6 +10,8 @@ namespace dyx3_px4_link {
 struct LocalPositionSample {
   bool xy_valid{false};
   bool v_xy_valid{false};
+  bool z_valid{false};
+  bool v_z_valid{false};
   float x{0}, y{0}, z{0};
   float vx{0}, vy{0}, vz{0};
   float heading{0};
@@ -43,6 +45,8 @@ struct VehicleStateOut {
   bool position_valid{false};
   bool velocity_valid{false};
   bool attitude_valid{false};
+  bool vertical_position_valid{false};
+  bool vertical_velocity_valid{false};
   float north{0}, east{0}, down{0};
   float vn{0}, ve{0}, vd{0};
   std::array<float, 4> q{0, 0, 0, 0};

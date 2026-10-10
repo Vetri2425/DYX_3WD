@@ -202,6 +202,8 @@ their source is stale.
 `VehicleState` is assembled at 50 Hz from the newest sample of each source. Mapping (NED, rad):
 `x,y,z` to `north/east/down`; `vx,vy,vz` to `velocity_*`; `q` (FRD to NED) copied as is;
 `heading` to `heading_rad`. Validity: `position_valid = xy_valid`, `velocity_valid = v_xy_valid`,
+`vertical_position_valid = z_valid`, `vertical_velocity_valid = v_z_valid` (IF-004, 0.14.0; each also needs a
+finite value),
 `attitude_valid = heading_good_for_control` and an attitude sample is fresh. Dead reckoning and
 estimator faults are *not* folded into these flags; the guard owns those gates through
 `EstimatorHealth`. A stale source clears its validity flags in the same tick. `xy_reset_counter`
