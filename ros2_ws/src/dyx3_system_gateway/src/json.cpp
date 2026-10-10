@@ -142,10 +142,10 @@ struct P {
           *out += '\t';
           break;
         case 'u': {
-          uint32_t cp;
+          uint32_t cp = 0;  // hex4() sets it on every true return; 0 silences GCC 11
           if (!hex4(&cp)) return false;
           if (cp >= 0xD800 && cp <= 0xDBFF) {
-            uint32_t lo;
+            uint32_t lo = 0;
             if (i + 1 >= t.size() || t[i] != '\\' || t[i + 1] != 'u')
               return fail("lone high surrogate");
             i += 2;
