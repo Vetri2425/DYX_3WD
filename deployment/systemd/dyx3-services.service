@@ -1,0 +1,39 @@
+[Unit]
+Description=DYX 3WD — graph services: mission, spray, system_gateway
+# Wants=, never Requires=/BindsTo=/PartOf=: dyx3-control must keep running when this unit dies or restarts, so a crash in
+# non-safety code becomes a STOP (motion_guard: mission state stale -> REASON_MISSION_GATE) instead of a disarm
+# (proposal 2026-10-10_control-services-unit-split.md).
+After=dyx3-control.service
+Wants=dyx3-control.service
+
+[Service]
+Type=exec
+User=dyx3
+Group=dyx3
+EnvironmentFile=-/etc/dyx3/ros.env
+ExecStart=/opt/dyx3/current/bin/dyx3-services
+Restart=always
+RestartSec=5
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/dyx3 /var/log/dyx3 /run/dyx3
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+
+LimitNOFILE=65536
+# No LimitRTPRIO / LimitMEMLOCK: mission, spray and the gateway run under normal scheduling and do not mlockall.
+# DERIVED — NOT FROM V1 SPEC: ros2 launch escalates SIGINT -> SIGTERM -> SIGKILL after 5 s + 5 s
+# (its defaults), so a healthy graph is down in well under 15 s. A hang now costs 15 s, not the
+# 90 s systemd default that every dyx3-platform restart paid on 2026-10-09.
+TimeoutStopSec=15
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=dyx3-services
+
+[Install]
+WantedBy=multi-user.target

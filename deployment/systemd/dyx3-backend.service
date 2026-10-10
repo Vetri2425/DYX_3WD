@@ -1,7 +1,8 @@
 [Unit]
 Description=DYX 3WD — REST + Socket.IO + path engine
-After=dyx3-ros.service
-Wants=dyx3-ros.service
+# The backend talks to dyx3_system_gateway's socket, which dyx3-services runs.
+After=dyx3-services.service
+Wants=dyx3-services.service
 
 [Service]
 Type=exec

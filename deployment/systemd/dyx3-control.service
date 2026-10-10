@@ -1,14 +1,16 @@
 [Unit]
-Description=DYX 3WD — the production control graph
+Description=DYX 3WD — the control chain: px4_link, motion_guard, rpp
 After=dyx3-platform.service
 Requires=dyx3-platform.service
+# The non-safety nodes (mission, spray, system_gateway) run in dyx3-services.service, which wants this unit, never the other way
+# round: a services crash or restart never stops or restarts this unit (proposal 2026-10-10_control-services-unit-split.md).
 
 [Service]
 Type=exec
 User=dyx3
 Group=dyx3
 EnvironmentFile=-/etc/dyx3/ros.env
-ExecStart=/opt/dyx3/current/bin/dyx3-ros
+ExecStart=/opt/dyx3/current/bin/dyx3-control
 Restart=always
 RestartSec=5
 
@@ -22,12 +24,11 @@ ProtectKernelModules=yes
 ProtectControlGroups=yes
 
 LimitNOFILE=65536
-# The launcher and non-control nodes must be scheduled normally. The launch file gives only
-# the RPP and motion-guard control executors (FIFO 80) and the px4_link writer (FIFO 70) real-time
-# priority, all pinned to CPU 4, through a `taskset -c 4 chrt -f <prio>` prefix that runs as
-# User=dyx3 without CAP_SYS_NICE. The kernel allows that only up to RLIMIT_RTPRIO, so
-# LimitRTPRIO must stay >= 80. If it is lowered, chrt fails, the node exits and the whole graph
-# restarts: loud, never silently non-RT.
+# The launcher must be scheduled normally. The launch file gives only the RPP and motion-guard
+# control executors (FIFO 80) and the px4_link writer (FIFO 70) real-time priority, all pinned to
+# CPU 4, through a `taskset -c 4 chrt -f <prio>` prefix that runs as User=dyx3 without
+# CAP_SYS_NICE. The kernel allows that only up to RLIMIT_RTPRIO, so LimitRTPRIO must stay >= 80.
+# If it is lowered, chrt fails, the node exits and this unit restarts: loud, never silently non-RT.
 LimitRTPRIO=99
 # rpp, motion_guard and px4_link call mlockall(MCL_CURRENT|MCL_FUTURE) (CLAUDE.md section 7).
 # Under the default RLIMIT_MEMLOCK it fails ("mlockall failed (continuing unlocked)").
@@ -39,7 +40,7 @@ TimeoutStopSec=15
 
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=dyx3-ros
+SyslogIdentifier=dyx3-control
 
 [Install]
 WantedBy=multi-user.target

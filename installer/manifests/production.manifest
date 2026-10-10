@@ -21,7 +21,8 @@ dyx3_bringup
 
 [services]
 dyx3-platform
-dyx3-ros
+dyx3-control
+dyx3-services
 dyx3-rtk
 dyx3-backend
 dyx3-recorder
@@ -35,10 +36,15 @@ dyx3-usb-serial-check
 # `dyx3-upgrade` revert. All six verified running on the 3WD rover 2026-10-08 (release 42c065b + the 4bb213a launcher fix):
 # platform (agent session, 68 /fmu topics), ros (graph + gateway socket), rtk (NTRIP login, reconnect), spray-watchdog,
 # recorder (22 topics), backend (/api/ping 200; bench binds 0.0.0.0 via /etc/dyx3/backend.env until the hotspot exists).
+# 2026-10-10: dyx3-ros was split into dyx3-control (px4_link, motion_guard, rpp) and dyx3-services (mission, spray,
+# system_gateway), the same six nodes (proposal 2026-10-10_control-services-unit-split.md). The split is NOT yet run on
+# the rover. Order is the restart order: control before services (services wants control), recorder after control,
+# backend last (after services, whose gateway it talks to). An upgrade removes the stale dyx3-ros unit (install_units).
 [enabled_services]
 dyx3-usb-serial-check
 dyx3-platform
-dyx3-ros
+dyx3-control
+dyx3-services
 dyx3-rtk
 dyx3-spray-watchdog
 dyx3-recorder
