@@ -1,5 +1,15 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <cstdint>
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <map>
+#include <sstream>
+#include <string>
+#include <vector>
+
 #include "builtin_interfaces/msg/time.hpp"
 #include "dyx3_interfaces/action/execute_mission.hpp"
 #include "dyx3_interfaces/msg/emergency_stop_state.hpp"
@@ -256,6 +266,11 @@ TEST(StatusMessageAbi, ConstantsAndSafeDefaults) {
   EXPECT_FALSE(rpp.spray_request);  // the safe default: no request to open the valve
   EXPECT_EQ(rpp.handoff, 0U);
   EXPECT_EQ(rpp.rtk_reason, 0U);
+  // IF-006: the appended conditioned-geometry id and the C2 heading/progress evidence. Empty and
+  // not-valid are the safe defaults: dyx3_spray must never see evidence nobody published.
+  EXPECT_TRUE(rpp.conditioned_execution_sha256.empty());
+  EXPECT_FALSE(rpp.heading_evidence_valid);
+  EXPECT_FLOAT_EQ(rpp.path_travel_m, 0.0F);
 
   using Mission = dyx3_interfaces::msg::MissionState;
   EXPECT_EQ(Mission::STATE_IDLE, 0U);
@@ -396,6 +411,133 @@ TEST(ServiceAndActionAbi, ConstantsAndSafeDefaults) {
   EXPECT_EQ(Action::Feedback{}.point_index, 0U);
   EXPECT_FLOAT_EQ(Action::Feedback{}.progress_fraction, 0.0F);
   EXPECT_EQ(Action::Feedback{}.mission_state, 0U);
+}
+
+// ------------------------------------------------------------------------------------------------
+// IF-006 schema fingerprint. Every .msg/.srv/.action file is reduced to its field list (comments,
+// blank lines and spacing removed; types, names, constants, defaults and the --- separators kept)
+// and hashed. Any interface change fails this test until the table below is updated in the same
+// commit as the version bump and the changelog entry: an accidental field change cannot slip
+// through as "only a comment edit", and a comment edit does not trip it.
+// FNV-1a 64 is a change detector here, not a security property.
+// ------------------------------------------------------------------------------------------------
+std::string field_list(const std::string& text) {
+  std::istringstream in(text);
+  std::string line, out;
+  while (std::getline(in, line)) {
+    const auto hash = line.find('#');  // no quoted '#' exists in a field line of this package
+    if (hash != std::string::npos) line.erase(hash);
+    std::string norm;
+    bool space = false;
+    for (const char c : line) {
+      if (c == ' ' || c == '\t' || c == '\r') {
+        space = !norm.empty();
+        continue;
+      }
+      if (space) norm += ' ';
+      space = false;
+      norm += c;
+    }
+    if (!norm.empty()) out += norm + "\n";
+  }
+  return out;
+}
+
+std::string fnv1a64_hex(const std::string& bytes) {
+  uint64_t h = 1469598103934665603ULL;
+  for (const unsigned char c : bytes) {
+    h ^= c;
+    h *= 1099511628211ULL;
+  }
+  char buf[17];
+  std::snprintf(buf, sizeof(buf), "%016llx", static_cast<unsigned long long>(h));
+  return buf;
+}
+
+std::map<std::string, std::string> schema_fingerprints() {
+  namespace fs = std::filesystem;
+  std::map<std::string, std::string> out;
+  const fs::path root(DYX3_INTERFACES_SOURCE_DIR);
+  for (const char* dir : {"msg", "srv", "action"}) {
+    for (const auto& e : fs::directory_iterator(root / dir)) {
+      const auto ext = e.path().extension().string();
+      if (ext != ".msg" && ext != ".srv" && ext != ".action") continue;
+      std::ifstream f(e.path(), std::ios::binary);
+      std::ostringstream ss;
+      ss << f.rdbuf();
+      const std::string rel = std::string(dir) + "/" + e.path().filename().string();
+      out[rel] = fnv1a64_hex(rel + "\n" + field_list(ss.str()));
+    }
+  }
+  return out;
+}
+
+TEST(SchemaFingerprint, CommentsAndSpacingDoNotCountFieldsDo) {
+  const std::string a =
+      "# header\nuint8 MODE_STOP=0   # inline\n\n  float32  speed_body_x\n---\nbool ok\n";
+  const std::string b = "uint8 MODE_STOP=0\nfloat32 speed_body_x\n---\nbool ok\n";
+  EXPECT_EQ(field_list(a), field_list(b));
+  EXPECT_NE(field_list(b), field_list("uint8 MODE_STOP=1\nfloat32 speed_body_x\n---\nbool ok\n"));
+  EXPECT_NE(field_list(b), field_list("uint8 MODE_STOP=0\nfloat64 speed_body_x\n---\nbool ok\n"));
+  EXPECT_NE(field_list(b), field_list("uint8 MODE_STOP=0\nfloat32 speed_body_x\nbool ok\n"));
+}
+
+// Update deliberately: a changed line here belongs in the same commit as the dyx3_interfaces
+// version bump and docs/interfaces/CHANGELOG.md. The failure message prints the new table.
+TEST(SchemaFingerprint, EveryInterfaceFieldListIsPinned) {
+  const std::map<std::string, std::string> pinned = {
+      {"action/ExecuteMission.action", "a2d66deb663f1d34"},
+      {"msg/EmergencyStopState.msg", "b5e0f69a013e8e8e"},
+      {"msg/EstimatorHealth.msg", "b96bdedebc39b889"},
+      {"msg/GnssReport.msg", "c1afc4b310e7c891"},
+      {"msg/MissionState.msg", "4dda7d620e8829b8"},
+      {"msg/MotionSetpoint.msg", "6193360bc62e1794"},
+      {"msg/MotionSetpointStatus.msg", "c08907d8044e1b62"},
+      {"msg/NtripStatus.msg", "612c65d90fa6068d"},
+      {"msg/OperatorLinkStatus.msg", "0971532d2a94a362"},
+      {"msg/PointResult.msg", "73d0b6b411d8b49f"},
+      {"msg/Px4LinkStatus.msg", "04c58bc9e1475cc8"},
+      {"msg/RecorderStatus.msg", "cebd63e8913b96f9"},
+      {"msg/RppStatus.msg", "fd1b086330d84a18"},
+      {"msg/RtcmData.msg", "927edee98f0c6448"},
+      {"msg/RtkStatus.msg", "d55613fae9d35eeb"},
+      {"msg/SafetyGateStatus.msg", "7dfe7d4551028cbc"},
+      {"msg/SprayActuatorAck.msg", "437fbd52d259e90d"},
+      {"msg/SprayActuatorCommand.msg", "17cbe13406daed08"},
+      {"msg/SprayLease.msg", "cc8d456067c06ec9"},
+      {"msg/SprayState.msg", "9e076590a791e97c"},
+      {"msg/SprayStatus.msg", "51b3e4008c5a254b"},
+      {"msg/SprayWatchdogStatus.msg", "bb125bd8577303dd"},
+      {"msg/UlogChunk.msg", "96184389cd7fe3f0"},
+      {"msg/VehicleState.msg", "259d2e4c02ecbf6c"},
+      {"srv/AbortMission.srv", "5ae70e76041f429f"},
+      {"srv/ArmDisarm.srv", "bf791453c6047365"},
+      {"srv/PauseMission.srv", "a0b1b334b33646ea"},
+      {"srv/ResumeMission.srv", "22c166eb7d92c4e8"},
+      {"srv/SetEmergencyStop.srv", "4c97b5e36a74d576"},
+      {"srv/SetOffboard.srv", "237aec38d47b5f04"},
+      {"srv/SetSprayManual.srv", "1f1423b17de3418e"},
+      {"srv/SkipPoint.srv", "d0560b8b49814bcf"},
+      {"srv/StartMission.srv", "6ef8a631f4609631"},
+  };
+  const auto actual = schema_fingerprints();
+  std::string table;
+  for (const auto& [file, h] : actual) {
+    table += "      {\"" + file + "\", \"" + h + "\"},\n";
+    const auto it = pinned.find(file);
+    if (it == pinned.end()) {
+      ADD_FAILURE() << file << ": new interface file, not pinned";
+    } else {
+      EXPECT_EQ(h, it->second) << file << ": field list changed";
+    }
+  }
+  for (const auto& [file, h] : pinned)
+    EXPECT_TRUE(actual.count(file) == 1) << file << ": pinned but no longer present";
+  if (::testing::Test::HasFailure()) {
+    ADD_FAILURE() << "if deliberate: bump the dyx3_interfaces version, add the changelog entry and "
+                     "pin this table:\n"
+                  << table;
+  }
 }
 
 }  // namespace
