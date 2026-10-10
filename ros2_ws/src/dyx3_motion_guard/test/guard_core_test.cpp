@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <limits>
+#include <string>
 
 #include "dyx3_motion_guard/estop_gate.hpp"
 #include "dyx3_motion_guard/fail_to_zero.hpp"
@@ -404,6 +405,44 @@ TEST(Decision, NeverHeardGatesFail) {
   EXPECT_NE(first_failing_safety_gate(GateInputs{}, GateConfig{}), Reason::Ok);
   EXPECT_FALSE(mission_running(MissionIn{}));
 }
+// ---- pre-arm gate (SafetyGateStatus.pre_arm_ok, mission contract v2)
+GateInputs pre_arm_gates() {
+  GateInputs g = good_gates();
+  g.vehicle.arming_state = 1;  // disarmed, not in OFFBOARD: what the rover looks like before ARMING
+  g.vehicle.nav_state = 4;
+  g.vehicle.global_reference_valid = true;
+  g.mission.state = 0;
+  return g;
+}
+TEST(PreArmGate, OkWhenDisarmedAndNotOffboardButFullGateIsNot) {
+  const GateInputs g = pre_arm_gates();
+  EXPECT_EQ(first_failing_pre_arm_gate(g, GateConfig{}), Reason::Ok);
+  EXPECT_EQ(first_failing_safety_gate(g, GateConfig{}), Reason::ArmingGate);
+}
+TEST(PreArmGate, EveryNonArmingGateFailsItWithTheSameReason) {
+  for (const auto& gc : kGateCases) {
+    const std::string name = gc.name;
+    if (name == "disarmed" || name == "not offboard" || name.rfind("mission", 0) == 0) continue;
+    GateInputs g = pre_arm_gates();
+    gc.break_it(g);
+    EXPECT_EQ(first_failing_pre_arm_gate(g, GateConfig{}), gc.expect) << gc.name;
+  }
+}
+TEST(PreArmGate, GlobalReferenceIsRequiredAndCheckedLast) {
+  GateInputs g = pre_arm_gates();
+  g.vehicle.global_reference_valid = false;
+  EXPECT_EQ(first_failing_pre_arm_gate(g, GateConfig{}), Reason::GlobalReferenceInvalid);
+  g.est.reject_hor_pos = true;  // an earlier gate wins
+  EXPECT_EQ(first_failing_pre_arm_gate(g, GateConfig{}), Reason::EstimatorUnhealthy);
+  // The full gate does not use the global reference: fail-to-zero is unchanged.
+  GateInputs full = good_gates();
+  full.vehicle.global_reference_valid = false;
+  EXPECT_EQ(first_failing_safety_gate(full, GateConfig{}), Reason::Ok);
+}
+TEST(PreArmGate, NeverHeardFails) {
+  EXPECT_NE(first_failing_pre_arm_gate(GateInputs{}, GateConfig{}), Reason::Ok);
+}
+
 TEST(Decision, CleanStopPassesWhateverTheGatesSay) {
   GuardCore g(3, cfg());
   for (uint64_t i = 1; i <= 3; ++i)

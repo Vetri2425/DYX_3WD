@@ -56,6 +56,7 @@ struct Rig {
   builtin_interfaces::msg::Time rpp_stamp{}, veh_stamp{};  // IF-003 pose sample stamps
   bool event{false};                                       // the node's mode (event_driven)
   bool veh_ok{true}, rtk_ok{true}, op_ok{true}, link_ok{true}, est_ok{true}, mission_running{true};
+  bool veh_armed_offboard{true}, veh_global_ref{true};  // pre-arm gate inputs (0.15.0)
 
   explicit Rig(const std::vector<rclcpp::Parameter>& params = {}) {
     ctx = std::make_shared<rclcpp::Context>();
@@ -165,8 +166,9 @@ struct Rig {
     }
     if (veh_ok) {
       dyx3_interfaces::msg::VehicleState v;
-      v.arming_state = 2;
-      v.nav_state = 14;
+      v.arming_state = veh_armed_offboard ? 2 : 1;
+      v.nav_state = veh_armed_offboard ? 14 : 4;
+      v.global_reference_valid = veh_global_ref;
       v.position_valid = v.velocity_valid = v.attitude_valid = true;
       v.px4_sample_stamp = veh_stamp;
       p_veh->publish(v);
@@ -603,6 +605,42 @@ TEST(MotionGuardNode, GateStatusIsPublishedWithoutAnyMotionCommand) {
   r.run(0.8, false);
   EXPECT_FALSE(r.last_gate.ok);
   EXPECT_EQ(r.last_gate.reason_code, dyx3_interfaces::msg::MotionSetpointStatus::REASON_RTK_GATE);
+}
+
+// Mission contract v2: the pre-arm verdict is published next to the full gate, from the same
+// inputs.
+TEST(MotionGuardNode, PreArmGateIsPublishedAndIgnoresArmedAndOffboard) {
+  using S = dyx3_interfaces::msg::MotionSetpointStatus;
+  Rig r;
+  r.veh_armed_offboard = false;  // disarmed, manual mode: the rover before ARMING
+  r.mission_running = false;
+  r.run(0.5, false);
+  EXPECT_FALSE(r.last_gate.ok);
+  EXPECT_EQ(r.last_gate.reason_code, S::REASON_ARMING_GATE);
+  EXPECT_TRUE(r.last_gate.pre_arm_ok);
+  r.veh_global_ref = false;
+  r.run(0.3, false);
+  EXPECT_FALSE(r.last_gate.pre_arm_ok);
+  EXPECT_EQ(r.last_gate.pre_arm_reason_code, S::REASON_GLOBAL_REFERENCE_INVALID);
+  r.veh_global_ref = true;
+  r.rtk_ok = false;  // RTK lost: pre-arm fails with the same reason as the full gate
+  r.run(0.8, false);
+  EXPECT_FALSE(r.last_gate.pre_arm_ok);
+  EXPECT_EQ(r.last_gate.pre_arm_reason_code, S::REASON_RTK_GATE);
+  r.rtk_ok = true;
+  r.run(0.3, false);
+  ASSERT_TRUE(r.last_gate.pre_arm_ok);
+  ASSERT_TRUE(r.call_estop(true, "tablet"));  // E-stop is first in both orders
+  r.deliver();
+  EXPECT_FALSE(r.last_gate.pre_arm_ok);
+  EXPECT_EQ(r.last_gate.pre_arm_reason_code, S::REASON_ESTOP);
+  // A global reference loss never touches the full gate (fail-to-zero unchanged).
+  ASSERT_TRUE(r.call_estop(false, "tablet"));
+  r.veh_armed_offboard = true;
+  r.veh_global_ref = false;
+  r.run(0.3, false);
+  EXPECT_TRUE(r.last_gate.ok);
+  EXPECT_FALSE(r.last_gate.pre_arm_ok);
 }
 
 // --- C3: decide and forward on each RPP command
