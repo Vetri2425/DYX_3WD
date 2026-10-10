@@ -1217,6 +1217,71 @@ PY
   check "prebuilt: download state cleaned up" '[ ! -e "${DYX3_VAR_LIB}/state/artifacts-${sha}" ]'
 }
 
+# ================================================================ release size (installer/ci/slim_release.sh)
+# What CI removes from a built release before packaging it: test sources and fixtures.
+# The slimmed tree must still pass the static verification and install through the prebuilt path.
+slim_release_block() {
+  export INSTALLER_DIR="${REPO}/installer" DYX3_ROOT="${T}/slim" DYX3_ALLOW_ANY_OS=1 ROS_DISTRO_NAME=humble
+  # shellcheck disable=SC1091
+  . "${INSTALLER_DIR}/lib/common.sh"
+  for l in os_check dependencies ros_install permissions network_install systemd_install health_check release; do
+    # shellcheck disable=SC1090
+    . "${INSTALLER_DIR}/lib/${l}.sh"
+  done
+  # shellcheck disable=SC1091
+  . "${INSTALLER_DIR}/ci/slim_release.sh"
+  set +e
+  load_pin firmware
+  local sha=2222222222222222222222222222222222222222 stage="${T}/slim_stage" art="${T}/slim_art" out rc
+  local srel="${T}/slim_stage/opt/dyx3/releases/2222222222222222222222222222222222222222"
+
+  # ---- test sources: removed; everything colcon/ament, launch, config, deployment, backend and docs use stays
+  mkdir -p "${srel}/ros2_ws/install" "${srel}/bin" "${srel}/ros2_ws/src/pkg_a/test/fixtures" \
+    "${srel}/ros2_ws/src/pkg_a/launch" "${srel}/ros2_ws/src/pkg_a/config" "${srel}/ros2_ws/src/pkg_a/src" \
+    "${srel}/ros2_ws/src/pkg_b/tests" "${srel}/backend/tests" "${srel}/backend/src/dyx3_backend" \
+    "${srel}/installer/tests" "${srel}/deployment/scripts" "${srel}/docs" "${srel}/ros2_ws/src/pkg_c"
+  : >"${srel}/ros2_ws/install/setup.bash"
+  printf '#!/bin/sh\n' >"${srel}/bin/dyx3-platform" && chmod +x "${srel}/bin/dyx3-platform"
+  : >"${srel}/bin/dyx3-env.sh"
+  for f in ros2_ws/src/pkg_a/package.xml ros2_ws/src/pkg_a/CMakeLists.txt ros2_ws/src/pkg_a/launch/a.launch.py \
+    ros2_ws/src/pkg_a/config/a.yaml ros2_ws/src/pkg_a/src/a.cpp ros2_ws/src/pkg_b/package.xml \
+    ros2_ws/src/pkg_c/package.xml backend/pyproject.toml backend/src/dyx3_backend/__init__.py \
+    installer/tests/run_tests.sh deployment/scripts/start-ros.sh docs/a.md; do
+    echo keep >"${srel}/${f}"
+  done
+  echo vec >"${srel}/ros2_ws/src/pkg_a/test/fixtures/v.txt"
+  echo t >"${srel}/ros2_ws/src/pkg_a/test/a_test.cpp"
+  echo t >"${srel}/ros2_ws/src/pkg_b/tests/test_b.py"
+  echo t >"${srel}/backend/tests/test_x.py"
+  out="$(slim_release_tests "${srel}")"
+  check "slim: test sources and fixtures are removed (ros2_ws packages and backend)" \
+    '[ ! -e "${srel}/ros2_ws/src/pkg_a/test" ] && [ ! -e "${srel}/ros2_ws/src/pkg_b/tests" ] && [ ! -e "${srel}/backend/tests" ] && [ "$(printf "%s\n" "${out}" | grep -c .)" -eq 3 ]'
+  check "slim: package.xml, CMakeLists, launch, config, sources, backend, installer, deployment and docs stay" \
+    'for f in ros2_ws/src/pkg_a/package.xml ros2_ws/src/pkg_a/CMakeLists.txt ros2_ws/src/pkg_a/launch/a.launch.py ros2_ws/src/pkg_a/config/a.yaml ros2_ws/src/pkg_a/src/a.cpp ros2_ws/src/pkg_b/package.xml ros2_ws/src/pkg_c/package.xml backend/pyproject.toml backend/src/dyx3_backend/__init__.py installer/tests/run_tests.sh deployment/scripts/start-ros.sh docs/a.md; do [ -f "${srel}/${f}" ] || exit 1; done'
+  check "slim: a tree that is not a built release is refused" '! (slim_release_tests "${T}/slim_none" >/dev/null 2>&1)'
+
+  # ---- the slimmed release passes static verification and installs through the prebuilt path
+  if ! tar --zstd -cf /dev/null --files-from /dev/null 2>/dev/null; then
+    ok "slim: prebuilt install of a slimmed release skipped (tar has no zstd here)"
+    return 0
+  fi
+  local pmst="${stage}/opt/dyx3/px4_msgs/${FIRMWARE_SHA}"
+  mkdir -p "${pmst}/install" "${art}"
+  : >"${pmst}/install/setup.bash" && : >"${pmst}/.complete" && echo abc >"${pmst}/px4_msgs.sha256"
+  tar -C "${stage}" --zstd -cf "${art}/release-${sha}.tar.zst" "opt/dyx3/releases/${sha}"
+  tar -C "${stage}" --zstd -cf "${art}/px4_msgs-${FIRMWARE_SHA}.tar.zst" "opt/dyx3/px4_msgs/${FIRMWARE_SHA}"
+  printf 'ARTIFACT_STACK_SHA=%s\nARTIFACT_FIRMWARE_SHA=%s\nARTIFACT_ROS_DISTRO=humble\nARTIFACT_CI_RUN=https://ci/run/2\n' \
+    "${sha}" "${FIRMWARE_SHA}" >"${art}/artifacts.env"
+  (cd "${art}" && sha256sum artifacts.env "release-${sha}.tar.zst" "px4_msgs-${FIRMWARE_SHA}.tar.zst" >SHA256SUMS)
+  local rel="${DYX3_RELEASES}/${sha}"
+  mkdir -p "${DYX3_VAR_LIB}/state" "${DYX3_RELEASES}"
+  (DYX3_ARTIFACT_DIR="${art}" install_prebuilt "${sha}") >"${T}/slim_pb" 2>&1
+  rc=$?
+  check "slim: a slimmed release installs through the prebuilt path" '[ "${rc}" -eq 0 ] && [ -f "${rel}/.prebuilt" ] && [ -f "${rel}/ros2_ws/src/pkg_a/package.xml" ] && [ ! -e "${rel}/ros2_ws/src/pkg_a/test" ]'
+  check "slim: the installed slimmed release passes the installer's static verification" '(health_release_only "${rel}" 0 >/dev/null 2>&1)'
+  check "slim: build_release does not rebuild a slimmed prebuilt release" '(build_release "${sha}" 2>&1 | grep -q "nothing to build")'
+}
+
 sup
 recorder_launcher
 (libs)
@@ -1224,6 +1289,7 @@ recorder_launcher
 (handoff)
 (locking)
 (prebuilt)
+(slim_release_block)
 pass="$(grep -c '^ok' "${RESULTS}")"
 fail="$(grep -c '^bad' "${RESULTS}")"
 [ -n "${SHOW_LOGS:-}" ] && tail -n +1 "${T}"/up_* 2>/dev/null

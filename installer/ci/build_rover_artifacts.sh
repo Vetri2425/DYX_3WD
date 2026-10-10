@@ -3,8 +3,9 @@
 #
 # Runs as root in ros:humble-ros-base on an arm64 runner (Ubuntu 22.04 aarch64 + ROS Humble: the
 # Jetson's userland; L4T/CUDA are not in the link path of these packages). Uses the installer's own
-# build_px4_msgs / build_release, so the release is byte-for-byte the layout the rover would build,
-# at the same absolute paths (/opt/dyx3/...): nothing needs relocating on the rover.
+# build_px4_msgs / build_release, so the release is the layout the rover would build, at the same
+# absolute paths (/opt/dyx3/...): nothing needs relocating on the rover. Before packaging, slim_release.sh
+# removes test sources and fixtures (nothing the rover reads).
 # Consumed by installer/lib/artifacts.sh (install_prebuilt). Proposal 2026-10-08_prebuilt-release-artifacts.md.
 set -euo pipefail
 
@@ -19,6 +20,8 @@ for lib in os_check dependencies ros_install permissions network_install systemd
   # shellcheck disable=SC1090
   . "${INSTALLER_DIR}/lib/${lib}.sh"
 done
+# shellcheck source=slim_release.sh
+. "${INSTALLER_DIR}/ci/slim_release.sh"
 
 # The release source is this checkout (CI has no mirror): git archive reads the checkout's object store.
 # shellcheck disable=SC2317  # called by build_release
@@ -31,7 +34,21 @@ log "rover artifacts for ${sha} (firmware pin ${FIRMWARE_SHA:0:10}, -j${DYX3_BUI
 mkdir -p "${DYX3_RELEASES}"
 build_px4_msgs
 build_release "${sha}"
-health_release_only "${DYX3_RELEASES}/${sha}" 0 || die "release ${sha:0:10} failed static verification"
+rel="${DYX3_RELEASES}/${sha}"
+health_release_only "${rel}" 0 || die "release ${sha:0:10} failed static verification"
+
+# Slim what ships (installer/ci/slim_release.sh), then verify the slimmed tree again: the rover gets exactly this.
+_sizes() {
+  local p
+  for p in venv ros2_ws/install ros2_ws/src; do
+    if [ -e "${rel}/${p}" ]; then printf '%s=%s ' "${p}" "$(du -sk "${rel}/${p}" | cut -f1)"; fi
+  done
+}
+log "before slimming (KiB): $(_sizes)"
+removed="$(slim_release_tests "${rel}")"
+log "removed test sources: $(printf '%s' "${removed}" | tr '\n' ' ')"
+log "after slimming (KiB): $(_sizes)"
+health_release_only "${rel}" 0 || die "slimmed release ${sha:0:10} failed static verification"
 
 mkdir -p "${OUT}"
 rel_f="release-${sha}.tar.zst"
