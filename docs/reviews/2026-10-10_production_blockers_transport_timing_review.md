@@ -327,4 +327,102 @@ INS-001/002/004/006/007, X-013.
 8. **S3/S4/S2** before the spray milestone: direction gate value, valve measurement, health coverage,
    NTRIP valid-frame liveness.
 
+---
+
+## 8. Is the architecture complete? Is this the most robust approach? What should be replaced?
+
+Source: a deliverable-by-deliverable audit of architecture V1 §4–§14 against the tree at `2c09587`
+and the gate records in HANDOFF (133 rows; evidence per row is in the audit, summarised here).
+
+### 8.1 Completeness — the honest status
+
+| DONE | PARTIAL | MISSING | SUPERSEDED (owner decision) | GATE-OPEN |
+|---|---|---|---|---|
+| 48 | 43 | 11 | 8 | 23 |
+
+Non-negotiables (§14, 19 bullets): 12 present, **5 violated**, 2 superseded.
+
+**Answer: no — the code is complete for a straight-line / square mission; the programme is not
+accepted against any of its own numbers, and "only hardening is open" is not true.** Four
+categories remain open, and only the first is hardening:
+
+1. **Hardening** (§1–§2 of this review, and the register): P1–P5, T1, S1, S3, S4.
+2. **Acceptance gates — all of the programme's numeric gates are open.** GATE 1 (OffboardControlMode
+   flag combination: reverse, zero-speed pivot, CREEP and the no-republish ulog check never
+   recorded), GATE 3 (geometry equivalence proven on the Git corpus only; `geometry_bag_replay_test`
+   exits 77 = skipped), GATE 4 (120 parameters never re-validated in NED; no shape RMS on the new
+   stack), GATE 7 (no shadow run; `dyx3_rpp_legacy` still in tree). The §10 gate table has **no
+   entry measured**: full-mission RMS + p95 + max, arc/lshape/square/U-turn RMS, pivot wobble
+   ≤ 0.50 cm, net walk ≤ 0.83 cm, coverage, spray loss. The only field number is a 3-side square at
+   1.1 cm p50 / 3.9 cm p95, which is a different metric. Stage 0.1 (quantify the arc payoff from
+   the old bags) and 0.3 (close the baseline questions) were never done. **R0 — one variable per
+   stage — was violated outright:** firmware, 6X, Ethernet, DDS, C++ RPP and the hotspot first ran
+   together on 2026-10-10 with no per-stage number.
+3. **Unported behaviour** (the port is not finished): RPP point hold / point handshake / progress
+   (tick publishes zero and reports `STATE_ERROR` if enabled), `run_sequencer` as a module, the
+   `stop_pivot_fsm` transition ring (built, never drained or exported), RPP's own `xy_reset_counter`
+   use (still the carried jump heuristic), 5 of the spray features (dash, point, heartbeat,
+   fallback), the F5 battery (reverse, pivot, CREEP, stop distance at speed).
+4. **Missing infrastructure the spec requires:** FCU parameter read path (`params_fcu.json` is
+   always "unavailable" — a run cannot prove which PX4 parameters it ran with, the exact failure
+   §7.9 was written to end); parameter profiles `production/precision/development.yaml` and
+   `dyx3-param get|set|save` (a live tweak is never persisted); per-node `/etc/dyx3/*.yaml`
+   shipped (today the C++ defaults *are* the production configuration, BR-001); parameter-class
+   enforcement in px4_link, gnss_rtk, recorder and gateway; the RT executor split (§8: control on
+   its own callback group, telemetry/params on a lower-priority executor — every node is one
+   `SingleThreadedExecutor`); a pinned DDS profile; BLE and mDNS (replaced by the UDP beacon);
+   `dyx3-version` without the firmware hash of the running FCU.
+
+**The single most important open item is not in any of the four lists above.** The migration's
+central claim is "publish the yaw rate directly and the arc floor (err ≈ ω/`RO_YAW_P`, 1.46 cm)
+disappears". The code for it exists (`TRACK_RATE`, `rover_rate_setpoint`), but
+`segment_command_mode` defaults to `"heading"` (`rpp_param_table.inc:119`; registry row 252,
+human decision 2026-10-08, "explicit GATE 4 A/B selector; default stays behaviour-compatible until
+rover measurements choose otherwise"). So today's rover drives arcs through PX4's attitude
+controller — the same P-only heading loop as before, on a new transport. **The circle/arc step of
+the field ladder must be run as that A/B (`heading` vs `rate`, same shape, same speed, same day)**
+or it will measure the old floor and the programme's go/no-go stays unanswered. F-tasks and the
+ladder entry do not say this; it should be written into the ladder now.
+
+Two documents contradict the state of the rover and should be corrected: `README.md` "Nothing here
+has run on a rover" and CLAUDE.md "174 = 120 + 54 parameters" (generated tables are 117 + 49,
+proposal 2026-10-08).
+
+### 8.2 Is this the most robust and proven way? — choice by choice
+
+| Choice | Verdict | Reasoning |
+|---|---|---|
+| **uXRCE-DDS + direct rover setpoints** instead of MAVROS velocity offboard | **Keep — right, proven on rover 01** | The only v1.17 path that carries yaw rate to the rover controller; 1.1 cm p50 on the square. The upstream risks (#27388 silent stop, #27514 stale setpoint, #27860 no retry) are all mitigated Jetson-side today. The *proven* long-term fix for #27514/#27860 is in the autopilot (F-tasks C5/C6, candidate patches) — not carried. Carry them; they are small and remove two reasons the companion must be perfect. |
+| **Explicit-zero chain + PX4 `COM_OF_LOSS_T` 0.5 s → disarm** as the safety model | **Keep — proven (0.69 s, 9 mm at 0.2 m/s)** | Standard offboard practice. Weakness: disarm is the *only* reaction to companion loss; at 0.85 m/s the roll-out after disarm is unmeasured (M3). A firmware setpoint-freshness timeout (C6) would stop in-mode instead of disarming. |
+| **Event-driven callbacks across three processes** (px4_link → rpp → guard → px4_link) | **Keep; measure** | Simpler and more fault-isolated than the proposed single component container; latency should be four loopback hops. Keep the separate processes; give px4_link RT priority (P4). Decide after M1. |
+| **Reliable KEEP_LAST(1) setpoints to the agent** | **Keep; bound it** | Forced by PX4's reliable readers; best-effort would not match. Pin `max_blocking_time` in a profile (P3/P4) so a stuck agent cannot stall the writer thread. |
+| **Fast DDS as RMW (unpinned)** | **Keep Fast DDS; pin it** | The agent *is* Fast DDS; staying on one vendor avoids cross-vendor interop surprises. Switching to Cyclone now would be a new variable with no number behind it. Pin `rmw_fastrtps_cpp` + a profile. |
+| **One `dyx3-ros` launch, any exit = whole graph down** | **Replace** | The least robust choice in the stack: non-safety code (gateway, spray, mission) can disarm the rover mid-line. Split into a control unit and a services unit; the guard already fails to zero when `mission/state` goes stale. |
+| **Mission progress in memory, no re-engage** | **Replace** | A transient becomes a restart from point 0 with manual repositioning. Persist the journal; add `resume_from_point` and a PAUSED → ARMING → ENGAGING path. |
+| **Arm/mode confirmation by `vehicle_status` timeout only** | **Replace** | PX4 says *why* it refuses, in `vehicle_command_ack`; the spray path already matches acks. Every refusal today is an opaque timeout. |
+| **RTK over USB to the UM982 (option C)** | **Keep — the most robust of the three** | Removes PX4 and the firmware from the correction path; proven outdoors (fix 6). Gap: no rollback transport (option B not built) and the NTRIP liveness is bytes-based (S2). Accept the no-rollback risk; fix S1/S2. |
+| **RTK worker in-process with the status publisher** | **Fix, not replace** | One lock across a joinable DNS-blocked thread (S1). Small change. |
+| **Backend: FastAPI + Socket.IO, no `rclpy`, Unix-socket gateway, E-stop as a prioritised request** | **Keep — well built** | Bounded and asynchronous end to end, stress-tested. The weak link is the tablet's JS thread and plaintext HTTP on the LAN (X-015). Nothing in the backend needs replacing for robustness. |
+| **Tablet as the single trajectory author, backend admits only** | **Keep (owner decision)** | Removes the second geometry builder. Consequence to accept: GATE 3's bag corpus and the vector generators died with the Python path engine — freeze the vectors under `tools/` (open item 5). |
+| **Spray through `VehicleCommand` 187 over DDS with an fsync'd identity ledger** | **Keep for now; measure before trusting** | Unusually heavy machinery for a valve, but it buys the one property that matters: PX4 disarm closes the valve (X-012). Never run with paint; valve/nozzle numbers are prototype values; the boundary defect ships enabled (S3). Measure (SP-003) before deciding whether a Jetson-side GPIO path with a hardware fail-closed is simpler. |
+| **Legacy Python oracle + equivalence vectors as the port method** | **Keep — but finish it** | Proven method (13 905 ticks, 0 mismatches on synthetic scenarios). It is unfinished until it runs on recorded bags (PC-1c) and on the rover (I2), and the oracle is deleted (GATE 7). |
+| **Forked EKF2 wheel-encoder fusion on v1.17** | **Keep; verify in the field** | Necessary (not upstream), GATE 2 replay passed. `EKF2_WENC_CTRL 1` is live before `EKF2_IMU_POS_*` was re-measured on the 6X mount and before any field pivot-wobble number — R1 is open. |
+| **Guard without acceleration/jerk limits (PX4 slews)** | **Keep; document** | Reasonable: one owner of the profile (RPP) and one slew (PX4). Record it in the guard contract (C3). |
+| **No physical E-stop; RC kill + tablet E-stop** | **Decide (owner)** | The tablet is not a deterministic path; RC loss is invisible in OFFBOARD by configuration. A hard-wired E-stop is the proven answer on marking machines. |
+
+### 8.3 What to replace — consolidated and ranked
+
+1. Whole-graph restart policy → control / services unit split (P2).
+2. In-memory progress + no re-engage → persisted journal, `resume_from_point`, re-engage (P2).
+3. Timeout-only arm/mode confirmation → ack-matched with PX4's reason (P1).
+4. Hand-edited, unpinned DDS environment → installer-shipped env + Fast DDS profile (P3, P4).
+5. Mission node wall clock → steady clock (T1).
+6. px4_link `SCHED_OTHER` → FIFO below the guard (P4).
+7. `segment_command_mode` default → decided by the arc A/B, not left at `heading` by inertia (8.1).
+8. Companion-only mitigation of #27514/#27860 → carry firmware C6/C5 (8.2).
+9. Spray valve numbers and boundary gate → measured values before paint (S3).
+
+Everything else in the stack is the right approach and should not be re-litigated; it should be
+**finished** (gates, unported features, missing infrastructure) and **measured** (§6).
+
 Agent: claude
