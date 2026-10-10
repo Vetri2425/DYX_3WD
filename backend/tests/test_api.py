@@ -149,3 +149,20 @@ def test_runs_listing_is_read_only_and_rejects_path_tricks(rig, tmp_path):
     assert c.get("/api/runs/2026-09-05_141530_mission_0042", headers=H("view-tok")).status_code == 200
     assert c.get("/api/runs/..", headers=H("view-tok")).status_code in (404, 400)
     assert c.get("/api/runs/does-not-exist", headers=H("view-tok")).status_code == 404
+
+
+def test_health_has_a_mission_block_from_the_snapshot(rig):
+    c, gw, _ = rig
+    empty = {"lifecycle_state": None, "last_error": None, "age_s": None, "fresh": False}
+    assert c.get("/api/health", headers=H("view-tok")).json()["mission"] == empty  # no snapshot yet
+    gw.snapshot, gw._age = {"mission": {"state": 3, "mission_id": 4, "reason_code": 0, "age_s": 0.1, "fresh": True}}, 0.2
+    # a snapshot without the lifecycle fields yet: tolerated as null
+    assert c.get("/api/health", headers=H("view-tok")).json()["mission"] == {**empty, "age_s": 0.1, "fresh": True}
+    error = {"code": "PLACING_FAILED", "reason": "EKF reference invalid"}
+    gw.snapshot = {"mission": {"lifecycle_state": "ERROR", "last_error": error, "age_s": 0.1, "fresh": True}}
+    assert c.get("/api/health", headers=H("view-tok")).json()["mission"] == {
+        "lifecycle_state": "ERROR", "last_error": error, "age_s": 0.1, "fresh": True}
+    gw._age = 60.0  # the whole snapshot is stale: never fresh
+    assert c.get("/api/health", headers=H("view-tok")).json()["mission"]["fresh"] is False
+    gw.snapshot, gw._age = {"mission": None}, 0.2  # source never received
+    assert c.get("/api/health", headers=H("view-tok")).json()["mission"] == empty

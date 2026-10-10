@@ -131,15 +131,32 @@ async def ping(request: Request) -> dict[str, str]:
 async def health(request: Request, _: Identity = Viewer) -> dict:
     gw, relay, settings = request.app.state.gateway, request.app.state.relay, request.app.state.settings
     age = gw.snapshot_age()
+    fresh = age is not None and age <= settings.telemetry_stale_s
     return {
         "backend": "ok",
         "gateway_connected": gw.connected,
         "telemetry_age_s": age,
-        "telemetry_fresh": age is not None and age <= settings.telemetry_stale_s,
+        "telemetry_fresh": fresh,
         "tablet_heartbeat_age_s": relay.tablet_age(),
         "tablet_alive": relay.tablet_alive(),
         "relay_running": relay.running,
         "operator_alive": relay.operator_alive(),
+        "mission": _mission_health(gw.snapshot, fresh),
+    }
+
+
+def _mission_health(snapshot: dict | None, telemetry_fresh: bool) -> dict:
+    """Diagnostic copy of the snapshot's ``mission`` source (the tablet gets mission progress as events, not here).
+
+    A field the snapshot does not carry is null; ``fresh`` is false unless both the snapshot and its mission source are.
+    """
+    m = snapshot.get("mission") if isinstance(snapshot, dict) else None
+    m = m if isinstance(m, dict) else {}
+    return {
+        "lifecycle_state": m.get("lifecycle_state"),
+        "last_error": m.get("last_error"),
+        "age_s": m.get("age_s"),
+        "fresh": telemetry_fresh and m.get("fresh") is True,
     }
 
 
