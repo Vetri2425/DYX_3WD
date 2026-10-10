@@ -11,7 +11,10 @@
 # each with the gateway's own `fresh` flag (snapshot_fresh_s, 1 s).
 #
 # Rover idle (X-016), in this order:
-#   dyx3-ros not running and nothing listens on the socket   -> idle (nothing on the Jetson can move the rover)
+#   no graph unit running and nothing listens on the socket  -> idle (nothing on the Jetson can move the rover)
+#   (graph units: dyx3-control and dyx3-services; dyx3-ros, the single unit of releases before the 2026-10-10 split, while an
+#   upgrade from such a release runs. dyx3-control alone can hold the vehicle armed in OFFBOARD while dyx3-services is down, so
+#   "control running, gateway absent" is unknown, never idle.)
 #   ARMED, or a mission that is starting or driving (LOADING, PLACING, ARMING, ENGAGING, READY, RUNNING), or one
 #   still releasing OFFBOARD / disarming (fresh or not)       -> busy: refuse. The mission arms the vehicle by itself
 #                                                               a moment after LOADING, so the vehicle's own ARMED
@@ -148,12 +151,19 @@ out("idle", f"disarmed, mission state {mstate}{note}", 0)
 PY
 }
 
-# _rover_ros_unit_active: dyx3-ros is running, starting or stopping (systemd only).
+# The units that run ROS graph nodes able to move the vehicle or report on it. dyx3-ros is listed for the upgrade from a
+# release before the split (it is still the running unit then); is-active of a unit that does not exist is "inactive".
+ROVER_GRAPH_UNITS=(dyx3-control dyx3-services dyx3-ros)
+
+# _rover_ros_unit_active: any graph unit is running, starting or stopping (systemd only).
 _rover_ros_unit_active() {
   systemd_available || return 1
-  case "$(systemctl is-active dyx3-ros.service 2>/dev/null || true)" in
-    active | activating | deactivating | reloading | refreshing) return 0 ;;
-  esac
+  local u
+  for u in "${ROVER_GRAPH_UNITS[@]}"; do
+    case "$(systemctl is-active "${u}.service" 2>/dev/null || true)" in
+      active | activating | deactivating | reloading | refreshing) return 0 ;;
+    esac
+  done
   return 1
 }
 
@@ -162,7 +172,7 @@ rover_idle_check() {
   local ros=0 line rc=0
   _rover_ros_unit_active && ros=1
   if [ "${ros}" -eq 0 ] && [ ! -e "${DYX3_GATEWAY_SOCK}" ]; then
-    echo "dyx3-ros is not running and there is no gateway socket"
+    echo "no graph unit (dyx3-control, dyx3-services) is running and there is no gateway socket"
     return 0
   fi
   if ! have python3; then
@@ -181,10 +191,10 @@ rover_idle_check() {
       ;;
     3)
       if [ "${ros}" -eq 0 ]; then
-        echo "dyx3-ros is not running (${line#* })"
+        echo "no graph unit (dyx3-control, dyx3-services) is running (${line#* })"
         return 0
       fi
-      echo "dyx3-ros is running but its gateway does not answer (${line#* })"
+      echo "a graph unit is running but the gateway (dyx3-services) does not answer (${line#* })"
       return 2
       ;;
     *)
@@ -207,7 +217,7 @@ rover_may_restart() {
     warn "################################################################################"
     warn "DYX3_FORCE_UNSAFE=1: ${what} goes ahead although the rover is NOT known to be idle"
     warn "  reason: ${ROVER_BUSY_REASON}"
-    warn "  a restart of dyx3-platform/dyx3-ros mid-mission drops offboard and PX4 disarms"
+    warn "  a restart of dyx3-platform/dyx3-control mid-mission drops offboard and PX4 disarms"
     warn "################################################################################"
     if [ -z "${DYX3_ROOT}" ] && have logger; then
       logger -p user.warning -t dyx3-installer \
@@ -218,8 +228,8 @@ rover_may_restart() {
   return 1
 }
 
-# require_rover_idle <what>: die unless rover_may_restart. Call it before anything that restarts dyx3-platform or
-# dyx3-ros, switches `current`, or touches the FCU or Wi-Fi link.
+# require_rover_idle <what>: die unless rover_may_restart. Call it before anything that restarts dyx3-platform,
+# dyx3-control or dyx3-services, switches `current`, or touches the FCU or Wi-Fi link.
 require_rover_idle() {
   rover_may_restart "$@" && return 0
   die "refusing ${1:-this operation}: the rover is not known to be idle (${ROVER_BUSY_REASON}). Disarm and end or abort the mission, then retry. Bench only, with nobody near the rover: DYX3_FORCE_UNSAFE=1"

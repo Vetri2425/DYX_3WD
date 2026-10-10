@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# DYX 3WD — dyx3-ros launcher: the production control graph (mission, motion_guard, px4_link, rpp, spray, system_gateway).
+# DYX 3WD — dyx3-control launcher: the control chain (px4_link, motion_guard, rpp) via dyx3_bringup control_graph.launch.py.
+# The XRCE-agent wait lives here only: px4_link is the one node that talks to the agent. dyx3-services (start-services.sh) does not wait.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -9,7 +10,7 @@ dyx3_env_load || exit 1
 
 # Availability only, never a gate: wait for the XRCE agent to bind its UDP port, so px4_link does not start its handshake into nothing on
 # every boot. DERIVED — NOT FROM V1 SPEC: 10 s total, polled every 0.5 s. The platform restart delay is 2 s (DYX3_RESTART_DELAY_S in
-# start-platform.sh) and the agent needs well under that to bind. Whatever happens, the graph starts: px4_link stays in handshake-pending
+# start-platform.sh) and the agent needs well under that to bind. Whatever happens, the control chain starts: px4_link stays in handshake-pending
 # STOP until the agent and the FCU session are up. The port is read, not executed, from platform.env, with the same default as start-platform.sh.
 agent_wait_s="${DYX3_AGENT_WAIT_S:-10}"
 agent_poll_s=0.5
@@ -33,12 +34,12 @@ if command -v ss >/dev/null 2>&1; then
     waited_polls=$((waited_polls + 1))
   done
   if agent_listening; then
-    echo "dyx3-ros: XRCE agent listening on udp/${xrce_port} after $((waited_polls / 2)).$((waited_polls % 2 * 5)) s; starting the graph"
+    echo "dyx3-control: XRCE agent listening on udp/${xrce_port} after $((waited_polls / 2)).$((waited_polls % 2 * 5)) s; starting the control chain"
   else
-    echo "dyx3-ros: WARN: nothing listens on udp/${xrce_port} after ${agent_wait_s} s; starting the graph anyway (px4_link holds STOP until the session is up)"
+    echo "dyx3-control: WARN: nothing listens on udp/${xrce_port} after ${agent_wait_s} s; starting the control chain anyway (px4_link holds STOP until the session is up)"
   fi
 else
-  echo "dyx3-ros: ss not available; not waiting for the XRCE agent on udp/${xrce_port}; starting the graph"
+  echo "dyx3-control: ss not available; not waiting for the XRCE agent on udp/${xrce_port}; starting the control chain"
 fi
 
 exec ros2 launch dyx3_bringup control_graph.launch.py config_dir:="${DYX3_CONFIG_DIR:-/etc/dyx3}"

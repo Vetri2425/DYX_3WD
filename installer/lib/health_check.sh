@@ -121,6 +121,17 @@ health_platform() {
 # _enabled <service>: is it in the manifest's [enabled_services]?
 _enabled() { manifest_section enabled_services "${2:-${DYX3_CURRENT}/installer/manifests/production.manifest}" 2>/dev/null | grep -qx "$1"; }
 
+# The ROS graph runs as two units since 2026-10-10 (proposal 2026-10-10_control-services-unit-split.md):
+#   dyx3-control   px4_link, motion_guard, rpp       (the px4_link sample, the control nodes)
+#   dyx3-services  mission, spray, system_gateway    (the gateway socket, the services nodes)
+# DERIVED — NOT FROM V1 SPEC: a release whose manifest still enables the single dyx3-ros unit (every release before the split:
+# the health baseline of the running release during the upgrade, a rollback target) ran all six nodes in it, so it counts as
+# both. Without that, the baseline and a rollback would silently skip the gateway and graph checks.
+_control_unit_enabled() { _enabled dyx3-control "$1" || _enabled dyx3-ros "$1"; }
+_services_unit_enabled() { _enabled dyx3-services "$1" || _enabled dyx3-ros "$1"; }
+# _graph_unit_of <dyx3-control|dyx3-services> <manifest>: the unit name to print in a message (dyx3-ros for a pre-split release).
+_graph_unit_of() { if _enabled "$1" "$2"; then printf '%s' "$1"; else printf 'dyx3-ros'; fi; }
+
 # health_extras: the parts beyond the platform. Each check is gated on the service being ENABLED in the manifest, so an
 # unverified service never turns the health red; disk is always reported.
 # _settle <function> [args...]: poll a check once a second for up to DYX3_HEALTH_SETTLE_S (default 30): health runs
@@ -184,8 +195,9 @@ health_extras() {
   local rel="${1:-${DYX3_CURRENT}}" m="${1:-${DYX3_CURRENT}}/installer/manifests/production.manifest"
   health_wifi
   if declare -F health_usb_serial >/dev/null 2>&1; then health_usb_serial; fi
-  if _enabled dyx3-ros "${m}"; then
-    if _settle _gateway_up; then _pass "gateway answers get_snapshot on ${DYX3_GATEWAY_SOCK}"; else _fail "gateway does not answer on ${DYX3_GATEWAY_SOCK} (dyx3-ros / system_gateway down?)"; fi
+  # The gateway (dyx3_system_gateway) runs in dyx3-services.
+  if _services_unit_enabled "${m}"; then
+    if _settle _gateway_up; then _pass "gateway answers get_snapshot on ${DYX3_GATEWAY_SOCK}"; else _fail "gateway does not answer on ${DYX3_GATEWAY_SOCK} ($(_graph_unit_of dyx3-services "${m}") / system_gateway down?)"; fi
   fi
   if _enabled dyx3-rtk "${m}"; then
     if _settle _rtk_up; then _pass "dyx3-rtk control socket answers GET_STATUS"; else _fail "dyx3-rtk control socket unavailable"; fi
@@ -272,12 +284,16 @@ _ros_cli() {
 # not a tuning value of the vehicle).
 DYX3_HEALTH_ROS_SPIN_S="${DYX3_HEALTH_ROS_SPIN_S:-3}"
 
-# health_graph: deep. The control graph's nodes are visible (WARN, not FAIL: needs ROS and a running graph). Secondary to
-# the px4_link sample in health_dds. `ros2 node list` under-reports right after a start: up to three asks, no daemon.
+# health_graph: deep. The graph's nodes are visible (WARN, not FAIL: needs ROS and a running graph). Secondary to the px4_link
+# sample in health_dds. `ros2 node list` under-reports right after a start: up to three asks, no daemon. The six nodes of the two
+# units, each listed only when its unit is enabled (control_graph.launch.py GRAPH / UNIT_PACKAGES).
 health_graph() {
-  local rel="${1:-${DYX3_CURRENT}}" nodes="" n i missing
-  local -a want=(/dyx3_mission /motion_guard /px4_link /rpp /spray /system_gateway)
-  _enabled dyx3-ros "${rel}/installer/manifests/production.manifest" || return 0
+  local rel="${1:-${DYX3_CURRENT}}" nodes="" n i missing m
+  m="${rel}/installer/manifests/production.manifest"
+  local -a want=()
+  if _control_unit_enabled "${m}"; then want+=(/motion_guard /px4_link /rpp); fi
+  if _services_unit_enabled "${m}"; then want+=(/dyx3_mission /spray /system_gateway); fi
+  [ "${#want[@]}" -gt 0 ] || return 0
   [ -f "${ROS_SETUP}" ] || {
     _warn "ROS not installed; graph check skipped"
     return 0
@@ -288,7 +304,7 @@ health_graph() {
     for n in "${want[@]}"; do printf '%s\n' "${nodes}" | grep -qx "${n}" || missing=1; done
     [ "${missing}" -eq 0 ] && break
   done
-  # Every node control_graph.launch.py starts, /rpp included (X-013).
+  # Every node the two launch files start, /rpp included (X-013).
   for n in "${want[@]}"; do
     if printf '%s\n' "${nodes}" | grep -qx "${n}"; then _pass "node ${n} up"; else _warn "node ${n} not visible (ros2 as ${DYX3_USER}, $(_ros_env_desc), ${i} tries)"; fi
   done
@@ -375,9 +391,10 @@ _px4_baseline_param() {
 # likely causes. No FCU parameter is read.
 health_dds() {
   local rel="${1:-${DYX3_CURRENT}}" s sa ho f m stale detail dom rc=0
-  _enabled dyx3-ros "${rel}/installer/manifests/production.manifest" || return 0
+  # px4_link runs in dyx3-control; the gateway (dyx3-services) is only the first place the sample is read from.
+  _control_unit_enabled "${rel}/installer/manifests/production.manifest" || return 0
   if ! s="$(_px4_link_sample "${rel}")"; then
-    _warn "px4_link: no /dyx3/px4_link/status sample from the gateway or from ros2 as ${DYX3_USER} ($(_ros_env_desc)); dyx3-ros down?"
+    _warn "px4_link: no /dyx3/px4_link/status sample from the gateway or from ros2 as ${DYX3_USER} ($(_ros_env_desc)); $(_graph_unit_of dyx3-control "${rel}/installer/manifests/production.manifest") down?"
     return 0
   fi
   sa="$(_kv session_alive "${s}")"

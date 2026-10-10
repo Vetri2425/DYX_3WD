@@ -2,8 +2,9 @@
 Description=DYX 3WD — independent spray fail-closed watchdog
 After=dyx3-platform.service
 Wants=dyx3-platform.service
-# Deliberately NOT tied to dyx3-ros.service: it must survive the spray controller (and the whole control graph)
-# dying or restarting, and keep asking for OFF. It only ever requests OFF, through dyx3_px4_link.
+# Deliberately NOT tied to dyx3-control.service or dyx3-services.service: it must survive the spray controller
+# (dyx3-services) and the control chain (dyx3-control) dying or restarting, and keep asking for OFF. It only ever
+# requests OFF, through dyx3_px4_link.
 
 [Service]
 Type=exec

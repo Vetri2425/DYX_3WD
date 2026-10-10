@@ -8,6 +8,7 @@ install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 if(BUILD_TESTING)
   find_package(ament_cmake_pytest REQUIRED)
   ament_add_pytest_test(test_control_graph_launch test/test_control_graph_launch.py)
+  ament_add_pytest_test(test_services_graph_launch test/test_services_graph_launch.py)
 endif()
 
 ament_package()

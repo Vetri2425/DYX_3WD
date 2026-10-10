@@ -6,7 +6,7 @@ velocity=true, a NaN TrajectorySetpoint, RoverSpeedSetpoint, RoverAttitudeSetpoi
 plus VEHICLE_CMD_DO_SET_MODE(1, 6) for OFFBOARD. It does NOT go through RPP or motion_guard: that chain is step 7.
 
 Preconditions (the script checks the ones it can):
-  * the control graph is stopped (sudo systemctl stop dyx3-ros), so nothing else writes /fmu/in;
+  * the control graph is stopped (sudo systemctl stop dyx3-services dyx3-control), so nothing else writes /fmu/in;
   * the operator has ARMED the rover (RC/QGC, Manual) with the RC kill switch in hand;
   * spray hardware off.
 
@@ -171,7 +171,7 @@ def main():
         n.spin_for(2.0)
         others = n.count_publishers("/fmu/in/offboard_control_mode") - 1
         if others > 0:
-            print("ABORT: %d other publisher(s) on /fmu/in/offboard_control_mode. Stop dyx3-ros first." % others)
+            print("ABORT: %d other publisher(s) on /fmu/in/offboard_control_mode. Stop dyx3-control (and dyx3-services) first." % others)
             return 2
         t_wait = time.monotonic()
         while a.wait_arm > 0 and time.monotonic() - t_wait < a.wait_arm and (

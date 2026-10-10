@@ -1,5 +1,14 @@
 # Bench procedure — fault injection on the production control graph (BR-004)
 
+> **2026-10-10 — unit split.** The single `dyx3-ros.service` this runbook was written for is replaced by
+> `dyx3-control.service` (px4_link, motion_guard, rpp; `Requires=dyx3-platform`) and `dyx3-services.service`
+> (mission, spray, system_gateway; `Wants=dyx3-control`), see
+> `docs/architecture/proposals/2026-10-10_control-services-unit-split.md`. Read every `dyx3-ros` below as the
+> unit that owns the node under test, and add the new case the split exists for: kill a services node and
+> verify that `dyx3-control` keeps running, the guard reports `REASON_MISSION_GATE`, PX4 stays armed in OFFBOARD
+> with STOP, and only `dyx3-services` restarts. The expected counts and the SIGINT→SIGTERM→SIGKILL timing apply
+> per unit. This runbook has not been re-run since the split.
+
 **Status:** procedure only. Nothing here has been run; the expected outcomes below come from the unit files, `control_graph.launch.py`
 and the contracts, not from measurements. Run it on the Jetson, record every result in the table at the end, and file each deviation
 as a finding. Where the repository states no number (PX4 loss actions, time for the wheels to stop), the expected outcome is

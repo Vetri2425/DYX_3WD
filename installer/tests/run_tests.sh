@@ -217,8 +217,12 @@ libs() {
 
   local svc
   svc="$(manifest_section enabled_services)"
-  # The six services verified on the 3WD rover 2026-10-08; a new one joins only after a rover run.
-  check "manifest: USB provisioning runs before the six rover services" '[ "$(printf "%s" "${svc}" | tr "\n" " ")" = "dyx3-usb-serial-check dyx3-platform dyx3-ros dyx3-rtk dyx3-spray-watchdog dyx3-recorder dyx3-backend" ]'
+  # The six services verified on the 3WD rover 2026-10-08, with dyx3-ros split into dyx3-control + dyx3-services (2026-10-10):
+  # the order is the restart order (control before services, recorder after control, backend after services).
+  check "manifest: USB provisioning runs before the rover services, control before services, backend last" '[ "$(printf "%s" "${svc}" | tr "\n" " ")" = "dyx3-usb-serial-check dyx3-platform dyx3-control dyx3-services dyx3-rtk dyx3-spray-watchdog dyx3-recorder dyx3-backend" ]'
+  check "manifest: the single dyx3-ros unit is gone from both lists" '! manifest_section services | grep -qx dyx3-ros && ! manifest_section enabled_services | grep -qx dyx3-ros'
+  check "manifest: [services] is exactly the shipped unit files (the installer installs the intersection)" '[ "$(manifest_section services | LC_ALL=C sort | tr "\n" " ")" = "$(for u in "${REPO}"/deployment/systemd/*.service; do basename "${u}" .service; done | LC_ALL=C sort | tr "\n" " ")" ]'
+  check "no dyx3-ros unit or start-ros.sh launcher is shipped any more" '[ ! -e "${REPO}/deployment/systemd/dyx3-ros.service" ] && [ ! -e "${REPO}/deployment/scripts/start-ros.sh" ]'
   check "manifest: legacy package absent from ros2_packages" '! manifest_section ros2_packages | grep -q legacy'
   check "manifest: spray watchdog is its own service" 'manifest_section services | grep -qx dyx3-spray-watchdog'
   local s2
@@ -232,12 +236,22 @@ libs() {
   check "USB serial unit provisions during old and new release activation" 'grep -qx "dyx3-usb-serial-check" <(manifest_section enabled_services) && grep -q "ExecStart=/opt/dyx3/current/installer/usb_serial_setup.sh" "${REPO}/deployment/systemd/dyx3-usb-serial-check.service"'
   check "fresh installer provisions the kernel driver before release setup" 'grep -q "provision_usb_serial_support" "${REPO}/installer/install.sh"'
   check "upgrade enables the provisioning unit before restarting rover services" 'sed -n "/^\[enabled_services\]/,/^\[/p" "${REPO}/installer/manifests/production.manifest" | sed -n "2p" | grep -qx dyx3-usb-serial-check'
-  check "the spray watchdog unit is not tied to dyx3-ros" '! grep -E "^(Requires|BindsTo|PartOf)=.*dyx3-ros" "${REPO}/deployment/systemd/dyx3-spray-watchdog.service"'
-  # Only rpp and motion_guard get FIFO 80 / CPU 4, via the launch prefix running as User=dyx3.
-  local ru="${REPO}/deployment/systemd/dyx3-ros.service"
-  check "dyx3-ros sets no tree-wide RT policy or affinity" '! grep -Eq "^(CPUSchedulingPolicy|CPUSchedulingPriority|CPUAffinity)=" "${ru}"'
-  check "dyx3-ros lets the unprivileged chrt prefix set FIFO 80" '[ "$(sed -n "s/^LimitRTPRIO=//p" "${ru}")" -ge 80 ] && grep -q "chrt -f 80" "${REPO}/ros2_ws/src/dyx3_bringup/launch/control_graph.launch.py"'
-  check "dyx3-ros lets mlockall succeed and bounds a stop hang" 'grep -qx "LimitMEMLOCK=infinity" "${ru}" && grep -qx "TimeoutStopSec=15" "${ru}" && ! grep -q "^RestrictRealtime=yes" "${ru}"'
+  check "the spray watchdog unit is not tied to either graph unit" '! grep -E "^(Requires|BindsTo|PartOf)=.*dyx3-(control|services|ros)" "${REPO}/deployment/systemd/dyx3-spray-watchdog.service"'
+  # Only rpp and motion_guard (FIFO 80) and px4_link (FIFO 70) get CPU 4, via the launch prefix running as User=dyx3.
+  local ru="${REPO}/deployment/systemd/dyx3-control.service" su="${REPO}/deployment/systemd/dyx3-services.service"
+  check "dyx3-control sets no tree-wide RT policy or affinity" '! grep -Eq "^(CPUSchedulingPolicy|CPUSchedulingPriority|CPUAffinity)=" "${ru}"'
+  check "dyx3-control lets the unprivileged chrt prefix set FIFO 80" '[ "$(sed -n "s/^LimitRTPRIO=//p" "${ru}")" -ge 80 ] && grep -q "chrt -f 80" "${REPO}/ros2_ws/src/dyx3_bringup/launch/control_graph.launch.py"'
+  check "dyx3-control lets mlockall succeed and bounds a stop hang" 'grep -qx "LimitMEMLOCK=infinity" "${ru}" && grep -qx "TimeoutStopSec=15" "${ru}" && ! grep -q "^RestrictRealtime=yes" "${ru}"'
+  check "dyx3-control requires the platform and runs the control launcher" 'grep -qx "After=dyx3-platform.service" "${ru}" && grep -qx "Requires=dyx3-platform.service" "${ru}" && grep -qx "ExecStart=/opt/dyx3/current/bin/dyx3-control" "${ru}" && grep -q "^exec ros2 launch dyx3_bringup control_graph.launch.py " "${REPO}/deployment/scripts/start-control.sh"'
+  check "dyx3-services wants dyx3-control and never requires, binds to or is part of it" 'grep -qx "After=dyx3-control.service" "${su}" && grep -qx "Wants=dyx3-control.service" "${su}" && ! grep -Eq "^(Requires|BindsTo|PartOf|Requisite)=" "${su}"'
+  check "dyx3-control does not depend on dyx3-services in any way" '! grep -Eq "^[A-Za-z]+=.*dyx3-services" "${ru}"'
+  check "dyx3-services runs the services launcher under normal scheduling, stop hang bounded" 'grep -qx "ExecStart=/opt/dyx3/current/bin/dyx3-services" "${su}" && grep -q "^exec ros2 launch dyx3_bringup services_graph.launch.py " "${REPO}/deployment/scripts/start-services.sh" && grep -qx "TimeoutStopSec=15" "${su}" && ! grep -Eq "^(LimitRTPRIO|CPUSchedulingPolicy|CPUSchedulingPriority|CPUAffinity)=" "${su}"'
+  local u
+  for u in "${ru}" "${su}"; do
+    check "${u##*/}: Restart=always, RestartSec=5, User=dyx3, ros.env, hardening, the stop-timeout DERIVED note" 'grep -qx "Restart=always" "${u}" && grep -qx "RestartSec=5" "${u}" && grep -qx "User=dyx3" "${u}" && grep -qx "EnvironmentFile=-/etc/dyx3/ros.env" "${u}" && grep -q "DERIVED — NOT FROM V1 SPEC: ros2 launch escalates" "${u}" && grep -qx "NoNewPrivileges=yes" "${u}" && grep -qx "ProtectSystem=strict" "${u}"'
+  done
+  check "the recorder starts after the control unit, the backend after the services unit" 'grep -qx "After=dyx3-control.service" "${REPO}/deployment/systemd/dyx3-recorder.service" && grep -qx "Wants=dyx3-control.service" "${REPO}/deployment/systemd/dyx3-recorder.service" && grep -qx "After=dyx3-services.service" "${REPO}/deployment/systemd/dyx3-backend.service" && grep -qx "Wants=dyx3-services.service" "${REPO}/deployment/systemd/dyx3-backend.service"'
+  check "no shipped unit or launcher still names dyx3-ros" '! grep -rn "dyx3-ros" "${REPO}/deployment/systemd" "${REPO}/deployment/scripts"'
   check "the RTK unit creates its own 0700 state directory" 'grep -qx "StateDirectory=dyx3/rtk" "${REPO}/deployment/systemd/dyx3-rtk.service" && grep -qx "StateDirectoryMode=0700" "${REPO}/deployment/systemd/dyx3-rtk.service"'
   check "router template: PX4 endpoint is a UDP server on 0.0.0.0:14550 (survives restarts), QGC on TCP 5760" 't="${REPO}/deployment/network/mavlink-router.conf.tmpl"; grep -qx "Mode=Server" "${t}" && grep -qx "Address=0.0.0.0" "${t}" && grep -qx "Port=14550" "${t}" && grep -qx "TcpServerPort=5760" "${t}" && ! grep -qx "Mode=Normal" "${t}"'
   check "no unit or template hard-codes a secret (comments excluded)" '! grep -rEi "^[^#]*(password|token)=." "${REPO}/deployment/systemd" "${REPO}/deployment/network"'
@@ -733,7 +747,7 @@ F
   ln -sfn ../dyx3-retired.service "${sd}/multi-user.target.wants/dyx3-retired.service"
   install_units "${DYX3_CURRENT}" >"${T}/units_out" 2>&1
   check "a dyx3 unit the release does not ship is removed with its enablement" '[ ! -e "${sd}/dyx3-retired.service" ] && [ ! -L "${sd}/multi-user.target.wants/dyx3-retired.service" ] && grep -q "removing dyx3-retired.service" "${T}/units_out"'
-  check "the Wi-Fi regdom unit and the shipped units are kept" '[ -f "${sd}/dyx3-wifi-regdom.service" ] && [ -L "${sd}/multi-user.target.wants/dyx3-wifi-regdom.service" ] && [ -f "${sd}/dyx3-platform.service" ] && [ -f "${sd}/dyx3-ros.service" ]'
+  check "the Wi-Fi regdom unit and the shipped units are kept" '[ -f "${sd}/dyx3-wifi-regdom.service" ] && [ -L "${sd}/multi-user.target.wants/dyx3-wifi-regdom.service" ] && [ -f "${sd}/dyx3-platform.service" ] && [ -f "${sd}/dyx3-control.service" ] && [ -f "${sd}/dyx3-services.service" ]'
   (systemd_available() { return 0; }; systemctl() { printf '%s\n' "$*" >>"${T}/units_calls"; }
     printf '[Service]\n' >"${sd}/dyx3-retired.service"; install_units "${DYX3_CURRENT}") >/dev/null 2>&1
   check "under systemd the retired unit is stopped and disabled" 'grep -qx "stop dyx3-retired.service" "${T}/units_calls" && grep -qx "disable dyx3-retired.service" "${T}/units_calls" && ! grep -q "dyx3-wifi-regdom" "${T}/units_calls"'
@@ -857,7 +871,7 @@ F
   # ---- INS-001: no switch or restart unless the rover is known idle (fake gateway on the staged socket)
   local gwf="${T}/gw_state"
   export DYX3_GATEWAY_QUERY_TIMEOUT_S=1
-  check "idle: dyx3-ros not running and no gateway socket is idle" '[ "$(idle_rc)" = 0 ]'
+  check "idle: no graph unit running and no gateway socket is idle" '[ "$(idle_rc)" = 0 ]'
   gw_state "${gwf}" 1 true 0 true
   fake_gateway_start "${DYX3_GATEWAY_SOCK}" "${gwf}"
   check "idle: fresh DISARMED with the mission IDLE is idle" '[ "$(idle_rc)" = 0 ] && grep -q "disarmed, mission state 0" "${T}/idle_reason"'
@@ -892,7 +906,7 @@ F
   check "idle: a gateway that answers garbage is unknown" '[ "$(idle_rc)" = 2 ]'
   echo '{"v":1,"id":1,"ok":false,"code":"busy","reason":"x","data":{}}' >"${gwf}"
   check "idle: a refused get_snapshot is unknown" '[ "$(idle_rc)" = 2 ]'
-  check "idle: dyx3-ros active under systemd with no answering gateway is unknown" \
+  check "idle: a graph unit active under systemd with no answering gateway is unknown" \
     '[ "$( (systemd_available() { return 0; }; systemctl() { echo active; }; DYX3_GATEWAY_SOCK="${T}/none.sock"; idle_rc) )" = 2 ]'
 
   gw_state "${gwf}" 2 true 3 true
@@ -931,7 +945,7 @@ F
   check "once idle, dyx3-rollback returns to the healthy release" '[ "$(basename "$(readlink -f "${DYX3_CURRENT}")")" = "${B}" ]'
   kill "${FAKE_GW_PID}" 2>/dev/null
   wait "${FAKE_GW_PID}" 2>/dev/null
-  check "idle: a stale socket file with dyx3-ros stopped is idle" '[ -S "${DYX3_GATEWAY_SOCK}" ] && [ "$(idle_rc)" = 0 ]'
+  check "idle: a stale socket file with the graph units stopped is idle" '[ -S "${DYX3_GATEWAY_SOCK}" ] && [ "$(idle_rc)" = 0 ]'
   rm -f "${DYX3_GATEWAY_SOCK}"
 
   # ---- X-013: the deep graph check lists /rpp
@@ -1242,7 +1256,7 @@ PY
 }
 
 # ---------------------------------------------------------------- HEALTH-DDS: deep health in the services' DDS environment
-# make_ros_rel <dir>: a staged release the deep checks can load: the real manifest (dyx3-ros enabled), the firmware pin,
+# make_ros_rel <dir>: a staged release the deep checks can load: the real manifest (dyx3-control + dyx3-services), the firmware pin,
 # bin/dyx3-env.sh and an empty workspace setup.
 make_ros_rel() {
   mkdir -p "$1/installer/manifests" "$1/installer/pins" "$1/bin" "$1/ros2_ws/install"
@@ -1330,6 +1344,19 @@ F
   as_root health_graph "${rel}" >"${T}/hd_graph" 2>&1
   check "deep health: a graph missed in another DDS environment names that environment" 'grep -q "^WARN  node /px4_link not visible (ros2 as dyx3, ROS_DOMAIN_ID=42, ROS_LOCALHOST_ONLY=0, 3 tries)" "${T}/hd_graph"'
   printf 'ROS_DOMAIN_ID=42\nDYX3_ROS_LOCALHOST_ONLY=1\n' >"${DYX3_ETC}/ros.env"
+  # P2 part 3: each unit's nodes are listed only when that unit is enabled; a pre-split dyx3-ros release lists all six.
+  local rm_="${rel}/installer/manifests/production.manifest"
+  cp "${rm_}" "${T}/hd_manifest"
+  printf '[enabled_services]\ndyx3-control\n' >"${rm_}"
+  as_root health_graph "${rel}" >"${T}/hd_graph" 2>&1
+  check "deep health: dyx3-control alone lists its three nodes, not the services' nodes" '[ "$(grep "^PASS  node" "${T}/hd_graph" | sed "s/^PASS  node //; s/ up$//" | LC_ALL=C sort | tr "\n" " ")" = "/motion_guard /px4_link /rpp " ]'
+  printf '[enabled_services]\ndyx3-services\n' >"${rm_}"
+  as_root health_graph "${rel}" >"${T}/hd_graph" 2>&1
+  check "deep health: dyx3-services alone lists mission, spray and the gateway" '[ "$(grep "^PASS  node" "${T}/hd_graph" | sed "s/^PASS  node //; s/ up$//" | LC_ALL=C sort | tr "\n" " ")" = "/dyx3_mission /spray /system_gateway " ]'
+  printf '[enabled_services]\ndyx3-ros\n' >"${rm_}"
+  as_root health_graph "${rel}" >"${T}/hd_graph" 2>&1
+  check "deep health: a pre-split release (dyx3-ros) still lists all six nodes" '[ "$(grep -c "^PASS  node" "${T}/hd_graph")" -eq 6 ]'
+  cp "${T}/hd_manifest" "${rm_}"
 
   # ---- the px4_link sample (authoritative)
   hd_status() { printf 'stamp:\n  sec: 1760000000\n  nanosec: 0\nsession_alive: %s\nhandshake_ok: %s\noffboard_heartbeat_active: false\nfailing_to_zero: true\nfault: %s\nstale_topics_mask: %s\nworst_topic_age_s: 0.02\n---\n' "$@" >"${T}/hd_status"; }
@@ -1348,7 +1375,7 @@ F
   check "px4_link: a live session with a handshake mismatch warns" 'grep -q "^WARN  px4_link: FCU session alive but not healthy (.*fault=2 HANDSHAKE_MISMATCH" "${T}/hd_dds"'
   rm -f "${T}/hd_status"
   as_root health_dds "${rel}" >"${T}/hd_dds" 2>&1
-  check "px4_link: no sample at all warns and names the environment" 'grep -q "^WARN  px4_link: no /dyx3/px4_link/status sample from the gateway or from ros2 as dyx3 (ROS_DOMAIN_ID=42, ROS_LOCALHOST_ONLY=1)" "${T}/hd_dds" && ! grep -q "^FAIL" "${T}/hd_dds"'
+  check "px4_link: no sample at all warns and names the environment" 'grep -q "^WARN  px4_link: no /dyx3/px4_link/status sample from the gateway or from ros2 as dyx3 (ROS_DOMAIN_ID=42, ROS_LOCALHOST_ONLY=1); dyx3-control down?" "${T}/hd_dds" && ! grep -q "^FAIL" "${T}/hd_dds"'
 
   # ---- PC-7a: a live session proves PX4 UXRCE_DDS_DOM_ID = ROS_DOMAIN_ID; a dead one names the likely causes
   hd_status true true 0 0
@@ -1428,7 +1455,7 @@ slim_release_block() {
   for f in ros2_ws/src/pkg_a/package.xml ros2_ws/src/pkg_a/CMakeLists.txt ros2_ws/src/pkg_a/launch/a.launch.py \
     ros2_ws/src/pkg_a/config/a.yaml ros2_ws/src/pkg_a/src/a.cpp ros2_ws/src/pkg_b/package.xml \
     ros2_ws/src/pkg_c/package.xml backend/pyproject.toml backend/src/dyx3_backend/__init__.py \
-    installer/tests/run_tests.sh deployment/scripts/start-ros.sh docs/a.md; do
+    installer/tests/run_tests.sh deployment/scripts/start-control.sh docs/a.md; do
     echo keep >"${srel}/${f}"
   done
   echo vec >"${srel}/ros2_ws/src/pkg_a/test/fixtures/v.txt"
@@ -1439,7 +1466,7 @@ slim_release_block() {
   check "slim: test sources and fixtures are removed (ros2_ws packages and backend)" \
     '[ ! -e "${srel}/ros2_ws/src/pkg_a/test" ] && [ ! -e "${srel}/ros2_ws/src/pkg_b/tests" ] && [ ! -e "${srel}/backend/tests" ] && [ "$(printf "%s\n" "${out}" | grep -c .)" -eq 3 ]'
   check "slim: package.xml, CMakeLists, launch, config, sources, backend, installer, deployment and docs stay" \
-    'for f in ros2_ws/src/pkg_a/package.xml ros2_ws/src/pkg_a/CMakeLists.txt ros2_ws/src/pkg_a/launch/a.launch.py ros2_ws/src/pkg_a/config/a.yaml ros2_ws/src/pkg_a/src/a.cpp ros2_ws/src/pkg_b/package.xml ros2_ws/src/pkg_c/package.xml backend/pyproject.toml backend/src/dyx3_backend/__init__.py installer/tests/run_tests.sh deployment/scripts/start-ros.sh docs/a.md; do [ -f "${srel}/${f}" ] || exit 1; done'
+    'for f in ros2_ws/src/pkg_a/package.xml ros2_ws/src/pkg_a/CMakeLists.txt ros2_ws/src/pkg_a/launch/a.launch.py ros2_ws/src/pkg_a/config/a.yaml ros2_ws/src/pkg_a/src/a.cpp ros2_ws/src/pkg_b/package.xml ros2_ws/src/pkg_c/package.xml backend/pyproject.toml backend/src/dyx3_backend/__init__.py installer/tests/run_tests.sh deployment/scripts/start-control.sh docs/a.md; do [ -f "${srel}/${f}" ] || exit 1; done'
   check "slim: a tree that is not a built release is refused" '! (slim_release_tests "${T}/slim_none" >/dev/null 2>&1)'
 
   # ---- venv: pip/setuptools/wheel go; whatever imported before still imports
@@ -1542,13 +1569,13 @@ slim_release_block() {
   check "slim: build_release does not rebuild a slimmed prebuilt release" '(build_release "${sha}" 2>&1 | grep -q "nothing to build")'
 }
 
-# ---------------------------------------------------------------- start-ros.sh: the bounded wait for the XRCE agent
+# ---------------------------------------------------------------- start-control.sh: the bounded wait for the XRCE agent
 # Fake dyx3-env.sh (dyx3_env_load succeeds), fake ros2 (records that the graph was started), fake ss (a UDP listener on the port
 # in ${T}/sw_listen, one per line).
-start_ros_wait() {
+start_control_wait() {
   local d="${T}/sw" out rc
   mkdir -p "${d}/scripts" "${d}/bin"
-  cp "${REPO}/deployment/scripts/start-ros.sh" "${d}/scripts/"
+  cp "${REPO}/deployment/scripts/start-control.sh" "${d}/scripts/"
   printf 'dyx3_env_load() { return 0; }\n' >"${d}/scripts/dyx3-env.sh"
   printf '#!/usr/bin/env bash\necho "ros2 $*" >>"%s/sw_ros2"\n' "${d}" >"${d}/bin/ros2"
   cat >"${d}/bin/ss" <<F
@@ -1563,40 +1590,148 @@ F
   : >"${d}/sw_ros2"
   : >"${d}/sw_listen"
   printf '8888\n' >"${d}/sw_listen"
-  out="$(PATH="${d}/bin:${PATH}" DYX3_PLATFORM_ENV="${d}/none.env" "${d}/scripts/start-ros.sh" 2>&1)"
+  out="$(PATH="${d}/bin:${PATH}" DYX3_PLATFORM_ENV="${d}/none.env" "${d}/scripts/start-control.sh" 2>&1)"
   rc=$?
-  check "start-ros: an agent already listening on the default udp/8888 starts the graph at once" '[ "${rc}" -eq 0 ] && printf "%s" "${out}" | grep -q "XRCE agent listening on udp/8888 after 0.0 s" && grep -q "^ros2 launch dyx3_bringup control_graph.launch.py" "${d}/sw_ros2"'
+  check "start-control: an agent already listening on the default udp/8888 starts the graph at once" '[ "${rc}" -eq 0 ] && printf "%s" "${out}" | grep -q "XRCE agent listening on udp/8888 after 0.0 s" && grep -q "^ros2 launch dyx3_bringup control_graph.launch.py" "${d}/sw_ros2"'
   # The port comes from platform.env (read, not executed).
   printf 'DYX3_XRCE_PORT=9999\n' >"${d}/platform.env"
   : >"${d}/sw_listen"
   : >"${d}/sw_ros2"
   ( sleep 1; printf '9999\n' >"${d}/sw_listen" ) &
-  out="$(PATH="${d}/bin:${PATH}" DYX3_PLATFORM_ENV="${d}/platform.env" "${d}/scripts/start-ros.sh" 2>&1)"
+  out="$(PATH="${d}/bin:${PATH}" DYX3_PLATFORM_ENV="${d}/platform.env" "${d}/scripts/start-control.sh" 2>&1)"
   rc=$?
   wait
-  check "start-ros: it waits for the agent on the port from platform.env, then starts the graph" '[ "${rc}" -eq 0 ] && printf "%s" "${out}" | grep -q "XRCE agent listening on udp/9999 after [1-9]" && grep -q "sport = :9999" "${d}/sw_ss" && grep -q "^ros2 launch" "${d}/sw_ros2"'
+  check "start-control: it waits for the agent on the port from platform.env, then starts the graph" '[ "${rc}" -eq 0 ] && printf "%s" "${out}" | grep -q "XRCE agent listening on udp/9999 after [1-9]" && grep -q "sport = :9999" "${d}/sw_ss" && grep -q "^ros2 launch" "${d}/sw_ros2"'
   # No agent at all: bounded wait, one WARN line, the graph still starts.
   : >"${d}/sw_listen"
   : >"${d}/sw_ros2"
   local t0 t1
   t0="$(date +%s)"
-  out="$(PATH="${d}/bin:${PATH}" DYX3_PLATFORM_ENV="${d}/platform.env" DYX3_AGENT_WAIT_S=2 "${d}/scripts/start-ros.sh" 2>&1)"
+  out="$(PATH="${d}/bin:${PATH}" DYX3_PLATFORM_ENV="${d}/platform.env" DYX3_AGENT_WAIT_S=2 "${d}/scripts/start-control.sh" 2>&1)"
   rc=$?
   t1="$(date +%s)"
-  check "start-ros: no agent: the wait is bounded, it logs one WARN line and starts the graph anyway" '[ "${rc}" -eq 0 ] && [ $((t1 - t0)) -ge 2 ] && [ $((t1 - t0)) -le 5 ] && [ "$(printf "%s\n" "${out}" | grep -c "nothing listens on udp/9999 after 2 s; starting the graph anyway")" -eq 1 ] && grep -q "^ros2 launch" "${d}/sw_ros2"'
+  check "start-control: no agent: the wait is bounded, it logs one WARN line and starts the graph anyway" '[ "${rc}" -eq 0 ] && [ $((t1 - t0)) -ge 2 ] && [ $((t1 - t0)) -le 5 ] && [ "$(printf "%s\n" "${out}" | grep -c "nothing listens on udp/9999 after 2 s; starting the control chain anyway")" -eq 1 ] && grep -q "^ros2 launch" "${d}/sw_ros2"'
   # No ss on PATH (a PATH of symlinks to just what the script needs): no wait, one line, the graph starts.
   mkdir -p "${d}/nossbin"
   for tool in bash env dirname sed tail sleep; do ln -sf "$(command -v "${tool}")" "${d}/nossbin/${tool}"; done
   ln -sf "${d}/bin/ros2" "${d}/nossbin/ros2"
   : >"${d}/sw_ros2"
-  out="$(PATH="${d}/nossbin" DYX3_PLATFORM_ENV="${d}/platform.env" "${d}/scripts/start-ros.sh" 2>&1)"
+  out="$(PATH="${d}/nossbin" DYX3_PLATFORM_ENV="${d}/platform.env" "${d}/scripts/start-control.sh" 2>&1)"
   rc=$?
-  check "start-ros: without ss it does not wait and still starts the graph" '[ "${rc}" -eq 0 ] && printf "%s" "${out}" | grep -q "ss not available" && grep -q "^ros2 launch" "${d}/sw_ros2"'
+  check "start-control: without ss it does not wait and still starts the graph" '[ "${rc}" -eq 0 ] && printf "%s" "${out}" | grep -q "ss not available" && grep -q "^ros2 launch" "${d}/sw_ros2"'
+
+  # start-services.sh: the services launch at once; no XRCE-agent wait (no ss call): none of its nodes talks to the agent.
+  cp "${REPO}/deployment/scripts/start-services.sh" "${d}/scripts/"
+  : >"${d}/sw_ros2"
+  : >"${d}/sw_ss"
+  : >"${d}/sw_listen"
+  out="$(env -u DYX3_CONFIG_DIR PATH="${d}/bin:${PATH}" DYX3_PLATFORM_ENV="${d}/platform.env" "${d}/scripts/start-services.sh" 2>&1)"
+  rc=$?
+  check "start-services: starts services_graph.launch.py at once and never waits for the XRCE agent" '[ "${rc}" -eq 0 ] && grep -qx "ros2 launch dyx3_bringup services_graph.launch.py config_dir:=/etc/dyx3" "${d}/sw_ros2" && [ ! -s "${d}/sw_ss" ]'
+  printf 'dyx3_env_load() { return 1; }\n' >"${d}/scripts/dyx3-env.sh"
+  : >"${d}/sw_ros2"
+  PATH="${d}/bin:${PATH}" "${d}/scripts/start-services.sh" >/dev/null 2>&1
+  rc=$?
+  check "start-services: a failed environment load exits non-zero and launches nothing" '[ "${rc}" -ne 0 ] && [ ! -s "${d}/sw_ros2" ]'
+}
+
+# ---------------------------------------------------------------- P2 part 3: dyx3-ros split into dyx3-control + dyx3-services
+# The upgrade path on a staged root with a recorded systemctl: an existing rover has dyx3-ros.service installed and enabled; the new
+# release installs and enables dyx3-control and dyx3-services, restarts them in manifest order, and the stale unit is stopped,
+# disabled and removed, idempotently. A rollback to a pre-split release does the reverse. Health treats dyx3-services as the
+# gateway's unit. What this does NOT prove: real systemd ordering, Wants=/Requires= propagation, or the rover staying armed in
+# OFFBOARD while dyx3-services restarts (docs/bench/fault_injection.md, on the rover).
+unit_split() {
+  export INSTALLER_DIR="${REPO}/installer" DYX3_ROOT="${T}/us"
+  # shellcheck disable=SC1091
+  . "${INSTALLER_DIR}/lib/common.sh"
+  for l in systemd_install health_check; do
+    # shellcheck disable=SC1090
+    . "${INSTALLER_DIR}/lib/${l}.sh"
+  done
+  set +e
+  local rel="${T}/us_rel" old="${T}/us_old" sd="${SYSTEMD_DIR}" calls="${T}/us_calls" out="${T}/us_out"
+  mkdir -p "${rel}/installer" "${sd}/multi-user.target.wants"
+  cp -r "${REPO}/deployment" "${rel}/"
+  cp -r "${REPO}/installer/manifests" "${rel}/installer/"
+  # The rover as a pre-split release left it: dyx3-ros installed and enabled next to the units that stay.
+  printf '[Service]\nExecStart=/opt/dyx3/current/bin/dyx3-ros\n' >"${sd}/dyx3-ros.service"
+  ln -sfn ../dyx3-ros.service "${sd}/multi-user.target.wants/dyx3-ros.service"
+  printf '[Service]\n' >"${sd}/dyx3-platform.service"
+  ln -sfn ../dyx3-platform.service "${sd}/multi-user.target.wants/dyx3-platform.service"
+  us_systemd() { (systemd_available() { return 0; }; systemctl() { printf '%s\n' "$*" >>"${calls}"; }; "$@"); }
+  : >"${calls}"
+  us_systemd install_units "${rel}" >"${out}" 2>&1
+  check "split upgrade: the stale dyx3-ros unit is stopped, disabled and reset" 'grep -qx "stop dyx3-ros.service" "${calls}" && grep -qx "disable dyx3-ros.service" "${calls}" && grep -qx "reset-failed dyx3-ros.service" "${calls}" && grep -q "removing dyx3-ros.service" "${out}"'
+  check "split upgrade: the stale unit is stopped before the new units are enabled" '[ "$(grep -n -x "stop dyx3-ros.service" "${calls}" | cut -d: -f1)" -lt "$(grep -n -x "enable dyx3-control.service" "${calls}" | cut -d: -f1)" ]'
+  check "split upgrade: the dyx3-ros unit file and its enablement link are gone" '[ ! -e "${sd}/dyx3-ros.service" ] && [ ! -L "${sd}/multi-user.target.wants/dyx3-ros.service" ]'
+  check "split upgrade: dyx3-control and dyx3-services are installed as shipped" 'cmp -s "${sd}/dyx3-control.service" "${REPO}/deployment/systemd/dyx3-control.service" && cmp -s "${sd}/dyx3-services.service" "${REPO}/deployment/systemd/dyx3-services.service"'
+  check "split upgrade: both new units are enabled, dyx3-ros is never enabled" 'grep -qx "enable dyx3-control.service" "${calls}" && grep -qx "enable dyx3-services.service" "${calls}" && ! grep -qx "enable dyx3-ros.service" "${calls}"'
+  check "split upgrade: units that stay are kept and re-installed, not removed" '! grep -q "removing dyx3-platform" "${out}" && cmp -s "${sd}/dyx3-platform.service" "${REPO}/deployment/systemd/dyx3-platform.service" && [ -L "${sd}/multi-user.target.wants/dyx3-platform.service" ]'
+  : >"${calls}"
+  us_systemd restart_enabled_services "${rel}" >/dev/null 2>&1
+  check "split upgrade: the enabled units restart in manifest order, control before services, backend last" '[ "$(sed -n "s/^restart //p" "${calls}" | tr "\n" " ")" = "dyx3-usb-serial-check.service dyx3-platform.service dyx3-control.service dyx3-services.service dyx3-rtk.service dyx3-spray-watchdog.service dyx3-recorder.service dyx3-backend.service " ]'
+  : >"${calls}"
+  us_systemd stop_enabled_services "${rel}" >/dev/null 2>&1
+  check "a failed first install stops the units in reverse order: services before control" '[ "$(sed -n "s/^stop //p" "${calls}" | tr "\n" " ")" = "dyx3-backend.service dyx3-recorder.service dyx3-spray-watchdog.service dyx3-rtk.service dyx3-services.service dyx3-control.service dyx3-platform.service dyx3-usb-serial-check.service " ]'
+  # Idempotent: a second run removes nothing and ends in the same state.
+  : >"${calls}"
+  us_systemd install_units "${rel}" >"${out}" 2>&1
+  check "split upgrade: a second run removes nothing and touches no stale unit" '! grep -q "removing" "${out}" && ! grep -q "dyx3-ros" "${calls}" && [ -f "${sd}/dyx3-control.service" ] && [ -f "${sd}/dyx3-services.service" ]'
+  # A run interrupted between deleting the unit file and its link: the dangling link alone is still swept.
+  ln -sfn ../dyx3-ros.service "${sd}/multi-user.target.wants/dyx3-ros.service"
+  : >"${calls}"
+  us_systemd install_units "${rel}" >"${out}" 2>&1
+  check "split upgrade: a dangling dyx3-ros enablement link left by an interrupted run is removed" '[ ! -L "${sd}/multi-user.target.wants/dyx3-ros.service" ] && grep -qx "disable dyx3-ros.service" "${calls}"'
+  # Without systemd (staged root) the files are still converged.
+  printf '[Service]\n' >"${sd}/dyx3-ros.service"
+  install_units "${rel}" >"${out}" 2>&1
+  check "split upgrade without systemd: the stale unit file is still removed" '[ ! -e "${sd}/dyx3-ros.service" ] && [ -f "${sd}/dyx3-control.service" ]'
+
+  # A release that ships a unit file its manifest no longer lists: not installed, removed when present.
+  cp -r "${rel}" "${T}/us_unlisted"
+  printf '[Service]\n' >"${T}/us_unlisted/deployment/systemd/dyx3-ros.service"
+  printf '[Service]\n' >"${sd}/dyx3-ros.service"
+  install_units "${T}/us_unlisted" >"${out}" 2>&1
+  check "a unit file the manifest no longer lists is neither installed nor kept" '[ ! -e "${sd}/dyx3-ros.service" ] && grep -q "removing dyx3-ros.service" "${out}"'
+  # A manifest without [services] never turns into "remove every unit".
+  cp -r "${rel}" "${T}/us_nosvc"
+  awk '/^\[services\]/ { skip = 1; next } /^\[/ { skip = 0 } !skip' "${rel}/installer/manifests/production.manifest" >"${T}/us_nosvc/installer/manifests/production.manifest"
+  install_units "${T}/us_nosvc" >"${out}" 2>&1
+  check "a manifest without [services] installs every shipped unit and removes none of them" '! grep -q "removing" "${out}" && grep -q "no \[services\]" "${out}" && [ -f "${sd}/dyx3-control.service" ] && [ -f "${sd}/dyx3-services.service" ] && [ -f "${sd}/dyx3-backend.service" ]'
+
+  # Rollback to a pre-split release (dyx3-ros shipped and enabled, no control/services units): the reverse.
+  cp -r "${rel}" "${old}"
+  rm -f "${old}/deployment/systemd/dyx3-control.service" "${old}/deployment/systemd/dyx3-services.service"
+  printf '[Service]\nExecStart=/opt/dyx3/current/bin/dyx3-ros\n' >"${old}/deployment/systemd/dyx3-ros.service"
+  sed -i.tmp -e 's/^dyx3-control$/dyx3-ros/' -e '/^dyx3-services$/d' "${old}/installer/manifests/production.manifest" && rm -f "${old}/installer/manifests/production.manifest.tmp"
+  : >"${calls}"
+  us_systemd install_units "${old}" >"${out}" 2>&1
+  check "rollback across the split: dyx3-control and dyx3-services are stopped and removed, dyx3-ros comes back enabled" 'grep -qx "stop dyx3-control.service" "${calls}" && grep -qx "stop dyx3-services.service" "${calls}" && [ ! -e "${sd}/dyx3-control.service" ] && [ ! -e "${sd}/dyx3-services.service" ] && [ -f "${sd}/dyx3-ros.service" ] && grep -qx "enable dyx3-ros.service" "${calls}"'
+  us_systemd install_units "${rel}" >/dev/null 2>&1
+
+  # ---- health: dyx3-services is the gateway's unit (a pre-split dyx3-ros counts as both units)
+  local m="${T}/us_health"
+  us_manifest() { mkdir -p "${m}/installer/manifests"; printf '[enabled_services]\n%s\n' "$1" | tr ' ' '\n' >"${m}/installer/manifests/production.manifest"; }
+  rm -f "${DYX3_GATEWAY_SOCK}"
+  us_manifest "dyx3-control dyx3-services"
+  (DYX3_HEALTH_SETTLE_S=1 health_extras "${m}") >"${out}" 2>&1
+  check "health: with dyx3-services enabled the gateway must answer, and the FAIL names dyx3-services" 'grep -q "^FAIL  gateway does not answer on .* (dyx3-services / system_gateway down?)" "${out}"'
+  us_manifest "dyx3-control"
+  (DYX3_HEALTH_SETTLE_S=1 health_extras "${m}") >"${out}" 2>&1
+  check "health: with dyx3-services not enabled the gateway is not checked (dyx3-control alone is not the gateway's unit)" '! grep -q "gateway" "${out}"'
+  us_manifest "dyx3-ros"
+  (DYX3_HEALTH_SETTLE_S=1 health_extras "${m}") >"${out}" 2>&1
+  check "health: a pre-split release (dyx3-ros) keeps its gateway check, naming dyx3-ros" 'grep -q "^FAIL  gateway does not answer on .* (dyx3-ros / system_gateway down?)" "${out}"'
+  us_manifest "dyx3-services"
+  (health_dds "${m}") >"${out}" 2>&1
+  check "health: the px4_link sample is gated on dyx3-control, not dyx3-services" '[ ! -s "${out}" ]'
 }
 
 sup
 recorder_launcher
-(start_ros_wait)
+(start_control_wait)
+(unit_split)
 (libs)
 (lifecycle)
 (handoff)
