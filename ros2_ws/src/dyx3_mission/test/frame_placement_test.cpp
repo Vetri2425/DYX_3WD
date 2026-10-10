@@ -1,5 +1,6 @@
-// Frame placement: the projection against hand-computed values and PX4's own inverse, the meta
-// rule (anchor / ekf_local_ned / refused), bounds, and the execution artifact RPP will load.
+// Frame placement: the projection against hand-computed values and PX4's own inverse, the WGS84
+// tangent-plane inverse, the full ellipsoid-correct placement against hand-computed values, the
+// meta rule (anchor / ekf_local_ned / refused), bounds, and the execution artifact RPP will load.
 #include "dyx3_mission/frame_placement.hpp"
 
 #include <gtest/gtest.h>
@@ -16,6 +17,10 @@ namespace {
 
 constexpr double kR = 6371000.0;  // PX4 CONSTANTS_RADIUS_OF_EARTH
 constexpr double kDeg = 3.14159265358979323846 / 180.0;
+// WGS84 radii of curvature at 13 deg N, written out independently of the implementation:
+// e2 = f (2 - f), f = 1 / 298.257223563; M = a (1 - e2) / (1 - e2 sin^2)^1.5; N = a / sqrt(...).
+constexpr double kM13 = 6338659.938909;  // m
+constexpr double kN13 = 6379217.589221;  // m
 
 PathArtifact make_source(const std::string& meta, const std::vector<ArtifactPoint>& pts) {
   const std::string bytes = serialize_artifact("app_v1", meta, pts);
@@ -40,6 +45,8 @@ EkfReference ref(double lat, double lon) {
   r.lon_deg = lon;
   return r;
 }
+
+EkfReference ref_of(const GeoPoint& g) { return ref(g.lat_deg, g.lon_deg); }
 
 // PX4 MapProjection::reproject (src/lib/geo/geo.cpp), the inverse of project, written out here
 // independently of the implementation under test.
@@ -91,6 +98,100 @@ TEST(Projection, InverseOfPx4Reproject) {
   }
 }
 
+// ---- WGS84 tangent plane (the tablet's model) and the one placement path
+TEST(Wgs84, RadiiOfCurvature) {
+  const Wgs84Radii r13 = wgs84_radii(13.0);
+  EXPECT_NEAR(r13.meridian_m, kM13, 1e-5);
+  EXPECT_NEAR(r13.prime_vertical_m, kN13, 1e-5);
+  const Wgs84Radii eq = wgs84_radii(0.0);  // equator: N = a, M = a (1 - e2)
+  EXPECT_NEAR(eq.prime_vertical_m, 6378137.0, 1e-6);
+  EXPECT_NEAR(eq.meridian_m, 6335439.327, 1e-3);
+  const Wgs84Radii pole = wgs84_radii(90.0);  // pole: M = N = a / sqrt(1 - e2)
+  EXPECT_NEAR(pole.meridian_m, pole.prime_vertical_m, 1e-6);
+  EXPECT_NEAR(pole.meridian_m, 6399593.626, 1e-3);
+}
+
+TEST(Wgs84, TangentPlaneInverse) {
+  const GeoPoint anchor{13.0, 77.5};
+  const GeoPoint g = tangent_plane_to_geo(anchor, {100.0, -250.0});
+  EXPECT_NEAR((g.lat_deg - 13.0) * kDeg * kM13, 100.0, 1e-6);
+  EXPECT_NEAR((g.lon_deg - 77.5) * kDeg * kN13 * std::cos(13.0 * kDeg), -250.0, 1e-6);
+  const GeoPoint same = tangent_plane_to_geo(anchor, {0.0, 0.0});
+  EXPECT_EQ(same.lat_deg, 13.0);
+  EXPECT_EQ(same.lon_deg, 77.5);
+  EXPECT_FALSE(std::isfinite(tangent_plane_to_geo({90.0, 0.0}, {0.0, 1.0}).lon_deg));
+}
+
+// Owner case: anchor == EKF reference at 13 deg N. 100 m of ground north is 100 R / M EKF metres
+// (+0.510203 %), 100 m of ground east is 100 R / N EKF metres (-0.128818 %): a design translated
+// without this would be painted 51.0 cm short north-south and 12.9 cm long east-west per 100 m.
+TEST(Placement, EllipsoidScaleAtThirteenDegreesNorth) {
+  const GeoPoint ref{13.0, 77.5};
+  const NePoint north = place_point(ref, ref, {100.0, 0.0});
+  EXPECT_NEAR(north.north_m, 100.0 * kR / kM13, 1e-4);  // 100.510203 m
+  EXPECT_NEAR(north.north_m, 100.510203441, 1e-6);
+  EXPECT_NEAR(north.east_m, 0.0, 1e-9);
+  const NePoint east = place_point(ref, ref, {0.0, 100.0});
+  EXPECT_NEAR(east.east_m, 100.0 * kR / kN13, 1e-4);  // 99.871182 m
+  EXPECT_NEAR(east.east_m, 99.871181863, 1e-6);
+  // The parallel through the reference is not the azimuthal projection's east axis: it lies
+  // R sin(phi0) cos(phi0) (1 - cos dlambda) north of it (0.18 mm at 100 m, hand formula).
+  const double dlon = 100.0 / (kN13 * std::cos(13.0 * kDeg));
+  EXPECT_NEAR(east.north_m,
+              kR * std::sin(13.0 * kDeg) * std::cos(13.0 * kDeg) * (1.0 - std::cos(dlon)), 1e-9);
+  EXPECT_NEAR(east.north_m, 0.000180720, 1e-9);
+  // Both at once: the same scales plus the second-order terms of the projection (0.18 mm north,
+  // -0.36 mm east at 141 m, meridian convergence); independent reference implementation values.
+  const NePoint both = place_point(ref, ref, {100.0, 100.0});
+  EXPECT_NEAR(both.north_m, 100.510384164, 1e-6);
+  EXPECT_NEAR(both.east_m, 99.870818102, 1e-6);
+  EXPECT_NEAR(both.north_m, 100.0 * kR / kM13, 0.5e-3);
+  EXPECT_NEAR(both.east_m, 100.0 * kR / kN13, 0.5e-3);
+  // (0, 0) at the reference is the origin, exactly.
+  const NePoint zero = place_point(ref, ref, {0.0, 0.0});
+  EXPECT_EQ(zero.north_m, 0.0);
+  EXPECT_EQ(zero.east_m, 0.0);
+}
+
+// Anchor 50 m from the EKF reference (29.870 m north, 40.139 m east on the ground at 13 deg N).
+// Hand check of the anchor on the sphere (k = c / sin c = 1 + 1e-11 here): north = R dlat plus
+// the parallel's offset R sin(lat_r) cos(lat_r) dlon^2 / 2 (29 micrometres), east =
+// R cos(lat_anchor) sin(dlon). The points: independent reference implementation (WGS84 inverse at
+// the anchor, then PX4 MapProjection::project in double), to 1 micrometre.
+TEST(Placement, AnchorAwayFromTheReferenceHandComputed) {
+  const GeoPoint ref{13.0, 77.5};
+  const GeoPoint anchor{13.00027, 77.50037};
+  const NePoint a = place_point(ref, anchor, {0.0, 0.0});
+  const double dlon = 0.00037 * kDeg;
+  EXPECT_NEAR(
+      a.north_m,
+      kR * 0.00027 * kDeg + kR * std::sin(13.0 * kDeg) * std::cos(13.0 * kDeg) * dlon * dlon / 2.0,
+      1e-6);
+  EXPECT_NEAR(a.north_m, 30.022659312, 1e-6);
+  EXPECT_NEAR(a.east_m, kR * std::cos(13.00027 * kDeg) * std::sin(dlon), 1e-6);
+  EXPECT_NEAR(a.east_m, 40.087609302, 1e-6);
+  const NePoint p = place_point(ref, anchor, {10.0, -20.0});
+  EXPECT_NEAR(p.north_m, 40.073657660, 1e-6);
+  EXPECT_NEAR(p.east_m, 20.113365742, 1e-6);
+  const NePoint q = place_point(ref, anchor, {-50.0, 30.0});
+  EXPECT_NEAR(q.north_m, -20.232381578, 1e-6);
+  EXPECT_NEAR(q.east_m, 70.049091221, 1e-6);
+  // The same through place_artifact (the node's path) and in the stored bytes.
+  const auto src = make_source(anchored_meta(13.00027, 77.50037),
+                               {{0.0, 0.0, 0}, {10.0, -20.0, 1}, {-50.0, 30.0, 3}});
+  const Placement pl = place_artifact(src, ref_of(ref), 1000.0);
+  ASSERT_TRUE(pl.ok) << pl.detail;
+  const auto back = parse_artifact(pl.bytes, pl.execution.sha256);
+  ASSERT_TRUE(back.ok) << back.error;
+  ASSERT_EQ(back.artifact.points.size(), 3U);
+  EXPECT_NEAR(back.artifact.points[1].north_m, 40.073657660, 1e-6);
+  EXPECT_NEAR(back.artifact.points[1].east_m, 20.113365742, 1e-6);
+  EXPECT_NEAR(back.artifact.points[2].north_m, -20.232381578, 1e-6);
+  EXPECT_NEAR(back.artifact.points[2].east_m, 70.049091221, 1e-6);
+  EXPECT_NE(back.artifact.meta_json.find("wgs84_tangent_plane_to_px4_map_projection"),
+            std::string::npos);
+}
+
 // ---- meta rule
 TEST(FrameSpec, AnchoredLocalNed) {
   const auto f = read_frame_spec(anchored_meta(12.5, 77.25));
@@ -134,8 +235,9 @@ TEST(FrameSpec, EverythingElseIsRefused) {
 }
 
 // ---- placement
-TEST(Placement, AnchoredTrajectoryIsTranslatedByTheProjectedAnchor) {
-  // EKF origin at (45, 7); anchor 0.001 deg north of it: 111.194927 m north, 0 m east.
+TEST(Placement, AnchoredTrajectoryIsPlacedThroughTheEllipsoid) {
+  // EKF origin at (45, 7); anchor 0.001 deg north of it: 111.194927 m north, 0 m east. The point
+  // (10, -5) ground metres is NOT anchor + (10, -5): at 45 deg R/M = 1.000568, R/N = 0.997206.
   const auto src = make_source(anchored_meta(45.001, 7.0), {{0.0, 0.0, 2}, {10.0, -5.0, 3}});
   const Placement p = place_artifact(src, ref(45.0, 7.0), 1000.0);
   ASSERT_TRUE(p.ok) << p.detail;
@@ -145,8 +247,8 @@ TEST(Placement, AnchoredTrajectoryIsTranslatedByTheProjectedAnchor) {
   ASSERT_EQ(p.execution.points.size(), 2U);
   EXPECT_NEAR(p.execution.points[0].north_m, 111.194927, 1e-6);
   EXPECT_NEAR(p.execution.points[0].east_m, 0.0, 1e-9);
-  EXPECT_NEAR(p.execution.points[1].north_m, 121.194927, 1e-6);
-  EXPECT_NEAR(p.execution.points[1].east_m, -5.0, 1e-9);
+  EXPECT_NEAR(p.execution.points[1].north_m, 121.200609211, 1e-6);
+  EXPECT_NEAR(p.execution.points[1].east_m, -4.986031366, 1e-6);
   EXPECT_EQ(p.execution.points[0].flags, 2);  // flags travel unchanged
   EXPECT_EQ(p.execution.points[1].flags, 3);
   // The bytes are a canonical DYX3PATH 1 that the reader (RPP's) accepts under the new sha.
@@ -200,6 +302,16 @@ TEST(Placement, OutOfBoundsIsRefused) {
   src = make_source(anchored_meta(45.0, 7.0), {{0.0, 0.0, 0}, {999.0, 100.0, 0}});
   EXPECT_EQ(place_artifact(src, ref(45.0, 7.0), 1000.0).error, PlacementError::kOutOfBounds);
   EXPECT_TRUE(place_artifact(src, ref(45.0, 7.0), 1000.0 + 6.0).ok);
+  // The bound is on the PLACED (EKF) coordinates: 998 m of ground north at 13 deg N is 1003.09
+  // EKF metres, beyond 1000 m (a plain translation would have let it through).
+  src = make_source(anchored_meta(13.0, 77.5), {{0.0, 0.0, 0}, {998.0, 0.0, 0}});
+  const Placement far = place_artifact(src, ref(13.0, 77.5), 1000.0);
+  EXPECT_EQ(far.error, PlacementError::kOutOfBounds);
+  EXPECT_NE(far.detail.find("placed point 1"), std::string::npos);
+  EXPECT_TRUE(place_artifact(src, ref(13.0, 77.5), 1003.1).ok);
+  // An anchor at a pole has no east direction: refused, never NaN coordinates.
+  src = make_source(anchored_meta(90.0, 0.0), {{0.0, 0.0, 0}, {0.0, 1.0, 0}});
+  EXPECT_EQ(place_artifact(src, ref(89.9999, 0.0), 1000.0).error, PlacementError::kOutOfBounds);
   // An ekf_local_ned path far from the origin.
   src = make_source(kEkfMeta, {{0.0, 0.0, 0}, {0.0, 1200.0, 0}});
   EXPECT_EQ(place_artifact(src, EkfReference{}, 1000.0).error, PlacementError::kOutOfBounds);

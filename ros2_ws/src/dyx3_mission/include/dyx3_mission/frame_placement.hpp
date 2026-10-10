@@ -1,13 +1,19 @@
 // frame_placement — places a source path artifact in the EKF local NED frame. SAFETY-CRITICAL.
 // See docs/contracts/dyx3_mission.md section 6.
 //
-// Pure C++ (no ROS). The rule (owner decision, mission contract v2):
-//  * meta "frame" == "local_ned" with an "anchor" {lat, lon}: the anchor IS the trajectory's local
-//    origin. Execution point = (anchor projected into the EKF frame with the EKF reference
-//    VehicleState.reference_latitude_deg / reference_longitude_deg) + (n, e). The projection is
-//    PX4's own MapProjection::project (azimuthal equidistant on the 6371000 m sphere), the exact
-//    function EKF2 uses to produce vehicle_local_position from its global estimate, so the anchor
-//    lands where the EKF will report the rover when it stands on the anchor.
+// Pure C++ (no ROS). The rule (owner decisions, mission contract v2, 2026-10-10):
+//  * meta "frame" == "local_ned" with an "anchor" {lat, lon}: the points (n, e) are TRUE ground
+//    metres in the WGS84 local tangent plane at the anchor, exactly the tablet's model
+//    (north = dphi * M(phi0), east = dlambda * N(phi0) * cos(phi0), M and N at the anchor
+//    latitude). Each point is placed by ONE path, place_point():
+//      1. invert that model to lat/lon (phi = phi0 + n / M(phi0), lambda = lambda0 + e /
+//         (N(phi0) cos(phi0))), then
+//      2. project lat/lon into the EKF frame with PX4's own MapProjection::project (azimuthal
+//         equidistant on the 6371000 m sphere about the live EKF reference), the exact function
+//         EKF2 uses to turn a GNSS fix into a local position.
+//    So a placed point is where the EKF will report the rover when its GNSS reads that point's
+//    latitude/longitude. A plain translation by the projected anchor is NOT used: EKF metres are
+//    sphere metres (0.51 % short north-south, 0.13 % long east-west at 13 deg N).
 //  * meta "frame" == "ekf_local_ned" with no anchor (null or absent): the points are already EKF
 //    local NED; no transform, the execution artifact IS the source artifact.
 //  * anything else (no "frame" key: old and planner-made artifacts; "local_ned" without an anchor;
@@ -35,6 +41,21 @@ struct NePoint {
 /// PX4 MapProjection::project (src/lib/geo/geo.cpp at the pinned firmware), in double precision:
 /// `p` in the local frame whose origin is `ref`.
 NePoint project_to_ekf(const GeoPoint& ref, const GeoPoint& p);
+
+/// WGS84 radii of curvature at a latitude: meridian M and prime vertical N (metres).
+struct Wgs84Radii {
+  double meridian_m = 0.0;
+  double prime_vertical_m = 0.0;
+};
+Wgs84Radii wgs84_radii(double lat_deg);
+
+/// Step 1: the tablet's WGS84 tangent-plane model at `anchor`, inverted: (n, e) ground metres ->
+/// lat/lon. Non-finite when the anchor is at a pole (no east direction).
+GeoPoint tangent_plane_to_geo(const GeoPoint& anchor, const NePoint& ne);
+
+/// THE placement of one point: tangent_plane_to_geo(anchor, ne) projected with project_to_ekf
+/// about the EKF reference `ekf_ref`.
+NePoint place_point(const GeoPoint& ekf_ref, const GeoPoint& anchor, const NePoint& ne);
 
 enum class FrameKind : std::uint8_t { kAnchored, kEkfLocal };
 

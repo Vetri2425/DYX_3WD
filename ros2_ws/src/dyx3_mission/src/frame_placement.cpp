@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <optional>
 
 namespace dyx3_mission {
@@ -18,6 +19,12 @@ namespace {
 constexpr double kPx4EarthRadiusM = 6371000.0;
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kDegToRad = kPi / 180.0;
+// WGS84 (the tablet's model, contract section 6): semi-major axis and flattening.
+constexpr double kWgs84A = 6378137.0;
+constexpr double kWgs84F = 1.0 / 298.257223563;
+constexpr double kWgs84E2 = kWgs84F * (2.0 - kWgs84F);  // first eccentricity squared
+// Recorded in the execution meta (provenance of the placed coordinates).
+constexpr const char* kPlacementMethod = "wgs84_tangent_plane_to_px4_map_projection";
 
 // ---- minimal JSON reader for the two meta keys (the meta was already verified canonical) ----
 struct JsonValue {
@@ -171,6 +178,36 @@ NePoint project_to_ekf(const GeoPoint& ref, const GeoPoint& p) {
   return out;
 }
 
+Wgs84Radii wgs84_radii(double lat_deg) {
+  const double s = std::sin(lat_deg * kDegToRad);
+  const double w = 1.0 - kWgs84E2 * s * s;
+  Wgs84Radii r;
+  r.prime_vertical_m = kWgs84A / std::sqrt(w);
+  r.meridian_m = kWgs84A * (1.0 - kWgs84E2) / (w * std::sqrt(w));
+  return r;
+}
+
+GeoPoint tangent_plane_to_geo(const GeoPoint& anchor, const NePoint& ne) {
+  const Wgs84Radii r = wgs84_radii(anchor.lat_deg);
+  const double cos_lat0 = std::cos(anchor.lat_deg * kDegToRad);
+  GeoPoint g;
+  g.lat_deg = anchor.lat_deg + (ne.north_m / r.meridian_m) / kDegToRad;
+  // At a pole there is no east: report it as non-finite (placement refuses it).
+  g.lon_deg = std::fabs(cos_lat0) > 1e-12
+                  ? anchor.lon_deg + (ne.east_m / (r.prime_vertical_m * cos_lat0)) / kDegToRad
+                  : std::numeric_limits<double>::quiet_NaN();
+  return g;
+}
+
+NePoint place_point(const GeoPoint& ekf_ref, const GeoPoint& anchor, const NePoint& ne) {
+  const GeoPoint g = tangent_plane_to_geo(anchor, ne);
+  if (!std::isfinite(g.lat_deg) || !std::isfinite(g.lon_deg)) {
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    return NePoint{nan, nan};
+  }
+  return project_to_ekf(ekf_ref, g);
+}
+
 FrameSpec read_frame_spec(const std::string& meta_json) {
   MetaReader top(meta_json);
   std::optional<std::string> frame;
@@ -266,7 +303,8 @@ Placement place_artifact(const PathArtifact& source, const EkfReference& ref,
     return placement_error(PlacementError::kReferenceInvalid,
                            "no valid EKF global reference to place an anchored trajectory");
   }
-  const NePoint a = project_to_ekf(ekf_ref, frame.anchor);
+  // The anchor itself (n, e) = (0, 0): place_point reduces to project_to_ekf(ref, anchor).
+  const NePoint a = place_point(ekf_ref, frame.anchor, NePoint{0.0, 0.0});
   if (too_far(a.north_m, a.east_m)) {
     return placement_error(PlacementError::kOutOfBounds,
                            "anchor is " + python_repr(std::hypot(a.north_m, a.east_m)) +
@@ -281,8 +319,10 @@ Placement place_artifact(const PathArtifact& source, const EkfReference& ref,
   p.execution.points.reserve(source.points.size());
   for (std::size_t i = 0; i < source.points.size(); ++i) {
     ArtifactPoint q = source.points[i];
-    q.north_m = a.north_m + source.points[i].north_m;
-    q.east_m = a.east_m + source.points[i].east_m;
+    const NePoint placed = place_point(ekf_ref, frame.anchor,
+                                       NePoint{source.points[i].north_m, source.points[i].east_m});
+    q.north_m = placed.north_m;
+    q.east_m = placed.east_m;
     if (too_far(q.north_m, q.east_m)) {
       return placement_error(PlacementError::kOutOfBounds,
                              "placed point " + std::to_string(i) + " is more than " +
@@ -295,7 +335,8 @@ Placement place_artifact(const PathArtifact& source, const EkfReference& ref,
   p.execution.meta_json =
       "{\"execution\":{\"anchor_ekf_ne_m\":[" + python_repr(a.north_m) + "," +
       python_repr(a.east_m) + "],\"ekf_reference\":{\"lat\":" + python_repr(ref.lat_deg) +
-      ",\"lon\":" + python_repr(ref.lon_deg) + "},\"source_sha256\":\"" + source.sha256 +
+      ",\"lon\":" + python_repr(ref.lon_deg) + "},\"method\":\"" + kPlacementMethod +
+      "\",\"source_sha256\":\"" + source.sha256 +
       "\"},\"frame\":\"ekf_execution\",\"source_meta\":" + source.meta_json + "}";
   p.bytes = serialize_artifact(p.execution.engine_id, p.execution.meta_json, p.execution.points);
   if (p.bytes.empty()) {

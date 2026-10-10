@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -378,7 +379,7 @@ TEST_F(MissionNodeTest, HappyPathRunsEveryStepInOrderAndPlacesTheAnchoredTraject
   EXPECT_EQ(ops(), (std::vector<std::string>{"arm", "offboard_on"}));
   EXPECT_LT(calls_[0].t_ns, calls_[1].t_ns);
   // The execution artifact is a different, content-addressed file RPP can load, placed with the
-  // EKF reference: point (n, e) -> projected anchor + (n, e).
+  // EKF reference: point (n, e) ground metres -> WGS84 lat/lon at the anchor -> PX4 projection.
   const std::string exec_sha = last_state_.path_artifact_sha256;
   ASSERT_FALSE(exec_sha.empty());
   EXPECT_NE(exec_sha, anchored_sha_);
@@ -389,8 +390,16 @@ TEST_F(MissionNodeTest, HappyPathRunsEveryStepInOrderAndPlacesTheAnchoredTraject
   const auto a = dyx3_mission::project_to_ekf({kRefLat, kRefLon}, {kAnchorLat, kAnchorLon});
   EXPECT_NEAR(a.north_m, 22.238985, 1e-5);  // 0.0002 deg of the 6371 km sphere
   for (std::size_t i = 0; i < exec.artifact.points.size(); ++i) {
-    EXPECT_NEAR(exec.artifact.points[i].north_m, a.north_m + src.artifact.points[i].north_m, 1e-9);
-    EXPECT_NEAR(exec.artifact.points[i].east_m, a.east_m + src.artifact.points[i].east_m, 1e-9);
+    const auto& sp = src.artifact.points[i];
+    const auto want = dyx3_mission::place_point({kRefLat, kRefLon}, {kAnchorLat, kAnchorLon},
+                                                {sp.north_m, sp.east_m});
+    EXPECT_NEAR(exec.artifact.points[i].north_m, want.north_m, 1e-9);
+    EXPECT_NEAR(exec.artifact.points[i].east_m, want.east_m, 1e-9);
+    // Not a translation (unless the point is the anchor): 45 deg N, R/M = 1.000568.
+    if (sp.north_m != 0.0) {
+      EXPECT_GT(std::fabs(exec.artifact.points[i].north_m - (a.north_m + sp.north_m)),
+                1e-4 * std::fabs(sp.north_m));
+    }
     EXPECT_EQ(exec.artifact.points[i].flags, src.artifact.points[i].flags);
   }
 }
