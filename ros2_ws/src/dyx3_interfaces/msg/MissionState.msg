@@ -57,6 +57,8 @@ uint8 REASON_ESTOP=15
 uint8 REASON_RPP_ERROR=16
 # RUNNING and no RppStatus of this mission within rpp_status_max_age_s: automatic pause.
 uint8 REASON_RPP_STALE=17
+# 0.17.0: RPP reported pivot_timed_out while RUNNING (commanded to pivot, heading not reached): PAUSED.
+uint8 REASON_RPP_PIVOT_TIMEOUT=18
 uint8 reason_code
 
 # Content hash of the EXECUTION artifact (docs/contracts/path_artifact.md): lowercase hex
@@ -88,3 +90,9 @@ uint8 WAIT_DISARM=8
 uint8 waiting_on
 # When the current state was entered (dyx3_mission ROS clock).
 builtin_interfaces/Time state_entered
+
+# --- appended in interfaces 0.17.0 ---
+# The run RPP starts (or resumed) this execution from. 0 for a fresh start. A start with StartMission.resume=true
+# restores the persisted progress of the same path artifact and sets this to the first run not yet completed;
+# dyx3_rpp installs the artifact and begins at this run instead of run 0.
+uint32 start_run_index

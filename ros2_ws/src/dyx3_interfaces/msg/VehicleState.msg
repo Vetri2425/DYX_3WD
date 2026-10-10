@@ -48,3 +48,10 @@ bool battery_valid
 float32 battery_voltage_v
 float32 battery_current_a
 float32 battery_remaining        # 0..1
+
+# --- appended in interfaces 0.17.0 ---
+# RC (manual control) link as PX4 sees it, from failsafe_flags.manual_control_signal_lost. rc_link_valid is true only
+# while a failsafe_flags sample is fresh; the motion guard may require rc_link_ok before arming (require_rc_link) so
+# that the RC kill switch is a guaranteed stop for every autonomous run. Not a motion gate while running.
+bool rc_link_valid
+bool rc_link_ok

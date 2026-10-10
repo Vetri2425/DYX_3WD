@@ -55,3 +55,9 @@ float32 path_travel_m
 # --- appended in interfaces 0.16.0 ---
 # Straight-line distance from the rover to the end of the current run, metres; NaN when unknown.
 float32 dist_to_goal_m
+
+# --- appended in interfaces 0.17.0 ---
+# True while the corner / alignment pivot watchdog has expired (segment_turn_timeout_s / segment_pivot_timeout_max_s)
+# and the heading is still outside the release band: the rover is commanded to pivot but has not reached the heading.
+# dyx3_mission pauses the mission on it (REASON_RPP_PIVOT_TIMEOUT). False when no pivot is active.
+bool pivot_timed_out
