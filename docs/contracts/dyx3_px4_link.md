@@ -57,7 +57,7 @@ flashed firmware. `EstimatorHealth.test_ratios_valid` is therefore always false 
 |---|---|---|---|
 | `/dyx3/vehicle_state` | VehicleState | per new local-position sample (about 50 Hz; `event_driven`, section 8) | one fan-out of position, velocity, attitude, resets, status. Validity flags false until each source is fresh |
 | `/dyx3/estimator_health` | EstimatorHealth | 10 Hz | from `estimator_status_flags` |
-| `/dyx3/gnss_report` | GnssReport | on sample | raw `SensorGps`, no interpretation |
+| `/dyx3/gnss_report` | GnssReport | on sample | raw `SensorGps`, no interpretation; reliable, depth 5 |
 | `/dyx3/px4_link/status` | Px4LinkStatus | 10 Hz | see section 6 |
 | `/dyx3/ulog_chunk` | UlogChunk | on sample | after the ack was sent |
 | subscribes `/dyx3/motion_guard/command` | MotionSetpoint | | the only command source |
@@ -295,12 +295,42 @@ Worst case 1.5 s + 2.0 s, inside `dyx3_mission`'s `arm_timeout_s` 4.0 s.
 `Px4LinkStatus.offboard_heartbeat_active` is true while the heartbeat is actually published,
 including the STOP window.
 
+**PX4 refusals (`VehicleCommandAck`).** A pending arm/disarm request (400) and a pending
+`SetOffboard(true)` request (OFFBOARD `DO_SET_MODE`, 176) are matched against
+`/fmu/out/vehicle_command_ack`. An ack belongs to a request only if `command` is the request's
+command id, `target_system == 1 && target_component == 1` (this link's ordinary identity, which PX4
+echoes from `source_*`; spray commands carry their own identities with component ≥ 2, so a spray
+ack can never match), the request's own command has already been published (a held arm has not),
+and the ack arrived (link steady clock) at or after that publication. With no such request pending
+the ack is ignored, so a stale ack never answers a later request. `IN_PROGRESS` is not terminal and
+is ignored; `ACCEPTED` changes nothing (confirmation stays `vehicle_status.arming_state` /
+`nav_state == 14`); any other result (`TEMPORARILY_REJECTED`, `DENIED`, `UNSUPPORTED`, `FAILED`,
+`CANCELLED`) answers the service at once, without waiting for `arm_confirm_timeout_s`, and logs one
+`WARN` naming the command and the PX4 result code. Arm/disarm: `accepted=false`,
+`REASON_REJECTED_BY_FCU` (the `REASON_TIMEOUT` now means only "no ack and no status change").
+`SetOffboard`: `accepted=false`, `REASON_NOT_ARMED_OR_REJECTED`, and the offboard session moves to
+`Failed` immediately (heartbeat STOP, no automatic retry); a refusal that finds the session in any
+other state than `Requested` (restarted by a link loss, already decided) is stale and ignored. The
+MANUAL release is also command 176 and is never matched: publishing a MANUAL request switches off
+ack matching for any pending `SetOffboard(true)` until its OFFBOARD command is published (again),
+so the order of publication decides which request an ack can answer. Residual: a late
+refusal of an earlier MANUAL that arrives after the OFFBOARD command was published cannot be told
+apart (same command, same identity); the MANUAL release is only sent while the heartbeat is off, at
+least `offboard_prestream_s` before the OFFBOARD command.
+
 ## 10. ULog and RTCM
 
 - `ulog_stream` chunks with `FLAGS_NEED_ACK` are acknowledged immediately (a `UlogStreamAck`
   with the same `msg_sequence`) *before* republishing as `UlogChunk`, because the FCU blocks its
   stream on the ack. The start command (`VEHICLE_CMD_LOGGING_START` 2510) is sent once per
   session when `ulog_streaming_enabled`.
+- **Streaming is off by default (fail closed).** Evidence 2026-10-10: the recorder's run summaries
+  show `ulog_gaps: 1195` in a 39 s run with "no header", i.e. the best-effort DDS stream loses about
+  30 chunks/s and the reassembled file cannot be decoded. A stream that cannot be decoded is not
+  evidence. With the default `false` nothing asks the FCU to stream (no 2510 is sent) and the
+  chunk path stays passive; chunks that arrive anyway are still acked and republished. The evidence
+  source is the FCU's SD log, pulled with `bench_tools/ulog_pull.py`. Enable only deliberately
+  (`ulog_streaming_enabled:=true`, IDLE_ONLY) for a transport experiment.
 - `RtcmData` becomes one `GpsInjectData` per chunk (`len = data.size() ≤ 300`, flags copied,
   `device_id = 0`). Oversized data is rejected, counted and never truncated. The link does
   not interpret RTCM and never touches the receiver configuration (hard requirement 2026-10-07).
@@ -330,7 +360,7 @@ negative injected timestamps.
 | `handshake_timeout_s`, `handshake_retry_s` | 5.0, 1.0 | IDLE_ONLY | DERIVED |
 | `offboard_prestream_s`, `offboard_confirm_timeout_s` | 0.5, 2.0 | IDLE_ONLY | DERIVED |
 | `offboard_disable_stop_s` | 0.3 | IDLE_ONLY | DERIVED (PXL-002): ≥ 20 ticks of STOP, well inside `COM_OF_LOSS_T` 1.0 s; validated > 0 |
-| `ulog_streaming_enabled` | true | IDLE_ONLY | |
+| `ulog_streaming_enabled` | false | IDLE_ONLY | evidence 2026-10-10 (section 10): best-effort stream lost ~30 chunks/s (`ulog_gaps: 1195` in a 39 s run, no header); the SD log is the evidence source |
 | `yaw_rate_lpf_tau_s` | 0.05 | IDLE_ONLY | DERIVED (RPP-009): 5 attitude samples at 100 Hz; validated ≥ 0 |
 | `spray_transaction_timeout_s` | 0.3 | RESTART | DERIVED (XR-GPX-001): pinned PX4 answers 187/183 at once; bounds how long a queued spray request can wait; validated > 0 |
 
