@@ -13,6 +13,8 @@ VehicleStateOut assemble(const LocalPositionSample& lp, const AttitudeSample& at
   if (fresh.local_position) {
     o.position_valid = lp.xy_valid && std::isfinite(lp.x) && std::isfinite(lp.y);
     o.velocity_valid = lp.v_xy_valid && std::isfinite(lp.vx) && std::isfinite(lp.vy);
+    o.vertical_position_valid = lp.z_valid && std::isfinite(lp.z);  // IF-004
+    o.vertical_velocity_valid = lp.v_z_valid && std::isfinite(lp.vz);
     o.north = lp.x;
     o.east = lp.y;
     o.down = lp.z;

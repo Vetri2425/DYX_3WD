@@ -44,6 +44,9 @@ struct Decision {
   bool clamped{false};
   uint64_t input_seq{0};
   double input_age_s{1.0e9};
+  // IF-003: the forwarded command's source_pose_sample_stamp (ns) when accepted; 0 otherwise (the
+  // node then stamps its own STOP with the newest pose it knows).
+  int64_t source_pose_sample_ns{0};
 };
 
 class GuardCore {

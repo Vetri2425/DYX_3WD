@@ -10,10 +10,24 @@
 | in | `/dyx3/vehicle_state` | VehicleState | R1 | pose is fed only while `position_valid` and `attitude_valid` and north, east and heading are finite; velocity while `velocity_valid` and both components and the yaw rate are finite (RPP-002; the core repeats the check). An invalid sample is **not** fed: the pose ages out and the core stops (STALE) |
 | in | `/dyx3/rtk_status` | RtkStatus | R1 | `fix_type` and `horizontal_accuracy_m` (0 = unknown, passed as unknown) |
 | in | `/dyx3/mission/state` | MissionState | R1 | `path_artifact_sha256` + `mission_id` select the path; `state == RUNNING` is the only state in which the core ticks |
-| out | `/dyx3/rpp/motion_setpoint` | MotionSetpoint | R1 | every tick, always `valid`; STOP unless running |
+| out | `/dyx3/rpp/motion_setpoint` | MotionSetpoint | R1 | every tick (per pose sample, or watchdog; section 2), always `valid`; STOP unless running. `source_pose_sample_stamp` (IF-003, 0.14.0) = `VehicleState.px4_sample_stamp` of the newest pose fed into the core, on every command including STOP; zero until a valid pose arrived (latency evidence, never gating) |
 | out | `/dyx3/rpp/status` | RppStatus | R1 | every tick; `mission_id` is the acknowledgement `dyx3_mission` waits for |
 
 ## 2. Behaviour
+
+* **When the core ticks (C2, `event_driven`).** Default: a `VehicleState` that carries a **new** `px4_sample_stamp` (non-zero and different
+  from the last one that ticked) is fed exactly as before and then ticks the core **in the same callback**, at the same clock instant, so the
+  command leaves with the pose that caused it (pose age ≈ 0 at the tick instead of up to one 20 ms timer period). A repeated or unstamped
+  sample is fed but does not tick. The `tick_hz` timer becomes a watchdog and is reset by every sample tick: it ticks only after **two
+  periods** without a sample tick (a sample late by less than one period, PX4 cadence jitter, is not silence and must not cause a second tick
+  for one sample), then once per period while samples stay away. Silence is therefore still ticked at `tick_hz`, so the stale-pose STOP lands
+  on the same `pose_max_age_s` deadline as in timer mode (tested: 0.52 s at 50 Hz in both modes). A sample arriving right after a watchdog
+  tick still ticks (the pose must not wait). The core, its inputs and its tick semantics are unchanged: the same calls in the same order with
+  the same times give the same outputs (gate4 / orchestrator equivalence drive the core directly). `tick_dt` is the time since the previous
+  tick, as before. `loop_jitter_*` / `loop_overrun_count` then measure the tick interval, i.e. the sample cadence, against `1/tick_hz`.
+  RPP and the other callbacks share the node's single default callback group on the single-threaded executor (`main.cpp`): no lock is needed.
+  `event_driven=false`: the timer ticks at `tick_hz` whatever arrives (the behaviour before 0.14.0).
+  DERIVED — NOT FROM V1 SPEC: the 1.5-period / 0.5-period watchdog thresholds (structural fractions of `1/tick_hz`, not tuning values).
 
 * **Load by id.** On a `MissionState` in LOADING / READY / RUNNING / PAUSED with a non-empty hash, the node reads `<artifact_dir>/<sha>.dyx3path`
   with the same reader `dyx3_mission` uses (the hash is verified), turns the points into runs with `condition_path` (the proven port of `_path_cb`),
@@ -55,7 +69,8 @@ Startup values (launch file) go through `init_many`: any class, same validation,
 XR-RPP-009 sanity upper bounds (DERIVED, defined in `tools/gen_param_tables.py`): `pose_max_age_s`, `rtk_fix_timeout_s` and
 `curvature_baseline_m` at most 2.0; `preview_curvature_n` and `corner_smooth_arc_pts` at most 64 (the core also caps the preview count at
 64); every Int must fit an `int`.
-Node-level: `tick_hz` (50, in [20, 100]; DERIVED from the prototype's `CONTROL_HZ`), `artifact_dir` (`/var/lib/dyx3/missions`).
+Node-level: `tick_hz` (50, in [20, 100]; DERIVED from the prototype's `CONTROL_HZ`), `artifact_dir` (`/var/lib/dyx3/missions`),
+`event_driven` (true, RESTART: tick per pose sample with `tick_hz` as the watchdog, section 2; false = free-running `tick_hz` timer).
 
 ## 4. Real-time discipline
 

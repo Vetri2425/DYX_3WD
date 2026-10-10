@@ -54,6 +54,15 @@ void init_ctx(const std::shared_ptr<rclcpp::Context>& ctx) {
   ctx->init(0, nullptr, io);
 }
 
+// The whole suite runs twice: px4_link_node_test in timer mode (event_driven=false, the timer-mode
+// regression) and px4_link_node_event_test in event-driven mode (the production default). Tests
+// that are about one mode set event_driven explicitly.
+#ifdef DYX3_TEST_EVENT_DRIVEN
+constexpr bool kSuiteEventDriven = true;
+#else
+constexpr bool kSuiteEventDriven = false;
+#endif
+
 struct Rig {
   static std::string unique_token_path() {
     static std::atomic<unsigned> serial{0};
@@ -95,6 +104,7 @@ struct Rig {
   std::vector<dyx3_interfaces::msg::UlogChunk> chunks;
   dyx3_interfaces::msg::Px4LinkStatus status;
   dyx3_interfaces::msg::VehicleState state;
+  int state_count{0};
   dyx3_interfaces::msg::EstimatorHealth health;
   std::vector<rclcpp::SubscriptionBase::SharedPtr> keep;
   rclcpp::Client<dyx3_interfaces::srv::SetOffboard>::SharedPtr cli_off;
@@ -107,7 +117,8 @@ struct Rig {
   uint8_t nav_state{0}, arming_state{1};
 
   explicit Rig(const rclcpp::ParameterValue* extra = nullptr, const std::string& defs = "",
-               const std::string& token_path = "") {
+               const std::string& token_path = "",
+               const std::vector<rclcpp::Parameter>& params = {}) {
     ctx = std::make_shared<rclcpp::Context>();
     init_ctx(ctx);
     rclcpp::NodeOptions no;
@@ -122,6 +133,12 @@ struct Rig {
     no.append_parameter_override("spray_ack_token_state_path", ack_state);
     if (extra != nullptr) {
     }
+    bool mode_given = false;
+    for (const auto& p : params) {
+      no.append_parameter_override(p.get_name(), p.get_parameter_value());
+      mode_given = mode_given || p.get_name() == "event_driven";
+    }
+    if (!mode_given) no.append_parameter_override("event_driven", kSuiteEventDriven);
     link = std::make_shared<Px4LinkNode>(no, [this]() { return now; }, false);
     rclcpp::NodeOptions fo;
     fo.context(ctx);
@@ -202,8 +219,10 @@ struct Rig {
         "/dyx3/px4_link/status", r1,
         [this](dyx3_interfaces::msg::Px4LinkStatus::ConstSharedPtr m) { status = *m; }));
     keep.push_back(fcu->create_subscription<dyx3_interfaces::msg::VehicleState>(
-        "/dyx3/vehicle_state", r1,
-        [this](dyx3_interfaces::msg::VehicleState::ConstSharedPtr m) { state = *m; }));
+        "/dyx3/vehicle_state", r1, [this](dyx3_interfaces::msg::VehicleState::ConstSharedPtr m) {
+          state = *m;
+          ++state_count;
+        }));
     keep.push_back(fcu->create_subscription<dyx3_interfaces::msg::EstimatorHealth>(
         "/dyx3/estimator_health", r1,
         [this](dyx3_interfaces::msg::EstimatorHealth::ConstSharedPtr m) { health = *m; }));
@@ -296,14 +315,19 @@ struct Rig {
     if (alive && lp_alive) {
       px4_msgs::msg::VehicleLocalPosition lp;
       lp.xy_valid = lp.v_xy_valid = lp.heading_good_for_control = true;
+      lp.z_valid = true;  // v_z_valid stays false: the two vertical flags are mapped separately
       lp.x = 3.0F;
       lp.y = 4.0F;
       lp.heading = 0.5F;
+      lp.timestamp_sample =
+          static_cast<uint64_t>(std::llround(now * 1e6));  // a new sample per tick
       p_lp->publish(lp);
     }
   }
+  builtin_interfaces::msg::Time cmd_pose_stamp{};  // IF-003 source_pose_sample_stamp
   void guard(uint8_t mode, float v, float yaw, float rate, bool valid = true) {
     dyx3_interfaces::msg::MotionSetpoint m;
+    m.source_pose_sample_stamp = cmd_pose_stamp;
     m.seq = ++seq;
     m.mode = mode;
     m.speed_body_x = v;
@@ -334,7 +358,11 @@ struct Rig {
     now += dt;
     if (publish) publish_fcu();
     pump(12);
-    link->step(now);
+    if (link->params().event_driven) {
+      link->on_timer(now);  // the writer timer; a guard command already cycled on arrival
+    } else {
+      link->step(now);
+    }
     pump(12);
   }
   void run(double seconds, double dt = 0.01, bool publish = true) {
@@ -729,7 +757,8 @@ TEST(Px4LinkNode, ShutdownStopPublishesStopOnlyWhereTheHeartbeatWasLive) {
   ASSERT_FLOAT_EQ(r.speed.back().speed_body_x, 0.5F);
   r.clear();
   r.guard(2, 0.5F, NaN, 0.1F);  // a fresh motion command is pending
-  r.pump(20);
+  // Not pumped before the burst: in event-driven mode it is delivered (and would be written) by
+  // the first pump below, after shutdown has started. It must not reach PX4 (X-010 with C4).
   for (size_t i = 1; i <= 30; ++i) {  // the recording readers keep depth 1: drain each one
     ASSERT_TRUE(r.link->publish_shutdown_stop());
     ASSERT_TRUE(r.pump_until([&] { return r.speed.size() >= i && r.ocm.size() >= i; })) << i;
@@ -1761,4 +1790,212 @@ TEST(Px4LinkNode, VehicleStateFanOut) {
   EXPECT_FLOAT_EQ(r.state.north_m, 3.0F);
   EXPECT_FLOAT_EQ(r.state.east_m, 4.0F);
   EXPECT_FLOAT_EQ(r.state.heading_rad, 0.5F);
+  EXPECT_TRUE(r.state.vertical_position_valid);   // IF-004: z_valid
+  EXPECT_FALSE(r.state.vertical_velocity_valid);  // v_z_valid false
+}
+
+// IF-003: the status reports the pose-to-write age of each new forwarded guard command, on the
+// system clock the stamps share; a window without such a write reports nothing.
+TEST(Px4LinkNode, StatusReportsPoseToWriteAgeOfForwardedCommands) {
+  Rig r;
+  r.bring_up();
+  r.nav_state = 14;
+  bool acc = false;
+  uint8_t rs = 0;
+  ASSERT_TRUE(r.call_offboard(true, &acc, &rs));
+  ASSERT_TRUE(acc);
+  r.run(0.2);
+  EXPECT_FALSE(r.status.pose_to_write_age_valid);  // no stamped command written yet
+  // The pose is 50 ms old (system clock) when the guard command is published.
+  const auto sys_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                          std::chrono::system_clock::now().time_since_epoch())
+                          .count() -
+                      50'000;
+  r.cmd_pose_stamp.sec = static_cast<int32_t>(sys_us / 1'000'000);
+  r.cmd_pose_stamp.nanosec = static_cast<uint32_t>((sys_us % 1'000'000) * 1000);
+  r.guard(2, 0.3F, NaN, 0.1F);
+  ASSERT_TRUE(r.pump_until([&] {
+    r.tick(0.01);
+    return r.status.pose_to_write_age_valid;
+  }));
+  // >= 50 ms by construction; the upper bound only rules out a unit or epoch error (test DDS and
+  // pumping add wall time on a loaded runner).
+  EXPECT_GE(r.status.pose_to_write_age_s, 0.05F);
+  EXPECT_LT(r.status.pose_to_write_age_s, 5.0F);
+  EXPECT_GE(r.status.pose_to_write_age_max_s, r.status.pose_to_write_age_s);
+  r.run(0.15);  // the same command rewritten: not a new measurement, the window empties
+  EXPECT_FALSE(r.status.pose_to_write_age_valid);
+  EXPECT_FLOAT_EQ(r.status.pose_to_write_age_s, 0.0F);
+  r.cmd_pose_stamp = builtin_interfaces::msg::Time{};  // no pose named: nothing to measure
+  r.guard(2, 0.3F, NaN, 0.1F);
+  r.run(0.25);
+  EXPECT_FALSE(r.status.pose_to_write_age_valid);
+}
+
+// --- C1: VehicleState on each new local-position sample ------------------------------------------
+namespace {
+px4_msgs::msg::VehicleLocalPosition lp_sample(uint64_t t_us) {
+  px4_msgs::msg::VehicleLocalPosition lp;
+  lp.xy_valid = lp.v_xy_valid = lp.heading_good_for_control = true;
+  lp.x = 1.0F;
+  lp.y = 2.0F;
+  lp.timestamp_sample = t_us;
+  return lp;
+}
+}  // namespace
+
+// (a) The sample is fanned out inside its own callback: no writer tick runs here (the link clock
+// does not move and step() is never called), yet the VehicleState carrying it arrives.
+TEST(Px4LinkNode, EventDrivenStateIsPublishedInTheSampleCallback) {
+  Rig r(nullptr, "", "", {rclcpp::Parameter("event_driven", true)});
+  r.bring_up();
+  r.pump(50);
+  const uint64_t t1 = static_cast<uint64_t>(std::llround(r.now * 1e6)) + 1000;
+  r.p_lp->publish(lp_sample(t1));
+  ASSERT_TRUE(
+      r.pump_until([&] { return r.state.px4_sample_stamp.nanosec == (t1 % 1000000) * 1000; }));
+  EXPECT_TRUE(r.state.position_valid);
+  EXPECT_FLOAT_EQ(r.state.north_m, 1.0F);
+  const int after_first = r.state_count;
+  r.p_lp->publish(lp_sample(t1));  // the same sample again: nothing new to fan out
+  r.pump(100);
+  EXPECT_EQ(r.state_count, after_first);
+  r.p_lp->publish(lp_sample(t1 + 20000));
+  ASSERT_TRUE(r.pump_until([&] { return r.state_count == after_first + 1; }));
+  EXPECT_EQ(r.state.px4_sample_stamp.nanosec, ((t1 + 20000) % 1000000) * 1000);
+}
+
+// (b) Silence: nothing is republished while the last sample is still fresh (the stale-pose path
+// downstream ages it from its own receipt), and once the local position is stale the 50 Hz fallback
+// publishes the cleared validity flags, exactly when the timer mode would show them.
+TEST(Px4LinkNode, EventDrivenFallbackRepublishesOnlyWhileTheLocalPositionIsStale) {
+  Rig r(nullptr, "", "", {rclcpp::Parameter("event_driven", true)});
+  r.bring_up();
+  r.run(0.1);
+  r.pump(50);
+  ASSERT_TRUE(r.state.position_valid);
+  r.lp_alive = false;
+  r.pump(50);
+  const int before = r.state_count;
+  r.run(0.18);  // < stale_local_position_s (0.2): silence, not a cached republish
+  r.pump(50);
+  EXPECT_EQ(r.state_count, before);
+  r.run(0.1);  // now stale: fallback at the 20 ms gate with the flags cleared
+  ASSERT_TRUE(r.pump_until([&] { return r.state_count >= before + 3; }));
+  EXPECT_FALSE(r.state.position_valid);
+  EXPECT_EQ(r.state.px4_sample_stamp.sec, 0);
+  r.lp_alive = true;  // samples return: event publication resumes at once
+  r.tick(0.01);
+  ASSERT_TRUE(r.pump_until([&] { return r.state.position_valid; }));
+}
+
+// (c) Timer mode: the sample callback publishes nothing; the 20 ms gate republishes the cache.
+TEST(Px4LinkNode, TimerModeStateComesOnlyFromTheTwentyMillisecondGate) {
+  Rig r(nullptr, "", "", {rclcpp::Parameter("event_driven", false)});
+  r.bring_up();
+  r.pump(50);
+  const int before = r.state_count;
+  r.p_lp->publish(lp_sample(static_cast<uint64_t>(std::llround(r.now * 1e6)) + 1000));
+  r.pump(100);
+  EXPECT_EQ(r.state_count, before);  // no writer tick, no VehicleState
+  r.lp_alive = false;                // the cache alone keeps the 50 Hz stream while it is fresh
+  r.run(0.1);
+  ASSERT_TRUE(r.pump_until([&] { return r.state_count >= before + 4; }));
+  EXPECT_TRUE(r.state.position_valid);
+}
+
+// --- C4: write the guard command to PX4 on arrival
+// ------------------------------------------------
+namespace {
+// Brings a rig to an Active OFFBOARD session with a forwarded command.
+void activate(Rig& r) {
+  r.bring_up();
+  r.nav_state = 14;
+  bool acc = false;
+  uint8_t rs = 0;
+  ASSERT_TRUE(r.call_offboard(true, &acc, &rs));
+  ASSERT_TRUE(acc);
+  r.guard(2, 0.2F, NaN, 0.1F);
+  r.run(0.05);
+  r.pump(50);
+}
+}  // namespace
+
+// (a) The command is written inside its own callback: no writer tick runs (the link clock does not
+// move, step()/on_timer() are not called), yet the full explicit-control set carrying it arrives,
+// exactly one set per new command, none for a duplicate.
+TEST(Px4LinkNode, EventDrivenWritesEachGuardCommandInItsCallback) {
+  Rig r(nullptr, "", "", {rclcpp::Parameter("event_driven", true)});
+  activate(r);
+  for (int i = 1; i <= 4; ++i) {
+    r.clear();
+    const float v = 0.1F * static_cast<float>(i);
+    r.guard(2, v, NaN, 0.1F);
+    ASSERT_TRUE(r.pump_until([&] { return r.speed.size() == 1 && r.rate.size() == 1; })) << i;
+    EXPECT_FLOAT_EQ(r.speed.back().speed_body_x, v);
+    EXPECT_EQ(r.ocm.size(), 1U);
+    EXPECT_EQ(r.traj.size(), 1U);
+    EXPECT_EQ(r.att_sp.size(), 1U);
+    r.pump(50);
+    EXPECT_EQ(r.speed.size(), 1U) << "one write per command";
+  }
+  r.clear();
+  r.seq -= 1;  // the same seq again: ignored by the gate, nothing written
+  r.guard(2, 0.9F, NaN, 0.1F);
+  r.pump(100);
+  EXPECT_TRUE(r.speed.empty());
+}
+
+// The heartbeat keeps its period around event writes: a timer tick due within half a period of a
+// command cycle is skipped (no second write of that command in one tick), the next is not.
+TEST(Px4LinkNode, EventDrivenTimerNeverRewritesACommandWithinATick) {
+  Rig r(nullptr, "", "", {rclcpp::Parameter("event_driven", true)});
+  activate(r);
+  r.now += 0.01;
+  r.clear();
+  r.guard(2, 0.3F, NaN, 0.1F);  // cycles at r.now
+  ASSERT_TRUE(r.pump_until([&] { return r.speed.size() == 1; }));
+  const double t = r.now;
+  r.link->on_timer(t + 0.002);
+  r.pump(50);
+  EXPECT_EQ(r.speed.size(), 1U);  // within half a period: skipped
+  r.link->on_timer(t + 0.010);
+  ASSERT_TRUE(r.pump_until([&] { return r.speed.size() == 2; }));  // the next tick writes
+  EXPECT_FLOAT_EQ(r.speed.back().speed_body_x, 0.3F);
+  r.now = t + 0.010;
+}
+
+// (b) A silent guard falls to the explicit zero on the same command_max_age_s deadline in both
+// modes; the heartbeat (OffboardControlMode) never stops.
+TEST(Px4LinkNode, ASilentGuardFallsToZeroOnTheSameDeadlineInBothModes) {
+  int zero_tick[2] = {-1, -1};
+  for (int mode = 0; mode < 2; ++mode) {
+    Rig r(nullptr, "", "", {rclcpp::Parameter("event_driven", mode == 1)});
+    activate(r);
+    r.guard(2, 0.3F, NaN, 0.1F);
+    r.tick(0.01);
+    ASSERT_FLOAT_EQ(r.speed.back().speed_body_x, 0.3F);
+    for (int k = 1; k <= 40 && zero_tick[mode] < 0; ++k) {
+      r.clear();
+      r.tick(0.01);
+      ASSERT_EQ(r.ocm.size(), 1U) << "heartbeat every writer tick, mode " << mode;
+      if (r.speed.back().speed_body_x == 0.0F) zero_tick[mode] = k;
+    }
+  }
+  EXPECT_GE(zero_tick[0], 19);  // command_max_age_s 0.2 on a 100 Hz writer
+  EXPECT_LE(zero_tick[0], 21);
+  EXPECT_EQ(zero_tick[1], zero_tick[0]);
+}
+
+// (c) Timer mode: a command is written by the next writer tick only.
+TEST(Px4LinkNode, TimerModeWritesOnlyOnTheWriterTick) {
+  Rig r(nullptr, "", "", {rclcpp::Parameter("event_driven", false)});
+  activate(r);
+  r.clear();
+  r.guard(2, 0.4F, NaN, 0.1F);
+  r.pump(100);
+  EXPECT_TRUE(r.speed.empty());
+  r.link->on_timer(r.now + 0.001);
+  ASSERT_TRUE(r.pump_until([&] { return !r.speed.empty(); }));
+  EXPECT_FLOAT_EQ(r.speed.back().speed_body_x, 0.4F);
 }

@@ -1,5 +1,24 @@
 # Interface changelog
 
+## 0.14.0 — 2026-10-10 (latency hardening)
+
+- `VehicleState`: appended `vertical_position_valid` and `vertical_velocity_valid`, filled by `dyx3_px4_link` from PX4
+  `vehicle_local_position.z_valid` / `v_z_valid` (false while the sample is stale or the value is non-finite) (IF-004).
+- `MotionSetpoint`: appended `source_pose_sample_stamp`, the PX4 `timestamp_sample` (Jetson system-clock domain, as
+  `VehicleState.px4_sample_stamp`) of the pose the command was computed from. `dyx3_rpp` fills it; `dyx3_motion_guard` preserves it
+  on forwarded commands and stamps its own canonical STOP with the newest `VehicleState.px4_sample_stamp` it received (zero if none)
+  (IF-003).
+- `Px4LinkStatus`: appended `pose_to_write_age_valid`, `pose_to_write_age_s`, `pose_to_write_age_max_s`: the link's write time minus
+  that stamp at the first write of each new forwarded command, over the status window (IF-003). Evidence only.
+- Migration: appended fields only; every consumer is rebuilt against 0.14.0 in the same release. Bags recorded with
+  0.13.x carry the old `VehicleState` definition.
+
+## 0.13.1 — 2026-10-10 (comment only, IF-007)
+
+- `SetEmergencyStop`: the request and response are documented. Accepted `source` values are exactly `tablet`, `backend`, `ble`, `physical`
+  (lowercase, compared byte for byte by `dyx3_motion_guard`); anything else is `REASON_INVALID_SOURCE` and changes nothing; any accepted source
+  may clear; an accepted assert is applied inside the call (MG-007). No field or constant changed (the IF-006 schema fingerprint is unchanged).
+
 ## 0.13.0 — 2026-10-08 (Cloud Review E3 explicit NTRIP security)
 
 - `NtripStatus` appends `security` (`UNSPECIFIED` only for invalid legacy environment, `PLAINTEXT`, `TLS`), `tls_verified`, `tls_verification_failed`, and `plaintext_credentials_warning`. No secret or Authorization value is included. Rebuild interface consumers together before deployment.

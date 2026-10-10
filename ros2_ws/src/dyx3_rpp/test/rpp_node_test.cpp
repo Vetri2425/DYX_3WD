@@ -56,6 +56,23 @@ std::string write_artifact(const std::string& dir, const std::vector<ArtPoint>& 
   return sha;
 }
 
+// The whole suite runs twice: rpp_node_test in timer mode (event_driven=false: cycle() calls
+// step(), the timer-mode regression) and rpp_node_event_test in event-driven mode (the production
+// default: every sample carries a new px4_sample_stamp and ticks the core in its callback; cycle()
+// only calls the watchdog). Tests about one mode set event_driven explicitly.
+#ifdef DYX3_TEST_EVENT_DRIVEN
+constexpr bool kSuiteEventDriven = true;
+#else
+constexpr bool kSuiteEventDriven = false;
+#endif
+
+builtin_interfaces::msg::Time stamp_of_ns(int64_t ns) {
+  builtin_interfaces::msg::Time t;
+  t.sec = static_cast<int32_t>(ns / 1'000'000'000);
+  t.nanosec = static_cast<uint32_t>(ns % 1'000'000'000);
+  return t;
+}
+
 struct Rig {
   std::shared_ptr<rclcpp::Context> ctx;
   int64_t now{200'000'000'000};
@@ -75,6 +92,8 @@ struct Rig {
   uint32_t mission_id{7};
   std::string mission_sha;
   bool publish_vehicle{true};
+  builtin_interfaces::msg::Time sample_stamp{};  // VehicleState.px4_sample_stamp of the next sample
+  bool event{false};                             // the node's mode (event_driven)
   double north{0.0}, east{0.0}, heading{0.0}, speed{0.0};
   uint8_t fix{6};
 
@@ -95,9 +114,14 @@ struct Rig {
     no.append_parameter_override("artifact_dir", dir);
     no.append_parameter_override("rtk_recover_hold_s", 0.0);
     no.append_parameter_override("entry_prealign_enabled", false);
-    for (const auto& p : params)
+    bool mode_given = false;
+    for (const auto& p : params) {
       no.append_parameter_override(p.get_name(), p.get_parameter_value());
+      mode_given = mode_given || p.get_name() == "event_driven";
+    }
+    if (!mode_given) no.append_parameter_override("event_driven", kSuiteEventDriven);
     rpp = std::make_shared<RppNode>(no, [this]() { return now; }, false);
+    event = rpp->event_driven();
     rclcpp::NodeOptions wo;
     wo.context(ctx);
     world = std::make_shared<rclcpp::Node>("world", wo);
@@ -151,6 +175,10 @@ struct Rig {
       v.heading_rad = static_cast<float>(heading);
       v.velocity_north_mps = static_cast<float>(speed * std::cos(heading));
       v.velocity_east_mps = static_cast<float>(speed * std::sin(heading));
+      // Event mode: every published sample is a new PX4 sample unless the test names one.
+      const bool named = sample_stamp.sec != 0 || sample_stamp.nanosec != 0;
+      v.px4_sample_stamp =
+          named ? sample_stamp : (event ? stamp_of_ns(now) : builtin_interfaces::msg::Time{});
       p_veh->publish(v);
     }
     dyx3_interfaces::msg::RtkStatus r;
@@ -205,13 +233,28 @@ struct Rig {
     east += speed * std::sin(heading) * dt;
   }
 
+  // Timer mode: the world publishes, then the timer ticks. Event mode: the sample ticks the core
+  // in its callback; the timer is only the watchdog (a no-op when the sample arrived).
   void cycle() {
     now += 20'000'000;
     publish_world();
     pump(6);
-    rpp->step(now);
+    if (event) {
+      rpp->on_watchdog(now);
+    } else {
+      rpp->step(now);
+    }
     pump(6);
     integrate(0.02);
+  }
+  template <typename Done>
+  bool pump_until(Done done, int timeout_ms = 3000) {
+    const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (std::chrono::steady_clock::now() < end) {
+      exec->spin_some(2ms);
+      if (done()) return true;
+    }
+    return done();
   }
   void run(double seconds) {
     for (double t = 0.0; t < seconds; t += 0.02) cycle();
@@ -799,4 +842,144 @@ TEST(RppNode, AFilesystemErrorInTheLoadNeverEscapes) {
   EXPECT_TRUE(r.status.state == RppStatus::STATE_LOADED || r.status.state == RppStatus::STATE_ERROR)
       << int(r.status.state);
   EXPECT_EQ(r.motion.back().mode, MotionSetpoint::MODE_STOP);
+}
+
+// IF-003: every command names the PX4 sample of the pose it was computed from, STOP included; an
+// invalid sample is not a pose and does not move the stamp.
+TEST(RppNode, EveryCommandCarriesThePoseSampleItWasComputedFrom) {
+  Rig r;
+  r.publish_vehicle = false;
+  r.run(0.1);
+  ASSERT_FALSE(r.motion.empty());
+  EXPECT_EQ(r.motion.back().source_pose_sample_stamp.sec, 0);  // no pose yet
+  EXPECT_EQ(r.motion.back().source_pose_sample_stamp.nanosec, 0U);
+
+  r.publish_vehicle = true;
+  r.sample_stamp.sec = 1791590000;
+  r.sample_stamp.nanosec = 120'000'000;
+  r.cycle();
+  EXPECT_EQ(r.motion.back().mode, MotionSetpoint::MODE_STOP);  // READY: STOP, still stamped
+  EXPECT_EQ(r.motion.back().source_pose_sample_stamp.sec, 1791590000);
+  EXPECT_EQ(r.motion.back().source_pose_sample_stamp.nanosec, 120'000'000U);
+
+  r.mission_state = MissionState::STATE_RUNNING;
+  r.sample_stamp.nanosec = 140'000'000;
+  r.cycle();
+  EXPECT_EQ(r.motion.back().source_pose_sample_stamp.nanosec, 140'000'000U);
+
+  dyx3_interfaces::msg::VehicleState bad;  // position_valid=false: not fed, stamp unchanged
+  bad.px4_sample_stamp.sec = 1791590001;
+  r.p_veh->publish(bad);
+  r.pump(6);
+  r.now += 20'000'000;
+  r.rpp->step(r.now);
+  r.pump(6);
+  EXPECT_EQ(r.motion.back().source_pose_sample_stamp.sec, 1791590000);
+  EXPECT_EQ(r.motion.back().source_pose_sample_stamp.nanosec, 140'000'000U);
+}
+
+// --- C2: event-driven tick
+// ------------------------------------------------------------------------ (a) A new sample ticks
+// the core inside its own callback: neither step() nor the watchdog is called here, the injected
+// clock does not move, and exactly one command per new sample appears, computed from that sample. A
+// repeated sample does not tick.
+TEST(RppNode, EventDrivenTicksOnceInTheCallbackOfEachNewSample) {
+  Rig r({rclcpp::Parameter("event_driven", true)});
+  r.mission_state = MissionState::STATE_RUNNING;
+  r.auto_drive = true;
+  r.run(0.3);  // loaded and running
+  for (int i = 0; i < 10; ++i) {
+    r.now += 20'000'000;
+    r.sample_stamp = stamp_of_ns(1'791'590'000'000'000'000LL + r.now);
+    const size_t before = r.motion.size();
+    r.publish_world();
+    ASSERT_TRUE(r.pump_until([&] { return r.motion.size() == before + 1; })) << i;
+    EXPECT_EQ(r.motion.back().source_pose_sample_stamp, r.sample_stamp) << i;
+    r.pump(10);
+    EXPECT_EQ(r.motion.size(), before + 1) << "one tick per sample";
+    r.integrate(0.02);
+  }
+  const size_t before = r.motion.size();
+  r.publish_world();  // the same sample again: fed, not ticked
+  r.pump(30);
+  EXPECT_EQ(r.motion.size(), before);
+}
+
+// No double tick: after a sample tick the watchdog waits two periods (a late sample is not
+// silence), then keeps the tick period; a sample always ticks.
+TEST(RppNode, EventDrivenWatchdogNeverDoubleTicksASample) {
+  Rig r({rclcpp::Parameter("event_driven", true)});
+  r.run(0.1);
+  r.publish_vehicle = false;
+  r.now += 20'000'000;
+  const int64_t t0 = r.now;
+  r.sample_stamp = stamp_of_ns(t0);
+  r.publish_vehicle = true;
+  size_t n = r.motion.size();
+  r.publish_world();
+  ASSERT_TRUE(r.pump_until([&] { return r.motion.size() == n + 1; }));
+  n = r.motion.size();
+  const auto watchdog = [&](int64_t at_ns) {
+    r.now = at_ns;
+    r.rpp->on_watchdog(at_ns);
+    r.pump(10);
+    return r.motion.size();
+  };
+  EXPECT_EQ(watchdog(t0 + 1'000'000), n);       // same instant as the sample: nothing
+  EXPECT_EQ(watchdog(t0 + 20'000'000), n);      // one period: a late sample is not silence
+  EXPECT_EQ(watchdog(t0 + 30'000'000), n + 1);  // 1.5 periods of silence: the watchdog ticks
+  EXPECT_EQ(watchdog(t0 + 35'000'000), n + 1);  // then not faster than the period
+  EXPECT_EQ(watchdog(t0 + 40'000'000), n + 2);
+  r.now = t0 + 41'000'000;  // a sample right after a watchdog tick still ticks
+  r.sample_stamp = stamp_of_ns(r.now);
+  r.publish_world();
+  EXPECT_TRUE(r.pump_until([&] { return r.motion.size() == n + 3; }));
+}
+
+// (b) Silence: the stale-pose STOP lands on the same deadline in both modes. The pose stops after
+// a running stretch; the timer (or watchdog) is driven at 50 Hz on the injected clock and the
+// first STALE tick is recorded as time since the last sample.
+TEST(RppNode, AStalePoseStopsOnTheSameDeadlineInBothModes) {
+  int64_t stale_after_ns[2] = {-1, -1};
+  for (int mode = 0; mode < 2; ++mode) {
+    Rig r({rclcpp::Parameter("event_driven", mode == 1)});
+    r.mission_state = MissionState::STATE_RUNNING;
+    r.run(0.3);
+    const int64_t last_sample = r.now;
+    r.publish_vehicle = false;
+    for (int k = 1; k <= 40 && stale_after_ns[mode] < 0; ++k) {
+      r.now = last_sample + 20'000'000LL * k;
+      r.publish_world();
+      r.pump(6);
+      if (r.event) {
+        r.rpp->on_watchdog(r.now);
+      } else {
+        r.rpp->step(r.now);
+      }
+      r.pump(6);
+      if (r.status.tick_state == -1) {  // the first STALE tick (none before it, by the loop)
+        stale_after_ns[mode] = r.now - last_sample;
+        EXPECT_EQ(r.motion.back().mode, MotionSetpoint::MODE_STOP);
+      }
+    }
+  }
+  // pose_max_age_s 0.5: the first tick with an age above 0.5 s, i.e. 0.52 s on a 50 Hz tick.
+  EXPECT_EQ(stale_after_ns[0], 520'000'000);
+  EXPECT_EQ(stale_after_ns[1], stale_after_ns[0]);
+}
+
+// (c) Timer mode: a sample never ticks; only the timer does, once per call.
+TEST(RppNode, TimerModeTicksOnlyOnTheTimer) {
+  Rig r({rclcpp::Parameter("event_driven", false)});
+  r.mission_state = MissionState::STATE_RUNNING;
+  r.run(0.2);
+  const size_t before = r.motion.size();
+  r.sample_stamp = stamp_of_ns(r.now + 1);
+  r.publish_world();
+  r.pump(50);
+  EXPECT_EQ(r.motion.size(), before);
+  r.rpp->on_watchdog(r.now + 1'000'000);  // keep-last-1 topic: deliver each before the next
+  EXPECT_TRUE(r.pump_until([&] { return r.motion.size() == before + 1; }));
+  r.rpp->on_watchdog(r.now + 2'000'000);
+  EXPECT_TRUE(r.pump_until([&] { return r.motion.size() == before + 2; }));
 }

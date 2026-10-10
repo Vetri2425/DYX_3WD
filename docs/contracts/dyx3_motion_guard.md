@@ -20,7 +20,7 @@ re-implements a gate. A backend or tablet E-stop is a *request* to this node.
 | in | `/dyx3/operator_link` | OperatorLinkStatus | tablet heartbeat (gateway owns the timeout) |
 | in | `/dyx3/px4_link/status` | Px4LinkStatus | link gate |
 | service | `/dyx3/motion_guard/set_emergency_stop` | SetEmergencyStop | latch / clear |
-| out | `/dyx3/motion_guard/command` | MotionSetpoint | consumed only by `dyx3_px4_link` |
+| out | `/dyx3/motion_guard/command` | MotionSetpoint | consumed only by `dyx3_px4_link`. `source_pose_sample_stamp` (IF-003, 0.14.0): preserved unchanged on every command forwarded from RPP (accepted, clamped, clean STOP); on the guard's own canonical STOP (any refusal, no command, `shutdown_stop`) the `px4_sample_stamp` of the newest `VehicleState` received (zero when that message had no fresh local position), zero if none was ever received. Never used for a decision |
 | out | `/dyx3/motion_guard/status` | MotionSetpointStatus | per decision: input seq, reason, applied command |
 | out | `/dyx3/safety_gate` | SafetyGateStatus | fixed 10 Hz, independent of RPP |
 | out | `/dyx3/emergency_stop_state` | EmergencyStopState | fixed 10 Hz |
@@ -33,6 +33,17 @@ that only reacted to incoming messages could not report the loss of RPP. The out
 always valid and contract-conforming: either the (limited) RPP command or the canonical STOP
 (`mode=STOP`, `speed=0`, `yaw=NaN`, `rate=0`, `valid=true`). The output `seq` is the guard's
 own, monotonic over the process lifetime.
+
+**Event-driven decisions (C3, `event_driven`, default true).** Each RPP `MotionSetpoint` is decided and the result
+published **inside its own callback**, on the guard clock at arrival, so a command does not wait up to one timer period.
+The timer stays as the watchdog that makes the loss of RPP visible: it is reset by every command decision, decides only
+after two periods without one (a command late by less than a period is not silence; no second decision for one command),
+then once per period. A silent RPP is therefore still decided at `publish_rate_hz` and stopped on the same
+`command_max_age_s` deadline as in timer mode (tested in both modes). E-stop handling is unchanged and immediate: the
+service call runs a decision and forces the safety publication (MG-007) in either mode. All callbacks share the node's
+default callback group on a single-threaded executor (`main.cpp`): no lock. `event_driven=false` is the fixed-rate loop
+above (the behaviour before 0.14.0). DERIVED — NOT FROM V1 SPEC: the 1.5-period / 0.5-period watchdog thresholds
+(structural fractions of `1/publish_rate_hz`).
 
 ## 3. Decision order
 
@@ -108,7 +119,8 @@ the old limiter mechanics directly testable; it is not a second production contr
 
 | Name | Default | Class | Source |
 |---|---|---|---|
-| `publish_rate_hz` | 50 | RESTART | DERIVED (prototype 50 Hz) |
+| `publish_rate_hz` | 50 | RESTART | DERIVED (prototype 50 Hz); the watchdog period in event-driven mode |
+| `event_driven` | true | RESTART | latency hardening (C3): decide on each RPP command, timer as watchdog (section 2) |
 | `command_max_age_s` | 0.2 | RESTART | DERIVED from prototype `input_max_age_s`; re-validate GATE 4 |
 | `session_accept_count` | 3 | RESTART | DERIVED — Phase plan leaves the count to this phase |
 | `vehicle_state_max_age_s`, `rtk_status_max_age_s` | 0.5 | RESTART | prototype `pose_max_age_s` / `rtk_fix_timeout_s` |

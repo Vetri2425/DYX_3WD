@@ -43,6 +43,11 @@ public:
 
   // One decision cycle at guard-clock time now_s. Public for deterministic tests.
   void step(double now_s);
+  // The decision timer's callback (C3). Timer mode: always a decision. Event-driven: a watchdog
+  // that decides only when no RPP command did: two periods after a command decision (a late
+  // command is not silence), then once per period. Public for deterministic tests.
+  void on_watchdog(double now_s);
+  bool event_driven() const { return event_driven_; }
 
   // Publishes one canonical STOP on /dyx3/motion_guard/command, independent of the gates and of
   // the last RPP command. Called by main in a bounded burst after SIGINT/SIGTERM, while the
@@ -58,6 +63,11 @@ private:
 
   ClockFn clock_;
   double publish_rate_hz_{50.0};
+  // C3: decide and forward on each RPP command (startup-only parameter event_driven, default true).
+  bool event_driven_{true};
+  bool have_tick_{false};
+  bool last_tick_was_command_{false};
+  double last_tick_s_{0.0};
   uint32_t accept_count_{3};
   MaxAges age_;
   GateConfig gate_cfg_;
@@ -73,6 +83,8 @@ private:
   OperatorIn op_;
   Px4LinkIn link_;
   MissionIn mission_;
+  // IF-003: px4_sample_stamp of the newest VehicleState; stamps the guard's own canonical STOP.
+  builtin_interfaces::msg::Time veh_pose_stamp_{};
   double last_step_s_{-1.0};
   double last_gate_pub_s_{-1e18};
   bool force_safety_pub_{false};  // E-stop latch changed: publish gate + E-stop state this step

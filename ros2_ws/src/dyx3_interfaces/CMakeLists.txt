@@ -49,6 +49,9 @@ if(BUILD_TESTING)
   ament_add_gtest(interface_abi_test test/interface_abi_test.cpp)
   if(TARGET interface_abi_test)
     rosidl_target_interfaces(interface_abi_test ${PROJECT_NAME} "rosidl_typesupport_cpp")
+    # IF-006: the schema fingerprint reads the definitions from the source tree.
+    target_compile_definitions(interface_abi_test PRIVATE
+      DYX3_INTERFACES_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
   endif()
 endif()
 

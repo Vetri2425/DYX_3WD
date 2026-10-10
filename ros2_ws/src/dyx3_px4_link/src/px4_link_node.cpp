@@ -118,6 +118,8 @@ Px4LinkNode::Px4LinkNode(const rclcpp::NodeOptions& options, ClockFn clock, bool
       [this](px4_msgs::msg::VehicleLocalPosition::ConstSharedPtr m) {
         lp_.xy_valid = m->xy_valid;
         lp_.v_xy_valid = m->v_xy_valid;
+        lp_.z_valid = m->z_valid;
+        lp_.v_z_valid = m->v_z_valid;
         lp_.x = m->x;
         lp_.y = m->y;
         lp_.z = m->z;
@@ -136,6 +138,14 @@ Px4LinkNode::Px4LinkNode(const rclcpp::NodeOptions& options, ClockFn clock, bool
         lp_.timestamp_sample_us = m->timestamp_sample;
         lp_t_ = clock_();
         mon_->on_sample(kLocalPosition, lp_t_);
+        // C1 (event_driven): a new PX4 sample is fanned out now, in this callback, not at the next
+        // 20 ms gate. A repeated timestamp_sample is not a new sample and is not republished.
+        if (p_.event_driven &&
+            !(lp_published_valid_ && lp_published_sample_us_ == m->timestamp_sample)) {
+          lp_published_valid_ = true;
+          lp_published_sample_us_ = m->timestamp_sample;
+          publish_state(lp_t_);
+        }
       });
   sub_status_ = create_subscription<px4_msgs::msg::VehicleStatus>(
       "/fmu/out/vehicle_status_v1", sensor, [this](px4_msgs::msg::VehicleStatus::ConstSharedPtr m) {
@@ -236,7 +246,19 @@ Px4LinkNode::Px4LinkNode(const rclcpp::NodeOptions& options, ClockFn clock, bool
         c.yaw_setpoint = m->yaw_setpoint;
         c.yaw_rate_setpoint = m->yaw_rate_setpoint;
         c.valid = m->valid;
-        gate_->on_command(c, clock_());
+        c.source_pose_sample_us =
+            static_cast<uint64_t>(std::max<int64_t>(0, m->source_pose_sample_stamp.sec)) *
+                1000000ULL +
+            m->source_pose_sample_stamp.nanosec / 1000U;
+        const double now = clock_();
+        // C4 (event_driven): a new guard command is written to PX4 now, by a full writer cycle in
+        // this callback (same gate, offboard state machine and heartbeat as the timer's), and the
+        // writer timer restarts its period here. A duplicate seq changes nothing and writes
+        // nothing.
+        if (gate_->on_command(c, now) && p_.event_driven && !shutting_down_) {
+          step(now);
+          if (timer_) timer_->reset();
+        }
       });
   sub_rtcm_ = create_subscription<dyx3_interfaces::msg::RtcmData>(
       "/dyx3/rtcm", rclcpp::QoS(32).reliable(),
@@ -325,7 +347,7 @@ Px4LinkNode::Px4LinkNode(const rclcpp::NodeOptions& options, ClockFn clock, bool
 
   if (create_timer) {
     timer_ = create_wall_timer(std::chrono::duration<double>(1.0 / p_.publish_rate_hz),
-                               [this]() { step(clock_()); });
+                               [this]() { on_timer(clock_()); });
   }
   RCLCPP_INFO(get_logger(),
               "px4_link up: %.0f Hz setpoints, command_max_age %.3f s, %zu handshake topics, "
@@ -343,6 +365,7 @@ bool Px4LinkNode::link_healthy_now() const {
 
 void Px4LinkNode::declare_and_validate_params() {
   p_.publish_rate_hz = declare_checked<double>(*this, "publish_rate_hz", 100.0);
+  p_.event_driven = declare_checked<bool>(*this, "event_driven", p_.event_driven);
   // F1.7: the explicit-control set must be published at >= 100 Hz.
   require(std::isfinite(p_.publish_rate_hz) && p_.publish_rate_hz >= 100.0,
           "publish_rate_hz must be >= 100");
@@ -764,6 +787,7 @@ void Px4LinkNode::start_ulog_if_due(double /*now_s*/, bool link_ok) {
 }
 
 void Px4LinkNode::step(double now_s) {
+  if (shutting_down_) return;  // X-010: only the shutdown STOP burst writes now
   if (!std::isfinite(now_s) || now_s < 0.0 || (last_step_s_ >= 0.0 && now_s < last_step_s_)) {
     // An unusable clock cannot age anything, so no timing or gate state is touched. Fail to zero:
     // keep the setpoint heartbeat alive with an explicit STOP rather than omitting the tick.
@@ -819,6 +843,19 @@ void Px4LinkNode::step(double now_s) {
   last_heartbeat_published_ = ofb.publish_heartbeat;
   if (ofb.publish_heartbeat)
     publish_setpoint_set(ofb.stop_only ? stop_setpoint() : last_gate_.sp, t_us);
+  // IF-003: pose-to-write age at the first write of each new forwarded guard command. Both stamps
+  // are Jetson system-clock microseconds (section 7), so the difference is the whole chain.
+  if (ofb.publish_heartbeat && !ofb.stop_only && last_gate_.forwarded &&
+      last_gate_.source_pose_sample_us != 0 &&
+      !(age_measured_seq_valid_ && age_measured_seq_ == last_gate_.seq)) {
+    age_measured_seq_valid_ = true;
+    age_measured_seq_ = last_gate_.seq;
+    const float age = static_cast<float>(
+        (static_cast<double>(t_us) - static_cast<double>(last_gate_.source_pose_sample_us)) * 1e-6);
+    age_max_s_ = age_valid_ ? std::max(age_max_s_, age) : age;
+    age_last_s_ = age;
+    age_valid_ = true;
+  }
   if (ofb.send_mode_command)
     publish_vehicle_command(kCmdDoSetMode, 1.0F, 6.0F, t_us);  // 6 = OFFBOARD
   start_ulog_if_due(now_s, last_link_ok_);
@@ -828,10 +865,23 @@ void Px4LinkNode::step(double now_s) {
   publish_status(now_s, last_rep_, last_gate_);
 }
 
+void Px4LinkNode::on_timer(double now_s) {
+  // DERIVED — NOT FROM V1 SPEC: half a period, a structural fraction of 1/publish_rate_hz. The
+  // timer is reset by each command cycle, so this only guards a timer that was already due when the
+  // command cycle ran; the skipped tick is replaced by the next one, so writes stay <= 1.5 periods
+  // apart even then (and one period apart otherwise: the >= 100 Hz heartbeat is kept).
+  if (p_.event_driven && last_step_s_ >= 0.0 && std::isfinite(now_s) && now_s >= last_step_s_ &&
+      now_s - last_step_s_ < 0.5 / p_.publish_rate_hz)
+    return;
+  step(now_s);
+}
+
 bool Px4LinkNode::publish_shutdown_stop() {
   if (timer_) timer_->cancel();
   // Only where the stream was live: never start a heartbeat, and never write an unproven format.
+  // (With no live heartbeat no later cycle can write motion either: that needs an Active session.)
   if (!last_heartbeat_published_ || handshake_->state() != HandshakeState::Ok) return false;
+  shutting_down_ = true;  // the burst has started: no writer cycle runs any more (C4)
   publish_setpoint_set(stop_setpoint(), stamp_us());
   return true;
 }
@@ -876,45 +926,12 @@ void Px4LinkNode::service_pending(double now_s, bool link_healthy, const Offboar
 }
 
 void Px4LinkNode::publish_state_and_health(double now_s) {
-  if (now_s - last_state_pub_s_ >= 0.02 - 1e-9) {
-    last_state_pub_s_ = now_s;
-    const double fresh_lp = p_.stale.max_age_s[kLocalPosition];
-    const double fresh_att = p_.stale.max_age_s[kAttitude];
-    const double fresh_st = p_.stale.max_age_s[kVehicleStatus];
-    Freshness f;
-    f.local_position = (now_s - lp_t_) <= fresh_lp;
-    f.attitude = (now_s - att_t_) <= fresh_att;
-    f.status = (now_s - st_t_) <= fresh_st;
-    const auto o = assemble(lp_, att_, st_, f);
-    dyx3_interfaces::msg::VehicleState s;
-    s.stamp = ros_now();
-    s.px4_sample_stamp = px4_stamp(o.px4_sample_us);
-    s.position_valid = o.position_valid;
-    s.velocity_valid = o.velocity_valid;
-    s.attitude_valid = o.attitude_valid;
-    s.north_m = o.north;
-    s.east_m = o.east;
-    s.down_m = o.down;
-    s.velocity_north_mps = o.vn;
-    s.velocity_east_mps = o.ve;
-    s.velocity_down_mps = o.vd;
-    for (size_t i = 0; i < 4; ++i) s.q_frd_to_ned[i] = o.q[i];
-    s.heading_rad = o.heading;
-    // 0 also means "unknown": the rate is published only with a valid, fresh attitude.
-    s.yaw_rate_radps = o.attitude_valid && yaw_rate_->valid() ? yaw_rate_->rate() : 0.0F;
-    s.xy_reset_counter = o.xy_reset_counter;
-    s.delta_north_m = o.delta_north;
-    s.delta_east_m = o.delta_east;
-    s.global_reference_valid = o.global_reference_valid;
-    s.reference_latitude_deg = o.ref_lat;
-    s.reference_longitude_deg = o.ref_lon;
-    s.reference_altitude_m_amsl = o.ref_alt;
-    s.arming_state = o.arming_state;
-    s.nav_state = o.nav_state;
-    s.failsafe = o.failsafe;
-    s.preflight_checks_pass = o.preflight_checks_pass;
-    pub_state_->publish(s);
-  }
+  // Timer mode: the 20 ms gate. Event-driven: each new sample was published on arrival, so the
+  // gate runs only while the local position is stale (or never seen), so consumers keep seeing the
+  // cleared validity flags and the vehicle_status fields at 50 Hz.
+  const bool lp_fresh = (now_s - lp_t_) <= p_.stale.max_age_s[kLocalPosition];
+  if ((!p_.event_driven || !lp_fresh) && now_s - last_state_pub_s_ >= 0.02 - 1e-9)
+    publish_state(now_s);
   if (now_s - last_health_pub_s_ >= 0.1 - 1e-9) {
     last_health_pub_s_ = now_s;
     dyx3_interfaces::msg::EstimatorHealth h;  // flags_valid=false default: unhealthy
@@ -934,6 +951,48 @@ void Px4LinkNode::publish_state_and_health(double now_s) {
     // test_ratios_valid stays false: estimator_status is not on DDS at the flashed firmware.
     pub_health_->publish(h);
   }
+}
+
+void Px4LinkNode::publish_state(double now_s) {
+  last_state_pub_s_ = now_s;
+  const double fresh_lp = p_.stale.max_age_s[kLocalPosition];
+  const double fresh_att = p_.stale.max_age_s[kAttitude];
+  const double fresh_st = p_.stale.max_age_s[kVehicleStatus];
+  Freshness f;
+  f.local_position = (now_s - lp_t_) <= fresh_lp;
+  f.attitude = (now_s - att_t_) <= fresh_att;
+  f.status = (now_s - st_t_) <= fresh_st;
+  const auto o = assemble(lp_, att_, st_, f);
+  dyx3_interfaces::msg::VehicleState s;
+  s.stamp = ros_now();
+  s.px4_sample_stamp = px4_stamp(o.px4_sample_us);
+  s.position_valid = o.position_valid;
+  s.velocity_valid = o.velocity_valid;
+  s.attitude_valid = o.attitude_valid;
+  s.north_m = o.north;
+  s.east_m = o.east;
+  s.down_m = o.down;
+  s.velocity_north_mps = o.vn;
+  s.velocity_east_mps = o.ve;
+  s.velocity_down_mps = o.vd;
+  for (size_t i = 0; i < 4; ++i) s.q_frd_to_ned[i] = o.q[i];
+  s.heading_rad = o.heading;
+  // 0 also means "unknown": the rate is published only with a valid, fresh attitude.
+  s.yaw_rate_radps = o.attitude_valid && yaw_rate_->valid() ? yaw_rate_->rate() : 0.0F;
+  s.xy_reset_counter = o.xy_reset_counter;
+  s.delta_north_m = o.delta_north;
+  s.delta_east_m = o.delta_east;
+  s.global_reference_valid = o.global_reference_valid;
+  s.reference_latitude_deg = o.ref_lat;
+  s.reference_longitude_deg = o.ref_lon;
+  s.reference_altitude_m_amsl = o.ref_alt;
+  s.arming_state = o.arming_state;
+  s.nav_state = o.nav_state;
+  s.failsafe = o.failsafe;
+  s.preflight_checks_pass = o.preflight_checks_pass;
+  s.vertical_position_valid = o.vertical_position_valid;
+  s.vertical_velocity_valid = o.vertical_velocity_valid;
+  pub_state_->publish(s);
 }
 
 void Px4LinkNode::publish_status(double now_s, const StalenessReport& rep, const GateOutput& g) {
@@ -977,6 +1036,11 @@ void Px4LinkNode::publish_status(double now_s, const StalenessReport& rep, const
   s.spray_unmatched_ack_count = spray_late_ack_count_;
   s.rtcm_chunks_accepted = rtcm_chunks_accepted_;
   s.rtcm_chunks_dropped = rtcm_chunks_dropped_;
+  s.pose_to_write_age_valid = age_valid_;  // IF-003, window = since the previous status
+  s.pose_to_write_age_s = age_valid_ ? age_last_s_ : 0.0F;
+  s.pose_to_write_age_max_s = age_valid_ ? age_max_s_ : 0.0F;
+  age_valid_ = false;
+  age_last_s_ = age_max_s_ = 0.0F;
   pub_status_->publish(s);
 }
 

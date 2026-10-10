@@ -54,6 +54,10 @@ using ClockFn = std::function<double()>;
 
 struct LinkParams {
   double publish_rate_hz{100.0};
+  // Event-driven chain (RESTART). true: VehicleState is published from the vehicle_local_position
+  // callback on each new sample (new timestamp_sample) instead of the 20 ms gate; the gate stays
+  // only as a fallback while the local position is stale. false: the 20 ms gate (timer mode).
+  bool event_driven{true};
   double command_max_age_s{0.2};
   StalenessLimits stale;
   double handshake_retry_s{1.0};
@@ -76,6 +80,11 @@ public:
 
   // One publish cycle at link-clock time `now_s`. Public for deterministic tests.
   void step(double now_s);
+  // The writer timer's callback (C4). Timer mode: always a cycle. Event-driven: the timer is reset
+  // by every cycle a guard command triggered, so it fires one period after it; a cycle that would
+  // land within half a period of the previous one is skipped (no second write of the same command
+  // inside one tick). Public for deterministic tests.
+  void on_timer(double now_s);
 
   // Process shutdown (X-010): cancels the writer timer and publishes one explicit STOP set if the
   // heartbeat was running on the last tick. Returns false (nothing sent) otherwise. main() calls it
@@ -112,6 +121,7 @@ private:
   void publish_vehicle_command(uint32_t command, float p1, float p2, uint64_t t_us);
   void publish_status(double now_s, const StalenessReport& rep, const GateOutput& g);
   void publish_state_and_health(double now_s);
+  void publish_state(double now_s);
   void service_pending(double now_s, bool link_healthy, const OffboardStep& ofb);
   void start_ulog_if_due(double now_s, bool link_ok);
   void on_spray_command(const dyx3_interfaces::msg::SprayActuatorCommand& m);
@@ -138,6 +148,9 @@ private:
   std::unique_ptr<YawRateEstimator> yaw_rate_;
   StatusSample st_;
   double lp_t_{-1e18}, att_t_{-1e18}, st_t_{-1e18};
+  // C1: timestamp_sample of the last local-position sample published on arrival.
+  bool lp_published_valid_{false};
+  uint64_t lp_published_sample_us_{0};
   px4_msgs::msg::EstimatorStatusFlags flags_;
   double flags_t_{-1e18};
   bool nav_offboard_{false};
@@ -148,12 +161,23 @@ private:
   StalenessReport last_rep_;
   bool last_link_ok_{false};
   bool last_heartbeat_published_{false};
+  // X-010 with C4: set once publish_shutdown_stop() sends its STOP set. From then on no writer
+  // cycle runs, whatever triggers it (timer, or a guard command delivered by a late spin): STOP is
+  // the last set PX4 sees.
+  bool shutting_down_{false};
   std::optional<Reason> logged_zero_reason_;  // empty while not failing to zero
 
   double last_step_s_{-1.0};
   double last_overrun_s_{-1.0};
   uint64_t overruns_{0};
   double last_status_pub_s_{-1e18}, last_state_pub_s_{-1e18}, last_health_pub_s_{-1e18};
+  // IF-003 pose-to-write age over the current status window (first write of each forwarded
+  // command only; reset by publish_status).
+  bool age_measured_seq_valid_{false};
+  uint64_t age_measured_seq_{0};
+  bool age_valid_{false};
+  float age_last_s_{0.0F};
+  float age_max_s_{0.0F};
   bool ulog_started_{false};
   uint64_t last_ulog_gen_{~0ULL};
   std::deque<Pending> pending_;

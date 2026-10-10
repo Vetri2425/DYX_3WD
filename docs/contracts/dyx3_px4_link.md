@@ -54,7 +54,7 @@ flashed firmware. `EstimatorHealth.test_ratios_valid` is therefore always false 
 
 | Name | Type | Rate | Content |
 |---|---|---|---|
-| `/dyx3/vehicle_state` | VehicleState | 50 Hz | one fan-out of position, velocity, attitude, resets, status. Validity flags false until each source is fresh |
+| `/dyx3/vehicle_state` | VehicleState | per new local-position sample (about 50 Hz; `event_driven`, section 8) | one fan-out of position, velocity, attitude, resets, status. Validity flags false until each source is fresh |
 | `/dyx3/estimator_health` | EstimatorHealth | 10 Hz | from `estimator_status_flags` |
 | `/dyx3/gnss_report` | GnssReport | on sample | raw `SensorGps`, no interpretation |
 | `/dyx3/px4_link/status` | Px4LinkStatus | 10 Hz | see section 6 |
@@ -92,6 +92,16 @@ never see a finite velocity from this link. `RoverSpeedSetpoint.speed_body_y` is
 
 All `timestamp` fields are the companion's **system (wall) clock** in microseconds (section 7).
 
+**Write on arrival (C4, `event_driven`, default true).** A guard command with a new `seq` (the gate stores it) runs one full
+writer cycle **inside its own callback** (the same staleness evaluation, gate, offboard state machine and five-field set as a
+timer tick), so it reaches PX4 without waiting for the next 10 ms tick, and the writer timer is reset there. The timer keeps
+the heartbeat: it fires one period after the last cycle, so writes stay one period apart (the ≥ 100 Hz F1.7 stream holds);
+a timer tick that would land within half a period of the previous cycle is skipped, so one command is not written twice
+in a tick. A duplicate `seq` writes nothing. The 0.2 s command gate, the STOP-only states (section 9), PXL-002 and the
+shutdown burst (section 4) are unchanged; once the shutdown burst has started no writer cycle runs from any trigger.
+`event_driven=false`: only the timer writes (the behaviour before 0.14.0). DERIVED — NOT FROM V1 SPEC: the half-period
+skip threshold (a structural fraction of `1/publish_rate_hz`).
+
 ## 4. Fail to zero (CLAUDE.md §7, F-tasks A1.1)
 
 The link forces STOP (speed 0, yaw NaN, rate 0) in every one of these cases, evaluated each tick,
@@ -123,7 +133,8 @@ the guard publishes its command at the RPP rate (50 Hz), so 0.2 s is ten missed 
 **Orderly shutdown (X-010).** rclcpp's signal handler is disabled: SIGINT/SIGTERM only set a flag,
 the executor loop (`spin_once`, 5 ms) exits, and, while the context is still up and without
 spinning the writer timer again, the explicit STOP set is published at 100 Hz for 0.3 s
-(`Px4LinkNode::publish_shutdown_stop`). Only where the heartbeat was running on the last tick; no
+(`Px4LinkNode::publish_shutdown_stop`). Once it has sent a STOP set no writer cycle runs, neither the timer nor a guard
+command delivered by a late spin (C4). Only where the heartbeat was running on the last tick; no
 heartbeat is ever started at shutdown. Then the process exits and PX4's offboard-loss handling
 runs with STOP as the last setpoint. SIGPIPE is ignored.
 
@@ -199,9 +210,22 @@ their source is stale.
 
 ## 8. State fan-out
 
-`VehicleState` is assembled at 50 Hz from the newest sample of each source. Mapping (NED, rad):
+**When it is published (C1).** With `event_driven=true` (default) `VehicleState` is assembled and published inside the
+`vehicle_local_position` callback for every **new** sample (a `timestamp_sample` different from the last one published),
+so a pose reaches RPP without waiting for a writer tick; a repeated `timestamp_sample` is not republished. While the local
+position is stale (no sample for `stale_local_position_s`, or none yet) the 20 ms gate inside the writer tick republishes
+the cache, so consumers keep receiving the cleared validity flags and the `vehicle_status` fields at 50 Hz. Between the
+last sample and that staleness nothing is republished: downstream ages the last pose from its own receipt (RPP
+`pose_max_age_s`, guard `vehicle_state_max_age_s` 0.5 s), and px4_link's own TopicStale fail-to-zero still fires at
+`stale_local_position_s`. With `event_driven=false` the 20 ms gate publishes the newest cached sample at 50 Hz whatever
+arrived (the behaviour before 0.14.0). Either way the newest sample of each other source is used.
+DERIVED — NOT FROM V1 SPEC: the stale-only fallback (no constant is added; it reuses the gate and the staleness limit).
+
+`VehicleState` is assembled from the newest sample of each source. Mapping (NED, rad):
 `x,y,z` to `north/east/down`; `vx,vy,vz` to `velocity_*`; `q` (FRD to NED) copied as is;
 `heading` to `heading_rad`. Validity: `position_valid = xy_valid`, `velocity_valid = v_xy_valid`,
+`vertical_position_valid = z_valid`, `vertical_velocity_valid = v_z_valid` (IF-004, 0.14.0; each also needs a
+finite value),
 `attitude_valid = heading_good_for_control` and an attitude sample is fresh. Dead reckoning and
 estimator faults are *not* folded into these flags; the guard owns those gates through
 `EstimatorHealth`. A stale source clears its validity flags in the same tick. `xy_reset_counter`
@@ -292,6 +316,7 @@ negative injected timestamps.
 | Name | Default | Class | Source |
 |---|---|---|---|
 | `publish_rate_hz` | 100 | RESTART | F1.7 (≥ 100); validated ≥ 100 |
+| `event_driven` | true | RESTART | latency hardening: VehicleState on each new local-position sample (C1, section 8) and a writer cycle on each new guard command (C4, section 3); false = the 20 ms gate and the timer-only writer |
 | `command_max_age_s` | 0.2 | IDLE_ONLY | DERIVED from prototype `input_max_age_s`, re-validate GATE 4 |
 | `stale_*_s` (6) | section 5 | IDLE_ONLY | DERIVED, re-validate GATE 4 |
 | `handshake_timeout_s`, `handshake_retry_s` | 5.0, 1.0 | IDLE_ONLY | DERIVED |
@@ -410,3 +435,15 @@ not valid when the session is down or nothing arrived. **Values only.** F-tasks 
 source (the issue only says ~4 ms is expected), and inventing one would put an arbitrary number in a safety path. **OPEN (human):** the criterion (offset below X
 for Y seconds?) and who gates on it (`dyx3_mission` precondition vs `dyx3_motion_guard`). Until then the evidence is recorded: the recorder logs it at run start
 and end, and the gateway's telemetry shows it.
+
+## Pose-to-write age (interfaces 0.14.0, IF-003)
+
+`MotionSetpoint.source_pose_sample_stamp` names the PX4 local-position sample a command was computed from (RPP fills it, the guard preserves it on
+forwarded commands; `dyx3_motion_guard.md` section 1). It is `timestamp_sample` in the Jetson system-clock domain (section 7), the same base as the
+`timestamp` this link writes. At the **first write to PX4 of each new forwarded guard command** (OFFBOARD `Active`, gate reason `None` or `GuardStop`,
+stamp non-zero) the link computes `write timestamp - source_pose_sample_stamp`: the whole chain PX4 sample → `/fmu/out` → px4_link →
+`/dyx3/vehicle_state` → rpp → motion_guard → px4_link → `/fmu/in`. Rewrites of the same command by the heartbeat are not measured again.
+`Px4LinkStatus.pose_to_write_age_s` is the newest measurement and `pose_to_write_age_max_s` the largest, both over the window since the previous status
+message; `pose_to_write_age_valid` is false (values 0) when the window had no measurement. Evidence only: nothing gates on it (freshness stays on the
+link's steady clock). A system-clock step can make a value negative or large; read it next to `timesync_*`. Bench reading: arm, OFFBOARD with an idle
+mission (RPP's STOP commands are stamped too), record `/dyx3/px4_link/status`.

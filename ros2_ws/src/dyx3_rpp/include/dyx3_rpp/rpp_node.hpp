@@ -35,6 +35,11 @@ public:
 
   // One control tick at monotonic time now_ns. Public for deterministic tests.
   void step(int64_t now_ns);
+  // The tick timer's callback (C2). Timer mode: always a tick. Event-driven: a watchdog that ticks
+  // only when no pose sample ticked the core: two periods after a sample tick (a late sample is
+  // not silence), then once per period while samples stay away. Public for deterministic tests.
+  void on_watchdog(int64_t now_ns);
+  bool event_driven() const { return event_driven_; }
   // Publish STOP once more and stop publishing motion (main calls this on SIGINT/SIGTERM).
   void shutdown_stop();
 
@@ -56,6 +61,13 @@ private:
   RppCore core_;
   LoopTimer timer_stats_;
   double tick_hz_{50.0};
+  // C2: tick on each new VehicleState sample (RESTART parameter event_driven, default true).
+  bool event_driven_{true};
+  bool have_tick_{false};
+  bool last_tick_was_sample_{false};
+  int64_t last_tick_ns_{0};
+  bool have_ticked_sample_{false};
+  builtin_interfaces::msg::Time ticked_sample_{};
   std::string artifact_dir_;
 
   // mission
@@ -75,6 +87,9 @@ private:
   std::string pending_sha_;
 
   uint64_t seq_{0};
+  // IF-003: VehicleState.px4_sample_stamp of the newest pose fed into the core; copied into every
+  // MotionSetpoint.source_pose_sample_stamp. Zero until a valid pose arrived.
+  builtin_interfaces::msg::Time pose_sample_stamp_{};
   uint8_t last_state_{255};
   // XR-RPP-002: a running tick on which the core publishes no command (a run handover that needs
   // no alignment) repeats the previous running tick's command once, instead of a one-tick STOP

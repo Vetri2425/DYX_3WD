@@ -352,6 +352,30 @@ TEST(Assembler, NonFinitePositionIsInvalid) {
   const auto o = assemble(lp, AttitudeSample{}, StatusSample{}, Freshness{true, true, true});
   EXPECT_FALSE(o.position_valid);
 }
+TEST(Assembler, VerticalValidityFollowsZValidAndFreshness) {  // IF-004
+  LocalPositionSample lp;
+  lp.xy_valid = lp.v_xy_valid = true;
+  const Freshness f{true, true, true};
+  auto o = assemble(lp, AttitudeSample{}, StatusSample{}, f);
+  EXPECT_FALSE(o.vertical_position_valid);  // PX4 did not set z_valid / v_z_valid
+  EXPECT_FALSE(o.vertical_velocity_valid);
+  lp.z_valid = lp.v_z_valid = true;
+  lp.z = -1.5F;
+  lp.vz = 0.1F;
+  o = assemble(lp, AttitudeSample{}, StatusSample{}, f);
+  EXPECT_TRUE(o.vertical_position_valid);
+  EXPECT_TRUE(o.vertical_velocity_valid);
+  EXPECT_FLOAT_EQ(o.down, -1.5F);
+  o = assemble(lp, AttitudeSample{}, StatusSample{}, Freshness{});  // stale: nothing
+  EXPECT_FALSE(o.vertical_position_valid);
+  EXPECT_FALSE(o.vertical_velocity_valid);
+  lp.z = std::numeric_limits<float>::quiet_NaN();
+  lp.vz = std::numeric_limits<float>::infinity();
+  o = assemble(lp, AttitudeSample{}, StatusSample{}, f);
+  EXPECT_FALSE(o.vertical_position_valid);  // a non-finite value is never presented as valid
+  EXPECT_FALSE(o.vertical_velocity_valid);
+  EXPECT_TRUE(o.position_valid);  // independent of the horizontal flags
+}
 
 // --- yaw rate (RPP-009) --------------------------------------------------------------------------
 namespace {

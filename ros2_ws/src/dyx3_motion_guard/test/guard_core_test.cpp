@@ -415,6 +415,33 @@ TEST(Decision, CleanStopPassesWhateverTheGatesSay) {
   EXPECT_TRUE(d.accepted);
   expect_stop(d.out);
 }
+// IF-003: an accepted command carries its pose stamp through; a refusal carries none (the node
+// stamps its own STOP), so a STOP can never claim the pose of a command that was refused.
+TEST(Decision, AcceptedCommandsCarryTheirPoseStampRefusalsDoNot) {
+  GuardCore g(3, cfg());
+  for (uint64_t i = 1; i <= 3; ++i) {
+    Command c = cmd(i, Mode::TrackRate, 0.3F, NaN, 0.1F);
+    c.source_pose_sample_ns = 1'000'000'000LL * 1791590000 + 20'000'000LL * static_cast<int64_t>(i);
+    g.on_command(c, 0.01 * static_cast<double>(i));
+  }
+  auto d = g.decide(0.04, 0.02, good_gates());
+  ASSERT_TRUE(d.accepted);
+  EXPECT_EQ(d.source_pose_sample_ns, 1'000'000'000LL * 1791590000 + 60'000'000LL);
+  GateInputs gi = good_gates();
+  gi.estop = true;
+  d = g.decide(0.05, 0.02, gi);
+  EXPECT_FALSE(d.accepted);
+  EXPECT_EQ(d.source_pose_sample_ns, 0);
+  d = g.decide(0.5, 0.02, good_gates());  // stale
+  EXPECT_EQ(d.reason, Reason::Stale);
+  EXPECT_EQ(d.source_pose_sample_ns, 0);
+  Command stop = cmd(4, Mode::Stop, 0.0F, NaN, 0.0F);  // a clean STOP is forwarded with its stamp
+  stop.source_pose_sample_ns = 77;
+  g.on_command(stop, 0.5);
+  d = g.decide(0.51, 0.02, gi);
+  EXPECT_TRUE(d.accepted);
+  EXPECT_EQ(d.source_pose_sample_ns, 77);
+}
 TEST(Decision, RecoversWithoutLatchWhenGatesReturn) {
   auto g = accepting_core();
   GateInputs gi = good_gates();

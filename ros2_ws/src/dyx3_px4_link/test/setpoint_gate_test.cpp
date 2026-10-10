@@ -118,10 +118,12 @@ TEST(Gate, RecoveryAfterGapNeedsNewSeq) {
 }
 TEST(Gate, DuplicateSeqNeverRefreshesFreshness) {
   CommandGate g(0.2);
-  g.on_command(cmd(5, Mode::TrackRate, 0.35F, NaN, 0.1F), 1.0);
-  for (int i = 1; i <= 30; ++i)
-    g.on_command(cmd(5, Mode::TrackRate, 0.35F, NaN, 0.1F), 1.0 + 0.01 * i);
+  EXPECT_TRUE(g.on_command(cmd(5, Mode::TrackRate, 0.35F, NaN, 0.1F), 1.0));  // stored
+  for (int i = 1; i <= 30; ++i)  // C4: a duplicate reports no change (no event-driven write)
+    EXPECT_FALSE(g.on_command(cmd(5, Mode::TrackRate, 0.35F, NaN, 0.1F), 1.0 + 0.01 * i));
   EXPECT_EQ(g.step(ok(1.31)).reason, Reason::CommandStale);
+  EXPECT_TRUE(g.on_command(cmd(4, Mode::TrackRate, 0.35F, NaN, 0.1F), 1.32));  // reset: a change
+  EXPECT_EQ(g.step(ok(1.33)).reason, Reason::SequenceReset);
 }
 TEST(Gate, InvalidCommand) {
   CommandGate g(0.2);
@@ -167,6 +169,28 @@ TEST(Gate, GuardStopIsForwardedNotAFault) {
   EXPECT_EQ(o.reason, Reason::GuardStop);
   EXPECT_FALSE(o.failing_to_zero);
   expect_stop(o.sp);
+}
+
+// IF-003: the forwarded command names its seq and pose stamp; a link-made STOP names neither.
+TEST(Gate, ForwardedOutputCarriesSeqAndPoseStamp) {
+  CommandGate g(0.2);
+  Command c = cmd(7, Mode::TrackRate, 0.35F, NaN, 0.1F);
+  c.source_pose_sample_us = 1791590000120000ULL;
+  g.on_command(c, 1.0);
+  auto o = g.step(ok(1.01));
+  EXPECT_TRUE(o.forwarded);
+  EXPECT_EQ(o.seq, 7U);
+  EXPECT_EQ(o.source_pose_sample_us, 1791590000120000ULL);
+  o = g.step(ok(1.5));  // stale: the link's own STOP
+  EXPECT_FALSE(o.forwarded);
+  EXPECT_EQ(o.source_pose_sample_us, 0U);
+  Command s = cmd(8, Mode::Stop, 0, NaN, 0);
+  s.source_pose_sample_us = 5;
+  g.on_command(s, 1.6);
+  o = g.step(ok(1.61));
+  EXPECT_EQ(o.reason, Reason::GuardStop);
+  EXPECT_TRUE(o.forwarded);  // the guard's STOP is the guard's command
+  EXPECT_EQ(o.source_pose_sample_us, 5U);
 }
 
 // Property: whatever the inputs, the output is either a contract-conforming forward of a fresh

@@ -1,6 +1,20 @@
+# Latched emergency stop, served by dyx3_motion_guard (/dyx3/motion_guard/set_emergency_stop).
+# Contract: docs/contracts/dyx3_motion_guard.md section 4.
+
+# true asserts the latch; false clears it. Clearing needs this explicit request: the latch
+# survives everything except a guard process restart.
 bool asserted
+# Who is asking. Accepted values (exact, lowercase, compared byte for byte by
+# dyx3_motion_guard EstopLatch::request): "tablet", "backend", "ble", "physical".
+# Anything else, including an empty string or a different case, is refused with
+# REASON_INVALID_SOURCE and changes nothing. Any accepted source may clear a latch asserted by
+# another accepted source. The asserting source is echoed in EmergencyStopState.source; it is
+# empty while clear.
 string source
 ---
+# true only when the latch now holds the requested state. An accepted assert is applied at once:
+# the guard runs a decision tick inside the service call, so its next command is STOP, and it
+# publishes /dyx3/safety_gate and /dyx3/emergency_stop_state immediately (MG-007).
 bool accepted
 uint8 REASON_OK=0
 uint8 REASON_INVALID_SOURCE=1

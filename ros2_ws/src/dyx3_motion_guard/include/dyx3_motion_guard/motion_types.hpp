@@ -44,6 +44,8 @@ struct Command {
   float yaw_setpoint{0.0F};
   float yaw_rate_setpoint{0.0F};
   bool valid{false};
+  // IF-003: MotionSetpoint.source_pose_sample_stamp in nanoseconds. Carried, never judged.
+  int64_t source_pose_sample_ns{0};
 };
 
 inline bool uses_rate(Mode m) {
