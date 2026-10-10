@@ -44,7 +44,54 @@ safety-relevant gap.
 
 ---
 
+## 1b. Tracking in detail — commanded vs achieved, oscillation, scatter, swing
+
+Computed over the steady part of every TRACK leg (commanded speed ≥ 0.5 m/s; the legs are only
+~2.5 m, so 1.3–2.3 s each), from the 50 Hz bag topics (`RppStatus`, `MotionSetpoint`,
+`VehicleState`).
+
+| Quantity (steady straight, 0.55–0.60 m/s) | Mission 0007 (4 legs) | Mission 0001 (4 legs) |
+|---|---|---|
+| Cross-track mean per leg (signed) | +1.0 / −0.0 / −0.8 / −0.7 cm | −0.9 / +1.5 / +0.8 / +0.1 cm |
+| Cross-track std / peak-to-peak | 0.25–0.49 / 1.2–1.9 cm | 0.27–0.77 / 0.9–2.5 cm |
+| Cross-track zero crossings per leg | 1–5 | 1–3 |
+| Heading error mean per leg (signed) | −0.28 / −0.24 / +0.35 / +0.66° | +0.34 / +0.07 / −0.64 / −0.70° |
+| Heading error std / p2p | 0.13–0.30° / 0.4–1.3° | 0.19–0.36° / 0.9–1.6° |
+| Heading zero crossings per leg (dither period) | 3–12 (≈0.3–0.9 s) | 3–13 (≈0.3–0.5 s) |
+| Achieved heading lag behind `yaw_setpoint` | 0–420 ms (corr 0.58–0.94) | 0–200 ms (corr 0.54–0.95) |
+| `yaw_setpoint` step per 20 ms tick (command smoothness) | std 0.0004–0.0006 rad, max 0.0027 rad (0.15°) | std 0.0004–0.0007 rad, max 0.0022 rad |
+| Speed: command − measured | mean +0.5…+1.9 cm/s, std 1.3–2.8 cm/s | mean +0.3…+1.3 cm/s, std 1.7–3.3 cm/s |
+| Measured yaw rate on the straight | std 0.016–0.039 rad/s, p2p 0.08–0.23 rad/s, 12–20 zero crossings per leg | std 0.025–0.040 rad/s, p2p 0.12–0.24 rad/s, 8–20 zero crossings |
+| corr(cross-track, heading error) | +0.63 / −0.50 / −0.53 / −0.66 | +0.70 / −0.45 / +0.84 / +0.73 |
+
+**Reading.**
+- **No limit cycle on the straights.** Cross-track crosses zero 1–5 times per leg and its
+  "dominant period" equals the leg duration: the error is a slow first-order correction of the
+  corner-entry offset (1–3 cm, Finding B) plus a small per-leg bias, not an oscillation. The
+  heading dithers at ±0.3–0.5° with a 0.3–0.9 s period around a **per-leg bias of 0.3–0.7°** that
+  changes sign from leg to leg (so the corr sign flips). A steady heading bias with the
+  cross-track still converging is what a heading-mode tracker with a lookahead does: the yaw
+  setpoint is offset to pull the cross-track in, and the achieved heading follows it with 0–0.4 s
+  lag. There is no left-right swing beyond that dither; the signed means above are the "swing".
+- **RPP's commands are smooth** (yaw setpoint moves ≤ 0.15° per tick, speed command std ≈
+  measured std). **The fast content is in the measured yaw rate**: ±0.1 rad/s, 12–20 zero crossings
+  in ~2 s ≈ 5 Hz. RPP cannot produce it (its command changes 0.03°/tick); it is the PX4 yaw-rate
+  loop and the RoboClaw drivetrain (`RO_YAW_RATE_P/I`, wheel-speed quantisation, the deadband
+  patches B1 #7/#8). It is visible in the 0.3 cm cross-track scatter and in the ±0.5° heading
+  dither; it is not what limits accuracy today — the corner entry and the braking tail are.
+- **Commanded vs achieved speed** tracks within 1–2 cm/s mean, with ~8 % overshoot at the
+  plateau (PX4 `RO_MAX_THR_SPEED`); the ramp to 0.6 m/s is PX4's `RO_ACCEL_LIM` 0.5 m/s².
+- **What accuracy on a straight is actually limited by:** (1) the entry offset from the pivot
+  (Finding B), (2) the braking tail before each corner (1.0–3.9 cm signed drift in the last metre
+  at 0.2 m/s, where the heading-mode tracker barely corrects at low speed), (3) a 0.3–0.7° heading
+  bias per leg. Items (1) and (2) are controller structure; (3) is partly drivetrain asymmetry.
+
 ## 2. Finding A — a dead RoboClaw link is invisible to the whole stack (mission 0001)
+
+> Owner note 2026-10-10: the RoboClaw had been powered off by hand and nobody noticed — the
+> outage itself was not a fault of the firmware or the rover. What stands is only that the stack
+> could not see it (every gate green for 26 s under a motion command); the firmware hypothesis
+> below is withdrawn.
 
 **What happened.** `vehicle_status` shows OFFBOARD at t = 0.72 s. RPP goes `STOPPING → PIVOT` at
 0.73 s with a −1.503 rad (86°) heading error and commands −0.45 rad/s. The PX4 log then shows, for
@@ -132,17 +179,26 @@ m; the state ended at exactly 8.0 s (the precise-stop timeout) with 0.7 cm remai
 during CREEP was 0.2 cm p50 (the lateral fix `5965d90` works). Mission 0007 (older stack) did not
 show this: CREEP lasted 0.3 s and STOPPING 7.6 s, final error 0.4 cm.
 
-**Mechanism.** The capture needs "stopped" (speed < `segment_stop_speed_threshold` 0.02 m/s) and the
-along-track residual within tolerance at the same time; the controller keeps commanding ±0.05–0.085
-m/s (`endpoint_approach_speed` class, reverse allowed to −0.10) for a residual of a few millimetres,
-so the vehicle never counts as stopped. The outcome (7 mm) is acceptable, the path to it (6.5 s of
-rocking at the endpoint, finish by timeout) is not robust: on a slope or with a sticky drivetrain the
-rocking can grow, and the spray OFF at the end of a MARK run happens during it.
+**Mechanism (exact, from `RppCore::precise_stop_tick`).** Finishing needs `|residual| ≤
+segment_endpoint_arrival_tolerance_m (0.02)`, `|cross| ≤ 0.02` **and** "stopped" (measured speed
+< `segment_stop_speed_threshold` 0.02 m/s and yaw rate < 0.05 rad/s for `segment_stop_dwell_s`
+0.3 s). But while not stopped the law commands `speed = min(√(2·decel·|residual|), max(speed,
+creep))` with the **sign of the residual**, for any non-zero residual: 0.084 m/s at 1 cm, 0.046 at
+3 mm, 0 only exactly on the plane. The vehicle (speed loop + drivetrain, 0.1–0.3 s) overshoots,
+the sign flips, the command reverses — 14 reversals in 8.6 s, measured speed up to 12.5 cm/s with
+0–1 cm to go — and "stopped" is never satisfied until the 8 s timeout's brake (XR-RPP-001) ends
+it. The two stacks run identical RPP code here (only telemetry fields changed between `172b047`
+and `7f9651d`); mission 0007 happened to satisfy the gate on its first pass.
 
-**Candidates:** a dead-band on the along-track residual below which the command is zero and the stop
-is confirmed on the measured speed only (the register's XR-RPP-001 recommendation: "finish when
-stopped and |residual| ≤ along_tol"); the residual tolerance exists (`point_capture_radius_m` is 0.10
-at mission level; RPP's own along-track tolerance is the parameter to use). Owner decision at GATE 4.
+**Fix (this branch, `dyx3_rpp`, BEHAVIOUR CHANGE, only existing parameters):** (1) inside the
+arrival band the command is a brake (zero speed, heading held), not a creep, so the stop can be
+confirmed; (2) the brake is held while `|residual| ≤ along_tol + endpoint_capture_past_m` (0.02,
+the prototype's capture-past allowance reused as hysteresis) so a few millimetres of coast do not
+re-arm the creep; (3) the feed-forward speed outside the band is evaluated to the band edge
+(`|residual| − along_tol`) instead of to the plane, so it reaches zero where the brake takes over.
+The 8 s timeout stays as the backstop. Tests: tick-level reproduction of the old command inside
+the band, and a closed-loop first-order vehicle model that must complete within 4 s with ≤ 2 sign
+changes. **Field re-validation at the next endpoint is required** (this is a control-law change).
 
 ## 5. What is healthy (measured, do not re-litigate)
 
@@ -168,13 +224,15 @@ at mission level; RPP's own along-track tolerance is the parameter to use). Owne
 
 ## 6. Actions, ranked
 
-1. **Firmware:** confirm whether B1 #6 (`select()` fd_set reuse) is in `8279fa4be3`; read the RoboClaw
-   driver's recovery path; treat `[roboclaw] ACK timeout` as a pre-arm blocker on the rover until
-   understood (open item 8 is now a blocker, not a watch).
-2. **Companion (owner decision, interfaces bump):** actuator-plausibility gate in the guard; pivot
-   timeout surfaced by RPP and acted on by the mission (§2).
-3. **Corner alignment (GATE 4 tuning):** measure the minimum effective pivot rate, decide floor vs
-   band (§3). Until then, expect 1–3 cm at every corner entry.
-4. **Endpoint (GATE 4):** along-track dead-band in the precise stop (§4).
+1. **Endpoint stop:** the dead-band/brake-hold fix is on this branch (§4); re-validate at the next
+   endpoint (expect ≤ 2 reversals, completion within ~2 s of entering the band, no timeout finish).
+2. **Corner alignment (GATE 4 tuning):** measure the minimum effective pivot rate, decide floor vs
+   band (§3). Until then, expect 1–3 cm at every corner entry and 1–2.6 s of hunting per corner.
+3. **Braking tail:** the last metre before a corner drifts 1–4 cm at 0.2 m/s (§1b); the tracker's
+   lateral correction at low speed is the next structural item after the corners.
+4. **Companion (owner decision, interfaces bump):** actuator-plausibility gate in the guard and a
+   pivot timeout surfaced by RPP (§2) — the stack must be able to tell "commanded but not moving"
+   whatever the cause (a powered-off RoboClaw included).
 5. **Evidence:** run the circle/arc step as the `heading` vs `rate` A/B (review §8.1) — these two
-   missions prove the straight-line regime only.
+   missions prove the straight-line regime only; and the 5 Hz yaw-rate dither (§1b) is the PX4
+   rate loop's to tune, not RPP's.
