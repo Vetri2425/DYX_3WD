@@ -11,7 +11,7 @@ Goal the review is measured against:
 - no hang, stall or silent degradation; fail to STOP on any fault;
 - about 1 cm cross-track accuracy on straights and arcs.
 
-Review baseline: DYX_3WD `master` `252778e` (firmware `8279fa4be3`).
+Review baseline: DYX_3WD `master` `252778e` (firmware `8279fa4be3`). Status updates 2026-10-11 against `master` `db8a687` and branch `claude/funny-sagan-upnenq` `cc8db98`.
 
 ## Severity
 
@@ -73,8 +73,8 @@ several are the root causes the part reviews keep hitting.
 | PC-4 | RTK transport. Superseded by the owner's decision of 2026-10-09: **no automatic failover**. USB_DIRECT is done (task 1). Still to build and prove: LoRa + USB, LoRa + DDS | partly done | `docs/plans/2026-10-08_production_rtk_plan.md` |
 | PC-5 | **FCU parameter baseline**, checked at the bench and not inherited from the prototype:<br>- `EKF2_GPS_P_NOISE` 0.015 (**baseline still 0.05**, flagged unsafe);<br>- `EKF2_GPS_V_NOISE` 0.05 (baseline 0.2);<br>- `RO_YAW_RATE_TH` 0.5 (baseline 0.4);<br>- re-measure `EKF2_IMU_POS_*`, the antenna positions and `GPS_YAW_OFFSET`;<br>- `RBCLW_QPPS_MAX`, `RO_MAX_THR_SPEED`;<br>- one decel value shared by all stop logic; decide whether zero-speed stops bypass `RO_DECEL_LIM` (0.3 m/s²);<br>- never send heading-error feedback as yaw rate (κ·v feed-forward only) | **open: before the 4-point Mission test** | `config/px4/3wd_6x_carry_from_proto.params` |
 | PC-6 | Prebuilt release artifacts. The proposal was accepted. Still undecided before any customer delivery: minisign signing, branch protection + 2FA (conflicts with direct-to-master) | partly done | `docs/architecture/proposals/2026-10-08_prebuilt-release-artifacts.md` |
-| PC-7a | Health check: PX4 `UXRCE_DDS_DOM_ID` must equal `ROS_DOMAIN_ID` (42). Nothing enforces it | open | installer / `dyx3-health` |
-| PC-7b | Verify the `ROS_LOCALHOST_ONLY` discovery between the nodes and the XRCE agent (`dyx3-platform` does not read `ros.env`) | open | |
+| PC-7a | Health check: PX4 `UXRCE_DDS_DOM_ID` must equal `ROS_DOMAIN_ID` (42). Nothing enforces it | **FIXED** `626201b` (`dyx3-health --deep` FAILs when the agent listens but px4_link has no session, naming `UXRCE_DDS_DOM_ID` / `UXRCE_DDS_PTCFG`) — was: open | installer / `dyx3-health` |
+| PC-7b | Verify the `ROS_LOCALHOST_ONLY` discovery between the nodes and the XRCE agent (`dyx3-platform` does not read `ros.env`) | partly done: `DYX3_ROS_LOCALHOST_ONLY=1` is the shipped default and `RMW_IMPLEMENTATION` + a Fast DDS profile are pinned (`626201b`); rover 01 runs localhost-only (handshake OK 2026-10-10). Discovery on a fresh install still to verify | |
 | PC-7c | One installer test is not self-contained ("dry-run mentions useradd") | open | `installer/tests` |
 | PC-8 | The prototype bag manifests pair `as_run_config.rpp_params` names with the wrong values. The recorder must write correct name/value pairs | **Pairing PASS; precision FAIL** (doubles stored with 6 decimals, REC-020); coverage gap REC-002 | `dyx3_recorder` |
 | PC-9 | `installer/pins/firmware.pin` still pins `27a7ac9284`, but the rover runs `8279fa4be3`. `msg/`, `srv/` and `dds_topics.yaml` are identical between the two, so px4_msgs on the rover is correct. Bump the pin to `8279fa4be3` for traceability; a px4_msgs rebuild follows at the next upgrade | open (hygiene); **blocked by INS-003**: install via a fresh install, or after the INS-002 re-exec fix | |
@@ -317,7 +317,7 @@ Facts used (code at `8236c65`, firmware `8279fa4be3`, `config/px4/3wd_6x_carry_f
 | PXL-002 | **HIGH** | **FIXED** `e7d15d3` (hardening/2026-10-10) — was: ACCEPTED | Stop | `px4_link_node.cpp:290-296`; `offboard_heartbeat.cpp:5-20` | `SetOffboard(false)` stops the setpoint stream at once, with no STOP first: PX4 keeps the last setpoint until offboard loss (1.0 s), then disarms |
 | PXL-004 | **HIGH** | **FIXED** `e2577de` (hardening/2026-10-10) — was: ACCEPTED (mechanism; magnitude to measure) | Stall | `spray_ack_tokens.cpp:59-92`; `px4_link_node.cpp:658-685,759,772` | Two `fsync`s (file + directory) per new spray transaction, inside the 100 Hz writer tick, before the setpoint publish |
 | PXL-001 | **HIGH** (~~CRITICAL~~) | **FIXED** `e62468c` (hardening/2026-10-10) — was: ACCEPTED ↓ (acceptance gate; merged with X-008, PC-2c) | Stop | `main.cpp:15-17`; firmware `commander_params.c` | No measured stop bound after process, agent, Ethernet or Jetson loss: PX4 offboard-loss (1.0 s default) + disarm is the only path |
-| PXL-003 | MEDIUM (~~HIGH~~) | DOUBT (measure, with X-006) | Stall | `px4_link_node.cpp:721-780`; `main.cpp:16` | One non-RT executor serves the writer plus ULog, RTCM, spray, handshake and services |
+| PXL-003 | MEDIUM (~~HIGH~~) | DOUBT (measure, with X-006). Mitigated: px4_link FIFO 70 on CPU 4 `626201b`, ULog streaming off by default `87d839b`, writer `max_blocking_time` 10 ms (Fast DDS profile `626201b`) | Stall | `px4_link_node.cpp:721-780`; `main.cpp:16` | One non-RT executor serves the writer plus ULog, RTCM, spray, handshake and services |
 | PXL-005 | LOW (~~MEDIUM~~) | DOUBT (bench) | Correctness | `px4_link_node.cpp:347`; `offboard_heartbeat.cpp:32-44` | 0.5 s prestream before the OFFBOARD request; a rejection goes to terminal `Failed` with no retry |
 | PXL-006 | LOW (~~MEDIUM~~) | **FIXED** `f8fa399` (hardening/2026-10-10) — was: ACCEPTED ↓ | State | `vehicle_state_assembler.cpp:13-27` | z, vz, deltas and the reference lat/lon/alt are copied without `isfinite` |
 | PXL-008 | LOW | **FIXED** `e50cd84` (hardening/2026-10-10) — was: ACCEPTED | Latency | `px4_link_node.cpp:762-766` | `std::to_string` + string compare every tick (small-string, no heap; trivial) |
@@ -407,7 +407,7 @@ Confirmed good:
 | ID | Severity | Status | Area | Where | Item |
 |---|---|---|---|---|---|
 | MS-001 | MEDIUM (~~HIGH~~) | ACCEPTED ↓ (owner decision) | Points | `point_journal.cpp:47-88`; `docs/contracts/dyx3_mission.md:57-61` | `PointResult COMPLETED` means "came within 0.10 m", not "marked" |
-| MS-002 | MEDIUM (~~HIGH~~) | ACCEPTED ↓ (owner decision) | Restart | `mission_node.cpp:379-383`; `mission_fsm.cpp` | Point progress lives in memory only; after a graph restart the mission is IDLE and progress is lost |
+| MS-002 | MEDIUM (~~HIGH~~) | ACCEPTED ↓ (owner decision). Persisted progress + resume + re-engage from PAUSED: `05da0b3` on branch `claude/funny-sagan-upnenq`, not on `master` yet | Restart | `mission_node.cpp:379-383`; `mission_fsm.cpp` | Point progress lives in memory only; after a graph restart the mission is IDLE and progress is lost |
 | MS-003 | MEDIUM | **FIXED** `bd1f233` (hardening/2026-10-10) — was: ACCEPTED | Fault | `mission_node.cpp:252-300` | No RPP-status freshness check while RUNNING |
 | MS-006 | LOW (~~MEDIUM~~) | **FIXED** `399c446` (hardening/2026-10-10) — was: ACCEPTED ↓ | Fault | `mission_node.cpp:36,293-299` | `rpp_ack_timeout_s` = 0 disables the READY timeout |
 | MS-004 | LOW (~~MEDIUM~~) | **FIXED** `aab7260` (hardening/2026-10-10) — was: ACCEPTED ↓ | Stall | `path_artifact.cpp:122-127`; `mission_node.cpp:385-387` | Artifact read and SHA-256 with no size limit, inside the Start service callback |
@@ -556,7 +556,7 @@ Confirmed good:
 
 | ID | Severity | Status | Area | Where | Item |
 |---|---|---|---|---|---|
-| RTK-001 | MEDIUM (~~HIGH~~) | ACCEPTED ↓ | Stall | `ntrip_client.cpp:270-291,386-395`; `rtk_node.cpp:231-244` | `getaddrinfo()` has no deadline; a config change joins the NTRIP worker, so a hung resolver hangs the control socket |
+| RTK-001 | MEDIUM (~~HIGH~~) | **FIXED** `c24532a` (DNS lookup bounded by `connect_timeout_s`; config locked while a mission is active) — was: ACCEPTED ↓ | Stall | `ntrip_client.cpp:270-291,386-395`; `rtk_node.cpp:231-244` | `getaddrinfo()` has no deadline; a config change joins the NTRIP worker, so a hung resolver hangs the control socket |
 | RTK-002 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Status | `rtk_node.cpp:376-395`; `correction_health.cpp:13-15` | `correction_age_s` is the age since source receipt, not the receiver's correction age |
 | RTK-003 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Status | `rtk_node.cpp:384-388` | Accuracy 0 = unknown; the guard and RPP already reject it |
 | RTK-004 | LOW (~~MEDIUM~~) | DOUBT (measure) | Stall | `rtk_node.cpp:112-117,372-379` | The 200 ms status timer also polls the USB readback |
@@ -805,7 +805,7 @@ Confirmed in code:
 | REC-002 | **HIGH** | **FIXED** `6c75da5` (hardening/2026-10-10) — was: ACCEPTED | Completeness | `recorder_node.cpp:147-149` | `param_nodes` omits **`rpp`** (119 tuning parameters) and `system_gateway` |
 | REC-004 | **HIGH** | **FIXED** `7599097` (hardening/2026-10-10) — was: ACCEPTED | Completeness | `recorder_node.cpp:204-284` | The bag starts only after RUNNING + up to 6 × 2 s of parameter RPCs + discovery: the first seconds of motion and spray are lost |
 | REC-005 | **HIGH** | **FIXED** `36af849` (hardening/2026-10-10) — was: ACCEPTED | Completeness | `ulog_capture.cpp:7-15`; `px4_link_node.cpp:716` | The per-run `.ulg` starts mid-stream with no ULog header, so it is probably unreadable |
-| REC-006 | **HIGH** | ACCEPTED | Completeness | `recorder_node.cpp:224-234`; `release.sh:272` | Runs record the **expected** firmware SHA, not the running one; overlay hash and px4_msgs source missing |
+| REC-006 | **HIGH** | ACCEPTED. Running firmware + FCU parameters per run: `1f47834` on branch `claude/funny-sagan-upnenq`, not on `master` yet | Completeness | `recorder_node.cpp:224-234`; `release.sh:272` | Runs record the **expected** firmware SHA, not the running one; overlay hash and px4_msgs source missing |
 | REC-003 | MEDIUM (~~HIGH~~) | **FIXED** `8603d07` (hardening/2026-10-10) — was: ACCEPTED ↓ | Completeness | `recorder_node.cpp:241-254,338-341` | Parameters snapshotted at start and end only; LIVE changes mid-run are not journaled |
 | REC-008 | MEDIUM (~~HIGH~~) | **FIXED** `0027730` (hardening/2026-10-10) — was: ACCEPTED ↓ | Lifecycle | `run_lifecycle.cpp:28-55` | A run never closes if MissionState stops for good (a restarted graph publishes IDLE and closes it) |
 | REC-009 | MEDIUM | **FIXED** `775211f` (hardening/2026-10-10) — was: ACCEPTED | Lifecycle | `recorder_node.cpp:70-114` | A recorder restart leaves the interrupted run directory unmarked |
@@ -1157,10 +1157,10 @@ New findings:
 |---|---|---|---|
 | X-001 | `px4_link` | Freshness stamped on receipt; `timestamp_sample` not used for age | open, review with PXL |
 | X-002 | `px4_link` / RPP | `xy_reset_counter` and `delta_xy` are published but RPP uses its own jump heuristic | open, review with PXL |
-| X-003 | chain | Four unsynchronised timer hops pose → PX4 (about 35 ms typical / 70 ms worst) | open, measure first |
+| X-003 | chain | Four unsynchronised timer hops pose → PX4 (about 35 ms typical / 70 ms worst) | measured from the bags (2026-10-10 analysis §1c): event-driven at PX4's 50 Hz, chain latency 3.3 ms p50 / 14.5 ms max; the 100 Hz write into PX4 is not observable in the logs (SD logger at 10 Hz) — open for that hop only |
 | X-004 | `motion_guard` | Numeric input policy and response timing of the guard | in MG review |
 | X-005 | bringup / systemd | Shared FIFO CPU placement, start-up and shutdown ordering | open |
-| X-006 | `px4_link` / bringup | `px4_link`, the final 100 Hz writer to PX4, runs under **normal scheduling**, unlike RPP and the guard (`control_graph.launch.py:33-34`) | DOUBT, measure |
+| X-006 | `px4_link` / bringup | `px4_link`, the final 100 Hz writer to PX4, runs under **normal scheduling**, unlike RPP and the guard (`control_graph.launch.py:33-34`) | **FIXED** `626201b` (px4_link SCHED_FIFO 70 on CPU 4, below the two control executors) — was: DOUBT, measure |
 | X-007 | `px4_link` | Root cause of RPP-009: no angular-rate subscription | **FIXED** `65fd610` (hardening/2026-10-10) — was: ACCEPTED, HIGH |
 | X-008 | `px4_link` / firmware | Measure the real stop time for three separate events: the guard sends STOP; the guard dies while `px4_link` lives (0.2 s gate); the whole graph dies (PX4 offboard loss: `COM_OF_LOSS_T` is not in the baseline, `COM_OBL_RC_ACT` 7, upstream #27514) | open, measure (from MG review) |
 | X-009 | mission / bringup | Prove that a systemd graph restart or an E-stop clear can never resume a mission without the operator | open, test (from MG review) |

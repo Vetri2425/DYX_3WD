@@ -2780,61 +2780,75 @@ at 10 Hz): healthy client 48–49 events / 5 s for 170 s, backend ping 1–3 ms,
 - **Tablet link drops** = the app's JS thread blocked > 5 s (import / first Fields render, root re-renders), not the
   backend (backend ping 6 ms during the drops).
 
-### Open items from 2026-10-10 (complete list)
+### Open items from 2026-10-10 (complete list; status as of 2026-10-11 in brackets)
 
 **Decisions for the owner**
-1. **Stop policy without an operator link:** the operator link is no longer a gate, so the stops are the tablet E-stop
+1. **[PARTLY: RC-link pre-arm option `fbb3bda` on branch `claude/funny-sagan-upnenq`, off by default; decision open]** **Stop policy without an operator link:** the operator link is no longer a gate, so the stops are the tablet E-stop
    (only while the tablet is connected), the RC kill and PX4 failsafes. Decide on the RC kill switch vs a physical
    E-stop for production.
-2. **NTRIP password over plain HTTP** on the site LAN / hotspot: accept for now, or plan HTTPS for the backend.
-3. **App branches:** `Trajectory` is the integration line; `origin/main` (old `agy/prod-transport` line),
+2. **[OPEN]** **NTRIP password over plain HTTP** on the site LAN / hotspot: accept for now, or plan HTTPS for the backend.
+3. **[OPEN]** **App branches:** `Trajectory` is the integration line; `origin/main` (old `agy/prod-transport` line),
    `Mission-Flow` and `telemetry` are merged or superseded. Decide which becomes `main`.
-4. **Old tablet** (192.168.3.106) still runs a pre-v2 build: update or retire it (it polls removed routes).
-5. **Gate3/gate4 vector generators** no longer run (they planned their corpus with the removed PathEngine). The
+4. **[OPEN]** **Old tablet** (192.168.3.106) still runs a pre-v2 build: update or retire it (it polls removed routes).
+5. **[OPEN]** **Gate3/gate4 vector generators** no longer run (they planned their corpus with the removed PathEngine). The
    committed vectors stay valid. Freeze a copy under `tools/`, or retire the generators.
 
 **Rover / PX4 (verify on the next field session)**
-6. Confirm the MANUAL release live (`fe1770b`): log "leaving OFFBOARD: MANUAL requested" then "arm ok". RC must be on.
-7. Pre-arm gate should include PX4 `preflight_checks_pass` (already in `VehicleState`), so Start is refused at once
+6. **[OPEN: field]** Confirm the MANUAL release live (`fe1770b`): log "leaving OFFBOARD: MANUAL requested" then "arm ok". RC must be on.
+7. **[CLOSED: ack matching `87d839b`, pre-arm check `f8bac88`; stale-OFFBOARD exemption `fbb3bda` on branch `claude/funny-sagan-upnenq`]** Pre-arm gate should include PX4 `preflight_checks_pass` (already in `VehicleState`), so Start is refused at once
    with a reason; px4_link should report PX4's arm DENIED (`REJECTED_BY_FCU`, from the command ack) instead of the 2 s
    timeout.
-8. Watch: `[roboclaw] ACK timeout` (3 seen) and the transient PX4 "horizontal position unstable / height estimate not
+8. **[PARTLY: actuator-stall gate `fbb3bda`, pivot-timeout pause `05da0b3` on branch `claude/funny-sagan-upnenq`; field: no false positive while driving]** Watch: `[roboclaw] ACK timeout` (3 seen) and the transient PX4 "horizontal position unstable / height estimate not
    stable" (both before the arm denial at 18:58 IST).
-9. RPP loop jitter: max 20 ms with 4 overruns since start (step 8, timing under load, still to measure).
-10. 100 m north–south scale check (tape or RTK) to prove the ellipsoid placement.
-11. `RO_SPEED_RED` 1 (corner slowdown); STEP1-R1 (px4_link recovery 15.8 s after an agent restart); MCAP verification.
-12. Bench override in `/etc/dyx3/backend.env` (listen on all interfaces, "restore 10.42.0.1 for the field"), and the
+9. **[PARTLY: measured from the bags, 50 Hz event-driven, 1 overrun in 88 s on `7f9651d` (analysis §1c); timing under CPU load still open]** RPP loop jitter: max 20 ms with 4 overruns since start (step 8, timing under load, still to measure).
+10. **[OPEN: field]** 100 m north–south scale check (tape or RTK) to prove the ellipsoid placement.
+11. **[PARTLY: agent wait at start `626201b`, unit split `3d410db` on branch `claude/funny-sagan-upnenq`; recovery time not re-measured; RO_SPEED_RED still −1; MCAP open]** `RO_SPEED_RED` 1 (corner slowdown); STEP1-R1 (px4_link recovery 15.8 s after an agent restart); MCAP verification.
+12. **[OPEN]** Bench override in `/etc/dyx3/backend.env` (listen on all interfaces, "restore 10.42.0.1 for the field"), and the
     hotspot cannot start while the Wi-Fi is a client of the site router: settle the field network.
 
 **Rover / backend code**
-13. RTK on the WebSocket: add an `rtk_state` `rover_event` kind (worker state, transport delivery age, mountpoint,
+13. **[OPEN]** RTK on the WebSocket: add an `rtk_state` `rover_event` kind (worker state, transport delivery age, mountpoint,
     last error with credentials masked); `POST /rtk/profiles/{id}/activate`; typed request bodies for profile
     create/patch; backend tests for profile POST/DELETE and for deleting the active profile.
-14. `RtkClient` shares the 6 s gateway request timeout (minor; split if a hung RTK socket ever matters).
-15. Recorder `mission_state_name` returns UNKNOWN for PLACING/ARMING/ENGAGING (never a final state; minor).
-16. `tools/bench/phaseA_executor.py` is untracked in the checkout (Phase A DDS restart validation script): commit it
+14. **[OPEN: minor, RtkClient timeout is 3 s]** `RtkClient` shares the 6 s gateway request timeout (minor; split if a hung RTK socket ever matters).
+15. **[CLOSED: `1f47834` on branch `claude/funny-sagan-upnenq`]** Recorder `mission_state_name` returns UNKNOWN for PLACING/ARMING/ENGAGING (never a final state; minor).
+16. **[CLOSED: moved out of the repo to `3WD_PROD/bench_tools/archive/` on 2026-10-10]** `tools/bench/phaseA_executor.py` is untracked in the checkout (Phase A DDS restart validation script): commit it
     under `tools/bench/` or delete it.
 
 **App (`Three_Wheel_v2` `Trajectory`)**
-17. **Aligned entry:** route the entry leg through a staging point behind the start (prototype E1) and warn when the
+17. **[OPEN]** **Aligned entry:** route the entry leg through a staging point behind the start (prototype E1) and warn when the
     rover is past the start point.
-18. **~6 s UI freeze** when opening Fields / importing a file (the remaining socket drop in the release build).
-19. **RTK profile management** still speaks an invented contract: create fails (missing `id`/`security`), "set
+18. **[OPEN]** **~6 s UI freeze** when opening Fields / importing a file (the remaining socket drop in the release build).
+19. **[OPEN]** **RTK profile management** still speaks an invented contract: create fails (missing `id`/`security`), "set
     default" calls a route that does not exist, `password_configured` vs `password_set`. Rewrite to the rover contract;
     remove the `startLora` `:8000` A/B branch.
-20. Remaining REST polls: spray status every 2 s in `ModernSettingsPage` and `SecondaryPages` (status must come from
+20. **[OPEN]** Remaining REST polls: spray status every 2 s in `ModernSettingsPage` and `SecondaryPages` (status must come from
     events).
-21. Dead code left by the v2 flow: `stagedMissionHydration`, the unused kinds in `pathPipelineGuard`, the joystick
+21. **[OPEN]** Dead code left by the v2 flow: `stagedMissionHydration`, the unused kinds in `pathPipelineGuard`, the joystick
     modules, unused `extensionTransitClassify` exports; rename `CsvStageAndLoadPanel` → Send panel.
 
 **Field ladder (owner order)**
-22. Square ✅ → circle / arc → multi-shape → speed steps 0.6 → 0.8 m/s → pivots, extensions, mark/transit split →
+22. **[OPEN: square ✅; endpoint fix to verify (≤ 1 cm, ≤ 2 reversals); circle/arc must run as the `heading` vs `rate` A/B (default still `heading`)]** Square ✅ → circle / arc → multi-shape → speed steps 0.6 → 0.8 m/s → pivots, extensions, mark/transit split →
     spray (flow by speed, timing, compensation). Steps 7–12 of the morning plan (contracts/FSM, timing, crash-free
     nodes, final mission test, spray) continue through this ladder.
 
 **Process (Claude)**
-23. A subagent pushed `Trajectory` once without permission (heartbeat fix, `ac3adf5`): verify `origin` after every
+23. **[RULE: kept in Claude memory; followed since]** A subagent pushed `Trajectory` once without permission (heartbeat fix, `ac3adf5`): verify `origin` after every
     agent run; agents never push.
+
+**Added 2026-10-11 (from the production review, the mission analysis and the branch review)**
+24. **[OPEN]** The 100 Hz px4_link write into PX4 has never been measured: the SD logger records `offboard_control_mode`
+    at 10 Hz and `/fmu/in` is not bagged. Raise the logger rate or bag `/fmu/in/offboard_control_mode` for one timing run.
+25. **[OPEN]** Endpoint node tests (`f8a30b3` on the branch) run on a symmetric 0.5 m/s² plant; rover 01 brakes at
+    `RO_DECEL_LIM` 2.0. Re-run them at decel 2.0 / accel 0.5 (+ 20 ms lag): completes, ≤ 2 reversals, ≤ 1 cm.
+26. **[OPEN]** Cloud-phases leftovers still open in `docs/reviews/production/open_items.md` §0: PC-2 timing proposal,
+    PC-2b firmware `dds_topics.yaml` (`estimator_status_flags` still 5 Hz), PC-3 unused RPP A/B options (all 9 still
+    declared), PC-5 parameter values, PC-7c installer test, PC-1a–c, PC-9 firmware pin.
+27. **[OPEN]** Branch review items before the first motion on it: FCU parameter dump at LOADING can overlap ARMING on
+    the same Ethernet link (`fcu_param_dump_enabled=false` is the switch); the stall gate treats a yaw rate of exactly 0
+    as a measurement; nothing disarms an armed, idle rover after a services restart; the `dyx3-control` /
+    `dyx3-services` split was never run on systemd or the rover.
+28. **[OPEN: app]** Send `resume=true` and show `resumed_run_index` (interfaces 0.17.0).
 
 ## 2026-10-10 (night) — Claude — production review: transport, timing, event handling, backend ↔ tablet
 
