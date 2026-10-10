@@ -1218,7 +1218,7 @@ PY
 }
 
 # ================================================================ release size (installer/ci/slim_release.sh)
-# What CI removes from a built release before packaging it: test sources, the venv's packaging tools.
+# What CI removes from a built release before packaging it: test sources, the venv's packaging tools, symbol tables.
 # The slimmed tree must still pass the static verification and install through the prebuilt path.
 slim_release_block() {
   export INSTALLER_DIR="${REPO}/installer" DYX3_ROOT="${T}/slim" DYX3_ALLOW_ANY_OS=1 ROS_DISTRO_NAME=humble
@@ -1293,6 +1293,48 @@ slim_release_block() {
   rc=$?
   check "slim: a release without a backend venv is left alone" '[ "${rc}" -eq 0 ] && grep -q "no backend venv" "${T}/slim_novenv"'
 
+  # ---- strip: symbols move to .build-id/xx/yyyy.debug; the build-id stays; binaries still run
+  # (No `readelf | grep -q` below: under pipefail an early grep exit can fail the pipeline with SIGPIPE.)
+  local cc_ok=0
+  if have cc && have readelf && have objcopy && have strip; then
+    mkdir -p "${T}/slim_cc"
+    printf 'int dyx3_slim_exported(int x) { return x + 1; }\nstatic int dyx3_slim_local(void) { return 41; }\nint dyx3_slim_lib(void) { return dyx3_slim_local(); }\n' >"${T}/slim_cc/lib.c"
+    printf '#include <stdio.h>\nint dyx3_slim_lib(void);\nint main(void) { printf("answer %%d\\n", dyx3_slim_lib() + 1); return 0; }\n' >"${T}/slim_cc/main.c"
+    if cc -shared -fPIC -Wl,--build-id -o "${T}/slim_cc/libdyx3_slim.so" "${T}/slim_cc/lib.c" 2>/dev/null &&
+      cc -Wl,--build-id -o "${T}/slim_cc/node" "${T}/slim_cc/main.c" -L"${T}/slim_cc" -ldyx3_slim 2>/dev/null &&
+      [ -n "$(_elf_kind "${T}/slim_cc/node")" ]; then
+      cc_ok=1
+    fi
+  fi
+  if [ "${cc_ok}" = 1 ]; then
+    local inst="${srel}/ros2_ws/install/pkg_a" dbg="${T}/slim_dbg" id_node id_lib sum_py
+    mkdir -p "${inst}/lib/pkg_a" "${inst}/lib/python3.10/site-packages"
+    cp "${T}/slim_cc/node" "${inst}/lib/pkg_a/node"
+    cp "${T}/slim_cc/libdyx3_slim.so" "${inst}/lib/libdyx3_slim.so"
+    ln -s libdyx3_slim.so "${inst}/lib/libdyx3_slim.so.1"
+    printf '#!/usr/bin/env python3\nprint(1)\n' >"${inst}/lib/pkg_a/script_node" && chmod +x "${inst}/lib/pkg_a/script_node"
+    sum_py="$(sha256sum "${inst}/lib/pkg_a/script_node")"
+    id_node="$(_build_id "${inst}/lib/pkg_a/node")"
+    id_lib="$(_build_id "${inst}/lib/libdyx3_slim.so")"
+    (strip_release_binaries "${srel}" "${dbg}") >"${T}/slim_strip" 2>&1
+    rc=$?
+    check "slim: ELF files in ros2_ws/install are stripped, their build-ids unchanged" \
+      '[ "${rc}" -eq 0 ] && [ -n "${id_node}" ] && [ -z "$(readelf -S "${inst}/lib/pkg_a/node" | grep "\.symtab")" ] && [ -z "$(readelf -S "${inst}/lib/libdyx3_slim.so" | grep "\.symtab")" ] && [ "$(_build_id "${inst}/lib/pkg_a/node")" = "${id_node}" ] && [ "$(_build_id "${inst}/lib/libdyx3_slim.so")" = "${id_lib}" ]'
+    check "slim: the removed symbols are kept under .build-id and indexed in BUILD_IDS" \
+      'readelf -s "${dbg}/.build-id/${id_lib:0:2}/${id_lib:2}.debug" | grep dyx3_slim_local >/dev/null && [ -f "${dbg}/.build-id/${id_node:0:2}/${id_node:2}.debug" ] && grep -qx "${id_node} ros2_ws/install/pkg_a/lib/pkg_a/node" "${dbg}/BUILD_IDS" && [ "$(grep -c . "${dbg}/BUILD_IDS")" -eq 2 ]'
+    check "slim: a stripped executable still runs and its library keeps its exported symbols" \
+      '[ "$(LD_LIBRARY_PATH="${inst}/lib" "${inst}/lib/pkg_a/node")" = "answer 42" ] && readelf --dyn-syms "${inst}/lib/libdyx3_slim.so" | grep dyx3_slim_exported >/dev/null'
+    check "slim: scripts and symlinks are not touched by the stripping" \
+      '[ "$(sha256sum "${inst}/lib/pkg_a/script_node")" = "${sum_py}" ] && [ -L "${inst}/lib/libdyx3_slim.so.1" ]'
+    cc -Wl,--build-id=none -o "${inst}/lib/pkg_a/noid" "${T}/slim_cc/main.c" -L"${T}/slim_cc" -ldyx3_slim 2>/dev/null
+    (strip_release_binaries "${srel}" "${T}/slim_dbg2") >"${T}/slim_noid" 2>&1
+    rc=$?
+    check "slim: an ELF without a build-id is refused (its symbols could not be found again)" '[ "${rc}" -ne 0 ] && grep -q "no build-id" "${T}/slim_noid"'
+    rm -f "${inst}/lib/pkg_a/noid"
+  else
+    ok "slim: strip tests skipped (no cc/readelf/objcopy/strip for ELF here)"
+  fi
+
   # ---- the slimmed release passes static verification and installs through the prebuilt path
   if ! tar --zstd -cf /dev/null --files-from /dev/null 2>/dev/null; then
     ok "slim: prebuilt install of a slimmed release skipped (tar has no zstd here)"
@@ -1306,8 +1348,8 @@ slim_release_block() {
   rm -rf "${srel}/venv" && mkdir -p "${srel}/venv/bin" && ln -s /usr/bin/python3 "${srel}/venv/bin/python3"
   tar -C "${stage}" --zstd -cf "${art}/release-${sha}.tar.zst" "opt/dyx3/releases/${sha}"
   tar -C "${stage}" --zstd -cf "${art}/px4_msgs-${FIRMWARE_SHA}.tar.zst" "opt/dyx3/px4_msgs/${FIRMWARE_SHA}"
-  printf 'ARTIFACT_STACK_SHA=%s\nARTIFACT_FIRMWARE_SHA=%s\nARTIFACT_ROS_DISTRO=humble\nARTIFACT_CI_RUN=https://ci/run/2\n' \
-    "${sha}" "${FIRMWARE_SHA}" >"${art}/artifacts.env"
+  printf 'ARTIFACT_STACK_SHA=%s\nARTIFACT_FIRMWARE_SHA=%s\nARTIFACT_ROS_DISTRO=humble\nARTIFACT_CI_RUN=https://ci/run/2\nARTIFACT_DEBUG_SYMBOLS=rover-debug-%s.tar.zst\nARTIFACT_DEBUG_SYMBOLS_SHA256=%s\n' \
+    "${sha}" "${FIRMWARE_SHA}" "${sha}" "$(printf x | sha256sum | cut -d' ' -f1)" >"${art}/artifacts.env"
   (cd "${art}" && sha256sum artifacts.env "release-${sha}.tar.zst" "px4_msgs-${FIRMWARE_SHA}.tar.zst" >SHA256SUMS)
   local rel="${DYX3_RELEASES}/${sha}"
   mkdir -p "${DYX3_VAR_LIB}/state" "${DYX3_RELEASES}"

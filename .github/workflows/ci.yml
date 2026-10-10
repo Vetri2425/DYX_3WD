@@ -352,13 +352,22 @@ jobs:
 
       - name: build release + package
         shell: bash
-        run: bash installer/ci/build_rover_artifacts.sh "$GITHUB_WORKSPACE/rover-artifacts"
+        run: bash installer/ci/build_rover_artifacts.sh "$GITHUB_WORKSPACE/rover-artifacts" "$GITHUB_WORKSPACE/rover-debug-symbols"
 
       - uses: actions/upload-artifact@v4
         with:
           name: rover-artifacts
           path: rover-artifacts/
           retention-days: 3
+
+      # Symbols removed from the shipped ros2_ws/install binaries (.build-id/xx/yyyy.debug), for crash analysis.
+      # NOT part of the rover release: rover_publish never downloads this artifact. 90 days is GitHub's maximum.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rover-debug-symbols-${{ github.sha }}
+          path: rover-debug-symbols/
+          retention-days: 90
+          if-no-files-found: error
 
   rover_publish:
     name: publish rover release
