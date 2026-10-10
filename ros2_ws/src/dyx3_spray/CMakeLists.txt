@@ -53,8 +53,9 @@ if(BUILD_TESTING)
     target_link_libraries(${t} dyx3_spray_core)
     target_compile_definitions(${t} PRIVATE DYX3_FIXTURES="${FIXTURES}")
   endforeach()
-  # Real-time DDS fault injection: tens of seconds, above the 60 s ament default.
-  ament_add_gtest(spray_node_test test/spray_node_test.cpp TIMEOUT 300)
+  # DDS fault injection on an injected clock with work-driven delivery (test/dds_test_support.hpp):
+  # seconds. The timeout only bounds a hang on a loaded runner.
+  ament_add_gtest(spray_node_test test/spray_node_test.cpp TIMEOUT 120)
   target_link_libraries(spray_node_test dyx3_spray_node_lib)
   ament_target_dependencies(spray_node_test rclcpp dyx3_interfaces)
   target_compile_definitions(spray_node_test PRIVATE DYX3_FIXTURES="${FIXTURES}")
