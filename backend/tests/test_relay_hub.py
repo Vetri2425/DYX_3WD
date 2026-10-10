@@ -308,6 +308,30 @@ async def test_gateway_events_are_relayed_at_once_with_the_hub_sequence():
     assert kinds["mission_state"]["data"]["state"] == 3 and kinds["mission_state"]["gateway_seq"] == 13
 
 
+async def test_the_v2_mission_fields_reach_the_tablet_unchanged_and_a_step_change_is_an_event():
+    import asyncio
+
+    gw, clk = FakeGateway(), Clock()
+    em = Emitter()
+    hub = RealtimeHub(token_store(), gw, OperatorLinkRelay(gw, relay_s=0.5, tablet_timeout_s=1.5, clock=clk), em)
+    data = {"state": 7, "mission_id": 7, "run_index": 0, "point_index": 0, "reason_code": 13,
+            "path_artifact_sha256": "e" * 64, "source_artifact_sha256": "a" * 64, "request_id": "tab-1:9f2c",
+            "reason_detail": "OFFBOARD not confirmed; release: disarm \u2014 timeout", "gate_reason_code": 0, "waiting_on": 7,
+            "state_entered": 1791624580.5, "fresh": True, "stamp_s": 1791624581.25}
+    await hub.broadcast_event(gw_event("mission_state", 21, data))
+    # the same state, reason and request, the next step of the release: another event, never merged away by the hub
+    await hub.broadcast_event(gw_event("mission_state", 22, {**data, "waiting_on": 8}))
+    sent = em.status()
+    assert [p["data"] for p in sent] == [data, {**data, "waiting_on": 8}]  # untouched: nothing added, renamed or dropped
+    assert [p["gateway_seq"] for p in sent] == [21, 22] and sent[0]["seq"] < sent[1]["seq"]
+    # the replay for a session that connects later carries the latest, whole
+    hub.on_connect("o", {"token": "oper-tok"})
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    mine = {p["kind"]: p for p in em.status(to="o")}
+    assert mine["mission_state"]["data"] == {**data, "waiting_on": 8} and mine["mission_state"]["replay"] is True
+
+
 async def test_before_the_gateway_connects_a_session_learns_the_link_is_down():
     import asyncio
 

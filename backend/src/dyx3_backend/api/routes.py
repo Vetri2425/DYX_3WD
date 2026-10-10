@@ -145,16 +145,54 @@ async def health(request: Request, _: Identity = Viewer) -> dict:
     }
 
 
-def _mission_health(snapshot: dict | None, telemetry_fresh: bool) -> dict:
-    """Diagnostic copy of the snapshot's ``mission`` source (the tablet gets mission progress as events, not here).
+# Names of the MissionState numbers (ros2_ws/src/dyx3_interfaces/msg/MissionState.msg, interfaces 0.15.0; the rover contract
+# is docs/contracts/dyx3_mission.md). The tablet gets the numbers in the ``mission_state`` event; these names are for /health.
+MISSION_STATES = {
+    0: "IDLE", 1: "LOADING", 2: "READY", 3: "RUNNING", 4: "PAUSED", 5: "COMPLETED", 6: "ABORTED", 7: "ERROR",
+    8: "PLACING", 9: "ARMING", 10: "ENGAGING",
+}
+MISSION_REASONS = {
+    0: "NONE", 1: "OPERATOR", 2: "SAFETY", 3: "RTK", 4: "PATH_ERROR", 5: "INTERNAL_ERROR",
+    6: "EKF_RESET", 7: "EKF_REFERENCE_INVALID", 8: "PLACEMENT_OUT_OF_BOUNDS", 9: "NO_PLACEMENT_FRAME", 10: "ARM_REFUSED",
+    11: "ARM_TIMEOUT", 12: "OFFBOARD_REFUSED", 13: "OFFBOARD_TIMEOUT", 14: "RPP_ACK_TIMEOUT", 15: "ESTOP", 16: "RPP_ERROR",
+    17: "RPP_STALE",
+}
+MISSION_WAITING_ON = {
+    0: "NONE", 1: "ARTIFACT", 2: "PLACEMENT", 3: "ARM", 4: "OFFBOARD", 5: "RPP_ACK", 6: "OPERATOR", 7: "OFFBOARD_RELEASE",
+    8: "DISARM",
+}
 
-    A field the snapshot does not carry is null; ``fresh`` is false unless both the snapshot and its mission source are.
+
+def _name(table: dict[int, str], value: object) -> str | None:
+    """The table's name for a snapshot number; ``UNKNOWN_<n>`` for a number a newer rover adds; null when not a number."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return table.get(value, f"UNKNOWN_{value}")
+
+
+def _mission_health(snapshot: dict | None, telemetry_fresh: bool) -> dict:
+    """Diagnostic view of the snapshot's ``mission`` source (the tablet gets mission progress as events, not here).
+
+    ``lifecycle_state`` is the name of ``state``; ``waiting_on`` the name of the step being waited on; ``last_error`` is
+    the current reason (``reason_code`` other than NONE) with its ``reason_detail`` and, for a guard gate, ``gate_reason_code``,
+    or null when there is none. A field the snapshot does not carry is null; ``fresh`` is false unless both the snapshot and
+    its mission source are.
     """
     m = snapshot.get("mission") if isinstance(snapshot, dict) else None
     m = m if isinstance(m, dict) else {}
+    reason = m.get("reason_code")
+    last_error = None
+    if isinstance(reason, int) and not isinstance(reason, bool) and reason != 0:
+        last_error = {
+            "reason_code": reason,
+            "reason": _name(MISSION_REASONS, reason),
+            "detail": m.get("reason_detail"),
+            "gate_reason_code": m.get("gate_reason_code"),
+        }
     return {
-        "lifecycle_state": m.get("lifecycle_state"),
-        "last_error": m.get("last_error"),
+        "lifecycle_state": _name(MISSION_STATES, m.get("state")),
+        "last_error": last_error,
+        "waiting_on": _name(MISSION_WAITING_ON, m.get("waiting_on")),
         "age_s": m.get("age_s"),
         "fresh": telemetry_fresh and m.get("fresh") is True,
     }
@@ -316,7 +354,13 @@ async def start_mission(
     if not reply["ok"]:
         return JSONResponse(reply, status_code=status)
     data = reply["data"]
-    execution = {"mission_id": data.get("mission_id"), "request_id": rid}
+    # mission_id is the execution id; a duplicate is the existing execution (nothing new started).
+    execution = {
+        "mission_id": data.get("mission_id"),
+        "request_id": rid,
+        "duplicate": data.get("duplicate"),
+        "gate_reason_code": data.get("gate_reason_code"),
+    }
     return JSONResponse({"ok": True, "accepted": True, "execution": execution, "data": data}, status_code=202)
 
 

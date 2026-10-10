@@ -104,8 +104,9 @@ def plan_mission(c) -> str:
     return r.json()["mission"]["sha256"]
 
 
-def accepted(mission_id: int) -> dict:
-    return {"v": 1, "ok": True, "code": "ok", "reason": "", "data": {"accepted": True, "reason_code": 0, "mission_id": mission_id}}
+def accepted(mission_id: int, duplicate: bool = False) -> dict:
+    return {"v": 1, "ok": True, "code": "ok", "reason": "",
+            "data": {"accepted": True, "reason_code": 0, "mission_id": mission_id, "duplicate": duplicate, "gate_reason_code": 0}}
 
 
 def test_start_answers_202_accepted_with_the_execution(rig):
@@ -114,22 +115,23 @@ def test_start_answers_202_accepted_with_the_execution(rig):
     gw.replies["start_mission"] = accepted(7)
     r = c.post(f"/api/missions/{sha}/start", headers=H("oper-tok"))
     assert r.status_code == 202, r.text
-    assert r.json() == {"ok": True, "accepted": True, "execution": {"mission_id": 7, "request_id": None},
-                        "data": {"accepted": True, "reason_code": 0, "mission_id": 7}}
+    assert r.json() == {"ok": True, "accepted": True,
+                        "execution": {"mission_id": 7, "request_id": None, "duplicate": False, "gate_reason_code": 0},
+                        "data": {"accepted": True, "reason_code": 0, "mission_id": 7, "duplicate": False, "gate_reason_code": 0}}
     assert gw.calls[-1] == ("start_mission", {"path_artifact_sha256": sha})  # no id: none is invented
 
 
 def test_start_passes_the_request_id_through_also_on_a_duplicate(rig):
     c, gw, _ = rig
     sha = plan_mission(c)
-    gw.replies["start_mission"] = accepted(7)
+    gw.replies["start_mission"] = accepted(7, duplicate=True)
     first = c.post(f"/api/missions/{sha}/start", headers=H("oper-tok"), json={"request_id": "tab-1:9f2c"})
     again = c.post(f"/api/missions/{sha}/start", headers={**H("oper-tok"), "Idempotency-Key": "tab-1:9f2c"})
     both = c.post(f"/api/missions/{sha}/start", headers={**H("oper-tok"), "Idempotency-Key": "tab-1:9f2c"},
                   json={"request_id": "tab-1:9f2c"})
     for r in (first, again, both):
         assert r.status_code == 202, r.text
-        assert r.json()["execution"] == {"mission_id": 7, "request_id": "tab-1:9f2c"}
+        assert r.json()["execution"] == {"mission_id": 7, "request_id": "tab-1:9f2c", "duplicate": True, "gate_reason_code": 0}
     assert gw.calls[-3:] == [("start_mission", {"path_artifact_sha256": sha, "request_id": "tab-1:9f2c"})] * 3
 
 
@@ -158,6 +160,12 @@ def test_a_bad_request_id_never_reaches_the_gateway(rig, kwargs):
     ({"ok": False, "code": "service_unavailable", "reason": "mission start service is not available", "data": {}}, 503),
     ({"ok": False, "code": "timeout", "reason": "no answer", "data": {}}, 504),
     ({"ok": False, "code": "invalid_command", "reason": "bad args", "data": {}}, 400),
+    # the pre-arm gate names the guard gate that failed; the mission node's refused request id (REASON_INVALID_REQUEST 4)
+    ({"ok": False, "code": "rejected", "reason": "refused by the target (see data.reason_code)",
+      "data": {"accepted": False, "reason_code": 3, "mission_id": 0, "duplicate": False, "gate_reason_code": 6}}, 409),
+    ({"ok": False, "code": "invalid_command", "reason": "refused by the target (see data.reason_code)",
+      "data": {"accepted": False, "reason_code": 4, "mission_id": 0, "duplicate": False, "gate_reason_code": 0,
+               "request_id": "r1"}}, 400),
 ])
 def test_start_errors_pass_through_typed_and_untouched(rig, reply, status):
     c, gw, _ = rig

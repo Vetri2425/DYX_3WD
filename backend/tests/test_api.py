@@ -153,16 +153,50 @@ def test_runs_listing_is_read_only_and_rejects_path_tricks(rig, tmp_path):
 
 def test_health_has_a_mission_block_from_the_snapshot(rig):
     c, gw, _ = rig
-    empty = {"lifecycle_state": None, "last_error": None, "age_s": None, "fresh": False}
+    empty = {"lifecycle_state": None, "last_error": None, "waiting_on": None, "age_s": None, "fresh": False}
     assert c.get("/api/health", headers=H("view-tok")).json()["mission"] == empty  # no snapshot yet
-    gw.snapshot, gw._age = {"mission": {"state": 3, "mission_id": 4, "reason_code": 0, "age_s": 0.1, "fresh": True}}, 0.2
-    # a snapshot without the lifecycle fields yet: tolerated as null
-    assert c.get("/api/health", headers=H("view-tok")).json()["mission"] == {**empty, "age_s": 0.1, "fresh": True}
-    error = {"code": "PLACING_FAILED", "reason": "EKF reference invalid"}
-    gw.snapshot = {"mission": {"lifecycle_state": "ERROR", "last_error": error, "age_s": 0.1, "fresh": True}}
+    # a healthy running mission: state named, no error, nothing waited on
+    gw.snapshot, gw._age = {"mission": {"state": 3, "mission_id": 4, "reason_code": 0, "gate_reason_code": 0, "waiting_on": 0,
+                                        "reason_detail": "", "age_s": 0.1, "fresh": True}}, 0.2
     assert c.get("/api/health", headers=H("view-tok")).json()["mission"] == {
-        "lifecycle_state": "ERROR", "last_error": error, "age_s": 0.1, "fresh": True}
+        "lifecycle_state": "RUNNING", "last_error": None, "waiting_on": "NONE", "age_s": 0.1, "fresh": True}
+    # a snapshot without the lifecycle fields: tolerated as null
+    gw.snapshot = {"mission": {"age_s": 0.1, "fresh": True}}
+    assert c.get("/api/health", headers=H("view-tok")).json()["mission"] == {**empty, "age_s": 0.1, "fresh": True}
+    # the error: reason code and name, the rover's detail, the guard gate, and the step still being waited on
+    gw.snapshot = {"mission": {"state": 7, "reason_code": 13, "reason_detail": "OFFBOARD not confirmed; release: disarm timed out",
+                               "gate_reason_code": 0, "waiting_on": 8, "age_s": 0.1, "fresh": True}}
+    assert c.get("/api/health", headers=H("view-tok")).json()["mission"] == {
+        "lifecycle_state": "ERROR",
+        "last_error": {"reason_code": 13, "reason": "OFFBOARD_TIMEOUT", "detail": "OFFBOARD not confirmed; release: disarm timed out",
+                       "gate_reason_code": 0},
+        "waiting_on": "DISARM", "age_s": 0.1, "fresh": True}
     gw._age = 60.0  # the whole snapshot is stale: never fresh
     assert c.get("/api/health", headers=H("view-tok")).json()["mission"]["fresh"] is False
     gw.snapshot, gw._age = {"mission": None}, 0.2  # source never received
     assert c.get("/api/health", headers=H("view-tok")).json()["mission"] == empty
+
+
+def test_health_names_every_v2_state_reason_and_step(rig):
+    from dyx3_backend.api.routes import MISSION_REASONS, MISSION_STATES, MISSION_WAITING_ON
+
+    c, gw, _ = rig
+    # the numbers of interfaces 0.15.0: states 0..10, reasons 0..17, steps 0..8 (MissionState.msg)
+    assert MISSION_STATES == {0: "IDLE", 1: "LOADING", 2: "READY", 3: "RUNNING", 4: "PAUSED", 5: "COMPLETED", 6: "ABORTED",
+                              7: "ERROR", 8: "PLACING", 9: "ARMING", 10: "ENGAGING"}
+    assert list(MISSION_REASONS) == list(range(18)) and MISSION_REASONS[6] == "EKF_RESET" and MISSION_REASONS[17] == "RPP_STALE"
+    assert list(MISSION_WAITING_ON) == list(range(9)) and MISSION_WAITING_ON[5] == "RPP_ACK"
+    for state, name in MISSION_STATES.items():
+        gw.snapshot, gw._age = {"mission": {"state": state, "reason_code": 0, "waiting_on": 0, "age_s": 0.1, "fresh": True}}, 0.2
+        assert c.get("/api/health", headers=H("view-tok")).json()["mission"]["lifecycle_state"] == name
+    for reason, name in MISSION_REASONS.items():
+        gw.snapshot = {"mission": {"state": 6, "reason_code": reason, "age_s": 0.1, "fresh": True}}
+        err = c.get("/api/health", headers=H("view-tok")).json()["mission"]["last_error"]
+        assert (err is None) if reason == 0 else (err["reason"] == name and err["reason_code"] == reason)
+    for step, name in MISSION_WAITING_ON.items():
+        gw.snapshot = {"mission": {"state": 1, "reason_code": 0, "waiting_on": step, "age_s": 0.1, "fresh": True}}
+        assert c.get("/api/health", headers=H("view-tok")).json()["mission"]["waiting_on"] == name
+    # a number a newer rover adds is reported, not hidden or invented
+    gw.snapshot = {"mission": {"state": 40, "reason_code": 99, "waiting_on": 77, "age_s": 0.1, "fresh": True}}
+    block = c.get("/api/health", headers=H("view-tok")).json()["mission"]
+    assert (block["lifecycle_state"], block["last_error"]["reason"], block["waiting_on"]) == ("UNKNOWN_40", "UNKNOWN_99", "UNKNOWN_77")

@@ -148,19 +148,38 @@ refuses to place such an artifact (`NO_PLACEMENT_FRAME`).
   never by polling.
   ```json
   {"ok": true, "accepted": true,
-   "execution": {"mission_id": 7, "request_id": "tab-1:9f2c"},
-   "data": {"accepted": true, "reason_code": 0, "mission_id": 7}}
+   "execution": {"mission_id": 7, "request_id": "tab-1:9f2c", "duplicate": false, "gate_reason_code": 0},
+   "data": {"accepted": true, "reason_code": 0, "mission_id": 7, "duplicate": false, "gate_reason_code": 0,
+            "request_id": "tab-1:9f2c"}}
   ```
-  `execution.mission_id` is the gateway reply's `data.mission_id` (null if absent); `execution.request_id` is the id sent
-  (null without one); `data` is the gateway reply's `data`, untouched.
+  `execution.mission_id` is the gateway reply's `data.mission_id`, the **execution id** (null if absent);
+  `execution.duplicate` is `data.duplicate` (true: the `request_id` matched the most recent execution, `mission_id` is that
+  execution's and nothing new started; null if absent); `execution.gate_reason_code` is `data.gate_reason_code` (0 on an
+  accept; null if absent); `execution.request_id` is the id sent (null without one); `data` is the gateway reply's `data`, untouched.
 - Errors, typed `{"ok": false, "code", "reason", "delivered", "data"}` with the gateway's `data` (including the mission's
-  `reason_code`) untouched: `rejected` -> **409**; `invalid_command` -> 400; `service_unavailable` / `busy` -> 503;
+  `reason_code` and, for the pre-arm gate refusal `reason_code` 3, `gate_reason_code` = the guard gate that failed) untouched:
+  `rejected` -> **409**; `invalid_command` -> 400 (also the mission node's `reason_code` 4 INVALID_REQUEST, which the gateway types as
+  `invalid_command`); `service_unavailable` / `busy` -> 503;
   gateway not connected -> **503** `"delivered": false` (not delivered: nothing started); `timeout` or no reply in time ->
   **504** `"delivered": null` (unknown: re-read the mission state before retrying with the same `request_id`).
 
-**Health** `GET /health` includes a diagnostic `mission` block copied from the latest gateway snapshot's `mission` source:
-`{"lifecycle_state": str|null, "last_error": any|null, "age_s": float|null, "fresh": bool}`. A field the snapshot does not
-carry is null; `fresh` is true only when the snapshot is fresh (`telemetry_stale_s`) and its mission source is `fresh`.
+**Health** `GET /health` includes a diagnostic `mission` block derived from the latest gateway snapshot's `mission` source
+(`dyx3_system_gateway.md` section 1.3 lists its fields):
+`{"lifecycle_state": str|null, "last_error": object|null, "waiting_on": str|null, "age_s": float|null, "fresh": bool}`.
+- `lifecycle_state`: the name of `state`: `IDLE`, `LOADING`, `READY`, `RUNNING`, `PAUSED`, `COMPLETED`, `ABORTED`, `ERROR`,
+  `PLACING`, `ARMING`, `ENGAGING` (0..10).
+- `last_error`: the current reason, `null` while `reason_code` is 0 (NONE): `{"reason_code": int, "reason": str,
+  "detail": str|null, "gate_reason_code": int|null}`. `reason` is the name of the code: `OPERATOR`, `SAFETY`, `RTK`, `PATH_ERROR`,
+  `INTERNAL_ERROR`, `EKF_RESET`, `EKF_REFERENCE_INVALID`, `PLACEMENT_OUT_OF_BOUNDS`, `NO_PLACEMENT_FRAME`, `ARM_REFUSED`,
+  `ARM_TIMEOUT`, `OFFBOARD_REFUSED`, `OFFBOARD_TIMEOUT`, `RPP_ACK_TIMEOUT`, `ESTOP`, `RPP_ERROR`, `RPP_STALE` (1..17); `detail` is
+  the rover's `reason_detail`; `gate_reason_code` the guard gate behind `SAFETY` / `RTK` (`MotionSetpointStatus.REASON_*`, a number:
+  the backend keeps no table of guard reasons).
+- `waiting_on`: the name of the step the lifecycle waits on: `NONE`, `ARTIFACT`, `PLACEMENT`, `ARM`, `OFFBOARD`, `RPP_ACK`,
+  `OPERATOR`, `OFFBOARD_RELEASE`, `DISARM` (0..8).
+- A number a newer rover adds is reported as `UNKNOWN_<n>`; a field the snapshot does not carry is null; `fresh` is true only when
+  the snapshot is fresh (`telemetry_stale_s`) and its mission source is `fresh`.
+
+The names live in `api/routes.py` and exist only for this block: the tablet receives the numbers in the `mission_state` event.
 Diagnostic only: nothing depends on polling it.
 
 
@@ -220,7 +239,9 @@ Transport timing: `sio_ping_interval_s` 5.0 and `sio_ping_timeout_s` 5.0 (DERIVE
 {"kind": "mission_state", "seq": 118, "gateway_seq": 42, "t_mono_s": 18234.512039871, "t_wall_ms": 1791624580734,
  "coalesced": 0, "replay": false,
  "data": {"state": 3, "mission_id": 7, "run_index": 0, "point_index": 0, "reason_code": 0,
-          "path_artifact_sha256": "<64 hex>", "fresh": true, "stamp_s": 1791624580.733912}}
+          "path_artifact_sha256": "<64 hex>", "source_artifact_sha256": "<64 hex>", "request_id": "tab-1:9f2c",
+          "reason_detail": "", "gate_reason_code": 0, "waiting_on": 0, "state_entered": 1791624580.5,
+          "fresh": true, "stamp_s": 1791624580.733912}}
 ```
 
 | field | meaning |
@@ -236,7 +257,7 @@ Transport timing: `sio_ping_interval_s` 5.0 and `sio_ping_timeout_s` 5.0 (DERIVE
 
 | `kind` | `data` |
 |---|---|
-| `mission_state` | the snapshot `mission` fields (`state`, `mission_id`, `run_index`, `point_index`, `reason_code`, `path_artifact_sha256`, ...), `fresh`, `stamp_s` |
+| `mission_state` | the gateway's `mission_state` data, **passed through unchanged**: `state`, `mission_id` (the execution id), `run_index`, `point_index`, `reason_code`, `gate_reason_code`, `reason_detail`, `path_artifact_sha256` (the execution artifact), `source_artifact_sha256`, `request_id`, `waiting_on`, `state_entered`, `fresh`, `stamp_s` (values: `dyx3_system_gateway.md` section 1.3). A change of `waiting_on` alone is an event |
 | `operator_link` | `alive`, `age_s`, `cause`: `heartbeat` \| `timeout` \| `connection_closed` \| `never` |
 | `fcu_link` | `fresh`, `session_alive`, `handshake_ok`, `fault`, `session_resets` |
 | `estop` | `fresh`, `asserted`, `source` |
@@ -265,7 +286,7 @@ Rules for the tablet:
 ## 6. Acceptance
 
 Off-target: token store (hashing, roles, fail-closed), gateway client against a fake socket server (framing, reconnect, timeout, pending requests failed on disconnect, telemetry cache), the REST surface with a fake gateway
-(auth matrix, error mapping, estop role rule, delivered:false, start 202 / request id / typed start errors, the health mission block),
-app-plan admission (densify on the segment, boundary snap and its limit, frame and anchor rules, meta, size, idempotent store, summary; the removed upload and parse routes answer 404/405), the heartbeat relay timing, the Socket.IO hub with a fake emitter (`rover_event` ordering, replay, `gateway_link`).
+(auth matrix, error mapping, estop role rule, delivered:false, start 202 / request id / duplicate / gate reason / typed start errors, the health mission block with every v2 state, reason and step name),
+app-plan admission (densify on the segment, boundary snap and its limit, frame and anchor rules, meta, size, idempotent store, summary; the removed upload and parse routes answer 404/405), the heartbeat relay timing, the Socket.IO hub with a fake emitter (`rover_event` ordering, replay, `gateway_link`, every v2 `mission_state` field passed through unchanged).
 The Python client was also run once against the REAL C++ gateway node in the Humble container (`tools/gateway_smoke.py`): framing, replies, `service_unavailable` for every service command, `invalid_command` for an unknown one, telemetry push, all as specified.
 **Not provable off-target:** the gateway socket's permissions under systemd, the real tablet, WiFi behaviour, uvicorn under systemd.
