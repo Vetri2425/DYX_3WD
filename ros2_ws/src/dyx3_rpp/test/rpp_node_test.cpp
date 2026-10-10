@@ -737,7 +737,14 @@ TEST(RppNode, AnOffsetEndpointIsReachedFromThePublishedCommandsAlone) {
       const double yaw = m.mode == MotionSetpoint::MODE_TRACK_HEADING ? m.yaw_setpoint : r.heading;
       const double dir = m.speed_body_x > 0.0F ? 1.0 : -1.0;
       EXPECT_GT(dir * (std::cos(yaw) * to_n + std::sin(yaw) * to_e), 0.0)
-          << "tick " << i << " moves away from the endpoint";
+          << "tick " << i << " moves away from the endpoint: mode " << static_cast<int>(m.mode)
+          << " speed " << m.speed_body_x << " yaw_setpoint " << m.yaw_setpoint << " yaw_rate "
+          << m.yaw_rate_setpoint << " | rig heading " << r.heading << " speed " << r.speed
+          << " at n " << r.north << " e " << r.east << " | status state "
+          << static_cast<int>(r.status.state) << " tick_state "
+          << static_cast<int>(r.status.tick_state) << " | previous command mode "
+          << (r.motion.size() > 1 ? static_cast<int>(r.motion[r.motion.size() - 2].mode) : -1)
+          << " speed " << (r.motion.size() > 1 ? r.motion[r.motion.size() - 2].speed_body_x : 0.0F);
     }
     EXPECT_TRUE(saw_creeping);
     EXPECT_EQ(r.status.state, RppStatus::STATE_COMPLETE) << "at n " << r.north << " e " << r.east;
