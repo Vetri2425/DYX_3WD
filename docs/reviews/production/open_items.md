@@ -99,14 +99,14 @@ Facts used to re-rate (all at `252778e`):
 
 | ID | Severity | Status | Area | Where | Item |
 |---|---|---|---|---|---|
-| RPP-009 | MEDIUM (~~HIGH~~) | ACCEPTED, re-rated by CR-1 (bounded by pivot rate law + settle hold; bench) | Fail-safe / accuracy | `dyx3_px4_link/src/px4_link_node.cpp:838-860`; `rpp_core.cpp:171-176,436`; `stop_pivot_fsm.cpp:51,131` | `VehicleState.yaw_rate_radps` is never filled, so RPP always sees a yaw rate of 0 |
+| RPP-009 | MEDIUM (~~HIGH~~) | **FIXED** `65fd610` (hardening/2026-10-10) — was: ACCEPTED, re-rated by CR-1 (bounded by pivot rate law + settle hold; bench) | Fail-safe / accuracy | `dyx3_px4_link/src/px4_link_node.cpp:838-860`; `rpp_core.cpp:171-176,436`; `stop_pivot_fsm.cpp:51,131` | `VehicleState.yaw_rate_radps` is never filled, so RPP always sees a yaw rate of 0 |
 | RPP-001 | MEDIUM (~~CRITICAL~~) | ACCEPTED ↓ | Stall / RT | `rpp_node.cpp:200-202,217-312,321-322` | Mission load, conditioning, hashing and disk I/O run on the FIFO-80 control thread |
 | RPP-003 | MEDIUM (~~HIGH~~) | ACCEPTED ↓ | Latency | `rpp_node.cpp:57-72`; `rpp_core.cpp:157-169,782` | Pose age is measured from RPP receipt, not the PX4 sample time |
 | RPP-005 | MEDIUM (~~HIGH~~) | DOUBT (measure) | RT | `control_graph.launch.py:34`; `main.cpp:22-36` | RPP and `motion_guard` share CPU 4 at equal FIFO 80 |
 | RPP-008 | MEDIUM | DOUBT (measure) | Latency | `rpp_node.cpp:125-127` | Free-running tick, not synchronised to pose arrival |
-| RPP-002 | LOW (~~CRITICAL~~) | ACCEPTED ↓ | Hardening | `rpp_node.cpp:57-72` | No `isfinite` check at the RPP boundary |
-| RPP-004 | LOW (~~HIGH~~) | ACCEPTED ↓ | Hardening | `rpp_core.cpp:782-797` | Negative or non-finite age is not rejected before extrapolation |
-| RPP-006 | MEDIUM | ACCEPTED, re-rated by CR-1 (IDLE_ONLY gates change on resume) | Params | `rpp_node.cpp:116`; `docs/contracts/rpp_node.md:40` | IDLE_ONLY conditioning parameters are accepted while READY/PAUSED but take effect only at the next load |
+| RPP-002 | LOW (~~CRITICAL~~) | **FIXED** `6244e16` (hardening/2026-10-10) — was: ACCEPTED ↓ | Hardening | `rpp_node.cpp:57-72` | No `isfinite` check at the RPP boundary |
+| RPP-004 | LOW (~~HIGH~~) | **FIXED** `6244e16` (hardening/2026-10-10) — was: ACCEPTED ↓ | Hardening | `rpp_core.cpp:782-797` | Negative or non-finite age is not rejected before extrapolation |
+| RPP-006 | MEDIUM | **FIXED** `3dae11b` (hardening/2026-10-10) — was: ACCEPTED, re-rated by CR-1 (IDLE_ONLY gates change on resume) | Params | `rpp_node.cpp:116`; `docs/contracts/rpp_node.md:40` | IDLE_ONLY conditioning parameters are accepted while READY/PAUSED but take effect only at the next load |
 | RPP-007 | — | REJECTED | — | `rpp_node.cpp:317-343` | "Tick overrun has no fail-safe" |
 
 ### RPP-009 — HIGH — yaw rate is never populated; stop and pivot confirmation ignore rotation
@@ -226,13 +226,13 @@ Producer periods used to re-rate MG-001:
 
 | ID | Severity | Status | Area | Where | Item |
 |---|---|---|---|---|---|
-| MG-007 | **MEDIUM** | ACCEPTED (new, found in verification) | E-stop / spray | `motion_guard_node.cpp:266-279,140` | E-stop and safety-gate state are published on a 100 ms cadence, not on change |
-| MG-003 | MEDIUM | ACCEPTED | Shutdown | `main.cpp:9-15` | No final STOP on SIGTERM (default rclcpp signal handling) |
+| MG-007 | **MEDIUM** | **FIXED** `9fc6c59` (hardening/2026-10-10) — was: ACCEPTED (new, found in verification) | E-stop / spray | `motion_guard_node.cpp:266-279,140` | E-stop and safety-gate state are published on a 100 ms cadence, not on change |
+| MG-003 | MEDIUM | **FIXED** `b23bd5c` (hardening/2026-10-10) — was: ACCEPTED | Shutdown | `main.cpp:9-15` | No final STOP on SIGTERM (default rclcpp signal handling) |
 | MG-002 | MEDIUM (~~HIGH~~) | DOUBT (measure, with RPP-005) | RT | `motion_guard_node.cpp:144-146` | Timer-only output with no measured deadline on the shared FIFO CPU |
-| MG-001 | LOW (~~HIGH~~) | ACCEPTED ↓ | Gates | `motion_guard_node.cpp:173-178` | 0.5 s freshness for every status input: rationale not documented per input |
+| MG-001 | LOW (~~HIGH~~) | **FIXED** `36f4f47` (hardening/2026-10-10) — was: ACCEPTED ↓ | Gates | `motion_guard_node.cpp:173-178` | 0.5 s freshness for every status input: rationale not documented per input |
 | MG-004 | LOW (~~MEDIUM~~) | ACCEPTED ↓ (policy) | E-stop | `estop_gate.cpp:5-10`; `docs/contracts/dyx3_motion_guard.md:70-73` | Any valid source can clear an E-stop asserted by another |
 | MG-005 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Fail-safe | `fail_to_zero.cpp:5-24` | Sequence tracking cannot tell a second publisher from a restart |
-| MG-006 | LOW | ACCEPTED | RT | `motion_guard_node.cpp:260-263` | `RCLCPP_WARN` on reason change inside the control callback |
+| MG-006 | LOW | **FIXED** `7a9cded` (hardening/2026-10-10) — was: ACCEPTED | RT | `motion_guard_node.cpp:260-263` | `RCLCPP_WARN` on reason change inside the control callback |
 
 ### MG-007 — MEDIUM — E-stop state reaches the mission and spray up to 100 ms late, and a short pulse can be missed
 - The command STOP is immediate. But `/dyx3/safety_gate` and `/dyx3/emergency_stop_state` are published only
@@ -314,13 +314,13 @@ Facts used (code at `8236c65`, firmware `8279fa4be3`, `config/px4/3wd_6x_carry_f
 
 | ID | Severity | Status | Area | Where | Item |
 |---|---|---|---|---|---|
-| PXL-002 | **HIGH** | ACCEPTED | Stop | `px4_link_node.cpp:290-296`; `offboard_heartbeat.cpp:5-20` | `SetOffboard(false)` stops the setpoint stream at once, with no STOP first: PX4 keeps the last setpoint until offboard loss (1.0 s), then disarms |
-| PXL-004 | **HIGH** | ACCEPTED (mechanism; magnitude to measure) | Stall | `spray_ack_tokens.cpp:59-92`; `px4_link_node.cpp:658-685,759,772` | Two `fsync`s (file + directory) per new spray transaction, inside the 100 Hz writer tick, before the setpoint publish |
-| PXL-001 | **HIGH** (~~CRITICAL~~) | ACCEPTED ↓ (acceptance gate; merged with X-008, PC-2c) | Stop | `main.cpp:15-17`; firmware `commander_params.c` | No measured stop bound after process, agent, Ethernet or Jetson loss: PX4 offboard-loss (1.0 s default) + disarm is the only path |
+| PXL-002 | **HIGH** | **FIXED** `e7d15d3` (hardening/2026-10-10) — was: ACCEPTED | Stop | `px4_link_node.cpp:290-296`; `offboard_heartbeat.cpp:5-20` | `SetOffboard(false)` stops the setpoint stream at once, with no STOP first: PX4 keeps the last setpoint until offboard loss (1.0 s), then disarms |
+| PXL-004 | **HIGH** | **FIXED** `e2577de` (hardening/2026-10-10) — was: ACCEPTED (mechanism; magnitude to measure) | Stall | `spray_ack_tokens.cpp:59-92`; `px4_link_node.cpp:658-685,759,772` | Two `fsync`s (file + directory) per new spray transaction, inside the 100 Hz writer tick, before the setpoint publish |
+| PXL-001 | **HIGH** (~~CRITICAL~~) | **FIXED** `e62468c` (hardening/2026-10-10) — was: ACCEPTED ↓ (acceptance gate; merged with X-008, PC-2c) | Stop | `main.cpp:15-17`; firmware `commander_params.c` | No measured stop bound after process, agent, Ethernet or Jetson loss: PX4 offboard-loss (1.0 s default) + disarm is the only path |
 | PXL-003 | MEDIUM (~~HIGH~~) | DOUBT (measure, with X-006) | Stall | `px4_link_node.cpp:721-780`; `main.cpp:16` | One non-RT executor serves the writer plus ULog, RTCM, spray, handshake and services |
 | PXL-005 | LOW (~~MEDIUM~~) | DOUBT (bench) | Correctness | `px4_link_node.cpp:347`; `offboard_heartbeat.cpp:32-44` | 0.5 s prestream before the OFFBOARD request; a rejection goes to terminal `Failed` with no retry |
-| PXL-006 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | State | `vehicle_state_assembler.cpp:13-27` | z, vz, deltas and the reference lat/lon/alt are copied without `isfinite` |
-| PXL-008 | LOW | ACCEPTED | Latency | `px4_link_node.cpp:762-766` | `std::to_string` + string compare every tick (small-string, no heap; trivial) |
+| PXL-006 | LOW (~~MEDIUM~~) | **FIXED** `f8fa399` (hardening/2026-10-10) — was: ACCEPTED ↓ | State | `vehicle_state_assembler.cpp:13-27` | z, vz, deltas and the reference lat/lon/alt are copied without `isfinite` |
+| PXL-008 | LOW | **FIXED** `e50cd84` (hardening/2026-10-10) — was: ACCEPTED | Latency | `px4_link_node.cpp:762-766` | `std::to_string` + string compare every tick (small-string, no heap; trivial) |
 | PXL-007 | — | REJECTED (duplicate) | Tests | — | "Unit tests do not prove physical stop time": this is the X-008 / PXL-001 measurement, not a separate defect |
 
 ### PXL-002 — HIGH — disabling offboard drops the stream without a STOP
@@ -408,10 +408,10 @@ Confirmed good:
 |---|---|---|---|---|---|
 | MS-001 | MEDIUM (~~HIGH~~) | ACCEPTED ↓ (owner decision) | Points | `point_journal.cpp:47-88`; `docs/contracts/dyx3_mission.md:57-61` | `PointResult COMPLETED` means "came within 0.10 m", not "marked" |
 | MS-002 | MEDIUM (~~HIGH~~) | ACCEPTED ↓ (owner decision) | Restart | `mission_node.cpp:379-383`; `mission_fsm.cpp` | Point progress lives in memory only; after a graph restart the mission is IDLE and progress is lost |
-| MS-003 | MEDIUM | ACCEPTED | Fault | `mission_node.cpp:252-300` | No RPP-status freshness check while RUNNING |
-| MS-006 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Fault | `mission_node.cpp:36,293-299` | `rpp_ack_timeout_s` = 0 disables the READY timeout |
-| MS-004 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Stall | `path_artifact.cpp:122-127`; `mission_node.cpp:385-387` | Artifact read and SHA-256 with no size limit, inside the Start service callback |
-| MS-005 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Artifact | `path_artifact.cpp:88-116` | The C++ reader accepts non-canonical metadata and numbers that the Python decoder would refuse |
+| MS-003 | MEDIUM | **FIXED** `bd1f233` (hardening/2026-10-10) — was: ACCEPTED | Fault | `mission_node.cpp:252-300` | No RPP-status freshness check while RUNNING |
+| MS-006 | LOW (~~MEDIUM~~) | **FIXED** `399c446` (hardening/2026-10-10) — was: ACCEPTED ↓ | Fault | `mission_node.cpp:36,293-299` | `rpp_ack_timeout_s` = 0 disables the READY timeout |
+| MS-004 | LOW (~~MEDIUM~~) | **FIXED** `aab7260` (hardening/2026-10-10) — was: ACCEPTED ↓ | Stall | `path_artifact.cpp:122-127`; `mission_node.cpp:385-387` | Artifact read and SHA-256 with no size limit, inside the Start service callback |
+| MS-005 | LOW (~~MEDIUM~~) | **FIXED** `6ad1e19` (hardening/2026-10-10) — was: ACCEPTED ↓ | Artifact | `path_artifact.cpp:88-116` | The C++ reader accepts non-canonical metadata and numbers that the Python decoder would refuse |
 | MS-007 | LOW | ACCEPTED | Points | `mission_node.cpp:283-288` | The journal uses `position_valid` but not the sample age |
 
 ### MS-001 — MEDIUM — "COMPLETED" is geometric (owner decision)
@@ -478,10 +478,10 @@ Confirmed good:
 
 | ID | Severity | Status | Area | Where | Item |
 |---|---|---|---|---|---|
-| SP-002 | **HIGH** | ACCEPTED | Boundary | `spray_controller.cpp:318-328`; contract `dyx3_spray.md:94-97` | 3-tick debounce delays every boundary edge by up to 60 ms, and the lead maths does not compensate |
+| SP-002 | **HIGH** | **FIXED** `b4a7c25` (hardening/2026-10-10) — was: ACCEPTED | Boundary | `spray_controller.cpp:318-328`; contract `dyx3_spray.md:94-97` | 3-tick debounce delays every boundary edge by up to 60 ms, and the lead maths does not compensate |
 | SP-003 | **HIGH** | DOUBT (bench measurement; = production-readiness #7) | Boundary | `spray_param_table.inc:21-24` | Valve open/close delays and the nozzle offset are prototype values, not measured |
-| SP-001 | MEDIUM (~~CRITICAL~~) | ACCEPTED ↓ (owner decision) | Manual | `spray_controller.cpp:140-141,203-223` | Manual ON overrides the mission, path and RTK gates, including **during a RUNNING autonomous mission** |
-| SP-004 | MEDIUM | ACCEPTED | Close | `spray_controller.cpp:236-238`; `spray_gates.cpp:136-144` | `min_spray_speed_mps` is declared but unused; STOPPING/CREEPING may keep the valve ON while the rover is almost stopped on a MARK leg |
+| SP-001 | MEDIUM (~~CRITICAL~~) | **FIXED** `f2ff35b` (hardening/2026-10-10) — was: ACCEPTED ↓ (owner decision) | Manual | `spray_controller.cpp:140-141,203-223` | Manual ON overrides the mission, path and RTK gates, including **during a RUNNING autonomous mission** |
+| SP-004 | MEDIUM | **FIXED** `1c7af88` (hardening/2026-10-10) — was: ACCEPTED | Close | `spray_controller.cpp:236-238`; `spray_gates.cpp:136-144` | `min_spray_speed_mps` is declared but unused; STOPPING/CREEPING may keep the valve ON while the rover is almost stopped on a MARK leg |
 | SP-005 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Stall | `spray_node.cpp:271-337` | Conditioned-artifact load runs on the spray executor |
 
 ### SP-002 — HIGH — debounce latency is not in the boundary lead
@@ -605,11 +605,11 @@ Facts used:
 | ID | Severity | Status | Area | Where | Item |
 |---|---|---|---|---|---|
 | GEO-004 | — | **REJECTED by CR-1** (n ≥ 4 ⇒ window ≥ 3; no run-end full scan) | RT / Hint | `project_onto_path.cpp:28-35`; `rpp_core.cpp:864-865` | A valid hint on the last 1–2 segments widens to a **full-path scan every tick**; ties go to the lowest index |
-| GEO-001 | LOW (~~HIGH~~) | ACCEPTED ↓ | RT | `curvature.cpp:30-44`; `rpp_param_table.inc:50` | Baseline walk is linear in `baseline / spacing`: about 2 steps at the defaults, but the LIVE parameter has no upper bound |
-| GEO-002 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Correctness | `project_onto_path.cpp:43-78`; header `:21,29` | An all-degenerate window returns `valid=true` with cross-track 0 (only the hint is invalidated); RPP never reads `.valid` |
+| GEO-001 | LOW (~~HIGH~~) | **FIXED** `747715b` (hardening/2026-10-10) — was: ACCEPTED ↓ | RT | `curvature.cpp:30-44`; `rpp_param_table.inc:50` | Baseline walk is linear in `baseline / spacing`: about 2 steps at the defaults, but the LIVE parameter has no upper bound |
+| GEO-002 | LOW (~~MEDIUM~~) | **FIXED** `ee1b744` (hardening/2026-10-10) — was: ACCEPTED ↓ | Correctness | `project_onto_path.cpp:43-78`; header `:21,29` | An all-degenerate window returns `valid=true` with cross-track 0 (only the hint is invalidated); RPP never reads `.valid` |
 | GEO-003 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Numeric | `line_intersection.cpp:13-17` | Absolute determinant threshold 1e-9 m² (load time only; matches Python) |
-| GEO-005 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | API | `resample.cpp:21` | `spacing <= 0` lets NaN through to a float → long conversion |
-| GEO-006 | LOW | ACCEPTED | API | `point.hpp:14-23` | `PathView` lifetime and bounds are the caller's discipline |
+| GEO-005 | LOW (~~MEDIUM~~) | **FIXED** `2067c75` (hardening/2026-10-10) — was: ACCEPTED ↓ | API | `resample.cpp:21` | `spacing <= 0` lets NaN through to a float → long conversion |
+| GEO-006 | LOW | **FIXED** `1f66096` (hardening/2026-10-10) — was: ACCEPTED | API | `point.hpp:14-23` | `PathView` lifetime and bounds are the caller's discipline |
 
 ### GEO-004 — MEDIUM — DOUBT — full scan at the end of every run
 - Confirmed mechanism. For `hint.seg ≥ n − 3`, the window `[seg − 2, min(n − 1, seg + 4))` is narrower than 3, so
@@ -675,8 +675,8 @@ Verdicts on known items (recorded; not new):
 |---|---|---|---|---|---|
 | BR-001 | MEDIUM (~~HIGH~~) | ACCEPTED ↓ (owner decision) | Config | `control_graph.launch.py:41-50,63`; `config/*/.gitkeep` | A missing `<stem>.yaml` silently means built-in defaults, and **no YAML exists at all**, so the code defaults are the production configuration |
 | BR-002 | MEDIUM | ACCEPTED | Restart | `dyx3-ros.service:7-13` | No progress watchdog: a live but stalled node keeps the unit "active" forever |
-| BR-004 | MEDIUM | ACCEPTED | Tests | `test_control_graph_launch.py:10-40` | Launch tests check topology only; no failure-propagation, restart or stop-while-moving tests |
-| BR-003 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Observability | `start-platform.sh:29-47` | An agent crash loop leaves `dyx3-platform` "active"; child restarts are not counted |
+| BR-004 | MEDIUM | **FIXED** `dc525b6` (hardening/2026-10-10) — was: ACCEPTED | Tests | `test_control_graph_launch.py:10-40` | Launch tests check topology only; no failure-propagation, restart or stop-while-moving tests |
+| BR-003 | LOW (~~MEDIUM~~) | **FIXED** `2101834` (hardening/2026-10-10) — was: ACCEPTED ↓ | Observability | `start-platform.sh:29-47` | An agent crash loop leaves `dyx3-platform` "active"; child restarts are not counted |
 | BR-005 | LOW | ACCEPTED | Security | `deployment/systemd/*.service` | Every unit shares the user `dyx3` and writes to all of `/var/lib/dyx3`, `/var/log/dyx3`, `/run/dyx3` |
 
 ### BR-001 — MEDIUM — the configuration policy (owner decision)
@@ -730,14 +730,14 @@ Confirmed good:
 
 | ID | Severity | Status | Area | Where | Item |
 |---|---|---|---|---|---|
-| GW-002 | **HIGH** (~~CRITICAL~~) | ACCEPTED | Lifecycle | `ipc_server.cpp:169-175`; `main.cpp` | `write()` to a closed peer raises **SIGPIPE** (no `MSG_NOSIGNAL`, no `SIG_IGN`) → the gateway dies → `on_exit=Shutdown` **takes down the whole control graph** |
+| GW-002 | **HIGH** (~~CRITICAL~~) | **FIXED** `6e3006c` (hardening/2026-10-10) — was: ACCEPTED | Lifecycle | `ipc_server.cpp:169-175`; `main.cpp` | `write()` to a closed peer raises **SIGPIPE** (no `MSG_NOSIGNAL`, no `SIG_IGN`) → the gateway dies → `on_exit=Shutdown` **takes down the whole control graph** |
 | GW-004 | **HIGH** | ACCEPTED (owner decision) | Link | `gateway_node.cpp:254-258`; `docs/contracts/backend.md` §3 | Operator-loss budget ≈ 1.5 + 2.0 + 0.1 + 0.02 = **3.62 s** before the guard STOP: 1.27 m at 0.35 m/s, 3.6 m at 1 m/s. Not approved |
-| GW-001 | MEDIUM (~~CRITICAL~~) | ACCEPTED ↓ | Auth | `ipc_server.cpp:138`; `operator_link.hpp:15-25`; every unit `User=dyx3` | Any process running as `dyx3` can connect, heartbeat and send commands; there is no `SO_PEERCRED`, and all services share one UID |
+| GW-001 | MEDIUM (~~CRITICAL~~) | **FIXED** `7b13abe` (hardening/2026-10-10) — was: ACCEPTED ↓ | Auth | `ipc_server.cpp:138`; `operator_link.hpp:15-25`; every unit `User=dyx3` | Any process running as `dyx3` can connect, heartbeat and send commands; there is no `SO_PEERCRED`, and all services share one UID |
 | GW-003 | LOW (~~HIGH~~) | DOUBT ↓ | Command | `gateway_node.cpp:311-365` | Abort could overtake an in-flight Start, because they go through separate services |
-| GW-005 | LOW (~~HIGH~~) | ACCEPTED ↓ | Command | `ipc_server.cpp:136-149`; `gateway_node.cpp:277-289` | No reserved slot for E-stop at `max_clients` 4; priority commands bypass the 256 inbox cap |
+| GW-005 | LOW (~~HIGH~~) | **FIXED** `e9033a4` (hardening/2026-10-10) — was: ACCEPTED ↓ | Command | `ipc_server.cpp:136-149`; `gateway_node.cpp:277-289` | No reserved slot for E-stop at `max_clients` 4; priority commands bypass the 256 inbox cap |
 | GW-006 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Command | `command_validator.cpp:76-94` | The request id is correlation only; a manual retry of `skip_point` after a timeout can skip twice |
-| GW-007 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Stall | `gateway_node.cpp:319-335,435-443` | Timed-out rclcpp requests are never `remove_pending_request`ed |
-| GW-008 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | JSON | `json.cpp:63-74` | Raw invalid UTF-8 is accepted in strings |
+| GW-007 | LOW (~~MEDIUM~~) | **FIXED** `c82ba84` (hardening/2026-10-10) — was: ACCEPTED ↓ | Stall | `gateway_node.cpp:319-335,435-443` | Timed-out rclcpp requests are never `remove_pending_request`ed |
+| GW-008 | LOW (~~MEDIUM~~) | **FIXED** `3e78e9a` (hardening/2026-10-10) — was: ACCEPTED ↓ | JSON | `json.cpp:63-74` | Raw invalid UTF-8 is accepted in strings |
 
 ### GW-002 — HIGH — SIGPIPE kills the control graph
 - Confirmed. There is no `MSG_NOSIGNAL`, `SIG_IGN` or `sigaction` in the gateway (only `dyx3_gnss_rtk` ignores
@@ -801,23 +801,23 @@ Confirmed in code:
 
 | ID | Severity | Status | Area | Where | Item |
 |---|---|---|---|---|---|
-| REC-001 | **HIGH** (~~CRITICAL~~) | ACCEPTED ↓ | Disk | `recorder_node.cpp:155,216-219` | `min_free_bytes` defaults to 0 and only warns; no retention. Runs share `/var/lib/dyx3` with the missions, the RTK state and the spray-ACK ledger |
-| REC-002 | **HIGH** | ACCEPTED | Completeness | `recorder_node.cpp:147-149` | `param_nodes` omits **`rpp`** (119 tuning parameters) and `system_gateway` |
-| REC-004 | **HIGH** | ACCEPTED | Completeness | `recorder_node.cpp:204-284` | The bag starts only after RUNNING + up to 6 × 2 s of parameter RPCs + discovery: the first seconds of motion and spray are lost |
-| REC-005 | **HIGH** | ACCEPTED | Completeness | `ulog_capture.cpp:7-15`; `px4_link_node.cpp:716` | The per-run `.ulg` starts mid-stream with no ULog header, so it is probably unreadable |
+| REC-001 | **HIGH** (~~CRITICAL~~) | **FIXED** `3987c1a` (hardening/2026-10-10) — was: ACCEPTED ↓ | Disk | `recorder_node.cpp:155,216-219` | `min_free_bytes` defaults to 0 and only warns; no retention. Runs share `/var/lib/dyx3` with the missions, the RTK state and the spray-ACK ledger |
+| REC-002 | **HIGH** | **FIXED** `6c75da5` (hardening/2026-10-10) — was: ACCEPTED | Completeness | `recorder_node.cpp:147-149` | `param_nodes` omits **`rpp`** (119 tuning parameters) and `system_gateway` |
+| REC-004 | **HIGH** | **FIXED** `7599097` (hardening/2026-10-10) — was: ACCEPTED | Completeness | `recorder_node.cpp:204-284` | The bag starts only after RUNNING + up to 6 × 2 s of parameter RPCs + discovery: the first seconds of motion and spray are lost |
+| REC-005 | **HIGH** | **FIXED** `36af849` (hardening/2026-10-10) — was: ACCEPTED | Completeness | `ulog_capture.cpp:7-15`; `px4_link_node.cpp:716` | The per-run `.ulg` starts mid-stream with no ULog header, so it is probably unreadable |
 | REC-006 | **HIGH** | ACCEPTED | Completeness | `recorder_node.cpp:224-234`; `release.sh:272` | Runs record the **expected** firmware SHA, not the running one; overlay hash and px4_msgs source missing |
-| REC-003 | MEDIUM (~~HIGH~~) | ACCEPTED ↓ | Completeness | `recorder_node.cpp:241-254,338-341` | Parameters snapshotted at start and end only; LIVE changes mid-run are not journaled |
-| REC-008 | MEDIUM (~~HIGH~~) | ACCEPTED ↓ | Lifecycle | `run_lifecycle.cpp:28-55` | A run never closes if MissionState stops for good (a restarted graph publishes IDLE and closes it) |
-| REC-009 | MEDIUM | ACCEPTED | Lifecycle | `recorder_node.cpp:70-114` | A recorder restart leaves the interrupted run directory unmarked |
-| REC-012 | MEDIUM | ACCEPTED | Process | `recorder_node.cpp:353-365` | A dead `ros2 bag` child is reported but not restarted |
-| REC-013 | MEDIUM | ACCEPTED | Process | `recorder_node.cpp:311-312,372-388` | `bag_.running()` (waitpid) is polled from status while `stop_run` stops the child: a race on a 3-thread executor |
-| REC-016 | MEDIUM | ACCEPTED | Completeness | `recorder_node.cpp:123-146` | No raw PX4 timing topic; `conditioned_execution_sha256` is not in the manifest (ties to X-001 / PC-2) |
-| REC-007 | LOW (~~HIGH~~) | ACCEPTED ↓ | Config | `recorder_node.cpp:120` | `config_dir` default `/etc/dyx3/config`, but the launch reads `/etc/dyx3`. No node YAML exists yet (BR-001), so nothing is lost today |
-| REC-010 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Durability | `run_manifest.cpp:164-175` | Atomic rename without `fsync` of the file or directory |
-| REC-011 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Durability | `recorder_node.cpp:220-259,335-345` | Some `write_file_atomic` results are ignored |
-| REC-014 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Process | `recorder_node.cpp:311-318` | A SIGTERM/SIGKILL escalation does not clear `bag_healthy_throughout` |
+| REC-003 | MEDIUM (~~HIGH~~) | **FIXED** `8603d07` (hardening/2026-10-10) — was: ACCEPTED ↓ | Completeness | `recorder_node.cpp:241-254,338-341` | Parameters snapshotted at start and end only; LIVE changes mid-run are not journaled |
+| REC-008 | MEDIUM (~~HIGH~~) | **FIXED** `0027730` (hardening/2026-10-10) — was: ACCEPTED ↓ | Lifecycle | `run_lifecycle.cpp:28-55` | A run never closes if MissionState stops for good (a restarted graph publishes IDLE and closes it) |
+| REC-009 | MEDIUM | **FIXED** `775211f` (hardening/2026-10-10) — was: ACCEPTED | Lifecycle | `recorder_node.cpp:70-114` | A recorder restart leaves the interrupted run directory unmarked |
+| REC-012 | MEDIUM | **FIXED** `bd009d1` (hardening/2026-10-10) — was: ACCEPTED | Process | `recorder_node.cpp:353-365` | A dead `ros2 bag` child is reported but not restarted |
+| REC-013 | MEDIUM | **FIXED** `f73d494` (hardening/2026-10-10) — was: ACCEPTED | Process | `recorder_node.cpp:311-312,372-388` | `bag_.running()` (waitpid) is polled from status while `stop_run` stops the child: a race on a 3-thread executor |
+| REC-016 | MEDIUM | **FIXED** `a7c28a0` (hardening/2026-10-10) — was: ACCEPTED | Completeness | `recorder_node.cpp:123-146` | No raw PX4 timing topic; `conditioned_execution_sha256` is not in the manifest (ties to X-001 / PC-2) |
+| REC-007 | LOW (~~HIGH~~) | **FIXED** `a4998ab` (hardening/2026-10-10) — was: ACCEPTED ↓ | Config | `recorder_node.cpp:120` | `config_dir` default `/etc/dyx3/config`, but the launch reads `/etc/dyx3`. No node YAML exists yet (BR-001), so nothing is lost today |
+| REC-010 | LOW (~~MEDIUM~~) | **FIXED** `79cc8d5` (hardening/2026-10-10) — was: ACCEPTED ↓ | Durability | `run_manifest.cpp:164-175` | Atomic rename without `fsync` of the file or directory |
+| REC-011 | LOW (~~MEDIUM~~) | **FIXED** `79cc8d5` (hardening/2026-10-10) — was: ACCEPTED ↓ | Durability | `recorder_node.cpp:220-259,335-345` | Some `write_file_atomic` results are ignored |
+| REC-014 | LOW (~~MEDIUM~~) | **FIXED** `80d2b25` (hardening/2026-10-10) — was: ACCEPTED ↓ | Process | `recorder_node.cpp:311-318` | A SIGTERM/SIGKILL escalation does not clear `bag_healthy_throughout` |
 | REC-015 | LOW (~~MEDIUM~~) | DOUBT ↓ | Load | `ulog_capture.cpp:41-42` | `fwrite` + `fflush` per ULog chunk; KEEP_LAST QoS does not block the publisher, so this does not back-pressure `px4_link` |
-| REC-017 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Lifecycle | `recorder_node.cpp:204-215` | A failed directory creation leaves the lifecycle "recording" |
+| REC-017 | LOW (~~MEDIUM~~) | **FIXED** `a519e1e` (hardening/2026-10-10) — was: ACCEPTED ↓ | Lifecycle | `recorder_node.cpp:204-215` | A failed directory creation leaves the lifecycle "recording" |
 
 ### HIGH fixes (one recorder change set)
 - **REC-001.** Required `min_free_bytes` (e.g. 5 GB), enforced **during** recording (stop the bag, mark the run
@@ -842,13 +842,13 @@ review missed**. Verified against the code and the upstream ROS 2 Humble sources
 
 | ID | Severity | Status | Area | Where | Item |
 |---|---|---|---|---|---|
-| REC-018 | MEDIUM | ACCEPTED | Lifecycle | `recorder_node.cpp:61`; `main.cpp:34-39` | `SyncParametersClient::list_parameters` **throws** on a timeout (rclcpp humble `parameter_client.cpp:544`), and the collector has no `try`. A node that is discovered but not answering, e.g. a stalled `px4_link` (BR-002), **crashes the recorder** at run start (half-written directory) or at run stop (no `summary.json`). From the destructor it can call `std::terminate` |
-| REC-019 | MEDIUM | ACCEPTED | Completeness | `recorder_node.cpp:62-65` | `get_parameters` returns an empty vector on a timeout, so the node is recorded `reachable: true, params: {}`: a silent gap |
-| REC-020 | MEDIUM | ACCEPTED | Completeness | `recorder_node.cpp:63` | `value_to_string()` formats doubles with `std::to_string`, i.e. **6 fixed decimals** (rclcpp humble `parameter_value.cpp:93`): `1e-7` → `"0.000000"`. **PC-8 amended:** the pairing passes, the value precision fails. Use `%.17g` for doubles and double arrays |
-| REC-021 | MEDIUM | ACCEPTED | Durability | `recorder_node.cpp:150-151` | The rosbag2 SQLite defaults (`synchronous=OFF`, journal in memory; `metadata.yaml` only on close) mean a power cut or the SIGKILL escalation can leave a corrupt `.db3`. Add `--storage-preset-profile resilient` (exists in Humble: `sqlite_storage.cpp:136-174`) or move to MCAP (owner decision) |
-| REC-022 | LOW | ACCEPTED | Config | `deployment/scripts/start-recorder.sh:9` | The recorder starts with no parameter file, so `vehicle_id`/`operator` are always "unknown" and the config snapshot is always empty (same root as REC-007 / BR-001) |
-| REC-023 | LOW | DOUBT (measure) | Load | `dyx3-recorder.service` | No `Nice` / `IOSchedulingClass` / `CPUAffinity`. Measure the recorder's effect on the PXL-004 `fsync` (same ext4 journal) |
-| REC-024 | LOW | ACCEPTED | Process | `dyx3-recorder.service`; `start-recorder.sh:9` | `KillMode=control-group` sends SIGTERM to the bag child at the same time as the recorder; the main PID is the `ros2 run` Python wrapper. Exec the node binary and use `KillMode=mixed` |
+| REC-018 | MEDIUM | **FIXED** `5165940` (hardening/2026-10-10) — was: ACCEPTED | Lifecycle | `recorder_node.cpp:61`; `main.cpp:34-39` | `SyncParametersClient::list_parameters` **throws** on a timeout (rclcpp humble `parameter_client.cpp:544`), and the collector has no `try`. A node that is discovered but not answering, e.g. a stalled `px4_link` (BR-002), **crashes the recorder** at run start (half-written directory) or at run stop (no `summary.json`). From the destructor it can call `std::terminate` |
+| REC-019 | MEDIUM | **FIXED** `5165940` (hardening/2026-10-10) — was: ACCEPTED | Completeness | `recorder_node.cpp:62-65` | `get_parameters` returns an empty vector on a timeout, so the node is recorded `reachable: true, params: {}`: a silent gap |
+| REC-020 | MEDIUM | **FIXED** `495f774` (hardening/2026-10-10) — was: ACCEPTED | Completeness | `recorder_node.cpp:63` | `value_to_string()` formats doubles with `std::to_string`, i.e. **6 fixed decimals** (rclcpp humble `parameter_value.cpp:93`): `1e-7` → `"0.000000"`. **PC-8 amended:** the pairing passes, the value precision fails. Use `%.17g` for doubles and double arrays |
+| REC-021 | MEDIUM | **FIXED** `3946005` (hardening/2026-10-10) — was: ACCEPTED | Durability | `recorder_node.cpp:150-151` | The rosbag2 SQLite defaults (`synchronous=OFF`, journal in memory; `metadata.yaml` only on close) mean a power cut or the SIGKILL escalation can leave a corrupt `.db3`. Add `--storage-preset-profile resilient` (exists in Humble: `sqlite_storage.cpp:136-174`) or move to MCAP (owner decision) |
+| REC-022 | LOW | **FIXED** `0cce6df` (hardening/2026-10-10) — was: ACCEPTED | Config | `deployment/scripts/start-recorder.sh:9` | The recorder starts with no parameter file, so `vehicle_id`/`operator` are always "unknown" and the config snapshot is always empty (same root as REC-007 / BR-001) |
+| REC-023 | LOW | **FIXED** `8a1b878` (hardening/2026-10-10) — was: DOUBT (measure) | Load | `dyx3-recorder.service` | No `Nice` / `IOSchedulingClass` / `CPUAffinity`. Measure the recorder's effect on the PXL-004 `fsync` (same ext4 journal) |
+| REC-024 | LOW | **FIXED** `fe6ee55` (hardening/2026-10-10) — was: ACCEPTED | Process | `dyx3-recorder.service`; `start-recorder.sh:9` | `KillMode=control-group` sends SIGTERM to the bag child at the same time as the recorder; the main PID is the `ros2 run` Python wrapper. Exec the node binary and use `KillMode=mixed` |
 
 Also from Opus, folded into existing items:
 - the recorder can write `/var/lib/dyx3/rtk` (the credential store), and the ULog `fopen` is not CLOEXEC, so the
@@ -885,15 +885,15 @@ Confirmed good:
 | ID | Severity | Status | Area | Where | Item |
 |---|---|---|---|---|---|
 | BE-001 | **HIGH** (~~CRITICAL~~) | ACCEPTED ↓ (owner decision) | Link | `realtime/relay.py:33-37`; `hub.py:38-53` | One global heartbeat timestamp: **any** operator tablet keeps the operator link alive for a mission started by another |
-| BE-002 | **HIGH** | ACCEPTED (raised by CR-3: parsed **before** auth, merged into XR-BE-001) | Input | `routes.py:211-224`; `parse_routes.py:18-25` | Multipart DXF: the 20 MiB check happens after Starlette has spooled the whole upload |
-| BE-003 | **HIGH** | ACCEPTED (raised by CR-3: parsed **before** auth, merged into XR-BE-001) | Input | `routes.py:312-314,364-379` | RTK JSON write routes take unbounded `dict` bodies |
-| BE-004 | MEDIUM (~~HIGH~~) | ACCEPTED ↓ | Input | `mission/service.py:74-109`; `routes.py:224` | DXF planning runs in a worker thread with no runtime or output budget; CPU-bound Python shares the GIL with the event loop |
-| BE-005 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Robustness | `routes.py:238-267` | Artifact read, hash and decode on the event loop for `/missions/{sha}`, `/path`, `/start` |
-| BE-006 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Link | `gateway/client.py:170-179` | `drain()` sits outside the 3 s request timeout |
+| BE-002 | **HIGH** | **FIXED** `d23c82c` via XR-BE-001 (hardening/2026-10-10: auth + Content-Length + streamed byte cap before any body read) — was: ACCEPTED (raised by CR-3, merged into XR-BE-001) | Input | `routes.py:211-224`; `parse_routes.py:18-25` | Multipart DXF: the 20 MiB check happens after Starlette has spooled the whole upload |
+| BE-003 | **HIGH** | **FIXED** `d23c82c` via XR-BE-001 (hardening/2026-10-10: auth + Content-Length + streamed byte cap before any body read) — was: ACCEPTED (raised by CR-3, merged into XR-BE-001) | Input | `routes.py:312-314,364-379` | RTK JSON write routes take unbounded `dict` bodies |
+| BE-004 | MEDIUM (~~HIGH~~) | **FIXED** `68cc323` (hardening/2026-10-10) — was: ACCEPTED ↓ | Input | `mission/service.py:74-109`; `routes.py:224` | DXF planning runs in a worker thread with no runtime or output budget; CPU-bound Python shares the GIL with the event loop |
+| BE-005 | LOW (~~MEDIUM~~) | **FIXED** `fbe96f3` (hardening/2026-10-10) — was: ACCEPTED ↓ | Robustness | `routes.py:238-267` | Artifact read, hash and decode on the event loop for `/missions/{sha}`, `/path`, `/start` |
+| BE-006 | LOW (~~MEDIUM~~) | **FIXED** `b7b9033` (hardening/2026-10-10) — was: ACCEPTED ↓ | Link | `gateway/client.py:170-179` | `drain()` sits outside the 3 s request timeout |
 | BE-007 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Auth | `auth/tokens.py:45-73`; `hub.py:27-36` | Token revocation needs a backend restart (as documented) |
-| BE-008 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Auth | `routes.py:136-139`; `docs/contracts/backend.md:20` | The contract says heartbeat is "any authenticated", the code says operator: the code is the safer one, so fix the contract |
+| BE-008 | LOW (~~MEDIUM~~) | **FIXED** `99fea41` (hardening/2026-10-10) — was: ACCEPTED ↓ | Auth | `routes.py:136-139`; `docs/contracts/backend.md:20` | The contract says heartbeat is "any authenticated", the code says operator: the code is the safer one, so fix the contract |
 | BE-009 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Robustness | `mission/path_artifact.py:245-268` | No retention or capacity check for stored mission artifacts |
-| BE-010 | LOW (~~MEDIUM~~) | DOUBT (measure) | Link | `routes.py:202` | `json.loads` of up to 20 MiB on the event loop |
+| BE-010 | LOW (~~MEDIUM~~) | **FIXED** `fbe96f3` (hardening/2026-10-10) — was: DOUBT (measure) | Link | `routes.py:202` | `json.loads` of up to 20 MiB on the event loop |
 
 ### BE-001 — HIGH — the shared heartbeat (owner decision)
 - Confirmed. `OperatorLinkRelay` keeps a single `_last`, and any operator session's heartbeat refreshes it.
@@ -957,7 +957,7 @@ Confirmed good:
 |---|---|---|---|---|---|
 | IF-003 | MEDIUM | ACCEPTED | Time | `MotionSetpoint.msg:5-15`; `rpp_node.cpp:382-390`; `motion_guard_node.cpp:232-240` | The source-pose sample time is not carried through RPP → guard → px4_link, so pose-to-command age cannot be measured from the data (the latency acceptance gates need it; ties to X-001 / X-003 / PC-2) |
 | IF-001 | LOW (~~HIGH~~) | ACCEPTED ↓ | Hot-path | `RppStatus.msg:46-48`; `rpp_node.cpp:398` | A 64-char `string` SHA is copied into `RppStatus` on every 50 Hz tick (one heap allocation; a non-loaned `publish` serialises anyway). Fold into PC-2's bounded, loanable hot-path types (`uint8[32]` digest) |
-| IF-002 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Time | `EstimatorHealth.msg:10-11`; `px4_link_node.cpp` (only `VehicleState` sets `px4_sample_stamp`, line 836) | `EstimatorHealth.px4_sample_stamp` is never filled, so it is always 0 |
+| IF-002 | LOW (~~MEDIUM~~) | **FIXED** `9afe3de` (hardening/2026-10-10) — was: ACCEPTED ↓ | Time | `EstimatorHealth.msg:10-11`; `px4_link_node.cpp` (only `VehicleState` sets `px4_sample_stamp`, line 836) | `EstimatorHealth.px4_sample_stamp` is never filled, so it is always 0 |
 | IF-004 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Safety | `VehicleState.msg:7-18`; `vehicle_state_assembler.cpp:11-12` | `position_valid` / `velocity_valid` reflect XY only; `down_m` / `velocity_down_mps` have no validity flag (no control consumer uses them on a 2D rover) |
 | IF-005 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Doc | `docs/contracts/topics.md:14` | The contract says `/dyx3/vehicle_state` is published "on each FCU sample"; it is a 20 ms timer republishing the latest cached sample |
 | IF-006 | LOW (~~MEDIUM~~) | ACCEPTED ↓ | Tests | `interface_abi_test.cpp` | `conditioned_execution_sha256`, `heading_evidence_valid` and `path_travel_m` (0.9 / 0.10 additions) are not pinned; there is no schema fingerprint test |
@@ -1002,25 +1002,25 @@ Confirmed good:
 
 | ID | Severity | Status | Area | Where | Item |
 |---|---|---|---|---|---|
-| INS-001 | **HIGH** (~~CRITICAL~~) | ACCEPTED ↓ | Interlock | `release.sh:201,218,315,325` | Install, upgrade and rollback restart `dyx3-platform` + `dyx3-ros` with **no armed or mission check**. During a mission → offboard loss → disarm (same outcome as GW-002) |
-| INS-002 | **HIGH** | ACCEPTED (field-proven) | Origin | `upgrade.sh:8-15` | The upgrade runs the **running** release's installer and pins; only units, templates and the manifest come from the target |
-| INS-004 | **HIGH** | ACCEPTED (field-proven) | Atomicity | `release.sh:194-203` | No detach or signal handling; the hotspot is re-activated right after the switch (it drops the ssh session that runs the upgrade); no boot-time finish or revert |
-| INS-006 | **HIGH** | ACCEPTED (field-proven) | Health | `usb_serial.sh:47`; `release.sh:203,316` | A fault already present before the upgrade (a LoRa CH340, an unplugged UM982) fails **every upgrade and every rollback**; no health baseline before the switch |
-| INS-007 | **HIGH** | ACCEPTED | Fresh | `ros.env.tmpl:6`; `start-backend.sh:13`; `release.sh:221-225` | A fresh install cannot pass its own health gate: `ROS_DOMAIN_ID` is commented out, the backend binds the hotspot address, the hotspot SSID is empty. It then reverts with no actionable message |
-| INS-003 | MEDIUM | ACCEPTED | Origin | `release.sh:163,178`; `artifacts.sh:86-90`; `dyx3-env.sh:18-19` | **A firmware-pin change cannot be installed by `dyx3-upgrade`:** px4_msgs is built for the old pin while the target's launchers want the new one. **Blocks PC-9 by upgrade** (same fix as INS-002) |
-| INS-005 | MEDIUM (~~HIGH~~) | ACCEPTED ↓ | Health | `health_check.sh:41-42,80` | One `is-active` sample right after restart, and the gateway check is a socket-file test: a crash-looping release can pass. `dyx3-rollback` still works |
-| INS-008 | MEDIUM (~~HIGH~~) | DOUBT (bench) | Atomicity | `release.sh:192-194` | No `sync` before `.complete` and the switch: a power cut right after an upgrade can leave `current` → files not yet written |
-| INS-009 | MEDIUM | ACCEPTED (field-proven) | Atomicity | `common.sh:113-116` | Lock fd 9 is inherited: `nmcli` held `install.lock` after the killed upgrade. Fix: `"$@" 9>&-` |
-| INS-010 | MEDIUM | ACCEPTED | Network | `network_install.sh:199-204,215-266` | Any `hotspot.env` validation failure **deletes** the working access point (the operator's only link without a router) |
-| INS-011 | MEDIUM | ACCEPTED | Atomicity | `systemd_install.sh:19-37` | Unit files are never removed; a rollback keeps the newer release's units |
-| INS-012 | MEDIUM | ACCEPTED | Supply | `artifacts.sh:146-153`; `release.sh:174-177` | A digest mismatch in `auto` mode silently falls back to a source build (tampered looks like missing) |
+| INS-001 | **HIGH** (~~CRITICAL~~) | **FIXED** `8e9a017` (hardening/2026-10-10) — was: ACCEPTED ↓ | Interlock | `release.sh:201,218,315,325` | Install, upgrade and rollback restart `dyx3-platform` + `dyx3-ros` with **no armed or mission check**. During a mission → offboard loss → disarm (same outcome as GW-002) |
+| INS-002 | **HIGH** | **FIXED** `def1261` (hardening/2026-10-10) — was: ACCEPTED (field-proven) | Origin | `upgrade.sh:8-15` | The upgrade runs the **running** release's installer and pins; only units, templates and the manifest come from the target |
+| INS-004 | **HIGH** | **FIXED** `c1317cb`, `754bbf5` (hardening/2026-10-10) — was: ACCEPTED (field-proven) | Atomicity | `release.sh:194-203` | No detach or signal handling; the hotspot is re-activated right after the switch (it drops the ssh session that runs the upgrade); no boot-time finish or revert |
+| INS-006 | **HIGH** | **FIXED** `6178cde` (hardening/2026-10-10) — was: ACCEPTED (field-proven) | Health | `usb_serial.sh:47`; `release.sh:203,316` | A fault already present before the upgrade (a LoRa CH340, an unplugged UM982) fails **every upgrade and every rollback**; no health baseline before the switch |
+| INS-007 | **HIGH** | **FIXED** `ae9bccb` (hardening/2026-10-10) — was: ACCEPTED | Fresh | `ros.env.tmpl:6`; `start-backend.sh:13`; `release.sh:221-225` | A fresh install cannot pass its own health gate: `ROS_DOMAIN_ID` is commented out, the backend binds the hotspot address, the hotspot SSID is empty. It then reverts with no actionable message |
+| INS-003 | MEDIUM | **FIXED** `def1261` (hardening/2026-10-10) — was: ACCEPTED | Origin | `release.sh:163,178`; `artifacts.sh:86-90`; `dyx3-env.sh:18-19` | **A firmware-pin change cannot be installed by `dyx3-upgrade`:** px4_msgs is built for the old pin while the target's launchers want the new one. **Blocks PC-9 by upgrade** (same fix as INS-002) |
+| INS-005 | MEDIUM (~~HIGH~~) | **FIXED** `4a813c6` (hardening/2026-10-10) — was: ACCEPTED ↓ | Health | `health_check.sh:41-42,80` | One `is-active` sample right after restart, and the gateway check is a socket-file test: a crash-looping release can pass. `dyx3-rollback` still works |
+| INS-008 | MEDIUM (~~HIGH~~) | **FIXED** `30c8cd0` (hardening/2026-10-10) — was: DOUBT (bench) | Atomicity | `release.sh:192-194` | No `sync` before `.complete` and the switch: a power cut right after an upgrade can leave `current` → files not yet written |
+| INS-009 | MEDIUM | **FIXED** `1244952` (hardening/2026-10-10) — was: ACCEPTED (field-proven) | Atomicity | `common.sh:113-116` | Lock fd 9 is inherited: `nmcli` held `install.lock` after the killed upgrade. Fix: `"$@" 9>&-` |
+| INS-010 | MEDIUM | **FIXED** `3014070` (hardening/2026-10-10) — was: ACCEPTED | Network | `network_install.sh:199-204,215-266` | Any `hotspot.env` validation failure **deletes** the working access point (the operator's only link without a router) |
+| INS-011 | MEDIUM | **FIXED** `5025c5b` (hardening/2026-10-10) — was: ACCEPTED | Atomicity | `systemd_install.sh:19-37` | Unit files are never removed; a rollback keeps the newer release's units |
+| INS-012 | MEDIUM | **FIXED** `b01b7a4` (hardening/2026-10-10) — was: ACCEPTED | Supply | `artifacts.sh:146-153`; `release.sh:174-177` | A digest mismatch in `auto` mode silently falls back to a source build (tampered looks like missing) |
 | INS-013 | MEDIUM | ACCEPTED | Supply | `artifacts.sh:79-106` | The artifact's `rclcpp` version is recorded but never compared with the rover's |
-| INS-014 | MEDIUM | DOUBT | Atomicity | `artifacts.sh:156-158` | The px4_msgs archive contains its own `.complete`; an interrupted extraction can look complete |
+| INS-014 | MEDIUM | **FIXED** `ed17792` (hardening/2026-10-10) — was: DOUBT | Atomicity | `artifacts.sh:156-158` | The px4_msgs archive contains its own `.complete`; an interrupted extraction can look complete |
 | INS-015 | MEDIUM | ACCEPTED | Fresh | `dependencies.sh:36-74`; `usb_serial.sh:124-131` | A fresh install compiles the XRCE agent, mavlink-router and the ch341 module and needs the internet (the goal says zero compiles, < 15 min); the module is unsigned |
-| INS-016 | MEDIUM | ACCEPTED | Atomicity | `release.sh:209-219,320-326` | Revert and restore are never health-checked; a failed gate discards a good source build |
+| INS-016 | MEDIUM | **FIXED** `6178cde` (hardening/2026-10-10) — was: ACCEPTED | Atomicity | `release.sh:209-219,320-326` | Revert and restore are never health-checked; a failed gate discards a good source build |
 | INS-017 | MEDIUM | DOUBT (rover) | Network | `network_install.sh:412-434` | No-auto-updates does not cover snapd, and the L4T kernel packages are not held (a kernel move breaks ch341 → INS-006) |
 | INS-018 | MEDIUM | ACCEPTED | Tests | `installer/tests/run_tests.sh` | No interruption, origin, interlock, two-CH340, archive-escape or fresh-install tests |
-| INS-019…025 | LOW | ACCEPTED | various | see the review | `FCU_KEEP_DHCP` not persisted; tar member check is a string prefix; README disagrees (hotspot on 192.168.3.x); `dyx3-health` without root; shims written in place; unpinned pip / ROS key from a branch / CI `--clobber`; the hotspot/FCU overlap check is a string match |
+| INS-019…025 | LOW | **FIXED except INS-024** (hardening/2026-10-10): INS-019 `5614810`, INS-020 `261c385`, INS-021 `df24aee`, INS-022 `55e4a16`, INS-023 `b741e44`, INS-025 `636927f`; INS-024 (unpinned pip / ROS key / CI `--clobber`) open — was: ACCEPTED | various | see the review | `FCU_KEEP_DHCP` not persisted; tar member check is a string prefix; README disagrees (hotspot on 192.168.3.x); `dyx3-health` without root; shims written in place; unpinned pip / ROS key from a branch / CI `--clobber`; the hotspot/FCU overlap check is a string match |
 
 ### Fix order (installer change set)
 1. **INS-001:** `require_rover_idle` before every switch or restart; unknown state = refuse; bench override.
@@ -1065,17 +1065,17 @@ Verdicts on recorded findings:
 New findings (verified by me against the code):
 | ID | Severity | Status | Where | Item |
 |---|---|---|---|---|
-| XR-RPP-001 | **HIGH** | ACCEPTED (mapping CONFIRMED; endless rocking DOUBT, sim test) | `rpp_core.cpp:692-724`; `rpp_command.cpp:30-31` | **The endpoint precise stop throws away its sideways correction.** With a sideways miss between 2 and 15 cm the core aims diagonally (`dir = d/radial`), but CREEP sends only the speed projected onto the nose, with a yaw rate of 0. The rover drives straight back and forth through the end plane at ≥ 0.1 m/s (reverse allowed down to −0.10) and cannot fix the sideways error, so it may never COMPLETE. The prototype steered toward the vector, so the equivalence test cannot see this. Fix: finish when stopped and `|residual| ≤ along_tol`, reporting the miss, and let the 8 s timeout brake-and-finish. Test: final approach with an east offset of 0.03 m → COMPLETE within 10 s, at most 2 sign changes |
-| XR-RPP-002 | MEDIUM | ACCEPTED | `rpp_core.cpp:565,736`; `rpp_node.cpp:341-344` | **A one-tick STOP while driving** at a run handover that needs no alignment: `advance_run()` publishes nothing, `out_` defaults to `cmd = Stop`, and the node does not check `velocity_published`. Gives a speed dip on line → tangent arc |
+| XR-RPP-001 | **HIGH** | **FIXED** `5965d90` (hardening/2026-10-10) — was: ACCEPTED (mapping CONFIRMED; endless rocking DOUBT, sim test) | `rpp_core.cpp:692-724`; `rpp_command.cpp:30-31` | **The endpoint precise stop throws away its sideways correction.** With a sideways miss between 2 and 15 cm the core aims diagonally (`dir = d/radial`), but CREEP sends only the speed projected onto the nose, with a yaw rate of 0. The rover drives straight back and forth through the end plane at ≥ 0.1 m/s (reverse allowed down to −0.10) and cannot fix the sideways error, so it may never COMPLETE. The prototype steered toward the vector, so the equivalence test cannot see this. Fix: finish when stopped and `|residual| ≤ along_tol`, reporting the miss, and let the 8 s timeout brake-and-finish. Test: final approach with an east offset of 0.03 m → COMPLETE within 10 s, at most 2 sign changes |
+| XR-RPP-002 | MEDIUM | **FIXED** `3bd604a` (hardening/2026-10-10) — was: ACCEPTED | `rpp_core.cpp:565,736`; `rpp_node.cpp:341-344` | **A one-tick STOP while driving** at a run handover that needs no alignment: `advance_run()` publishes nothing, `out_` defaults to `cmd = Stop`, and the node does not check `velocity_published`. Gives a speed dip on line → tangent arc |
 | XR-RPP-004 | MEDIUM | ACCEPTED | `rpp_core.cpp:1021-1030`; `rpp_command.cpp:19-20` | On smooth runs `make_track_rate(hypot(v), yaw_rate)` drops the velocity direction, so `smooth_lateral_gain` and the 75° cone clamp have **no effect** (in the prototype the firmware steered along that vector). Fold them into the rate or remove them (PC-3) |
-| XR-RPP-005 | MEDIUM | ACCEPTED | `rpp_core.cpp:638,688,726` | During the precise stop, `cross = (pos_n−b.n)·ue − (pos_e−b.e)·un` is **positive to the left**, the opposite of `cross_track_right_m` (`frames.md`). This corrupts the 1 cm acceptance data at every endpoint. Debug only: control uses `fabs` |
+| XR-RPP-005 | MEDIUM | **FIXED** `b2a65c2` (hardening/2026-10-10) — was: ACCEPTED | `rpp_core.cpp:638,688,726` | During the precise stop, `cross = (pos_n−b.n)·ue − (pos_e−b.e)·un` is **positive to the left**, the opposite of `cross_track_right_m` (`frames.md`). This corrupts the 1 cm acceptance data at every endpoint. Debug only: control uses `fabs` |
 | XR-RPP-003 | MEDIUM | DOUBT (bag replay) | `rpp_core.cpp:158-164,769-771,836-848` | The jump threshold is scaled by RPP **receipt** gaps (always about 20 ms, because samples are re-sent), so it stays at 0.05 m. At 1 m/s, sample bunching or a 60 ms XRCE stall gives a false JumpSkip (a STOP tick and a lost hint). Use `xy_reset_counter` (X-002) and sample-stamp gaps |
-| XR-RPP-006 | MEDIUM | ACCEPTED | `rpp_node_test.cpp:146-176,251-287`; `orchestrator_equivalence_test.cpp:205` | **The 13,166-tick equivalence compares core output, not the published `MotionSetpoint`**, so it cannot see what `command_from_tick` throws away (XR-RPP-001/002/004). The node test drives a due-north line from heading 0 with instant dynamics. Add command-level checks, an L-shaped mission, an offset endpoint, and a pause with coast |
-| XR-RPP-007 | LOW | ACCEPTED | `rpp_core.cpp:1159,1268,1291-1293` | For 2 ticks after a pivot, TRACK_HEADING carries the previous leg's heading (`last_yaw_cmd_` updates only when the speed is above 0.01) |
-| XR-RPP-008 | LOW | ACCEPTED | `rpp_core.cpp:1317-1321` | `pause()` keeps `last_pos_`, `hint_`, `have_last_tick_` and `endpoint_stop_start_ns_`: a jump skip on resume after coasting, or a **permanent EKF offset** if `ekf_reset_compensation` was set while paused, and the 8 s precise-stop timeout keeps counting through the pause |
-| XR-RPP-009 | LOW | ACCEPTED | `rpp_param_table.inc:33,39,43,118`; `rpp_params.hpp:77`; `stop_pivot_fsm.cpp:91-92` | No upper bound on `pose_max_age_s` / `rtk_fix_timeout_s`; `integer()` overflows; `CornerFsm::go` allocates a `std::string` in the tick |
-| XR-RPP-010 | LOW | ACCEPTED | `main.cpp:29-44`; `rpp_node.cpp:282,299` | An exception (`filesystem_error` from the throwing `exists`/`remove`) skips the STOP burst. `px4_link`'s 0.2 s gate still applies |
-| XR-RPP-011 | LOW | ACCEPTED | `stop_pivot_fsm.cpp:40-48` | The stale-velocity hold counts from hold entry: after 2 s of braking, one stale-velocity tick confirms the stop, so a pivot can start on a frozen pose |
+| XR-RPP-006 | MEDIUM | **FIXED** `3abf60e` (hardening/2026-10-10) — was: ACCEPTED | `rpp_node_test.cpp:146-176,251-287`; `orchestrator_equivalence_test.cpp:205` | **The 13,166-tick equivalence compares core output, not the published `MotionSetpoint`**, so it cannot see what `command_from_tick` throws away (XR-RPP-001/002/004). The node test drives a due-north line from heading 0 with instant dynamics. Add command-level checks, an L-shaped mission, an offset endpoint, and a pause with coast |
+| XR-RPP-007 | LOW | **FIXED** `390f843` (hardening/2026-10-10) — was: ACCEPTED | `rpp_core.cpp:1159,1268,1291-1293` | For 2 ticks after a pivot, TRACK_HEADING carries the previous leg's heading (`last_yaw_cmd_` updates only when the speed is above 0.01) |
+| XR-RPP-008 | LOW | **FIXED** `44cbf7e` (hardening/2026-10-10) — was: ACCEPTED | `rpp_core.cpp:1317-1321` | `pause()` keeps `last_pos_`, `hint_`, `have_last_tick_` and `endpoint_stop_start_ns_`: a jump skip on resume after coasting, or a **permanent EKF offset** if `ekf_reset_compensation` was set while paused, and the 8 s precise-stop timeout keeps counting through the pause |
+| XR-RPP-009 | LOW | **FIXED** `b65375d` (hardening/2026-10-10) — was: ACCEPTED | `rpp_param_table.inc:33,39,43,118`; `rpp_params.hpp:77`; `stop_pivot_fsm.cpp:91-92` | No upper bound on `pose_max_age_s` / `rtk_fix_timeout_s`; `integer()` overflows; `CornerFsm::go` allocates a `std::string` in the tick |
+| XR-RPP-010 | LOW | **FIXED** `ec3db37` (hardening/2026-10-10) — was: ACCEPTED | `main.cpp:29-44`; `rpp_node.cpp:282,299` | An exception (`filesystem_error` from the throwing `exists`/`remove`) skips the STOP burst. `px4_link`'s 0.2 s gate still applies |
+| XR-RPP-011 | LOW | **FIXED** `7a28bda` (hardening/2026-10-10) — was: ACCEPTED | `stop_pivot_fsm.cpp:40-48` | The stale-velocity hold counts from hold entry: after 2 s of braking, one stale-velocity tick confirms the stop, so a pivot can start on a frozen pose |
 
 ### CR-2 — `dyx3_motion_guard` + `dyx3_px4_link`
 
@@ -1101,15 +1101,15 @@ Time to the first STOP on the wire:
 New findings (verified by me against the code and the firmware):
 | ID | Severity | Status | Where | Item |
 |---|---|---|---|---|
-| XR-GPX-001 | **CRITICAL** | ACCEPTED (code path; needs one lost ACK) | `px4_link_node.cpp:26,544-566,659,703` | **Spray OFF can wait up to 5 s behind an in-flight ON.** While a transaction is in flight, `dispatch_next_spray_transaction` returns. The in-flight request clears only on its ACK or after `kSprayTransactionTimeoutS = 5.0`. The watchdog's OFF has priority over the queue only. FCU out-topics are best-effort, so **one lost ACK** after an ON means a line-end OFF, a watchdog OFF or an E-stop-driven OFF reaches PX4 up to 5 s late: up to 5 m of paint at 1 m/s, or a puddle at an E-stop. Fix: an OFF pre-empts the in-flight ON (fail its ACK, dispatch at once); in-flight timeout about 0.3 s; keep republishing the in-flight request. Test: ON dispatched, no ACK, watchdog OFF → command 187 OFF on the wire within 50 ms |
+| XR-GPX-001 | **CRITICAL** | **FIXED** `fbaab44` (hardening/2026-10-10) — was: ACCEPTED (code path; needs one lost ACK) | `px4_link_node.cpp:26,544-566,659,703` | **Spray OFF can wait up to 5 s behind an in-flight ON.** While a transaction is in flight, `dispatch_next_spray_transaction` returns. The in-flight request clears only on its ACK or after `kSprayTransactionTimeoutS = 5.0`. The watchdog's OFF has priority over the queue only. FCU out-topics are best-effort, so **one lost ACK** after an ON means a line-end OFF, a watchdog OFF or an E-stop-driven OFF reaches PX4 up to 5 s late: up to 5 m of paint at 1 m/s, or a puddle at an E-stop. Fix: an OFF pre-empts the in-flight ON (fail its ACK, dispatch at once); in-flight timeout about 0.3 s; keep republishing the in-flight request. Test: ON dispatched, no ACK, watchdog OFF → command 187 OFF on the wire within 50 ms |
 | XR-GPX-002 | **HIGH** | ACCEPTED (fw + params); distance to measure | fw `src/lib/rover_control/RoverControl.cpp:126-134` (+ `throttleControl` :59-67); `3wd_6x_carry_from_proto.params` `RO_DECEL_LIM 0.3` | **Every Jetson STOP, the E-stop included, is ramped by PX4 at 0.3 m/s²:** from 1.0 m/s that is ≈ 3.3 s / 1.7 m, from 0.35 m/s ≈ 1.2 s / 0.2 m. The E-stop never disarms. A crash (1.0 s, then an immediate disarm stop) can stop faster than a software E-stop. Fix: E-stop also disarms, or a "hard stop" that bypasses the slew; set `RO_DECEL_LIM` from a measured braking value. **Owner decision; part of PC-5** |
 | XR-GPX-003 | MEDIUM | DOUBT (firmware; deferred to the firmware review) | fw `DifferentialSpeedControl.cpp:113-117`; `dds_topics.h.em` | PX4 age-checks only `offboard_control_mode`. If one `/fmu/in` setpoint reader breaks while the heartbeat flows, PX4 keeps the last setpoint with no time limit |
-| XR-GPX-004 | MEDIUM | ACCEPTED | `px4_link_node.cpp:182-183` vs fw `uxrce_dds_client/utilities.hpp:80,137` | **ULog streaming never works:** the FCU writers are BEST_EFFORT and `px4_link` subscribes RELIABLE, so they never match and no chunk is ever received. The test passes because its fake FCU publishes RELIABLE. (Makes REC-005 moot until fixed; the SD-card log is the only ULog today) |
-| XR-GPX-005 | MEDIUM | ACCEPTED | `px4_link_node.cpp:556-574,626-637` | Every ACK of a reasserted spray command counts as "unmatched" and logs an **unthrottled WARN** on the writer executor (2 Hz idle, 20 Hz in watchdog bursts) |
+| XR-GPX-004 | MEDIUM | **FIXED** `c34cbf9` (hardening/2026-10-10) — was: ACCEPTED | `px4_link_node.cpp:182-183` vs fw `uxrce_dds_client/utilities.hpp:80,137` | **ULog streaming never works:** the FCU writers are BEST_EFFORT and `px4_link` subscribes RELIABLE, so they never match and no chunk is ever received. The test passes because its fake FCU publishes RELIABLE. (Makes REC-005 moot until fixed; the SD-card log is the only ULog today) |
+| XR-GPX-005 | MEDIUM | **FIXED** `19e6ec4` (hardening/2026-10-10) — was: ACCEPTED | `px4_link_node.cpp:556-574,626-637` | Every ACK of a reasserted spray command counts as "unmatched" and logs an **unthrottled WARN** on the writer executor (2 Hz idle, 20 Hz in watchdog bursts) |
 | XR-GPX-006 | MEDIUM | DOUBT (bench) | `px4_link_node.cpp:388-393` (`system_clock`) | A backward wall-clock step of more than 1 s (first NTP sync mid-run, site LAN coming up) makes `offboard_control_mode` look old → offboard loss → disarm mid-line. Fix: slew-only time sync while armed; a "clock synced" mission precondition |
-| XR-GPX-007 | MEDIUM | ACCEPTED | `px4_link_node.cpp:772`; `offboard_heartbeat.cpp:21-26` | The heartbeat carries the guard's command outside the Active state (the contract says an explicit STOP). On a link loss Active → Prestream, and OFFBOARD is **re-requested automatically** when the link returns (the contract says never silently). Mitigated by the guard's nav_state gate and the mission PAUSE |
-| XR-GPX-008 | LOW | ACCEPTED | `limits.cpp:51-69`; `RO_YAW_RATE_LIM 30` | The guard's 0.45 rad/s yaw envelope does not apply in TRACK_HEADING (NaN rate); PX4 allows 0.52 rad/s |
-| XR-GPX-009 | LOW | ACCEPTED | `motion_guard_node_test.cpp:284-313` | Tests do not prove E-stop immediacy (they run 0.3 s first) or the 0.5 s freshness boundary |
+| XR-GPX-007 | MEDIUM | **FIXED** `b3526f0` (hardening/2026-10-10) — was: ACCEPTED | `px4_link_node.cpp:772`; `offboard_heartbeat.cpp:21-26` | The heartbeat carries the guard's command outside the Active state (the contract says an explicit STOP). On a link loss Active → Prestream, and OFFBOARD is **re-requested automatically** when the link returns (the contract says never silently). Mitigated by the guard's nav_state gate and the mission PAUSE |
+| XR-GPX-008 | LOW | **FIXED** `bcdbdc9` (hardening/2026-10-10) — was: ACCEPTED | `limits.cpp:51-69`; `RO_YAW_RATE_LIM 30` | The guard's 0.45 rad/s yaw envelope does not apply in TRACK_HEADING (NaN rate); PX4 allows 0.52 rad/s |
+| XR-GPX-009 | LOW | **FIXED** `7c14901` (hardening/2026-10-10) — was: ACCEPTED | `motion_guard_node_test.cpp:284-313` | Tests do not prove E-stop immediacy (they run 0.3 s first) or the 0.5 s freshness boundary |
 
 ### CR-3 — `dyx3_system_gateway` + backend relay
 
@@ -1140,14 +1140,14 @@ Verdicts on recorded findings:
 New findings:
 | ID | Severity | Status | Where | Item |
 |---|---|---|---|---|
-| XR-BE-001 | **HIGH** | ACCEPTED (verified) | `routes.py:143,170-181,313,365,372`; FastAPI `routing.py:422-473` | **Pre-auth unbounded body parsing on every body route.** An unauthenticated LAN host can POST a GB to `/api/estop`: memory growth, OOM risk, an event-loop stall → false STOP and delayed real E-stops. Fix: pure-ASGI middleware that checks the bearer token and the size cap **before** reading the body (merges BE-002 and BE-003) |
-| XR-BE-002 | MEDIUM | DOUBT (test) | `relay.py:36-37`; `hub.py:52` | A heartbeat is stamped when it is processed, not when it was received. After a loop stall, queued heartbeats replay as fresh and extend the link by up to the stall time |
-| XR-BE-003 | MEDIUM | DOUBT (test) | `relay.py:60-63,71`; `routes.py:125-126` | The relay task catches only `GatewayError`. Any other exception ends it silently (a permanent STOP, fail-safe) while `/health` still shows `tablet_alive` |
-| XR-BE-004 | MEDIUM | DOUBT (rover) | `dyx3-backend.service` (`ProtectSystem=strict`, no `PrivateTmp` / `TMPDIR`) | Uploads above 1 MiB spool to `/tmp`, which may be read-only under strict, so DXF upload would fail in production. Fix: `PrivateTmp=yes` or `TMPDIR=/var/lib/dyx3/tmp` |
-| XR-GW-001 | MEDIUM | ACCEPTED | `gateway_node.cpp:244`; `hub.py`, `relay.py` | No audit log of E-stop assert/clear (who), link alive transitions, client drops or service timeouts |
-| XR-GW-002 | LOW | ACCEPTED | `client.py:122,139` | At `max_clients`, the reconnect resets its backoff on connect, so accept-then-close flaps at 5 Hz |
-| XR-GW-003 | LOW | ACCEPTED | `ipc_server.cpp:32,78` | Unconditional `unlink` of the socket path: a second gateway (a manual launch) steals or deletes the live socket |
-| XR-GW-004 | LOW | ACCEPTED | `gateway_node_test.cpp:32,238-242`; `test_api.py:24-35` | Tests pass for the wrong reason: `estop_answers` unused (the timeout path is untested); the auth tests send no body, so they cannot catch XR-BE-001 |
+| XR-BE-001 | **HIGH** | **FIXED** `d23c82c` (hardening/2026-10-10) — was: ACCEPTED (verified) | `routes.py:143,170-181,313,365,372`; FastAPI `routing.py:422-473` | **Pre-auth unbounded body parsing on every body route.** An unauthenticated LAN host can POST a GB to `/api/estop`: memory growth, OOM risk, an event-loop stall → false STOP and delayed real E-stops. Fix: pure-ASGI middleware that checks the bearer token and the size cap **before** reading the body (merges BE-002 and BE-003) |
+| XR-BE-002 | MEDIUM | **FIXED** `3521ab5` (hardening/2026-10-10) — was: DOUBT (test) | `relay.py:36-37`; `hub.py:52` | A heartbeat is stamped when it is processed, not when it was received. After a loop stall, queued heartbeats replay as fresh and extend the link by up to the stall time |
+| XR-BE-003 | MEDIUM | **FIXED** `41c62e4` (hardening/2026-10-10) — was: DOUBT (test) | `relay.py:60-63,71`; `routes.py:125-126` | The relay task catches only `GatewayError`. Any other exception ends it silently (a permanent STOP, fail-safe) while `/health` still shows `tablet_alive` |
+| XR-BE-004 | MEDIUM | **FIXED** `6775c05` (hardening/2026-10-10) — was: DOUBT (rover) | `dyx3-backend.service` (`ProtectSystem=strict`, no `PrivateTmp` / `TMPDIR`) | Uploads above 1 MiB spool to `/tmp`, which may be read-only under strict, so DXF upload would fail in production. Fix: `PrivateTmp=yes` or `TMPDIR=/var/lib/dyx3/tmp` |
+| XR-GW-001 | MEDIUM | **FIXED** `56e31d2` (hardening/2026-10-10) — was: ACCEPTED | `gateway_node.cpp:244`; `hub.py`, `relay.py` | No audit log of E-stop assert/clear (who), link alive transitions, client drops or service timeouts |
+| XR-GW-002 | LOW | **FIXED** `fa4c137` (hardening/2026-10-10) — was: ACCEPTED | `client.py:122,139` | At `max_clients`, the reconnect resets its backoff on connect, so accept-then-close flaps at 5 Hz |
+| XR-GW-003 | LOW | **FIXED** `b2d8821` (hardening/2026-10-10) — was: ACCEPTED | `ipc_server.cpp:32,78` | Unconditional `unlink` of the socket path: a second gateway (a manual launch) steals or deletes the live socket |
+| XR-GW-004 | LOW | **FIXED** `dde68a0` (hardening/2026-10-10) — was: ACCEPTED | `gateway_node_test.cpp:32,238-242`; `test_api.py:24-35` | Tests pass for the wrong reason: `estop_answers` unused (the timeout path is untested); the auth tests send no body, so they cannot catch XR-BE-001 |
 
 ---
 
@@ -1161,13 +1161,13 @@ New findings:
 | X-004 | `motion_guard` | Numeric input policy and response timing of the guard | in MG review |
 | X-005 | bringup / systemd | Shared FIFO CPU placement, start-up and shutdown ordering | open |
 | X-006 | `px4_link` / bringup | `px4_link`, the final 100 Hz writer to PX4, runs under **normal scheduling**, unlike RPP and the guard (`control_graph.launch.py:33-34`) | DOUBT, measure |
-| X-007 | `px4_link` | Root cause of RPP-009: no angular-rate subscription | ACCEPTED, HIGH |
+| X-007 | `px4_link` | Root cause of RPP-009: no angular-rate subscription | **FIXED** `65fd610` (hardening/2026-10-10) — was: ACCEPTED, HIGH |
 | X-008 | `px4_link` / firmware | Measure the real stop time for three separate events: the guard sends STOP; the guard dies while `px4_link` lives (0.2 s gate); the whole graph dies (PX4 offboard loss: `COM_OF_LOSS_T` is not in the baseline, `COM_OBL_RC_ACT` 7, upstream #27514) | open, measure (from MG review) |
 | X-009 | mission / bringup | Prove that a systemd graph restart or an E-stop clear can never resume a mission without the operator | open, test (from MG review) |
-| X-010 | `px4_link` | On a graph stop every node gets SIGINT together, so only the last hop can guarantee a final STOP: `px4_link` must publish STOP and stop the offboard heartbeat cleanly before exiting | ACCEPTED: confirmed `main.cpp:15-17`; part of PXL-001 |
+| X-010 | `px4_link` | On a graph stop every node gets SIGINT together, so only the last hop can guarantee a final STOP: `px4_link` must publish STOP and stop the offboard heartbeat cleanly before exiting | **FIXED** `e62468c` (hardening/2026-10-10) — was: ACCEPTED: confirmed `main.cpp:15-17`; part of PXL-001 |
 | X-011 | PX4 parameter baseline | `COM_RCL_EXCEPT` = 4 (bit 2 = Offboard, firmware `commander_params.c:633-645`): **RC loss triggers no failsafe in OFFBOARD**. Carried from the prototype. The RC kill switch still works while the RC link is alive. Owner decision: keep it (the tablet link and the guard govern autonomy) or clear bit 2 so RC loss stops autonomous runs. Test it with production-readiness #5 | open, owner decision (found in PXL verification) |
 | X-012 | PX4 firmware / hardware / spray | **Physical valve close when every Jetson path is lost.** The controller and the watchdog both reach the valve only through `px4_link` → DDS → PX4. Prove on hardware what the valve output does on disarm, on offboard loss (1.0 s → disarm) and on loss of actuator commands; measure it with the valve driver. Owner decision (open since 2026-10-07): (a) a secondary UART path, (b) a PX4 companion-loss failsafe that disarms, plus a disarmed-output level that is valve-closed | **open: blocks fail-closed sign-off** |
-| X-013 | installer / health | `installer/lib/health_check.sh` (deep graph check, about line 166) lists `/dyx3_mission /motion_guard /px4_link /spray /system_gateway`, **without `/rpp`**. Missing nodes and absent `/fmu` topics are WARN, not FAIL | open, installer review (from BR review) |
+| X-013 | installer / health | `installer/lib/health_check.sh` (deep graph check, about line 166) lists `/dyx3_mission /motion_guard /px4_link /spray /system_gateway`, **without `/rpp`**. Missing nodes and absent `/fmu` topics are WARN, not FAIL | **FIXED** `50ba23e` (hardening/2026-10-10) — was: open, installer review (from BR review) |
 | X-014 | architecture / network | `docs/architecture/...V1.md` §4.3 says "no router, no site LAN", but the rover now runs a site LAN (`network.env`, 192.168.3.0/24) next to the hotspot by owner decision of 2026-10-09. Amend §4.3 and the operator-link reasoning (§4.3.1) | open, doc (from BR review) |
 | X-015 | backend / app / network | On the site LAN, tablet Bearer tokens travel over **plain HTTP**, and the UDP beacon cannot prove rover identity, so a LAN attacker can sniff tokens or spoof a rover. Owner decision: TLS (self-signed, pinned per rover at pairing, fits QR pairing), a VPN, or the hotspot only for production | open, owner decision (from BE review) |
 | X-016 | installer / gateway / mission | The installer needs an authoritative, root-readable "rover idle" state (disarmed AND mission not RUNNING; unknown ≠ idle) to refuse install, upgrade or rollback mid-run (INS-001) | open (from INS review) |
