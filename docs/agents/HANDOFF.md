@@ -2953,3 +2953,75 @@ preserved, closed-loop first-order model completes in 3.4 s with 1 sign change (
 vectors deviate only inside the endpoint windows of 7 scenarios (pinned count 525). Verified here with the real core compiled
 against a gtest stand-in; CI is the authority for `rpp_node_test`. **Field re-validation required at the next endpoint:**
 expect ≤ 2 reversals, no timeout finish.
+
+## 2026-10-10 (after midnight) — the six industrial-grade gaps closed where code can close them; CI green again
+
+**Branch:** `claude/funny-sagan-upnenq`, commits `a04bfdc`..`1f47834`. Author = owner,
+no trailers (owner rule). `master` is untouched; this branch is a merge candidate only after CI is green on its head.
+
+**The six gaps (owner question "industrial grade?" → "not yet, six gaps") and what landed:**
+
+| # | Gap | Landed | Not closable by code |
+|---|---|---|---|
+| 1 | Recovery | `3d410db` unit split (`dyx3-control` = px4_link, guard, RPP, mission, spray; `dyx3-services` = gateway, gnss_rtk, recorder, spray_watchdog, backend-facing), `05da0b3` persisted progress + `StartMission.resume` + re-engage from PAUSED (contract §3a/§9a) | — |
+| 2 | Stop policy | `068c52e` px4_link `VehicleState.rc_link_valid/rc_link_ok` from `failsafe_flags` (optional topic), `fbb3bda` guard `require_rc_link` pre-arm option (default **false** until `rc_link_valid` is seen on the rover) | the physical E-stop and the RC-kill decision (owner) |
+| 3 | Accuracy apparatus | `1a3ccad` `tools/analysis/mission_bag_metrics.py`: the gate-table numbers from a recorder run, no ROS | the gates themselves (field) |
+| 4 | Spray | — | paint trials only |
+| 5 | Provenance | `1f47834` REC-025: `tools/px4/param_dump.py` (pymavlink, read-only) run by the recorder at every run open → `params_fcu.json`, `versions_fcu.json`, `firmware_running` + `fcu_params` in `summary.json`; `dyx3-param` operator tool (get/set/save/diff); `config/profiles/`; pymavlink 2.4.49 venv from the installer (install + upgrade) | signing of releases (owner) |
+| 6 | Drivetrain visibility | `fbb3bda` guard actuator-stall gate (`REASON_ACTUATOR_STALL`), `4af71fe` `RppStatus.pivot_timed_out`, `05da0b3` mission pauses on it (`REASON_RPP_PIVOT_TIMEOUT`) | — |
+
+**Interfaces 0.17.0 (`d15ec25`, changelog entry; fingerprints pinned in `d4de24e`):** `StartMission.resume` /
+`resumed_run_index`, `MissionState.start_run_index` + `REASON_RPP_PIVOT_TIMEOUT=18`, `MotionSetpointStatus.REASON_ACTUATOR_STALL=14`,
+`RppStatus.pivot_timed_out`, `VehicleState.rc_link_valid/rc_link_ok`. Gateway + backend pass them through (`6309cb1`). The
+tablet does not use `resume` yet: the app change is open (below).
+
+**Review items from the 20f6c3c merge (owner):** (1) preflight exemption while `nav_state == OFFBOARD` is in `fbb3bda` with a
+test; (2) endpoint law: brake-in-band kept, feed-forward taken back to the plane (`4af71fe`), the lag-sweep table is in the RPP
+test and contract (plane law mean −3.6 mm / rms 10.9 mm vs band edge +1.3 / 9.7 mm, ≤ 2 sign changes either way).
+
+**CI trim (`6758e9d`, owner request):** release build with `-DBUILD_TESTING=OFF`; `rover_artifacts` needs only
+`interface_freeze`, `rover_publish` needs all ten jobs. Before (master `750784c`, run 38060488410): colcon 1m58s, artifacts
+started at +2m02s and took 5m51s, whole run 8m08s. After: measured on the first `master` run after the merge — record it here.
+
+**CI red since `d15ec25`, green again at `f8a30b3` (run 38076927373, every job):**
+- `d4de24e`: `SchemaFingerprint.EveryInterfaceFieldListIsPinned` (the 0.17.0 bump did not re-pin the table; recomputed with
+  the test's own FNV-1a-64 reduction, matches CI's printout).
+- `f8a30b3`: four `RppNode` endpoint tests (timer and event variants) rocked 441 times after `4af71fe` took the feed-forward
+  back to the plane: the rover now enters the arrival band at speed, the in-band brake commands the measured speed reversed,
+  and the rig's **instantaneous** plant (`accel_limit 0`) executes that within one tick → a gain-1 limit cycle at the brake
+  cap, never "stopped". Reproduced off-target on the real core with the rig's plant model; with the rig's rate-limited plant
+  (0.5 m/s², already used by the other closed-loop cases) the lateral-miss case completes in 1.2 s with one reversal 1.0 cm
+  short, the whole mission in 12.5 s with one reversal 0.5 cm short. The four tests now use that plant. **This is a rig
+  limitation, not a controller change** — but it is also the reason the stop position on the rover must be measured at the
+  next endpoint: the real drivetrain lag (0.1–0.3 s, mission 0001) is what makes the brake converge.
+- `1f47834` (recorder): see the CI run for that commit before merging.
+
+**What was run here (no ROS, no Docker in this container):** closed-loop replay of the endpoint law on the real `RppCore` +
+`command_from_tick` with the node rig's plant (scratchpad harness, not committed); clang-format 20.1.8 dry-run on every C++ file; ROS-free cores
+compiled against gtest in the scratchpad (mission fsm 16 / sequencer 17 / journal 7 / progress 6, guard and RPP cores in their
+own commits); backend ruff + pytest; installer shellcheck + staged-root tests; tools pytest. **Not run:** every `*_node_test`
+(mission's 12 new node tests, guard's, RPP's) — CI on this branch is the authority: run 175 (`05da0b3`) and the provenance
+run must be green before this branch is merged. Timing, DDS, systemd, the unit split on a Jetson: field only.
+
+**DERIVED — NOT FROM V1 SPEC (new):**
+- Progress keyed by the **source** artifact sha (the execution sha changes with the EKF reference); written from PLACING on;
+  COMPLETED marks the record complete instead of deleting it; 4 MiB reader cap.
+- "First run not completed" = highest `RppStatus.run_index` seen while driving (RPP drives runs in order).
+- Re-engage holds for the guard's full gate after the OFFBOARD confirmation, bounded by `offboard_timeout_s`; its
+  ARMING/ENGAGING are **published as PAUSED** (RPP unloads on ARMING/ENGAGING).
+- Pivot-timeout pause is latched once per watchdog expiry (RPP holds the flag up while the heading is outside the band).
+- Recorder: the FCU parameter read (≈900 parameters over MAVLink TCP 5760, 2–3 s against a fake PX4) runs at run open
+  (LOADING), i.e. it can overlap ARMING/ENGAGING on the same Ethernet link as uXRCE-DDS. **Bench check before field use:**
+  `/fmu/out` rates and `pose_to_write_age` during a read; `fcu_param_dump_enabled=false` is the switch.
+- Actuator-stall gate: `yaw_rate_radps == 0` is treated as a measurement, not "unknown" → possible false positive if the
+  estimator reports exact zeros; `battery_status` is in px4_link's required handshake set (consider optional).
+- A resumed run whose boundary turn is < 45° gets no alignment pivot (same rule as run 0).
+
+**Open for the owner / next agent:**
+1. Merge the branch to `master` once run 175+ is green; deploy; the first field run re-validates the endpoint stop
+   (≤ 2 reversals, no timeout finish), the stall gate (no false positive while driving) and a deliberate OFFBOARD loss + resume.
+2. App: send `resume=true` on a restart of a mission with a persisted record; show `resumed_run_index`.
+3. Decisions: re-engage hold bound (reuses `offboard_timeout_s`); pivot-timeout latch vs level; how long COMPLETED records
+   are kept; `require_rc_link` default once `rc_link_valid` is observed; stop policy (physical E-stop vs RC kill).
+4. After a services restart with the vehicle armed and idle, the guard streams STOP and nothing disarms: decide whether
+   px4_link should disarm on start when it did not arm.
