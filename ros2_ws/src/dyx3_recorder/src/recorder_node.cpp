@@ -386,7 +386,10 @@ void RecorderNode::on_mission(const dyx3_interfaces::msg::MissionState& m) {
     }
     stop_run(a.final_state);
   }
-  if (a.start) start_run(m.mission_id, m.run_index, m.path_artifact_sha256, a.start_running);
+  if (a.start) {
+    start_run(m.mission_id, m.run_index, m.path_artifact_sha256, m.source_artifact_sha256,
+              a.start_running);
+  }
   if (a.running) mark_running();
 }
 
@@ -402,7 +405,8 @@ void RecorderNode::join_param_job() {
   if (param_thread_.joinable()) param_thread_.join();
 }
 
-void RecorderNode::start_run(uint32_t mission_id, uint32_t run_index, const std::string& sha,
+void RecorderNode::start_run(uint32_t mission_id, uint32_t run_index,
+                             const std::string& execution_sha, const std::string& source_sha,
                              bool running) {
   join_param_job();  // normally already joined by stop_run
   std::error_code ec;
@@ -410,7 +414,8 @@ void RecorderNode::start_run(uint32_t mission_id, uint32_t run_index, const std:
   RunInfo info;
   info.mission_id = mission_id;
   info.run_index = run_index;
-  info.path_artifact_sha256 = sha;
+  info.path_artifact_sha256 = execution_sha;
+  info.source_artifact_sha256 = source_sha;
   info.start_utc = iso_utc(now);
   info.start_state = running ? "RUNNING" : "READY";
   info.vehicle_id = vehicle_id_;

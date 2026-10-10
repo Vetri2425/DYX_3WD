@@ -58,7 +58,7 @@ OFFBOARD_REFUSED 12 · OFFBOARD_TIMEOUT 13 · RPP_ACK_TIMEOUT 14 · ESTOP 15 · 
 With `SAFETY` / `RTK`, `gate_reason_code` names the guard gate (`MotionSetpointStatus.REASON_*`), 0 otherwise.
 
 **Other `MissionState` fields (0.15.0):** `path_artifact_sha256` = the **execution** artifact RPP loads (set when PLACING
-succeeds, cleared on ERROR); `source_artifact_sha256` = the artifact the operator started (kept until the next start);
+succeeds, cleared on ERROR); `source_artifact_sha256` = the artifact the operator started (kept until the next start); `dyx3_recorder` writes both to the run's `manifest.json` (`docs/contracts/dyx3_recorder.md`);
 `request_id`; `reason_detail` (human-readable cause, plus `; release: …` when a release step failed); `waiting_on`
 (`WAIT_NONE 0 · ARTIFACT 1 · PLACEMENT 2 · ARM 3 · OFFBOARD 4 · RPP_ACK 5 · OPERATOR 6 · OFFBOARD_RELEASE 7 · DISARM 8`; a
 pending release step takes precedence over the state's own wait); `state_entered` (ROS time of the transition into the
@@ -254,5 +254,4 @@ states are not IDLE: to reconfigure after a mission, leave the vehicle stopped a
 
 ## 12. Open questions
 The numeric value of `rpp_ack_timeout_s`; mission-id persistence across reboot (per-process counter, so a `request_id` is
-only deduplicated within one process lifetime); the recorder records `path_artifact_sha256` (the execution) but not yet
-`source_artifact_sha256`.
+only deduplicated within one process lifetime).

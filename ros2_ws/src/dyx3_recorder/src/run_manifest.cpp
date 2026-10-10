@@ -101,6 +101,7 @@ std::string manifest_json(const RunInfo& r) {
       .integer("mission_id", r.mission_id)
       .integer("run_index", r.run_index)
       .str("path_artifact_sha256", r.path_artifact_sha256)
+      .str("source_artifact_sha256", r.source_artifact_sha256)
       .str("conditioned_execution_sha256", r.conditioned_execution_sha256)
       .str("start_utc", r.start_utc)
       .str("start_state", r.start_state)

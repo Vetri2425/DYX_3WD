@@ -66,7 +66,8 @@ public:
 
 private:
   void on_mission(const dyx3_interfaces::msg::MissionState& m);
-  void start_run(uint32_t mission_id, uint32_t run_index, const std::string& sha, bool running);
+  void start_run(uint32_t mission_id, uint32_t run_index, const std::string& execution_sha,
+                 const std::string& source_sha, bool running);
   void mark_running();
   void join_param_job();
   void stop_run(const std::string& final_state);

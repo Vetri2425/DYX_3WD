@@ -33,7 +33,10 @@ struct RunInfo {
   std::string run_id;
   uint32_t mission_id{0};
   uint32_t run_index{0};
+  // Mission contract v2: the EXECUTION artifact RPP loads (the placed trajectory) and the SOURCE
+  // artifact the operator started; equal when the source was already in the EKF frame.
   std::string path_artifact_sha256;
+  std::string source_artifact_sha256;
   // RPP's id of the conditioned execution geometry (RppStatus) at run start, when RPP reported one
   // for this mission; empty otherwise (REC-016).
   std::string conditioned_execution_sha256;

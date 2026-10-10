@@ -75,16 +75,22 @@ TEST(Manifest, ContainsEveryProvenanceField) {
   r.run_id = "r1";
   r.mission_id = 42;
   r.run_index = 1;
-  r.path_artifact_sha256 = std::string(64, 'a');
+  r.path_artifact_sha256 = std::string(64, 'a');    // execution
+  r.source_artifact_sha256 = std::string(64, 'c');  // source
   r.start_utc = "2026-09-05T14:15:30Z";
   r.vehicle_id = "3wd-01";
   r.operator_name = "op \"x\"";
   r.hostname = "jetson";
   const std::string m = manifest_json(r);
-  for (const char* k : {"run_id", "mission_id", "run_index", "path_artifact_sha256", "start_utc",
-                        "vehicle_id", "operator", "hostname"}) {
+  for (const char* k :
+       {"run_id", "mission_id", "run_index", "path_artifact_sha256", "source_artifact_sha256",
+        "start_utc", "vehicle_id", "operator", "hostname"}) {
     EXPECT_NE(m.find(std::string("\"") + k + "\""), std::string::npos) << k;
   }
+  EXPECT_NE(m.find("\"path_artifact_sha256\": \"" + std::string(64, 'a') + "\""),
+            std::string::npos);
+  EXPECT_NE(m.find("\"source_artifact_sha256\": \"" + std::string(64, 'c') + "\""),
+            std::string::npos);
   EXPECT_NE(m.find("op \\\"x\\\""), std::string::npos);
   RunSummary s;
   s.notes = {"a", "b"};

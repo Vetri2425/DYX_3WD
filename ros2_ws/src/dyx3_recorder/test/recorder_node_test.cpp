@@ -152,7 +152,8 @@ struct Rig {
     m.state = state;
     m.mission_id = id;
     m.run_index = run;
-    m.path_artifact_sha256 = std::string(64, 'b');
+    m.path_artifact_sha256 = std::string(64, 'b');    // the execution artifact (placed)
+    m.source_artifact_sha256 = std::string(64, 'a');  // the artifact the operator started
     p_mission->publish(m);
     pump(150);
   }
@@ -205,7 +206,13 @@ TEST(RecorderNode, FullRunProducesAnEvidenceDirectoryWithProvenance) {
   }
   EXPECT_FALSE(fs::exists(d + "/config_snapshot/ntrip.env"));  // secrets never copied
   EXPECT_NE(slurp(d + "/manifest.json").find("3wd-test"), std::string::npos);
-  EXPECT_NE(slurp(d + "/manifest.json").find(std::string(64, 'b')), std::string::npos);
+  // both artifacts of mission contract v2 are recorded, under their own names
+  EXPECT_NE(slurp(d + "/manifest.json")
+                .find("\"path_artifact_sha256\": \"" + std::string(64, 'b') + "\""),
+            std::string::npos);
+  EXPECT_NE(slurp(d + "/manifest.json")
+                .find("\"source_artifact_sha256\": \"" + std::string(64, 'a') + "\""),
+            std::string::npos);
   EXPECT_NE(slurp(d + "/versions.json").find("abc"), std::string::npos);
   EXPECT_NE(slurp(d + "/params_fcu.json").find("unavailable"), std::string::npos);
   EXPECT_NE(slurp(d + "/params_ros.json").find("max_xtrack_error_m"), std::string::npos);
