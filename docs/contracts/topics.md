@@ -2,7 +2,7 @@
 
 **Status:** extracted from the code on 2026-10-07 (cloud session), not from the spec. Where this table and a node's source disagree, the source is right
 and this file is stale: regenerate it. Types are `dyx3_interfaces/msg/*` unless a `px4_msgs` name is given. Everything runs in a private DDS domain
-(`ROS_DOMAIN_ID` has no default: the launchers refuse to start without it; the number is an OPEN item). **Only `dyx3_px4_link` touches `/fmu/**`.**
+(`ROS_DOMAIN_ID` has no code default: the launchers refuse to start without it; `ros.env.tmpl` ships 42, the fleet domain, and PX4 `UXRCE_DDS_DOM_ID` must match). **Only `dyx3_px4_link` touches `/fmu/**`.**
 
 QoS shorthand: `R1` = reliable, keep-last 1 (state that is only useful when it is the newest); `R10` / `R16` / `R32` / `R64` = reliable with that depth (commands, chunks,
 events that must not drop); `R100` = point results.
@@ -68,4 +68,5 @@ vehicle_command, gps_inject_data, ulog_stream_ack, message_format_request}`. QoS
 * One motion source: nothing but `dyx3_rpp` publishes `/dyx3/rpp/motion_setpoint`, and nothing but `dyx3_motion_guard` publishes `/dyx3/motion_guard/command`.
 * No safety verdict is published by the backend or the tablet; their E-stop is a service request to the guard (via the gateway).
 * RPP and spray load the SAME content-addressed artifact the mission names in `MissionState.path_artifact_sha256`.
-* Open: the DDS scoping (loopback vs the FCU Ethernet interface), the recorded topic list (raw `/fmu` is excluded), and per-topic latency budgets (timing is not provable off-target).
+* DDS scoping (decided 2026-10-10): loopback-only by default. `ros.env.tmpl` ships `DYX3_ROS_LOCALHOST_ONLY=1` (launchers export `ROS_LOCALHOST_ONLY=1`; PX4 reaches the graph only through the XRCE agent with `UXRCE_DDS_PTCFG=1`), the RMW is pinned to `rmw_fastrtps_cpp` in `dyx3-env.sh`, and `/etc/dyx3/fastdds_profiles.xml` (from `deployment/network/fastdds_profiles.xml`, UDPv4-only participant, 10 ms writer `max_blocking_time`) is exported as `FASTRTPS_DEFAULT_PROFILES_FILE` when present. Per-topic QoS stays in code (`RMW_FASTRTPS_USE_QOS_FROM_XML` is not set). The transport choice is to be confirmed by bench measurement M2 (`docs/reviews/2026-10-10_production_blockers_transport_timing_review.md`).
+* Open: the recorded topic list (raw `/fmu` is excluded) and per-topic latency budgets (timing is not provable off-target).

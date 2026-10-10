@@ -355,8 +355,19 @@ _xrce_listening() {
   ss -H -lun "sport = :$(_xrce_port)" 2>/dev/null | grep -q .
 }
 
-# health_dds: deep. Is the FCU session up? Authoritative: one /dyx3/px4_link/status sample (WARN, never FAIL); it replaces
-# counting /fmu topics, which said nothing about the link and under-reported right after a start.
+# _px4_baseline_param <release-dir> <NAME>: the value of a PX4 parameter in the repo baseline
+# config/px4/3wd_6x_carry_from_proto.params ("vehicle component NAME value type", tab separated), or "?" when the file or the
+# parameter is missing. Read at check time, never hardcoded; no FCU parameter is read.
+_px4_baseline_param() {
+  local v
+  v="$(awk -v n="$2" '$1 !~ /^#/ && $3 == n { v = $4 } END { print v }' "$1/config/px4/3wd_6x_carry_from_proto.params" 2>/dev/null)"
+  printf '%s' "${v:-?}"
+}
+
+# health_dds: deep. Is the FCU session up? Authoritative: one /dyx3/px4_link/status sample (WARN, except below); it replaces
+# counting /fmu topics, which said nothing about the link and under-reported right after a start. FAIL when the XRCE agent
+# listens but px4_link sees no PX4 session: the DDS environment cannot be told from a domain/participant mismatch or a dead FCU
+# link, and a rover in that state cannot be driven. "No sample at all" stays WARN (the graph may simply be down).
 # DERIVED — NOT FROM V1 SPEC: the sample is healthy with session_alive, handshake_ok and no stale topic. `fault` is
 # reported, not judged: COMMAND_STALE is what px4_link reports while no guard command flows.
 # PC-7a: px4_link sees /fmu only when PX4's UXRCE_DDS_DOM_ID equals ROS_DOMAIN_ID and UXRCE_DDS_PTCFG=1 matches the
@@ -385,7 +396,7 @@ health_dds() {
   _warn "px4_link: FCU session down (${detail})"
   _xrce_listening || rc=$?
   case "${rc}" in
-    0) _warn "DDS domain: the XRCE agent listens on udp/$(_xrce_port) but px4_link sees no PX4 session on ROS_DOMAIN_ID ${dom}; likely PX4 UXRCE_DDS_DOM_ID != ${dom} or UXRCE_DDS_PTCFG != 1 (localhost-only); else FCU power or the Ethernet cable" ;;
+    0) _fail "DDS domain: the XRCE agent listens on udp/$(_xrce_port) but px4_link sees no PX4 session on ROS_DOMAIN_ID ${dom}; likely PX4 UXRCE_DDS_DOM_ID != ${dom} or UXRCE_DDS_PTCFG != 1 (localhost-only); else FCU power or the Ethernet cable. Repo baseline expects UXRCE_DDS_DOM_ID=$(_px4_baseline_param "${rel}" UXRCE_DDS_DOM_ID) and UXRCE_DDS_PTCFG=$(_px4_baseline_param "${rel}" UXRCE_DDS_PTCFG); this rover runs $(_ros_env_desc)" ;;
     1) _warn "DDS domain: no PX4 session and nothing listens on udp/$(_xrce_port): the XRCE agent is down (dyx3-platform)" ;;
     *) _warn "DDS domain: no PX4 session on ROS_DOMAIN_ID ${dom}; likely the XRCE agent is down, PX4 UXRCE_DDS_DOM_ID != ${dom}, or UXRCE_DDS_PTCFG != 1 (localhost-only)" ;;
   esac

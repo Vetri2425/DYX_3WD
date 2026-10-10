@@ -8,9 +8,12 @@ Runs: mission, motion_guard, px4_link, rpp, spray, system_gateway. NOT in this g
 
 DERIVED — NOT FROM V1 SPEC: when ANY node of this graph exits, the whole launch shuts down and systemd restarts the unit. A graph with a
 dead px4_link or guard is not a degraded graph worth keeping half alive, and a restart mid-mission aborts the run anyway.
-DERIVED — NOT FROM V1 SPEC: retain the existing FIFO 80 / CPU 4 allocation only for
-RPP and motion_guard, the two control executors named by architecture section 8. The
-mission, px4_link, spray and gateway executors stay under normal scheduling.
+DERIVED — NOT FROM V1 SPEC: retain the existing FIFO 80 / CPU 4 allocation for RPP and motion_guard, the two control executors named by
+architecture section 8, so they preempt everything else on that core. dyx3_px4_link, the only other hop in the control chain, shares CPU 4
+at FIFO 70: below the two control executors, above everything else (70 is not a tuned value; it only has to order px4_link under the two
+80s). The mission, spray and gateway executors stay under normal scheduling. dyx3-recorder.service keeps the recorder off CPU 4
+(CPUAffinity=0-3 5). The prefixes run as User=dyx3 without CAP_SYS_NICE, which the kernel allows only up to RLIMIT_RTPRIO
+(dyx3-ros.service LimitRTPRIO=99): if chrt fails the node exits and the whole graph restarts, loud and never silently non-RT.
 """
 
 import os
@@ -30,8 +33,14 @@ GRAPH = (
     ("dyx3_system_gateway", "gateway_node", "system_gateway", "gateway"),
 )
 
-RT_CONTROL_PACKAGES = frozenset(("dyx3_motion_guard", "dyx3_rpp"))
 RT_CONTROL_PREFIX = "taskset -c 4 chrt -f 80"
+RT_LINK_PREFIX = "taskset -c 4 chrt -f 70"
+# package -> real-time prefix; a package absent from this map runs under normal scheduling.
+RT_PREFIXES = {
+    "dyx3_motion_guard": RT_CONTROL_PREFIX,
+    "dyx3_rpp": RT_CONTROL_PREFIX,
+    "dyx3_px4_link": RT_LINK_PREFIX,
+}
 
 
 def plan(config_dir: str) -> list[dict]:
@@ -47,7 +56,7 @@ def plan(config_dir: str) -> list[dict]:
                 "executable": executable,
                 "name": name,
                 "params_file": params_file if os.path.isfile(params_file) else None,
-                "prefix": RT_CONTROL_PREFIX if package in RT_CONTROL_PACKAGES else None,
+                "prefix": RT_PREFIXES.get(package),
             }
         )
     return out

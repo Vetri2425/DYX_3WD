@@ -23,10 +23,11 @@ ProtectControlGroups=yes
 
 LimitNOFILE=65536
 # The launcher and non-control nodes must be scheduled normally. The launch file gives only
-# the RPP and motion-guard control executors FIFO priority and CPU affinity, through a
-# `taskset -c 4 chrt -f 80` prefix that runs as User=dyx3 without CAP_SYS_NICE. The kernel
-# allows that only up to RLIMIT_RTPRIO, so LimitRTPRIO must stay >= 80. If it is lowered,
-# chrt fails, the node exits and the whole graph restarts: loud, never silently non-RT.
+# the RPP and motion-guard control executors (FIFO 80) and the px4_link writer (FIFO 70) real-time
+# priority, all pinned to CPU 4, through a `taskset -c 4 chrt -f <prio>` prefix that runs as
+# User=dyx3 without CAP_SYS_NICE. The kernel allows that only up to RLIMIT_RTPRIO, so
+# LimitRTPRIO must stay >= 80. If it is lowered, chrt fails, the node exits and the whole graph
+# restarts: loud, never silently non-RT.
 LimitRTPRIO=99
 # rpp, motion_guard and px4_link call mlockall(MCL_CURRENT|MCL_FUTURE) (CLAUDE.md section 7).
 # Under the default RLIMIT_MEMLOCK it fails ("mlockall failed (continuing unlocked)").

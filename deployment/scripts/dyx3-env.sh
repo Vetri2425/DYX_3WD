@@ -5,9 +5,14 @@
 # ROS_DOMAIN_ID: the architecture says the domain is pinned (4.4) but names no number, and a wrong guess would silently
 # join (or miss) another rover's graph. Set it in /etc/dyx3/ros.env.
 #
-# DDS scoping (architecture 4.4 says "scoped to eth0") is OPEN: the whole ROS graph is local to the Jetson (the XRCE agent talks
-# to the FCU over XRCE, not DDS), so loopback-only is stricter and survives an unplugged FCU cable, while an eth0 interface
-# whitelist would not. Opt in with DYX3_ROS_LOCALHOST_ONLY=1; the default changes nothing.
+# DDS scoping (architecture 4.4 says "scoped to eth0"): DECIDED 2026-10-10, loopback-only. The whole ROS graph is local to the Jetson
+# (the XRCE agent talks to the FCU over XRCE, not DDS), so loopback-only is stricter and survives an unplugged FCU cable, while an eth0
+# interface whitelist would not. /etc/dyx3/ros.env ships DYX3_ROS_LOCALHOST_ONLY=1; this file only honours it (unset or 0 = not
+# restricted, so a rover installed before the default keeps working until its ros.env is edited).
+#
+# The RMW is pinned to what Humble defaults to, so a future image cannot silently change it. The Fast DDS profile file
+# (/etc/dyx3/fastdds_profiles.xml, installed from deployment/network/fastdds_profiles.xml) is used when present. RMW_FASTRTPS_USE_QOS_FROM_XML
+# is deliberately NOT set: the per-topic QoS is declared in code and must stay there.
 
 dyx3_env_load() {
   local rel="${DYX3_RELEASE_DIR:-/opt/dyx3/current}"
@@ -40,6 +45,9 @@ dyx3_env_load() {
   done
   export ROS_DOMAIN_ID
   if [ "${DYX3_ROS_LOCALHOST_ONLY:-0}" = "1" ]; then export ROS_LOCALHOST_ONLY=1; fi
+  export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+  local fastdds_profiles="${DYX3_FASTDDS_PROFILES:-/etc/dyx3/fastdds_profiles.xml}"
+  if [ -r "${fastdds_profiles}" ]; then export FASTRTPS_DEFAULT_PROFILES_FILE="${fastdds_profiles}"; fi
   # The service user's HOME (/var/lib/dyx3) is root-owned by design, so ROS cannot create ~/.ros there
   # (rcl aborts: "Failed to create log directory"). Point ROS at directories the service owns.
   export ROS_HOME="${ROS_HOME:-/var/lib/dyx3/state/ros}"

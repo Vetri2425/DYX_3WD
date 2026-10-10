@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  DYX 3WD — Fast DDS (rmw_fastrtps_cpp, ROS 2 Humble = Fast DDS 2.6) default profiles.
+
+  Installed ONCE to /etc/dyx3/fastdds_profiles.xml (an upgrade never overwrites an existing copy, like the *.env files). The launchers
+  export it as FASTRTPS_DEFAULT_PROFILES_FILE when it exists (deployment/scripts/dyx3-env.sh).
+
+  Deliberately NOT in this file: reliability kind, history, durability and depth. The nodes declare the per-topic QoS in code and that
+  stays the single owner. RMW_FASTRTPS_USE_QOS_FROM_XML is NOT set, so the code QoS is never replaced from here.
+
+  1. Participant: UDPv4 only, shared memory off.
+     DERIVED — NOT FROM V1 SPEC: architecture section 8 says the prototype's fastdds_no_shm.xml existed for a reason to re-derive
+     and neither inherit nor drop blindly. The reason recorded here is deterministic recovery after a process crash: Fast DDS
+     shared-memory segments and port mutexes under /dev/shm can outlive a crashed participant and block or delay rediscovery, which
+     matters because any node exiting restarts the whole graph (control_graph.launch.py). Every node is on this host's loopback, so UDP
+     adds no network hop, and the loopback UDP cost is negligible at this graph's rates. To be confirmed by the bench measurement M2
+     in docs/reviews/2026-10-10_production_blockers_transport_timing_review.md; if M2 shows a cost or no recovery benefit, change it
+     there, not by habit.
+     The transport is whitelisted to 127.0.0.1 so this file can never widen what ROS_LOCALHOST_ONLY=1 restricts (see the descriptor).
+
+  2. DataWriter: reliable max_blocking_time 10 ms.
+     DERIVED — NOT FROM V1 SPEC: 10 ms is one dyx3_px4_link writer period (publish_rate_hz 100 -> 10 ms). A reliable KEEP_LAST(1) writer
+     whose reader stops acknowledging blocks publish() for up to max_blocking_time (Fast DDS default 100 ms), and px4_link publishes
+     five messages per cycle on its single executor thread, so one stuck reader could otherwise cost many cycles. Only the blocking
+     bound is set; the kind stays whatever the code declares.
+-->
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+
+  <transport_descriptors>
+    <transport_descriptor>
+      <transport_id>dyx3_udp_v4</transport_id>
+      <type>UDPv4</type>
+      <!-- Loopback only, like ROS_LOCALHOST_ONLY=1. The rmw adds its own 127.0.0.1-whitelisted UDPv4 transport for that
+           variable but keeps the user transports of the default participant profile: an unrestricted transport here would
+           reopen discovery on eth0 and the hotspot. A bench that needs a second machine on the graph edits this list too. -->
+      <interfaceWhiteList>
+        <address>127.0.0.1</address>
+      </interfaceWhiteList>
+    </transport_descriptor>
+  </transport_descriptors>
+
+  <participant profile_name="dyx3_default_participant" is_default_profile="true">
+    <rtps>
+      <useBuiltinTransports>false</useBuiltinTransports>
+      <userTransports>
+        <transport_id>dyx3_udp_v4</transport_id>
+      </userTransports>
+    </rtps>
+  </participant>
+
+  <data_writer profile_name="dyx3_default_datawriter" is_default_profile="true">
+    <qos>
+      <reliability>
+        <max_blocking_time>
+          <sec>0</sec>
+          <nanosec>10000000</nanosec>
+        </max_blocking_time>
+      </reliability>
+    </qos>
+  </data_writer>
+
+</profiles>
