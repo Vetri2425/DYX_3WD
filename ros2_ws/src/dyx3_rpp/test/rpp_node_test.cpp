@@ -332,6 +332,10 @@ TEST(RppNode, AMissingArtifactIsAnErrorAndStopsNeverGuesses) {
 TEST(RppNode, DrivesTheWholeMissionMarksTheLineAndCompletes) {
   Rig r;
   r.auto_drive = true;
+  // The endpoint brake inside the arrival band commands the measured speed reversed; a plant that
+  // takes the command at once (accel_limit 0) turns that into a limit cycle at the brake cap and
+  // never satisfies the stop confirmation, which no drivetrain does. Decelerate through zero.
+  r.accel_limit = 0.5;
   r.mission_state = MissionState::STATE_RUNNING;
   bool saw_track = false, saw_request = false, request_on_transit = false, saw_stop_at_end = false;
   double max_speed = 0.0;
@@ -541,6 +545,10 @@ TEST(RppNode, AnEndpointWithALateralMissCompletesWithoutRocking) {
   // when the precise stop engages (it is a final approach, not a line acquisition).
   Rig r({rclcpp::Parameter("pivot_to_intercept_enabled", false)});
   r.auto_drive = true;
+  // The endpoint brake inside the arrival band commands the measured speed reversed; a plant that
+  // takes the command at once (accel_limit 0) turns that into a limit cycle at the brake cap and
+  // never satisfies the stop confirmation, which no drivetrain does. Decelerate through zero.
+  r.accel_limit = 0.5;
   r.north = 5.92;
   r.east = 0.03;
   r.heading = 0.0;
@@ -660,6 +668,7 @@ TEST(RppNode, AnLShapedMissionIsDrivenFromThePublishedCommandsAlone) {
 TEST(RppNode, AnOffsetEndpointIsReachedFromThePublishedCommandsAlone) {
   Rig r;  // pivot_to_intercept at its default: the entry pivot already aims at the line
   r.auto_drive = true;
+  r.accel_limit = 0.5;  // the in-band brake needs a plant that decelerates through zero (above)
   r.north = 5.88;
   r.east = -0.05;  // 5 cm WEST of the final point
   r.mission_state = MissionState::STATE_RUNNING;
@@ -686,6 +695,7 @@ TEST(RppNode, AnOffsetEndpointIsReachedFromThePublishedCommandsAlone) {
 TEST(RppNode, APauseWithACoastResumesAlongTheLineFromRest) {
   Rig r;
   r.auto_drive = true;
+  r.accel_limit = 0.5;  // the in-band brake needs a plant that decelerates through zero (above)
   r.mission_state = MissionState::STATE_RUNNING;
   for (int i = 0; i < 400 && !(r.status.state == RppStatus::STATE_TRACKING && r.north > 2.0); ++i)
     r.cycle();
