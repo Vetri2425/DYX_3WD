@@ -26,7 +26,9 @@ saved 2026-10-09 16:53. Restore it with Motion Studio → *Device* → *Load set
 - `actuator_test set -f <fn> -v <v>` gave a direction that disagreed with the stick path on this setup; prove
   direction with a logged stick drive (or Offboard), not with `actuator_test` alone.
 - Rule: fix a left/right swap in the RBCLW_FUNC output mapping, never with `RC1_REV` (that only changes manual
-  driving). Still to do: wheels-down check that gyro yaw is positive on a right turn.
+  driving).
+- Wheels down (log `04_14_36.ulg`): stick right → gyro yaw +0.70 rad/s (right turn), stick left → −0.64 rad/s,
+  forward straight. T1 closed 2026-10-10.
 
 **PX4 link:** `RBCLW_QPPS_MAX` = 90 % of the tuned QPPS = **151200**
 (`config/px4/3wd_6x_carry_from_proto.params`). Full stick then stays inside the RoboClaw's tuned speed, so the

@@ -2520,4 +2520,5 @@ handshake OK, timesync 0.55 ms round trip; battery 26.46 V (86 %). Two notes:
 - **Accel / decel observed (owner: leave them as they are):** full stick about 5 s to full speed; release from
   about 0.96 m/s about 3.5 s to stop (about 0.27 m/s², `RO_DECEL_LIM 0.3`): about 1.7 m stopping distance at
   1 m/s.
-- **Remaining T1c:** wheels down, slow manual drive; the log must show gyro yaw > 0 on a right turn.
+- **T1c passed (wheels down, log `04_14_36.ulg`):** stick right → gyro yaw +0.70 rad/s, stick left → −0.64 rad/s,
+  straight forward (a slight left drift of −0.03 to −0.07 rad/s at 0.4 m/s; watch it in T4). **T1 closed.**
