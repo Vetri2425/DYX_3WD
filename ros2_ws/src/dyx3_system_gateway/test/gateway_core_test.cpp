@@ -207,6 +207,15 @@ TEST(Commands, ValidCommandsParseToTypedForms) {
   ASSERT_TRUE(r.ok);
   EXPECT_FALSE(r.has_id);
   EXPECT_EQ(r.cmd.sha256, kSha);
+  EXPECT_EQ(r.cmd.request_id, "");  // optional: absent is empty
+  r = P(R"({"v":1,"id":4,"cmd":"start_mission","args":{"path_artifact_sha256":")" + kSha +
+        R"(","request_id":"5f0c-AB_9.x:1"}})");
+  ASSERT_TRUE(r.ok);
+  EXPECT_EQ(r.cmd.request_id, "5f0c-AB_9.x:1");
+  r = P(R"({"v":1,"id":4,"cmd":"start_mission","args":{"path_artifact_sha256":")" + kSha +
+        R"(","request_id":")" + std::string(kMaxRequestIdLen, 'r') + R"("}})");
+  ASSERT_TRUE(r.ok);
+  EXPECT_EQ(r.cmd.request_id.size(), kMaxRequestIdLen);
   r = P(R"({"v":1,"id":1,"cmd":"abort_mission","args":{"reason":"safety"}})");
   ASSERT_TRUE(r.ok);
   EXPECT_EQ(r.cmd.abort_reason, 2);
@@ -250,6 +259,18 @@ TEST(Commands, EveryDeviationIsRejectedAndTheIdIsStillRecovered) {
       {R"({"v":1,"id":9,"cmd":"start_mission","args":{"path_artifact_sha256":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}})",
        "invalid_command"},
       {R"({"v":1,"id":9,"cmd":"abort_mission","args":{"reason":"because"}})", "invalid_command"},
+      // start_mission.request_id: a string of [A-Za-z0-9._:-], 1..kMaxRequestIdLen
+      {R"({"v":1,"id":9,"cmd":"start_mission","args":{"path_artifact_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","request_id":7}})",
+       "invalid_command"},
+      {R"({"v":1,"id":9,"cmd":"start_mission","args":{"path_artifact_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","request_id":""}})",
+       "invalid_command"},
+      {R"({"v":1,"id":9,"cmd":"start_mission","args":{"path_artifact_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","request_id":"a b"}})",
+       "invalid_command"},
+      {R"({"v":1,"id":9,"cmd":"start_mission","args":{"path_artifact_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","request_id":"x\n"}})",
+       "invalid_command"},
+      {R"({"v":1,"id":9,"cmd":"start_mission","args":{"path_artifact_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","request_id":null}})",
+       "invalid_command"},
+      {R"({"v":1,"id":9,"cmd":"pause_mission","args":{"request_id":"r1"}})", "invalid_command"},
       {R"({"v":1,"id":9,"cmd":"estop","args":{"asserted":true}})", "invalid_command"},
       {R"({"v":1,"id":9,"cmd":"estop","args":{"asserted":"yes","source":"tablet"}})",
        "invalid_command"},
@@ -264,6 +285,11 @@ TEST(Commands, EveryDeviationIsRejectedAndTheIdIsStillRecovered) {
     EXPECT_FALSE(r.ok) << b.line;
     EXPECT_EQ(r.code, b.code) << b.line;
   }
+  const std::string too_long(kMaxRequestIdLen + 1, 'r');
+  const auto tl = P(R"({"v":1,"id":9,"cmd":"start_mission","args":{"path_artifact_sha256":")" +
+                    kSha + R"(","request_id":")" + too_long + R"("}})");
+  EXPECT_FALSE(tl.ok);
+  EXPECT_EQ(tl.code, "invalid_command");
   const auto r = P(R"({"v":1,"id":9,"cmd":"reboot"})");
   EXPECT_TRUE(r.has_id);
   EXPECT_EQ(r.id, 9);

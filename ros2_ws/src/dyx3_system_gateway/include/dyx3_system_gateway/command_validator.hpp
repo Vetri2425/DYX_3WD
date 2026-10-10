@@ -27,6 +27,7 @@ const char* to_string(CmdKind k);
 struct Command {
   CmdKind kind{CmdKind::Heartbeat};
   std::string sha256;       // StartMission
+  std::string request_id;   // StartMission: optional client idempotency key, "" when absent
   uint8_t abort_reason{0};  // AbortMission: 0 unspecified, 1 operator, 2 safety
   bool flag{false};         // Estop.asserted / Arm.arm / Offboard.enable / SprayManual.on
   std::string source;       // Estop
@@ -42,6 +43,8 @@ struct ParseResult {
 };
 
 constexpr int kProtocolVersion = 1;
+// start_mission.request_id: 1..kMaxRequestIdLen characters of [A-Za-z0-9._:-] (a UUID fits).
+constexpr size_t kMaxRequestIdLen = 128;
 ParseResult parse_command(const std::string& line);
 
 // E-stop and heartbeat are processed ahead of other work; the gateway node orders E-stop strictly
