@@ -79,7 +79,9 @@ public:
   // Freshness is refreshed only by a sequence number strictly greater than the last one accepted:
   // a repeated command (same seq) must never look fresh. A smaller seq means the publisher
   // restarted: the command is discarded and the gate reports SequenceReset for one tick.
-  void on_command(const Command& c, double now_s);
+  // Returns true when the gate's state changed (a new command stored, or a sequence reset), false
+  // for an ignored duplicate.
+  bool on_command(const Command& c, double now_s);
 
   GateOutput step(const GateInputs& in);
 

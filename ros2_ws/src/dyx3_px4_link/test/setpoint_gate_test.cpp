@@ -118,10 +118,12 @@ TEST(Gate, RecoveryAfterGapNeedsNewSeq) {
 }
 TEST(Gate, DuplicateSeqNeverRefreshesFreshness) {
   CommandGate g(0.2);
-  g.on_command(cmd(5, Mode::TrackRate, 0.35F, NaN, 0.1F), 1.0);
-  for (int i = 1; i <= 30; ++i)
-    g.on_command(cmd(5, Mode::TrackRate, 0.35F, NaN, 0.1F), 1.0 + 0.01 * i);
+  EXPECT_TRUE(g.on_command(cmd(5, Mode::TrackRate, 0.35F, NaN, 0.1F), 1.0));  // stored
+  for (int i = 1; i <= 30; ++i)  // C4: a duplicate reports no change (no event-driven write)
+    EXPECT_FALSE(g.on_command(cmd(5, Mode::TrackRate, 0.35F, NaN, 0.1F), 1.0 + 0.01 * i));
   EXPECT_EQ(g.step(ok(1.31)).reason, Reason::CommandStale);
+  EXPECT_TRUE(g.on_command(cmd(4, Mode::TrackRate, 0.35F, NaN, 0.1F), 1.32));  // reset: a change
+  EXPECT_EQ(g.step(ok(1.33)).reason, Reason::SequenceReset);
 }
 TEST(Gate, InvalidCommand) {
   CommandGate g(0.2);

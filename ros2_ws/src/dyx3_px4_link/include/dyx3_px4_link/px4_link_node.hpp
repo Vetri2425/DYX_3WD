@@ -80,6 +80,11 @@ public:
 
   // One publish cycle at link-clock time `now_s`. Public for deterministic tests.
   void step(double now_s);
+  // The writer timer's callback (C4). Timer mode: always a cycle. Event-driven: the timer is reset
+  // by every cycle a guard command triggered, so it fires one period after it; a cycle that would
+  // land within half a period of the previous one is skipped (no second write of the same command
+  // inside one tick). Public for deterministic tests.
+  void on_timer(double now_s);
 
   // Process shutdown (X-010): cancels the writer timer and publishes one explicit STOP set if the
   // heartbeat was running on the last tick. Returns false (nothing sent) otherwise. main() calls it
@@ -156,6 +161,10 @@ private:
   StalenessReport last_rep_;
   bool last_link_ok_{false};
   bool last_heartbeat_published_{false};
+  // X-010 with C4: set once publish_shutdown_stop() sends its STOP set. From then on no writer
+  // cycle runs, whatever triggers it (timer, or a guard command delivered by a late spin): STOP is
+  // the last set PX4 sees.
+  bool shutting_down_{false};
   std::optional<Reason> logged_zero_reason_;  // empty while not failing to zero
 
   double last_step_s_{-1.0};

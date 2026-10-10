@@ -250,7 +250,15 @@ Px4LinkNode::Px4LinkNode(const rclcpp::NodeOptions& options, ClockFn clock, bool
             static_cast<uint64_t>(std::max<int64_t>(0, m->source_pose_sample_stamp.sec)) *
                 1000000ULL +
             m->source_pose_sample_stamp.nanosec / 1000U;
-        gate_->on_command(c, clock_());
+        const double now = clock_();
+        // C4 (event_driven): a new guard command is written to PX4 now, by a full writer cycle in
+        // this callback (same gate, offboard state machine and heartbeat as the timer's), and the
+        // writer timer restarts its period here. A duplicate seq changes nothing and writes
+        // nothing.
+        if (gate_->on_command(c, now) && p_.event_driven && !shutting_down_) {
+          step(now);
+          if (timer_) timer_->reset();
+        }
       });
   sub_rtcm_ = create_subscription<dyx3_interfaces::msg::RtcmData>(
       "/dyx3/rtcm", rclcpp::QoS(32).reliable(),
@@ -339,7 +347,7 @@ Px4LinkNode::Px4LinkNode(const rclcpp::NodeOptions& options, ClockFn clock, bool
 
   if (create_timer) {
     timer_ = create_wall_timer(std::chrono::duration<double>(1.0 / p_.publish_rate_hz),
-                               [this]() { step(clock_()); });
+                               [this]() { on_timer(clock_()); });
   }
   RCLCPP_INFO(get_logger(),
               "px4_link up: %.0f Hz setpoints, command_max_age %.3f s, %zu handshake topics, "
@@ -779,6 +787,7 @@ void Px4LinkNode::start_ulog_if_due(double /*now_s*/, bool link_ok) {
 }
 
 void Px4LinkNode::step(double now_s) {
+  if (shutting_down_) return;  // X-010: only the shutdown STOP burst writes now
   if (!std::isfinite(now_s) || now_s < 0.0 || (last_step_s_ >= 0.0 && now_s < last_step_s_)) {
     // An unusable clock cannot age anything, so no timing or gate state is touched. Fail to zero:
     // keep the setpoint heartbeat alive with an explicit STOP rather than omitting the tick.
@@ -856,10 +865,23 @@ void Px4LinkNode::step(double now_s) {
   publish_status(now_s, last_rep_, last_gate_);
 }
 
+void Px4LinkNode::on_timer(double now_s) {
+  // DERIVED — NOT FROM V1 SPEC: half a period, a structural fraction of 1/publish_rate_hz. The
+  // timer is reset by each command cycle, so this only guards a timer that was already due when the
+  // command cycle ran; the skipped tick is replaced by the next one, so writes stay <= 1.5 periods
+  // apart even then (and one period apart otherwise: the >= 100 Hz heartbeat is kept).
+  if (p_.event_driven && last_step_s_ >= 0.0 && std::isfinite(now_s) && now_s >= last_step_s_ &&
+      now_s - last_step_s_ < 0.5 / p_.publish_rate_hz)
+    return;
+  step(now_s);
+}
+
 bool Px4LinkNode::publish_shutdown_stop() {
   if (timer_) timer_->cancel();
   // Only where the stream was live: never start a heartbeat, and never write an unproven format.
+  // (With no live heartbeat no later cycle can write motion either: that needs an Active session.)
   if (!last_heartbeat_published_ || handshake_->state() != HandshakeState::Ok) return false;
+  shutting_down_ = true;  // the burst has started: no writer cycle runs any more (C4)
   publish_setpoint_set(stop_setpoint(), stamp_us());
   return true;
 }

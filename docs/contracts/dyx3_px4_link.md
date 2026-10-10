@@ -92,6 +92,16 @@ never see a finite velocity from this link. `RoverSpeedSetpoint.speed_body_y` is
 
 All `timestamp` fields are the companion's **system (wall) clock** in microseconds (section 7).
 
+**Write on arrival (C4, `event_driven`, default true).** A guard command with a new `seq` (the gate stores it) runs one full
+writer cycle **inside its own callback** (the same staleness evaluation, gate, offboard state machine and five-field set as a
+timer tick), so it reaches PX4 without waiting for the next 10 ms tick, and the writer timer is reset there. The timer keeps
+the heartbeat: it fires one period after the last cycle, so writes stay one period apart (the ≥ 100 Hz F1.7 stream holds);
+a timer tick that would land within half a period of the previous cycle is skipped, so one command is not written twice
+in a tick. A duplicate `seq` writes nothing. The 0.2 s command gate, the STOP-only states (section 9), PXL-002 and the
+shutdown burst (section 4) are unchanged; once the shutdown burst has started no writer cycle runs from any trigger.
+`event_driven=false`: only the timer writes (the behaviour before 0.14.0). DERIVED — NOT FROM V1 SPEC: the half-period
+skip threshold (a structural fraction of `1/publish_rate_hz`).
+
 ## 4. Fail to zero (CLAUDE.md §7, F-tasks A1.1)
 
 The link forces STOP (speed 0, yaw NaN, rate 0) in every one of these cases, evaluated each tick,
@@ -123,7 +133,8 @@ the guard publishes its command at the RPP rate (50 Hz), so 0.2 s is ten missed 
 **Orderly shutdown (X-010).** rclcpp's signal handler is disabled: SIGINT/SIGTERM only set a flag,
 the executor loop (`spin_once`, 5 ms) exits, and, while the context is still up and without
 spinning the writer timer again, the explicit STOP set is published at 100 Hz for 0.3 s
-(`Px4LinkNode::publish_shutdown_stop`). Only where the heartbeat was running on the last tick; no
+(`Px4LinkNode::publish_shutdown_stop`). Once it has sent a STOP set no writer cycle runs, neither the timer nor a guard
+command delivered by a late spin (C4). Only where the heartbeat was running on the last tick; no
 heartbeat is ever started at shutdown. Then the process exits and PX4's offboard-loss handling
 runs with STOP as the last setpoint. SIGPIPE is ignored.
 
@@ -305,7 +316,7 @@ negative injected timestamps.
 | Name | Default | Class | Source |
 |---|---|---|---|
 | `publish_rate_hz` | 100 | RESTART | F1.7 (≥ 100); validated ≥ 100 |
-| `event_driven` | true | RESTART | latency hardening (C1): VehicleState on each new local-position sample (section 8); false = the 20 ms gate |
+| `event_driven` | true | RESTART | latency hardening: VehicleState on each new local-position sample (C1, section 8) and a writer cycle on each new guard command (C4, section 3); false = the 20 ms gate and the timer-only writer |
 | `command_max_age_s` | 0.2 | IDLE_ONLY | DERIVED from prototype `input_max_age_s`, re-validate GATE 4 |
 | `stale_*_s` (6) | section 5 | IDLE_ONLY | DERIVED, re-validate GATE 4 |
 | `handshake_timeout_s`, `handshake_retry_s` | 5.0, 1.0 | IDLE_ONLY | DERIVED |

@@ -72,7 +72,7 @@ Setpoint to_setpoint(const Command& c) {
   return s;
 }
 
-void CommandGate::on_command(const Command& c, double now_s) {
+bool CommandGate::on_command(const Command& c, double now_s) {
   if (have_seq_ && c.seq < last_seq_) {
     // Publisher restarted. Do not resume anything from the old session, and discard this first
     // command of the new one too: it is one tick of STOP in exchange for never acting on a
@@ -80,15 +80,16 @@ void CommandGate::on_command(const Command& c, double now_s) {
     last_seq_ = c.seq;
     have_cmd_ = false;
     reset_pending_ = true;
-    return;
+    return true;
   }
-  if (have_seq_ && c.seq == last_seq_) return;  // duplicate: must not refresh freshness
+  if (have_seq_ && c.seq == last_seq_) return false;  // duplicate: must not refresh freshness
   have_seq_ = true;
   last_seq_ = c.seq;
   cmd_ = c;
   received_s_ = now_s;
   have_cmd_ = true;
   gap_counted_ = false;
+  return true;
 }
 
 GateOutput CommandGate::step(const GateInputs& in) {
