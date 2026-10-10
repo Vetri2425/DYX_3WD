@@ -73,29 +73,28 @@ MotionGuardNode::MotionGuardNode(const rclcpp::NodeOptions& options, ClockFn clo
   pub_estop_ = create_publisher<dyx3_interfaces::msg::EmergencyStopState>(
       "/dyx3/emergency_stop_state", rel1);
 
-  sub_cmd_ = create_subscription<MotionSetpoint>("/dyx3/rpp/motion_setpoint", rel1,
-                                                 [this](MotionSetpoint::ConstSharedPtr m) {
-                                                   Command c;
-                                                   c.seq = m->seq;
-                                                   c.mode = m->mode;
-                                                   c.speed_body_x = m->speed_body_x;
-                                                   c.yaw_setpoint = m->yaw_setpoint;
-                                                   c.yaw_rate_setpoint = m->yaw_rate_setpoint;
-                                                   c.valid = m->valid;
-                                                   c.source_pose_sample_ns =
-                                                       to_ns(m->source_pose_sample_stamp);
-                                                   const double now = clock_();
-                                                   core_->on_command(c, now);
-                                                   w_cmd_.touch(now);
-                                                   // C3: decide and forward now, in this callback.
-                                                   if (event_driven_) {
-                                                     step(now);
-                                                     have_tick_ = true;
-                                                     last_tick_was_command_ = true;
-                                                     last_tick_s_ = now;
-                                                     if (timer_) timer_->reset();
-                                                   }
-                                                 });
+  sub_cmd_ = create_subscription<MotionSetpoint>(
+      "/dyx3/rpp/motion_setpoint", rel1, [this](MotionSetpoint::ConstSharedPtr m) {
+        Command c;
+        c.seq = m->seq;
+        c.mode = m->mode;
+        c.speed_body_x = m->speed_body_x;
+        c.yaw_setpoint = m->yaw_setpoint;
+        c.yaw_rate_setpoint = m->yaw_rate_setpoint;
+        c.valid = m->valid;
+        c.source_pose_sample_ns = to_ns(m->source_pose_sample_stamp);
+        const double now = clock_();
+        core_->on_command(c, now);
+        w_cmd_.touch(now);
+        // C3: decide and forward now, in this callback.
+        if (event_driven_) {
+          step(now);
+          have_tick_ = true;
+          last_tick_was_command_ = true;
+          last_tick_s_ = now;
+          if (timer_) timer_->reset();
+        }
+      });
   sub_mission_ = create_subscription<dyx3_interfaces::msg::MissionState>(
       "/dyx3/mission/state", rel1, [this](dyx3_interfaces::msg::MissionState::ConstSharedPtr m) {
         mission_.state = m->state;
