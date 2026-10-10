@@ -7,7 +7,12 @@ import tempfile
 
 import pytest
 
-from dyx3_backend.gateway.client import GatewayClient, GatewayTimeout, GatewayUnavailable
+from dyx3_backend.gateway.client import (
+    EVENT_QUEUE_MAX,
+    GatewayClient,
+    GatewayTimeout,
+    GatewayUnavailable,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -47,6 +52,15 @@ class FakeServer:
         for w in self.writers:
             w.write((json.dumps({"v": 1, "type": "telemetry", "snapshot": snapshot}) + "\n").encode())
             await w.drain()
+
+    async def push_event(self, kind, seq, data=None, **extra):
+        msg = {"v": 1, "type": "event", "event": kind, "seq": seq, "t_mono_s": 10.0 + seq, "t_wall_ms": 1791624580000 + seq,
+               "coalesced": 0, "replay": False, "data": data if data is not None else {"seq": seq}}
+        msg.update(extra)
+        for w in self.writers:
+            if not w.is_closing():
+                w.write((json.dumps(msg) + "\n").encode())
+                await w.drain()
 
     async def stop(self):
         for w in self.writers:
@@ -214,5 +228,125 @@ async def test_backoff_resets_after_the_gateway_has_spoken(sock_path):
     assert await wait_until(lambda: gw.connected, 1.0)
     assert asyncio.get_running_loop().time() - t0 < 0.3  # reconnected after reconnect_min_s, not a grown delay
     assert (await gw.request("pause_mission"))["ok"]
+    await gw.stop()
+    await srv.stop()
+
+
+# ---- status events (gateway contract section 1.3)
+
+
+async def test_events_are_dispatched_in_order_and_duplicates_per_kind_are_dropped(sock_path):
+    srv = FakeServer(sock_path)
+    await srv.start()
+    gw = GatewayClient(sock_path, request_timeout_s=1.0)
+    seen = []
+    gw.on_event(lambda e: seen.append((e["event"], e["seq"])))
+    await gw.start()
+    assert await wait_until(lambda: gw.connected and srv.writers)
+    await srv.push_event("mission_state", 1)
+    await srv.push_event("estop", 2)
+    await srv.push_event("mission_state", 3)
+    await srv.push_event("mission_state", 3, replay=True)  # a replay that raced the push: duplicate
+    await srv.push_event("estop", 2, replay=True)  # same
+    await srv.push_event("operator_link", 4)
+    for w in srv.writers:  # malformed events are ignored, the link stays up
+        w.write(b'{"v":1,"type":"event","event":5,"seq":9,"data":{}}\n{"v":1,"type":"event","event":"x","seq":"9","data":{}}\n'
+                b'{"v":1,"type":"event","event":"x","seq":true,"data":{}}\n{"v":1,"type":"event","event":"x","seq":9,"data":[]}\n')
+        await w.drain()
+    await srv.push_event("mission_state", 5)
+    assert await wait_until(lambda: len(seen) >= 5)
+    await asyncio.sleep(0.05)
+    assert seen == [("mission_state", 1), ("estop", 2), ("mission_state", 3), ("operator_link", 4), ("mission_state", 5)]
+    assert (await gw.request("pause_mission"))["ok"]
+    await gw.stop()
+    await srv.stop()
+
+
+async def test_a_reconnect_resumes_the_event_flow_and_the_replay_is_delivered_again(sock_path):
+    srv = FakeServer(sock_path)
+    await srv.start()
+    gw = GatewayClient(sock_path, request_timeout_s=1.0, reconnect_min_s=0.05, reconnect_max_s=0.1)
+    seen = []
+    gw.on_event(lambda e: seen.append((e["event"], e["seq"], e["replay"])))
+    states = []
+    gw.on_state(lambda c: states.append(c))
+    await gw.start()
+    assert await wait_until(lambda: gw.connected and srv.writers)
+    await srv.push_event("mission_state", 7)
+    assert await wait_until(lambda: len(seen) == 1)
+    for w in srv.writers:  # the gateway restarts or the link drops
+        w.close()
+    srv.writers.clear()
+    assert await wait_until(lambda: states[-1:] == [False])
+    assert await wait_until(lambda: gw.connected and srv.writers)
+    # the gateway replays the current state on connect: the same seq, delivered again (it is the state now)
+    await srv.push_event("mission_state", 7, replay=True)
+    await srv.push_event("mission_state", 8)
+    assert await wait_until(lambda: len(seen) == 3)
+    assert seen == [("mission_state", 7, False), ("mission_state", 7, True), ("mission_state", 8, False)]
+    await gw.stop()
+    await srv.stop()
+
+
+async def test_a_slow_event_subscriber_never_blocks_replies_and_its_queue_is_bounded(sock_path):
+    srv = FakeServer(sock_path)
+    await srv.start()
+    gw = GatewayClient(sock_path, request_timeout_s=1.0)
+    release = asyncio.Event()
+    seen = []
+
+    async def slow(e):
+        seen.append(e["seq"])
+        await release.wait()  # a stuck Socket.IO emit
+
+    gw.on_event(slow)
+    await gw.start()
+    assert await wait_until(lambda: gw.connected and srv.writers)
+    n = EVENT_QUEUE_MAX + 50
+    for seq in range(1, n + 1):
+        await srv.push_event("mission_state", seq)
+    assert (await gw.request("pause_mission"))["ok"]  # the reader is not held up by the subscriber
+    assert await wait_until(lambda: gw.events_dropped > 0)
+    assert gw._events.qsize() <= EVENT_QUEUE_MAX
+    release.set()
+    assert await wait_until(lambda: seen and seen[-1] == n)  # the newest always gets through
+    assert seen[0] == 1 and len(seen) == n - gw.events_dropped
+    await gw.stop()
+    await srv.stop()
+
+
+async def test_event_line_to_subscriber_latency(sock_path):
+    srv = FakeServer(sock_path)
+    await srv.start()
+    gw = GatewayClient(sock_path, request_timeout_s=1.0)
+    loop = asyncio.get_running_loop()
+    got = {}
+    gw.on_event(lambda e: got.setdefault(e["seq"], loop.time()))
+    await gw.start()
+    assert await wait_until(lambda: gw.connected and srv.writers)
+    lat = []
+    for seq in range(1, 51):
+        t0 = loop.time()
+        await srv.push_event("mission_state", seq)
+        assert await wait_until(lambda s=seq: s in got, 1.0)
+        lat.append(got[seq] - t0)
+    lat.sort()
+    print(f"gateway event line -> subscriber: p50 {lat[25] * 1e3:.3f} ms, max {lat[-1] * 1e3:.3f} ms")
+    assert lat[25] < 0.005
+    await gw.stop()
+    await srv.stop()
+
+
+async def test_a_per_call_timeout_overrides_the_default(sock_path):
+    srv = FakeServer(sock_path)
+    srv.mode = "silent"
+    await srv.start()
+    gw = GatewayClient(sock_path, request_timeout_s=5.0)
+    await gw.start()
+    assert await wait_until(lambda: gw.connected)
+    t0 = asyncio.get_running_loop().time()
+    with pytest.raises(GatewayTimeout):
+        await gw.request("offboard", {"enable": True}, timeout_s=0.1)
+    assert asyncio.get_running_loop().time() - t0 < 1.0
     await gw.stop()
     await srv.stop()
