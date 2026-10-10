@@ -25,7 +25,9 @@ enum class Reason : uint8_t {
   HeadingUnhealthy = 9,
   OperatorLinkLost = 10,
   ArmingGate = 11,
-  EstimatorUnhealthy = 12
+  EstimatorUnhealthy = 12,
+  // Pre-arm only (SafetyGateStatus.pre_arm_reason_code): never a command decision reason.
+  GlobalReferenceInvalid = 13
 };
 
 struct Motion {

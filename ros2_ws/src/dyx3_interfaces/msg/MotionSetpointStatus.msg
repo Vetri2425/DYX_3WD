@@ -24,6 +24,9 @@ uint8 REASON_ARMING_GATE=11
 # Position / velocity estimate unhealthy: dead reckoning, position test ratio,
 # or horizontal position/velocity rejection (EstimatorHealth).
 uint8 REASON_ESTIMATOR_UNHEALTHY=12
+# 0.15.0: the EKF has no valid global (WGS84) reference (VehicleState.global_reference_valid).
+# Reported only as SafetyGateStatus.pre_arm_reason_code; the guard never refuses a command with it.
+uint8 REASON_GLOBAL_REFERENCE_INVALID=13
 uint8 reason_code
 
 bool accepted

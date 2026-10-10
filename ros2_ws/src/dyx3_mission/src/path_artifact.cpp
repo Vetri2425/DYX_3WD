@@ -297,6 +297,26 @@ private:
 
 std::string python_repr(double v) { return python_repr_impl(v); }
 
+std::string serialize_artifact(const std::string& engine_id, const std::string& meta_json,
+                               const std::vector<ArtifactPoint>& points) {
+  if (points.empty() || engine_id.empty()) return {};
+  for (unsigned char c : engine_id) {
+    if (c <= 0x20 || c > 0x7e) return {};
+  }
+  for (unsigned char c : meta_json) {
+    if (c < 0x20 || c > 0x7e) return {};
+  }
+  if (!CanonicalJson(meta_json).object()) return {};
+  std::string out = "DYX3PATH 1\nframe local_ned\nengine " + engine_id + "\nmeta " + meta_json +
+                    "\npoints " + std::to_string(points.size()) + "\n";
+  for (const auto& p : points) {
+    if (!std::isfinite(p.north_m) || !std::isfinite(p.east_m) || p.flags > 3) return {};
+    out += python_repr_impl(p.north_m) + " " + python_repr_impl(p.east_m) + " " +
+           std::to_string(static_cast<unsigned>(p.flags)) + "\n";
+  }
+  return out + "end " + std::to_string(points.size()) + "\n";
+}
+
 ArtifactResult parse_artifact(const std::string& bytes, const std::string& expected_sha256) {
   const std::string digest = sha256_hex(bytes);
   if (!expected_sha256.empty() && digest != expected_sha256) {
@@ -358,7 +378,7 @@ ArtifactResult load_artifact(const std::string& dir, const std::string& sha256,
                              std::uintmax_t max_bytes) {
   if (!is_lower_hex64(sha256)) return fail("sha256 must be 64 lowercase hex characters");
   const std::string path = dir + "/" + sha256 + ".dyx3path";
-  // Size first, before any read: this runs inside the Start service callback.
+  // Size first, before any read (MS-004): a huge or special file is refused unread.
   std::error_code ec;
   if (!std::filesystem::is_regular_file(path, ec) || ec) {
     return fail("artifact " + sha256 + " is not a readable regular file in " + dir);

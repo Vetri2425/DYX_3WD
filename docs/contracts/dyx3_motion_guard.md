@@ -22,7 +22,7 @@ re-implements a gate. A backend or tablet E-stop is a *request* to this node.
 | service | `/dyx3/motion_guard/set_emergency_stop` | SetEmergencyStop | latch / clear |
 | out | `/dyx3/motion_guard/command` | MotionSetpoint | consumed only by `dyx3_px4_link`. `source_pose_sample_stamp` (IF-003, 0.14.0): preserved unchanged on every command forwarded from RPP (accepted, clamped, clean STOP); on the guard's own canonical STOP (any refusal, no command, `shutdown_stop`) the `px4_sample_stamp` of the newest `VehicleState` received (zero when that message had no fresh local position), zero if none was ever received. Never used for a decision |
 | out | `/dyx3/motion_guard/status` | MotionSetpointStatus | per decision: input seq, reason, applied command |
-| out | `/dyx3/safety_gate` | SafetyGateStatus | fixed 10 Hz, independent of RPP |
+| out | `/dyx3/safety_gate` | SafetyGateStatus | fixed 10 Hz, independent of RPP; full gate (`ok`, `reason_code`) and pre-arm gate (`pre_arm_ok`, `pre_arm_reason_code`, 0.15.0) |
 | out | `/dyx3/emergency_stop_state` | EmergencyStopState | fixed 10 Hz |
 
 ## 2. Fixed-rate decision loop
@@ -71,6 +71,14 @@ authoritative and default. A gate input that was never received or is older than
 **failing**, never "assumed fine". A gate failing on a non-STOP command always zeroes the output at
 the same tick: there is no ramp-down, because fail-to-zero is immediate (a ramp would be a
 guard-invented motion).
+
+**Pre-arm verdict (0.15.0, mission contract v2).** The same `SafetyGateStatus` message also carries `pre_arm_ok` and
+`pre_arm_reason_code`: checks 4–10 in the same priority order **except** "armed" and "nav_state == OFFBOARD" (check 7
+keeps only "vehicle state fresh, no PX4 failsafe" → `ARMING_GATE`), followed by `VehicleState.global_reference_valid`
+(`GLOBAL_REFERENCE_INVALID` (13), checked last). `dyx3_mission` admits a start and calls `/dyx3/px4_link/arm` only while
+it is true; it never re-implements a gate. Default false. `GLOBAL_REFERENCE_INVALID` is a pre-arm reason only: the full
+gate and the decision order above (fail-to-zero) are unchanged and do not use the global reference. Implementation:
+`first_failing_pre_arm_gate()` in `mission_gate.cpp` (one shared gate definition with `first_failing_safety_gate()`).
 
 Recovery has no latch other than the E-stop and the sequence rule: when every check passes
 again the next valid RPP command is forwarded. A *mission* must not silently resume after a

@@ -30,6 +30,8 @@ static_assert(static_cast<uint8_t>(Reason::OperatorLinkLost) ==
 static_assert(static_cast<uint8_t>(Reason::ArmingGate) == MotionSetpointStatus::REASON_ARMING_GATE);
 static_assert(static_cast<uint8_t>(Reason::EstimatorUnhealthy) ==
               MotionSetpointStatus::REASON_ESTIMATOR_UNHEALTHY);
+static_assert(static_cast<uint8_t>(Reason::GlobalReferenceInvalid) ==
+              MotionSetpointStatus::REASON_GLOBAL_REFERENCE_INVALID);
 
 int64_t to_ns(const builtin_interfaces::msg::Time& t) {
   return static_cast<int64_t>(t.sec) * 1'000'000'000LL + static_cast<int64_t>(t.nanosec);
@@ -108,6 +110,7 @@ MotionGuardNode::MotionGuardNode(const rclcpp::NodeOptions& options, ClockFn clo
         veh_.position_valid = m->position_valid;
         veh_.velocity_valid = m->velocity_valid;
         veh_.attitude_valid = m->attitude_valid;
+        veh_.global_reference_valid = m->global_reference_valid;
         veh_pose_stamp_ = m->px4_sample_stamp;
         w_veh_.touch(clock_());
       });
@@ -321,6 +324,9 @@ void MotionGuardNode::step(double now_s) {
     gs.stamp = ros_now();
     gs.ok = g == Reason::Ok;
     gs.reason_code = static_cast<uint8_t>(g);
+    const Reason pre = first_failing_pre_arm_gate(gates, gate_cfg_);
+    gs.pre_arm_ok = pre == Reason::Ok;
+    gs.pre_arm_reason_code = static_cast<uint8_t>(pre);
     pub_gate_->publish(gs);
     dyx3_interfaces::msg::EmergencyStopState es;
     es.stamp = ros_now();

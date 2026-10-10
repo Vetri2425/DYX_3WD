@@ -9,10 +9,14 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(dyx3_interfaces REQUIRED)
+find_package(Threads REQUIRED)
 
-# Pure C++ core: FSM, path-artifact reader, SHA-256, point journal. No ROS includes.
+# Pure C++ core: FSM, PX4 call sequencer, frame placement, path-artifact reader/writer, SHA-256,
+# point journal. No ROS includes.
 add_library(dyx3_mission_core STATIC
   src/mission_fsm.cpp
+  src/px4_sequencer.cpp
+  src/frame_placement.cpp
   src/sha256.cpp
   src/path_artifact.cpp
   src/point_journal.cpp
@@ -25,7 +29,7 @@ target_compile_options(dyx3_mission_core PRIVATE -Wall -Wextra -Wpedantic)
 
 # ROS wiring.
 add_library(dyx3_mission_node_lib STATIC src/mission_node.cpp)
-target_link_libraries(dyx3_mission_node_lib PUBLIC dyx3_mission_core)
+target_link_libraries(dyx3_mission_node_lib PUBLIC dyx3_mission_core Threads::Threads)
 ament_target_dependencies(dyx3_mission_node_lib PUBLIC rclcpp rclcpp_action dyx3_interfaces)
 target_compile_options(dyx3_mission_node_lib PRIVATE -Wall -Wextra -Wpedantic)
 
@@ -42,12 +46,15 @@ ament_export_targets(export_dyx3_mission_core HAS_LIBRARY_TARGET)
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   set(FIXTURES ${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures)
-  foreach(t mission_fsm_test sha256_test path_artifact_test point_journal_test)
+  foreach(t mission_fsm_test px4_sequencer_test frame_placement_test sha256_test path_artifact_test
+          point_journal_test)
     ament_add_gtest(${t} test/${t}.cpp)
     target_link_libraries(${t} dyx3_mission_core)
     target_compile_definitions(${t} PRIVATE DYX3_FIXTURES="${FIXTURES}")
   endforeach()
-  ament_add_gtest(mission_node_test test/mission_node_test.cpp)
+  # Fake px4_link / guard / RPP / vehicle in-process; condition waits, private locked DDS domain.
+  # The arm and OFFBOARD timeout cases wait for the minimum valid timeouts (> 2.0 s, > 3.5 s).
+  ament_add_gtest(mission_node_test test/mission_node_test.cpp TIMEOUT 180)
   target_link_libraries(mission_node_test dyx3_mission_node_lib)
   ament_target_dependencies(mission_node_test rclcpp rclcpp_action dyx3_interfaces)
   target_compile_definitions(mission_node_test PRIVATE DYX3_FIXTURES="${FIXTURES}")

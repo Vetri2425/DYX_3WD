@@ -86,6 +86,7 @@ TEST(MotionSetpointStatusAbi, ConstantsAndSafeDefault) {
   EXPECT_EQ(Msg::REASON_OPERATOR_LINK_LOST, 10U);
   EXPECT_EQ(Msg::REASON_ARMING_GATE, 11U);
   EXPECT_EQ(Msg::REASON_ESTIMATOR_UNHEALTHY, 12U);
+  EXPECT_EQ(Msg::REASON_GLOBAL_REFERENCE_INVALID, 13U);  // 0.15.0
   const Msg message{};
   ExpectZeroTime(message.stamp);
   EXPECT_EQ(message.input_seq, 0U);
@@ -154,6 +155,8 @@ TEST(SafetyMessagesAbi, DefaultsAreFailSafe) {
   ExpectZeroTime(gate.stamp);
   EXPECT_FALSE(gate.ok);  // no data == not safe
   EXPECT_EQ(gate.reason_code, 0U);
+  EXPECT_FALSE(gate.pre_arm_ok);  // 0.15.0: no data == do not arm
+  EXPECT_EQ(gate.pre_arm_reason_code, 0U);
 
   const dyx3_interfaces::msg::OperatorLinkStatus link{};
   ExpectZeroTime(link.stamp);
@@ -293,6 +296,31 @@ TEST(StatusMessageAbi, ConstantsAndSafeDefaults) {
   EXPECT_EQ(Mission::REASON_RTK, 3U);
   EXPECT_EQ(Mission::REASON_PATH_ERROR, 4U);
   EXPECT_EQ(Mission::REASON_INTERNAL_ERROR, 5U);
+  // 0.15.0 (mission contract v2): appended states, reasons and wait steps.
+  EXPECT_EQ(Mission::STATE_PLACING, 8U);
+  EXPECT_EQ(Mission::STATE_ARMING, 9U);
+  EXPECT_EQ(Mission::STATE_ENGAGING, 10U);
+  EXPECT_EQ(Mission::REASON_EKF_RESET, 6U);
+  EXPECT_EQ(Mission::REASON_EKF_REFERENCE_INVALID, 7U);
+  EXPECT_EQ(Mission::REASON_PLACEMENT_OUT_OF_BOUNDS, 8U);
+  EXPECT_EQ(Mission::REASON_NO_PLACEMENT_FRAME, 9U);
+  EXPECT_EQ(Mission::REASON_ARM_REFUSED, 10U);
+  EXPECT_EQ(Mission::REASON_ARM_TIMEOUT, 11U);
+  EXPECT_EQ(Mission::REASON_OFFBOARD_REFUSED, 12U);
+  EXPECT_EQ(Mission::REASON_OFFBOARD_TIMEOUT, 13U);
+  EXPECT_EQ(Mission::REASON_RPP_ACK_TIMEOUT, 14U);
+  EXPECT_EQ(Mission::REASON_ESTOP, 15U);
+  EXPECT_EQ(Mission::REASON_RPP_ERROR, 16U);
+  EXPECT_EQ(Mission::REASON_RPP_STALE, 17U);
+  EXPECT_EQ(Mission::WAIT_NONE, 0U);
+  EXPECT_EQ(Mission::WAIT_ARTIFACT, 1U);
+  EXPECT_EQ(Mission::WAIT_PLACEMENT, 2U);
+  EXPECT_EQ(Mission::WAIT_ARM, 3U);
+  EXPECT_EQ(Mission::WAIT_OFFBOARD, 4U);
+  EXPECT_EQ(Mission::WAIT_RPP_ACK, 5U);
+  EXPECT_EQ(Mission::WAIT_OPERATOR, 6U);
+  EXPECT_EQ(Mission::WAIT_OFFBOARD_RELEASE, 7U);
+  EXPECT_EQ(Mission::WAIT_DISARM, 8U);
   const Mission mission{};
   ExpectZeroTime(mission.stamp);
   EXPECT_EQ(mission.state, Mission::STATE_IDLE);
@@ -301,6 +329,12 @@ TEST(StatusMessageAbi, ConstantsAndSafeDefaults) {
   EXPECT_EQ(mission.point_index, 0U);
   EXPECT_EQ(mission.reason_code, Mission::REASON_NONE);
   EXPECT_TRUE(mission.path_artifact_sha256.empty());
+  EXPECT_TRUE(mission.source_artifact_sha256.empty());
+  EXPECT_TRUE(mission.request_id.empty());
+  EXPECT_TRUE(mission.reason_detail.empty());
+  EXPECT_EQ(mission.gate_reason_code, 0U);
+  EXPECT_EQ(mission.waiting_on, Mission::WAIT_NONE);
+  ExpectZeroTime(mission.state_entered);
 
   using Point = dyx3_interfaces::msg::PointResult;
   EXPECT_EQ(Point::RESULT_NONE, 0U);
@@ -369,6 +403,10 @@ TEST(ServiceAndActionAbi, ConstantsAndSafeDefaults) {
   EXPECT_FALSE(Start::Response{}.accepted);
   EXPECT_EQ(Start::Response{}.reason_code, 0U);
   EXPECT_EQ(Start::Response{}.mission_id, 0U);
+  EXPECT_EQ(Start::Response::REASON_INVALID_REQUEST, 4U);  // 0.15.0
+  EXPECT_TRUE(Start::Request{}.request_id.empty());
+  EXPECT_FALSE(Start::Response{}.duplicate);
+  EXPECT_EQ(Start::Response{}.gate_reason_code, 0U);
 
   using Pause = dyx3_interfaces::srv::PauseMission;
   EXPECT_EQ(Pause::Response::REASON_OK, 0U);
@@ -380,6 +418,8 @@ TEST(ServiceAndActionAbi, ConstantsAndSafeDefaults) {
   EXPECT_EQ(Resume::Response::REASON_OK, 0U);
   EXPECT_EQ(Resume::Response::REASON_NOT_PAUSED, 1U);
   EXPECT_EQ(Resume::Response::REASON_SAFETY_GATE, 2U);
+  EXPECT_EQ(Resume::Response::REASON_NOT_ARMED_OR_OFFBOARD, 3U);  // 0.15.0
+  EXPECT_EQ(Resume::Response::REASON_EKF_REFERENCE_CHANGED, 4U);
   EXPECT_FALSE(Resume::Response{}.accepted);
   EXPECT_EQ(Resume::Response{}.reason_code, 0U);
   using Abort = dyx3_interfaces::srv::AbortMission;
@@ -496,9 +536,9 @@ TEST(SchemaFingerprint, EveryInterfaceFieldListIsPinned) {
       {"msg/EmergencyStopState.msg", "b5e0f69a013e8e8e"},
       {"msg/EstimatorHealth.msg", "b96bdedebc39b889"},
       {"msg/GnssReport.msg", "c1afc4b310e7c891"},
-      {"msg/MissionState.msg", "4dda7d620e8829b8"},
+      {"msg/MissionState.msg", "f99a953ac512b6e6"},
       {"msg/MotionSetpoint.msg", "b3e830129bf344f8"},
-      {"msg/MotionSetpointStatus.msg", "c08907d8044e1b62"},
+      {"msg/MotionSetpointStatus.msg", "81b60396c767ae29"},
       {"msg/NtripStatus.msg", "612c65d90fa6068d"},
       {"msg/OperatorLinkStatus.msg", "0971532d2a94a362"},
       {"msg/PointResult.msg", "73d0b6b411d8b49f"},
@@ -507,7 +547,7 @@ TEST(SchemaFingerprint, EveryInterfaceFieldListIsPinned) {
       {"msg/RppStatus.msg", "fd1b086330d84a18"},
       {"msg/RtcmData.msg", "927edee98f0c6448"},
       {"msg/RtkStatus.msg", "d55613fae9d35eeb"},
-      {"msg/SafetyGateStatus.msg", "7dfe7d4551028cbc"},
+      {"msg/SafetyGateStatus.msg", "559bf1602703c824"},
       {"msg/SprayActuatorAck.msg", "437fbd52d259e90d"},
       {"msg/SprayActuatorCommand.msg", "17cbe13406daed08"},
       {"msg/SprayLease.msg", "cc8d456067c06ec9"},
@@ -519,12 +559,12 @@ TEST(SchemaFingerprint, EveryInterfaceFieldListIsPinned) {
       {"srv/AbortMission.srv", "5ae70e76041f429f"},
       {"srv/ArmDisarm.srv", "bf791453c6047365"},
       {"srv/PauseMission.srv", "a0b1b334b33646ea"},
-      {"srv/ResumeMission.srv", "22c166eb7d92c4e8"},
+      {"srv/ResumeMission.srv", "93329c6dc4c9afdf"},
       {"srv/SetEmergencyStop.srv", "4c97b5e36a74d576"},
       {"srv/SetOffboard.srv", "237aec38d47b5f04"},
       {"srv/SetSprayManual.srv", "1f1423b17de3418e"},
       {"srv/SkipPoint.srv", "d0560b8b49814bcf"},
-      {"srv/StartMission.srv", "6ef8a631f4609631"},
+      {"srv/StartMission.srv", "cd5815d19c45e505"},
   };
   const auto actual = schema_fingerprints();
   std::string table;
