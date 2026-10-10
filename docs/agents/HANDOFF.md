@@ -2380,3 +2380,70 @@ Each fix: tests + `ros2_humble.sh build-test`, HANDOFF entry, commit `Agent: Cla
 - delete `/home/flash/tablet-1.token` once both tablets have the token;
 - remove the stale `4393fb07e1` line from `docs/bench/2026-10-09_bench_runbook.md`;
 - the PC-9 pin bump is **blocked by INS-003** (do it via a fresh install or after the re-exec fix).
+
+## 2026-10-10 (night) — Claude — production hardening branch `hardening/2026-10-10` (local, not pushed)
+
+**State:** 98 fix commits + 1 integration fix, merged from per-area branches `hard/<area>`. Each fix is one commit
+per finding ID, authored Vetrivelan Velmurugan. **Not pushed** (owner: one push, only on request). `master` is
+unchanged at `962c4ee`. The register `docs/reviews/production/open_items.md` marks every closed row **FIXED** with
+its sha.
+
+**Closed:** 1 CRITICAL (XR-GPX-001), 18 HIGH, 39 MEDIUM, 40 LOW.
+**Still open HIGH (need the owner or the rover):** BE-001, GW-004, XR-GPX-002 (owner decisions), SP-003 (valve
+timing on the bench), REC-006 (firmware identity read path).
+
+| Area | Fixes | Notes |
+|---|---|---|
+| px4_link | 11 | XR-GPX-001 spray OFF pre-empts an in-flight ON, `spray_transaction_timeout_s` 0.3; PXL-002 STOP before offboard off; PXL-001/X-010 STOP burst on exit; PXL-004 durable ACK blocks; ULog best effort; yaw rate from attitude (RPP-009 interim); IF-002 |
+| rpp | 11 | XR-RPP-001 precise stop steers to the correction; XR-RPP-007 exit-leg heading after a pivot; command-level tests; parameter upper bounds; no allocation in the tick |
+| motion_guard | 6 | E-stop state published at once; STOP burst on exit |
+| gateway | 8 | GW-002 SIGPIPE; heartbeat bound to its connection; E-stop first; socket lock |
+| backend | 8 | auth + body cap before parsing (closes BE-002/003); planning in a subprocess (60 s, 200k points); relay stall guard |
+| mission | 4 | PAUSE on stale RppStatus (0.5 s); `rpp_ack_timeout_s` 30 s; artifact size cap; canonical reader |
+| spray | 3 | debounce in the boundary lead; min-speed cut while stopping; manual refused during a mission |
+| geometry | 4 | invalid projection on degenerate windows; resample bounds |
+| recorder | 17 | params of every node; run opens at READY; ULog header cache; zstd (153 → about 60 MB/h); disk floor + retention |
+| installer | 20 | refuse unless idle; target's own installer; detached upgrade; health baseline |
+| systemd | 6 | backend `PrivateTmp`; recorder exec'd directly, `KillMode=mixed`, off CPU 4; platform restart counts; bench fault-injection procedure |
+
+**Verification (local container, integrated branch):** full `build-test` → 12 packages build; 571 ROS tests,
+0 failures after `b0658e7` (MS-005 follow-up: the rpp node test wrote non-canonical numbers). Backend pytest
+607 passed / 43 skipped. Installer `run_tests.sh` 259 passed (one transient failure on one run; two re-runs
+clean). Nothing has run on the Jetson.
+
+**Known load flake:** `dyx3_mission` `mission_node_test` fails a few tests when the build VM is heavily loaded;
+it passes on a quiet machine. Watch it in CI.
+
+**Deployment changes an operator must know before upgrading the rover to this branch:**
+- **Bootstrap:** the first upgrade onto this branch still runs rover 01's OLD installer (no interlock, no detach,
+  hotspot re-activated right after the switch). Do it disarmed, from a non-hotspot link, or run the new installer
+  directly: extract `installer/` + `deployment/` at the new sha from `/var/lib/dyx3/state/repo.git`, then
+  `sudo bash <dir>/installer/upgrade.sh <sha>`.
+- **Upgrades / rollbacks run detached:** the command returns at once and prints
+  `journalctl -fu dyx3-upgrade-<utc>`. `DYX3_NO_DETACH=1` runs attached.
+- **They refuse unless idle:** ARMED, a RUNNING mission, a silent gateway, stale data, or no FCU session
+  (`arming_state 0`). With the FCU powered off on the bench: `DYX3_FORCE_UNSAFE=1`.
+- **`dyx3-health`** needs sudo and holds services for 10 s.
+- **Recorder:** optional `/etc/dyx3/recorder.yaml` (template `config/recorder/recorder.yaml.example`, sets
+  `vehicle_id` / `operator`). A run opens at READY (a `NOT_STARTED` run folder if never started). **Retention
+  deletes the oldest COMPLETE runs above 20 GiB**; 2 GiB free-space floor. Under 50 MB/h needs MCAP
+  (`ros-humble-rosbag2-storage-mcap`, owner decision).
+- **Backend:** tokenless `/api` requests get 401 (was 422/404); new 409 `busy` for a second planning job (the app
+  does not know it yet); new settings `DYX3_PLAN_TIMEOUT_S`, `DYX3_PLAN_MAX_POINTS`, `DYX3_JSON_BODY_MAX_BYTES`.
+- **Gateway:** a `<socket>.lock` file in `/run/dyx3`; only the connection that heartbeats keeps the operator link
+  alive.
+- **Spray:** manual ON is refused in LOADING/READY/RUNNING/PAUSED and before any MissionState.
+- **Mission:** `rpp_ack_timeout_s` 0 is now refused at start-up (no repo config sets it).
+
+**Bench checks for this branch (wheels up, spray disconnected or water):**
+- `systemctl restart dyx3-backend` mid-run: `dyx3-ros` survives, the guard STOPs on operator loss.
+- Spray ON then a forced OFF with the FCU ACK dropped: OFF reaches PX4 at once.
+- SIGTERM `px4_link` while commanding motion: a STOP burst before exit.
+- The precise stop at an endpoint with a 3 cm lateral miss: completes, no rocking. The endpoint spot turn can
+  reach about 90°.
+- A smooth run started from rest on a sparse polyline arc can creep at about 0.8 mm/s (curvature acceleration gate;
+  same as the prototype). Watch for it; it is a new observation, not yet in the register.
+- Upgrade on the rover with the new installer: the interlock refuses while armed, health baseline, detach.
+
+**Agent note:** while debugging, the installer agent deleted the `tmp.*` directories in the Mac user `$TMPDIR`.
+No data loss is known.
