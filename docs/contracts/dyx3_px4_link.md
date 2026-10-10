@@ -12,7 +12,8 @@ command to PX4 setpoints and falls to zero when that command is not trustworthy.
 ## 1. Pinned message set
 
 `px4_msgs` is built from the pinned firmware (`installer/pins/firmware.pin`, flashed SHA
-`27a7ac92845317b0276776242c504215809b2a0f`): `msg/*.msg`, `msg/versioned/*.msg`, `srv/*.srv`.
+`8279fa4be33d5fc26c3b895c7e4a0a8660fcfff1`; its `msg/`, `srv/` and `dds_topics.yaml` are identical to the earlier pin
+`27a7ac9284`): `msg/*.msg`, `msg/versioned/*.msg`, `srv/*.srv`.
 Stock `px4_msgs` from apt is never used. Versioned messages carry a `_v<MESSAGE_VERSION>` suffix on
 the DDS topic when the version is above 0:
 
@@ -383,7 +384,7 @@ longer required and becomes required again, or when the physical mapping changes
 withdraws readiness immediately on mapping change.
 
 ACK matching requires command ID **and both** ACK target system and target component. The pinned
-firmware (`27a7ac92845317b0276776242c504215809b2a0f`) echoes command source system/component
+firmware (`8279fa4be3`, same behaviour as `27a7ac9284`) echoes command source system/component
 in `Commander::answer_command`; command 187 gets an immediate ACCEPTED answer there, and 183 an
 immediate UNSUPPORTED answer. Each physical transmission can produce a terminal ACK. Extra or
 late ACKs for an old pair cannot prove a newer epoch because pairs are never reused. `IN_PROGRESS`
