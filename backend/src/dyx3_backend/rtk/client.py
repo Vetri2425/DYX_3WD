@@ -26,20 +26,25 @@ class RtkClient:
         message = json.dumps({"v": 1, "cmd": command, **arguments}, separators=(",", ":")) + "\n"
         if len(message.encode()) > 65536:
             raise RtkRejected("invalid_config", "RTK request is too large")
-        writer = None
+        conn: list[asyncio.StreamWriter] = []
+
+        async def exchange() -> bytes:
+            reader, writer = await asyncio.open_unix_connection(self.socket_path)
+            conn.append(writer)
+            writer.write(message.encode())
+            await writer.drain()
+            return await reader.readline()
+
         try:
-            async with asyncio.timeout(self.timeout_s):
-                reader, writer = await asyncio.open_unix_connection(self.socket_path)
-                writer.write(message.encode())
-                await writer.drain()
-                response = await reader.readline()
-                if len(response) > 65536 or not response.endswith(b"\n"):
-                    raise RtkUnavailable("invalid RTK worker reply")
-                reply = json.loads(response)
-        except (OSError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
+            # asyncio.wait_for, not asyncio.timeout: the rover runs Python 3.10.
+            response = await asyncio.wait_for(exchange(), self.timeout_s)
+            if len(response) > 65536 or not response.endswith(b"\n"):
+                raise RtkUnavailable("invalid RTK worker reply")
+            reply = json.loads(response)
+        except (OSError, TimeoutError, asyncio.TimeoutError, json.JSONDecodeError, ValueError) as exc:
             raise RtkUnavailable("RTK worker unavailable") from exc
         finally:
-            if writer is not None:
+            for writer in conn:
                 writer.close()
                 try:
                     await writer.wait_closed()
